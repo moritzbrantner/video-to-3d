@@ -146,14 +146,15 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         let median_dx = median(&mut dx_values);
         let median_dy = median(&mut dy_values);
         let median_motion = median(&mut motion_values);
-        let (translation_x, translation_y, mut parallax_residuals) = compensate_global_motion(
+        let (translation_x, translation_y, parallax_residuals) = compensate_global_motion(
             source_features,
             target_features,
             &matches,
             width,
             height,
         );
-        let median_parallax_residual = median(&mut parallax_residuals.clone());
+        let mut residuals_for_median = parallax_residuals.clone();
+        let median_parallax_residual = median(&mut residuals_for_median);
         let low_parallax = matches.len() < 6
             || median_motion < 1.4
             || median_parallax_residual < 0.55;
@@ -299,8 +300,10 @@ fn compensate_global_motion(
         raw_dy.push(target.y as f32 - source.y as f32);
     }
 
-    let initial_tx = median(&mut raw_dx.clone());
-    let initial_ty = median(&mut raw_dy.clone());
+    let mut initial_dx = raw_dx.clone();
+    let mut initial_dy = raw_dy.clone();
+    let initial_tx = median(&mut initial_dx);
+    let initial_ty = median(&mut initial_dy);
     let mut numerator = 0.0f32;
     let mut denominator = 0.0f32;
     for (index, feature_match) in matches.iter().enumerate() {
