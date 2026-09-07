@@ -2,9 +2,10 @@ use super::{Feature, FeatureMatch};
 use nalgebra::{DMatrix, Matrix3, Matrix4, Vector3};
 use std::cmp::Ordering;
 
-const RANSAC_ITERATIONS: usize = 96;
+const RANSAC_SAMPLE_SIZE: usize = 8;
+const RANSAC_TARGET_CONFIDENCE: f64 = 0.99;
 const SAMPSON_THRESHOLD_PIXELS: f64 = 1.75;
-const MIN_INLIER_RATIO: f64 = 0.35;
+const MIN_INLIER_RATIO: f64 = 0.5;
 const MAX_ROTATION_ONLY_RESIDUAL_PIXELS: f64 = 1.25;
 const MIN_TRIANGULATION_ANGLE_DEGREES: f64 = 0.5;
 const MAX_REPROJECTION_ERROR_PIXELS: f64 = 4.0;
@@ -68,7 +69,7 @@ pub(super) fn estimate_two_view(
     height: u32,
     focal_pixels: f64,
 ) -> Option<TwoViewEstimate> {
-    if matches.len() < 8 || focal_pixels <= 0.0 {
+    if matches.len() < RANSAC_SAMPLE_SIZE || focal_pixels <= 0.0 {
         return None;
     }
 
@@ -101,8 +102,11 @@ pub(super) fn estimate_two_view(
     let mut best_median_error = f64::INFINITY;
     let mut best_essential = None;
 
-    for iteration in 0..RANSAC_ITERATIONS {
+    let mut iteration = 0;
+    let mut iteration_limit = required_ransac_iterations(MIN_INLIER_RATIO);
+    while iteration < iteration_limit {
         let sample = deterministic_sample(correspondences.len(), iteration);
+        iteration += 1;
         let Some(essential) = estimate_essential(&correspondences, &sample) else {
             continue;
         };
@@ -123,11 +127,17 @@ pub(super) fn estimate_two_view(
             best_inliers = inliers;
             best_median_error = median_error;
             best_essential = Some(essential);
+
+            let observed_inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;
+            if observed_inlier_ratio >= MIN_INLIER_RATIO {
+                iteration_limit = iteration_limit
+                    .min(required_ransac_iterations(observed_inlier_ratio).max(iteration));
+            }
         }
     }
 
     let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;
-    if best_inliers.len() < 8 || inlier_ratio < MIN_INLIER_RATIO {
+    if best_inliers.len() < RANSAC_SAMPLE_SIZE || inlier_ratio < MIN_INLIER_RATIO {
         return None;
     }
 
@@ -196,14 +206,38 @@ pub(super) fn estimate_two_view(
     })
 }
 
+fn required_ransac_iterations(inlier_ratio: f64) -> usize {
+    if !inlier_ratio.is_finite() || inlier_ratio <= 0.0 {
+        return usize::MAX;
+    }
+
+    let inlier_ratio = inlier_ratio.min(1.0);
+    let sample_success = inlier_ratio.powi(RANSAC_SAMPLE_SIZE as i32);
+    if sample_success >= 1.0 {
+        return 1;
+    }
+
+    let denominator = (1.0 - sample_success).ln();
+    if denominator == 0.0 {
+        return usize::MAX;
+    }
+
+    let iterations = ((1.0 - RANSAC_TARGET_CONFIDENCE).ln() / denominator).ceil();
+    if iterations.is_finite() {
+        iterations.max(1.0) as usize
+    } else {
+        usize::MAX
+    }
+}
+
 fn deterministic_sample(len: usize, iteration: usize) -> Vec<usize> {
-    if len == 8 {
-        return (0..8).collect();
+    if len == RANSAC_SAMPLE_SIZE {
+        return (0..RANSAC_SAMPLE_SIZE).collect();
     }
 
     let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ (iteration as u64 + 1);
-    let mut sample = Vec::with_capacity(8);
-    while sample.len() < 8 {
+    let mut sample = Vec::with_capacity(RANSAC_SAMPLE_SIZE);
+    while sample.len() < RANSAC_SAMPLE_SIZE {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
@@ -219,7 +253,7 @@ fn estimate_essential(
     correspondences: &[Correspondence],
     indices: &[usize],
 ) -> Option<Matrix3<f64>> {
-    if indices.len() < 8 {
+    if indices.len() < RANSAC_SAMPLE_SIZE {
         return None;
     }
 
@@ -660,6 +694,18 @@ mod tests {
             .map(|correspondence| sampson_error(&essential, correspondence))
             .fold(0.0, f64::max);
         assert!(max_error < 1.0e-8, "maximum Sampson error: {max_error}");
+    }
+
+    #[test]
+    fn ransac_budget_meets_the_minimum_inlier_confidence_contract() {
+        let iterations = required_ransac_iterations(MIN_INLIER_RATIO);
+        let sample_success = MIN_INLIER_RATIO.powi(RANSAC_SAMPLE_SIZE as i32);
+        let achieved_confidence = 1.0 - (1.0 - sample_success).powi(iterations as i32);
+        let legacy_confidence = 1.0 - (1.0 - sample_success).powi(96);
+
+        assert!(achieved_confidence >= RANSAC_TARGET_CONFIDENCE);
+        assert!(legacy_confidence < RANSAC_TARGET_CONFIDENCE);
+        assert!(required_ransac_iterations(0.7) < iterations);
     }
 
     #[test]
