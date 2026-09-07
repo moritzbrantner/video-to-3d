@@ -1,0 +1,59 @@
+name: Verify calibrated two-view fixes
+
+on:
+  push:
+    branches:
+      - feat/calibrated-two-view-sfm
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/calibrated-two-view-sfm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Apply reviewed estimator patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          lines = Path('.github/workflows/diagnose-two-view.yml').read_text().splitlines()
+          marker = '      - name: Apply reviewed estimator fixes'
+          start = lines.index(marker)
+          run_line = next(i for i in range(start + 1, len(lines)) if lines[i] == '        run: |')
+          body = []
+          for line in lines[run_line + 1:]:
+              if line.startswith('      - name:'):
+                  break
+              if line.startswith('          '):
+                  body.append(line[10:])
+              elif not line:
+                  body.append('')
+              else:
+                  raise SystemExit(f'unexpected workflow line: {line!r}')
+          exec('\n'.join(body), {'__name__': '__main__'})
+      - name: Format Rust
+        run: cargo fmt --all
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Commit verified estimator fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          git commit -m "Fix calibrated two-view robust estimation"
+          git push origin HEAD:feat/calibrated-two-view-sfm
