@@ -70,6 +70,7 @@ pub struct PairStats {
     pub median_dx: f32,
     pub median_dy: f32,
     pub median_motion: f32,
+    pub median_parallax_residual: f32,
     pub low_parallax: bool,
 }
 
@@ -97,8 +98,162 @@ struct FeatureMatch {
 }
 
 pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
+    validate_request(request)?;
+
+    let width = request.frames[0].width;
+    let height = request.frames[0].height;
+    let options = request.options;
+    let luma_frames: Vec<Vec<u8>> = request.frames.iter().map(to_luma).collect();
+    let features: Vec<Vec<Feature>> = luma_frames
+        .iter()
+        .map(|luma| detect_features(luma, width, height, options))
+        .collect();
+
+    let focal = 0.86 * width.max(height) as f32;
+    let diagonal = (width as f32).hypot(height as f32);
+    let mut cameras = Vec::with_capacity(request.frames.len());
+    let mut points = Vec::new();
+    let mut pairs = Vec::with_capacity(request.frames.len() - 1);
+    let mut warnings = Vec::new();
+
+    let mut camera = CameraPose {
+        frame_index: 0,
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        matched_features: 0,
+    };
+    cameras.push(camera);
+
+    for pair_index in 0..request.frames.len() - 1 {
+        let source_features = &features[pair_index];
+        let target_features = &features[pair_index + 1];
+        let matches = match_features(source_features, target_features, options);
+
+        let mut dx_values = Vec::with_capacity(matches.len());
+        let mut dy_values = Vec::with_capacity(matches.len());
+        let mut motion_values = Vec::with_capacity(matches.len());
+        for feature_match in &matches {
+            let a = &source_features[feature_match.a];
+            let b = &target_features[feature_match.b];
+            let dx = b.x as f32 - a.x as f32;
+            let dy = b.y as f32 - a.y as f32;
+            dx_values.push(dx);
+            dy_values.push(dy);
+            motion_values.push(dx.hypot(dy));
+        }
+
+        let median_dx = median(&mut dx_values);
+        let median_dy = median(&mut dy_values);
+        let median_motion = median(&mut motion_values);
+        let (translation_x, translation_y, mut parallax_residuals) = compensate_global_motion(
+            source_features,
+            target_features,
+            &matches,
+            width,
+            height,
+        );
+        let median_parallax_residual = median(&mut parallax_residuals.clone());
+        let low_parallax = matches.len() < 6
+            || median_motion < 1.4
+            || median_parallax_residual < 0.55;
+
+        let observed_baseline = if low_parallax {
+            0.0
+        } else {
+            (median_parallax_residual / diagonal * 12.0).clamp(0.05, 1.0)
+        };
+
+        if low_parallax {
+            camera = CameraPose {
+                frame_index: pair_index + 1,
+                matched_features: matches.len(),
+                ..camera
+            };
+        } else {
+            camera = CameraPose {
+                frame_index: pair_index + 1,
+                x: camera.x - translation_x / width as f32 * 1.5,
+                y: camera.y + translation_y / height as f32 * 1.5,
+                z: camera.z + observed_baseline,
+                matched_features: matches.len(),
+            };
+        }
+        cameras.push(camera);
+
+        if !low_parallax {
+            for (feature_match, disparity) in matches.iter().zip(&parallax_residuals) {
+                if *disparity < 0.35 {
+                    continue;
+                }
+                let a = &source_features[feature_match.a];
+                let depth = (focal * observed_baseline / disparity.max(0.5)).clamp(0.35, 18.0);
+                let normalized_x = (a.x as f32 - width as f32 * 0.5) / focal;
+                let normalized_y = (a.y as f32 - height as f32 * 0.5) / focal;
+                let source_camera = cameras[pair_index];
+                let (r, g, b) = sample_rgb(&request.frames[pair_index], a.x, a.y);
+                let descriptor_confidence =
+                    (1.0 - feature_match.distance / options.max_descriptor_distance).clamp(0.0, 1.0);
+                let motion_confidence = (disparity / 5.0).clamp(0.15, 1.0);
+
+                points.push(Point3 {
+                    x: source_camera.x + normalized_x * depth,
+                    y: source_camera.y - normalized_y * depth,
+                    z: source_camera.z + depth,
+                    confidence: descriptor_confidence * motion_confidence,
+                    r,
+                    g,
+                    b,
+                });
+            }
+        }
+
+        pairs.push(PairStats {
+            from_frame: pair_index,
+            to_frame: pair_index + 1,
+            features_from: source_features.len(),
+            features_to: target_features.len(),
+            matches: matches.len(),
+            median_dx,
+            median_dy,
+            median_motion,
+            median_parallax_residual,
+            low_parallax,
+        });
+    }
+
+    let low_pairs = pairs.iter().filter(|pair| pair.low_parallax).count();
+    if low_pairs > pairs.len() / 2 {
+        warnings.push(
+            "Most frame pairs have weak residual parallax after compensating dominant translation and rotation. Move through a textured scene instead of only panning or rotating the camera."
+                .into(),
+        );
+    }
+    if points.len() < 80 {
+        warnings.push(
+            "The sparse cloud is small. Try a more textured, well-lit scene with slower camera motion."
+                .into(),
+        );
+    }
+    warnings.push(
+        "MVP geometry uses a conservative uncalibrated parallax approximation; metric scale and full 3D camera rotation are not recovered yet."
+            .into(),
+    );
+
+    Ok(ReconstructionResult {
+        cameras,
+        points,
+        pairs,
+        warnings,
+    })
+}
+
+fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
     if request.frames.len() < 2 {
         return Err("at least two sampled frames are required".into());
+    }
+    if request.options.max_descriptor_distance <= 0.0 {
+        return Err("max descriptor distance must be positive".into());
     }
 
     let width = request.frames[0].width;
@@ -119,126 +274,76 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             ));
         }
     }
+    Ok(())
+}
 
-    let options = request.options;
-    let luma_frames: Vec<Vec<u8>> = request.frames.iter().map(to_luma).collect();
-    let features: Vec<Vec<Feature>> = luma_frames
+fn compensate_global_motion(
+    a: &[Feature],
+    b: &[Feature],
+    matches: &[FeatureMatch],
+    width: u32,
+    height: u32,
+) -> (f32, f32, Vec<f32>) {
+    if matches.is_empty() {
+        return (0.0, 0.0, Vec::new());
+    }
+
+    let center_x = width as f32 * 0.5;
+    let center_y = height as f32 * 0.5;
+    let mut raw_dx = Vec::with_capacity(matches.len());
+    let mut raw_dy = Vec::with_capacity(matches.len());
+    for feature_match in matches {
+        let source = &a[feature_match.a];
+        let target = &b[feature_match.b];
+        raw_dx.push(target.x as f32 - source.x as f32);
+        raw_dy.push(target.y as f32 - source.y as f32);
+    }
+
+    let initial_tx = median(&mut raw_dx.clone());
+    let initial_ty = median(&mut raw_dy.clone());
+    let mut numerator = 0.0f32;
+    let mut denominator = 0.0f32;
+    for (index, feature_match) in matches.iter().enumerate() {
+        let source = &a[feature_match.a];
+        let x = source.x as f32 - center_x;
+        let y = source.y as f32 - center_y;
+        let dx = raw_dx[index] - initial_tx;
+        let dy = raw_dy[index] - initial_ty;
+        numerator += x * dy - y * dx;
+        denominator += x * x + y * y;
+    }
+    let rotation = if denominator > f32::EPSILON {
+        (numerator / denominator).clamp(-0.35, 0.35)
+    } else {
+        0.0
+    };
+
+    let mut corrected_dx = Vec::with_capacity(matches.len());
+    let mut corrected_dy = Vec::with_capacity(matches.len());
+    for (index, feature_match) in matches.iter().enumerate() {
+        let source = &a[feature_match.a];
+        let x = source.x as f32 - center_x;
+        let y = source.y as f32 - center_y;
+        corrected_dx.push(raw_dx[index] + rotation * y);
+        corrected_dy.push(raw_dy[index] - rotation * x);
+    }
+    let translation_x = median(&mut corrected_dx);
+    let translation_y = median(&mut corrected_dy);
+
+    let residuals = matches
         .iter()
-        .map(|luma| detect_features(luma, width, height, options))
+        .enumerate()
+        .map(|(index, feature_match)| {
+            let source = &a[feature_match.a];
+            let x = source.x as f32 - center_x;
+            let y = source.y as f32 - center_y;
+            let predicted_dx = translation_x - rotation * y;
+            let predicted_dy = translation_y + rotation * x;
+            (raw_dx[index] - predicted_dx).hypot(raw_dy[index] - predicted_dy)
+        })
         .collect();
 
-    let focal = 0.86 * width.max(height) as f32;
-    let diagonal = ((width * width + height * height) as f32).sqrt();
-    let mut cameras = Vec::with_capacity(request.frames.len());
-    let mut points = Vec::new();
-    let mut pairs = Vec::with_capacity(request.frames.len() - 1);
-    let mut warnings = Vec::new();
-
-    let mut camera = CameraPose {
-        frame_index: 0,
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-        matched_features: 0,
-    };
-    cameras.push(camera);
-
-    for pair_index in 0..request.frames.len() - 1 {
-        let matches = match_features(&features[pair_index], &features[pair_index + 1], options);
-        let mut dx_values = Vec::with_capacity(matches.len());
-        let mut dy_values = Vec::with_capacity(matches.len());
-        let mut motion_values = Vec::with_capacity(matches.len());
-
-        for feature_match in &matches {
-            let a = &features[pair_index][feature_match.a];
-            let b = &features[pair_index + 1][feature_match.b];
-            let dx = b.x as f32 - a.x as f32;
-            let dy = b.y as f32 - a.y as f32;
-            dx_values.push(dx);
-            dy_values.push(dy);
-            motion_values.push(dx.hypot(dy));
-        }
-
-        let median_dx = median(&mut dx_values);
-        let median_dy = median(&mut dy_values);
-        let median_motion = median(&mut motion_values);
-        let low_parallax = matches.len() < 10 || median_motion < 1.4;
-
-        let observed_baseline = (median_motion / diagonal * 10.0).clamp(0.05, 1.0);
-        camera = CameraPose {
-            frame_index: pair_index + 1,
-            x: camera.x - median_dx / width as f32 * 1.5,
-            y: camera.y + median_dy / height as f32 * 1.5,
-            z: camera.z + observed_baseline,
-            matched_features: matches.len(),
-        };
-        cameras.push(camera);
-
-        for feature_match in &matches {
-            let a = &features[pair_index][feature_match.a];
-            let b = &features[pair_index + 1][feature_match.b];
-            let dx = b.x as f32 - a.x as f32;
-            let dy = b.y as f32 - a.y as f32;
-            let residual = (dx - median_dx).hypot(dy - median_dy);
-            let raw_motion = dx.hypot(dy);
-            let disparity = residual * 0.7 + raw_motion * 0.3;
-            let depth = (focal * observed_baseline / disparity.max(1.0)).clamp(0.35, 18.0);
-            let normalized_x = (a.x as f32 - width as f32 * 0.5) / focal;
-            let normalized_y = (a.y as f32 - height as f32 * 0.5) / focal;
-            let source_camera = cameras[pair_index];
-            let (r, g_color, b_color) = sample_rgb(&request.frames[pair_index], a.x, a.y);
-            let descriptor_confidence =
-                (1.0 - feature_match.distance / options.max_descriptor_distance).clamp(0.0, 1.0);
-            let motion_confidence = (disparity / 6.0).clamp(0.15, 1.0);
-
-            points.push(Point3 {
-                x: source_camera.x + normalized_x * depth,
-                y: source_camera.y - normalized_y * depth,
-                z: source_camera.z + depth,
-                confidence: descriptor_confidence * motion_confidence,
-                r,
-                g: g_color,
-                b: b_color,
-            });
-        }
-
-        pairs.push(PairStats {
-            from_frame: pair_index,
-            to_frame: pair_index + 1,
-            features_from: features[pair_index].len(),
-            features_to: features[pair_index + 1].len(),
-            matches: matches.len(),
-            median_dx,
-            median_dy,
-            median_motion,
-            low_parallax,
-        });
-    }
-
-    let low_pairs = pairs.iter().filter(|pair| pair.low_parallax).count();
-    if low_pairs > pairs.len() / 2 {
-        warnings.push(
-            "Most frame pairs have weak parallax. Move the camera through the scene rather than only rotating it."
-                .into(),
-        );
-    }
-    if points.len() < 80 {
-        warnings.push(
-            "The sparse cloud is small. Try a more textured, well-lit scene with slower camera motion."
-                .into(),
-        );
-    }
-    warnings.push(
-        "MVP geometry uses an uncalibrated parallax approximation; metric scale and camera rotation are not recovered yet."
-            .into(),
-    );
-
-    Ok(ReconstructionResult {
-        cameras,
-        points,
-        pairs,
-        warnings,
-    })
+    (translation_x, translation_y, residuals)
 }
 
 fn to_luma(frame: &FrameInput) -> Vec<u8> {
@@ -451,8 +556,9 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let x = base_x + shift_x;
-            if x < 3 || x >= width as i32 - 4 {
+            let depth_shift = (index as i32 % 3) * shift_x / 3;
+            let x = base_x + shift_x + depth_shift;
+            if x < 3 || x >= width as i32 - 4 || base_y < 3 || base_y >= height as i32 - 4 {
                 continue;
             }
             let intensity = 90 + index as u8 * 16;
@@ -493,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn reconstructs_shifted_sequence_into_sparse_output() {
+    fn reconstructs_parallax_sequence_into_sparse_output() {
         let request = ReconstructionRequest {
             frames: vec![
                 synthetic_frame(96, 80, 0),
@@ -516,7 +622,82 @@ mod tests {
             result.pairs[0].matches
         );
         assert!(result.pairs[0].median_dx > 1.0);
+        assert!(result.pairs[0].median_parallax_residual > 0.5);
+        assert!(!result.pairs[0].low_parallax);
+        assert!(result.cameras[1].z > 0.0);
         assert!(!result.points.is_empty());
+    }
+
+    #[test]
+    fn stationary_sequence_does_not_invent_camera_motion() {
+        let frame = synthetic_frame(96, 80, 0);
+        let request = ReconstructionRequest {
+            frames: vec![frame.clone(), frame],
+            options: ReconstructionOptions {
+                max_descriptor_distance: 55.0,
+                ..ReconstructionOptions::default()
+            },
+        };
+
+        let result = reconstruct(&request).expect("stationary reconstruction should succeed");
+        assert!(result.pairs[0].low_parallax);
+        assert!(result.cameras[1].x.abs() < f32::EPSILON);
+        assert!(result.cameras[1].y.abs() < f32::EPSILON);
+        assert!(result.cameras[1].z.abs() < f32::EPSILON);
+        assert!(result.points.is_empty());
+    }
+
+    #[test]
+    fn dominant_rotation_is_not_counted_as_parallax() {
+        let center_x = 48.0f32;
+        let center_y = 40.0f32;
+        let angle = 0.05f32;
+        let translation_x = 2.0f32;
+        let translation_y = -1.0f32;
+        let source_positions = [
+            (20u32, 18u32),
+            (48, 15),
+            (75, 20),
+            (24, 40),
+            (70, 42),
+            (18, 64),
+            (48, 66),
+            (76, 62),
+        ];
+        let source: Vec<Feature> = source_positions
+            .iter()
+            .map(|&(x, y)| Feature {
+                x,
+                y,
+                score: 1.0,
+                descriptor: vec![0],
+            })
+            .collect();
+        let target: Vec<Feature> = source_positions
+            .iter()
+            .map(|&(x, y)| {
+                let centered_x = x as f32 - center_x;
+                let centered_y = y as f32 - center_y;
+                Feature {
+                    x: (x as f32 + translation_x - angle * centered_y).round() as u32,
+                    y: (y as f32 + translation_y + angle * centered_x).round() as u32,
+                    score: 1.0,
+                    descriptor: vec![0],
+                }
+            })
+            .collect();
+        let matches: Vec<FeatureMatch> = (0..source.len())
+            .map(|index| FeatureMatch {
+                a: index,
+                b: index,
+                distance: 0.0,
+            })
+            .collect();
+
+        let (_, _, mut residuals) =
+            compensate_global_motion(&source, &target, &matches, 96, 80);
+        let residual = median(&mut residuals);
+        assert!(residual < 0.55, "rotation residual was {residual}");
     }
 
     #[test]
@@ -524,11 +705,11 @@ mod tests {
         let request = ReconstructionRequest {
             frames: vec![
                 FrameInput {
-                    width: 64,
-                    height: 48,
+                    width: 96,
+                    height: 80,
                     rgba: vec![0; 4],
                 },
-                synthetic_frame(64, 48, 0),
+                synthetic_frame(96, 80, 0),
             ],
             options: ReconstructionOptions::default(),
         };
