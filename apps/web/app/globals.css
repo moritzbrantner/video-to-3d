@@ -37,6 +37,12 @@ h2 { margin: 0; font-size: 1.25rem; letter-spacing: -0.02em; }
 .status-sampling, .status-reconstructing { background: #ffd166; box-shadow: 0 0 16px rgba(255, 209, 102, 0.55); }
 .status-done { background: #7fe0a3; box-shadow: 0 0 16px rgba(127, 224, 163, 0.45); }
 .status-error { background: #ff8d7d; }
+.video-runs { display: flex; gap: 8px; overflow-x: auto; padding: 12px 0 0; }
+.video-run { min-width: 180px; max-width: 280px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(13, 24, 31, 0.66); color: var(--text); cursor: pointer; text-align: left; }
+.video-run:hover { border-color: #31515f; background: rgba(18, 34, 43, 0.82); }
+.video-run-active { border-color: rgba(111, 220, 255, 0.65); background: var(--accent-soft); }
+.video-run span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.video-run small { display: block; margin-top: 4px; color: var(--muted); font-size: 0.72rem; }
 .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 18px; margin-top: 26px; }
 .viewer-panel, .method-panel, .section-block, .notice { border: 1px solid var(--line); border-radius: 18px; background: rgba(13, 24, 31, 0.9); }
 .viewer-panel { position: relative; min-height: 520px; overflow: hidden; }

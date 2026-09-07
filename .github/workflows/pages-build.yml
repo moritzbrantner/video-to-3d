@@ -1,4 +1,4 @@
-name: Pages build
+name: Pages
 
 on:
   pull_request:
@@ -6,9 +6,20 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-pages:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -20,10 +31,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: bun install
       - run: cargo install wasm-bindgen-cli --version 0.2.104 --locked
-      - run: bun run wasm:build
-      - run: GITHUB_PAGES=true bun --cwd apps/web build
-      - uses: actions/upload-artifact@v4
+      - name: Compile Rust reconstruction to WebAssembly
+        run: bun run wasm:build
+      - name: Build static Next.js export
+        run: GITHUB_PAGES=true bun --cwd apps/web build
+      - name: Upload pull-request static export
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
         with:
           name: github-pages-static-export
           path: apps/web/out
           if-no-files-found: error
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/out
+
+  deploy-pages:
+    if: github.event_name != 'pull_request'
+    needs: build-pages
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
