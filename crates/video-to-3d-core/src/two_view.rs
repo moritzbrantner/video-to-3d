@@ -292,11 +292,7 @@ fn rotation_only_residual_pixels(
             let source = correspondences[index].x1.normalize();
             let target = correspondences[index].x2.normalize();
             let predicted = rotation * source;
-            predicted
-                .dot(&target)
-                .clamp(-1.0, 1.0)
-                .acos()
-                * focal_pixels
+            predicted.dot(&target).clamp(-1.0, 1.0).acos() * focal_pixels
         })
         .filter(|residual| residual.is_finite())
         .collect();
@@ -496,8 +492,16 @@ fn reprojection_error(
     correspondence: &Correspondence,
     focal_pixels: f64,
 ) -> f64 {
-    let projected_one = Vector3::new(point_one.x / point_one.z, point_one.y / point_one.z, 1.0);
-    let projected_two = Vector3::new(point_two.x / point_two.z, point_two.y / point_two.z, 1.0);
+    let projected_one = Vector3::new(
+        point_one.x / point_one.z,
+        point_one.y / point_one.z,
+        1.0,
+    );
+    let projected_two = Vector3::new(
+        point_two.x / point_two.z,
+        point_two.y / point_two.z,
+        1.0,
+    );
     let error_one = (projected_one.x - correspondence.x1.x)
         .hypot(projected_one.y - correspondence.x1.y);
     let error_two = (projected_two.x - correspondence.x2.x)
@@ -641,7 +645,11 @@ mod tests {
         let estimate = estimate_two_view(&source, &target, &matches, 640, 480, 500.0)
             .expect("calibrated two-view estimate");
         assert!(estimate.inliers >= 24, "inliers: {}", estimate.inliers);
-        assert!(estimate.points.len() >= 20, "points: {}", estimate.points.len());
+        assert!(
+            estimate.points.len() >= 20,
+            "points: {}",
+            estimate.points.len()
+        );
         assert!(estimate.median_reprojection_error_pixels < 1.5);
         assert!(estimate.median_triangulation_angle_degrees > 0.5);
 
@@ -665,8 +673,7 @@ mod tests {
             0.0,
             yaw.cos(),
         );
-        let (source, target, matches) =
-            synthetic_correspondences(rotation, Vector3::zeros());
+        let (source, target, matches) = synthetic_correspondences(rotation, Vector3::zeros());
         assert!(estimate_two_view(&source, &target, &matches, 640, 480, 500.0).is_none());
     }
 }
