@@ -287,18 +287,16 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 let descriptor_confidence = (1.0
                     - triangulated.descriptor_distance / options.max_descriptor_distance)
                     .clamp(0.0, 1.0);
-                let reprojection_confidence =
-                    (1.0 / (1.0 + triangulated.reprojection_error_pixels as f32 * 0.5))
-                        .clamp(0.15, 1.0);
+                let reprojection_confidence = (1.0
+                    / (1.0 + triangulated.reprojection_error_pixels as f32 * 0.5))
+                    .clamp(0.15, 1.0);
                 let angle_confidence =
                     (triangulated.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
                 Point3 {
                     x: triangulated.position.x as f32,
                     y: triangulated.position.y as f32,
                     z: triangulated.position.z as f32,
-                    confidence: descriptor_confidence
-                        * reprojection_confidence
-                        * angle_confidence,
+                    confidence: descriptor_confidence * reprojection_confidence * angle_confidence,
                     r,
                     g,
                     b,
@@ -315,8 +313,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             focal_pixels: focal,
             median_sampson_error_pixels: estimate.median_sampson_error_pixels as f32,
             median_reprojection_error_pixels: estimate.median_reprojection_error_pixels as f32,
-            median_triangulation_angle_degrees: estimate
-                .median_triangulation_angle_degrees as f32,
+            median_triangulation_angle_degrees: estimate.median_triangulation_angle_degrees as f32,
             relative_rotation: [
                 estimate.rotation[(0, 0)] as f32,
                 estimate.rotation[(0, 1)] as f32,
@@ -695,7 +692,8 @@ mod tests {
             let intensity = 90 + index as u8 * 16;
             for py in base_y - 2..=base_y + 2 {
                 for px in x - 2..=x + 2 {
-                    let edge = px == x - 2 || px == x + 2 || py == base_y - 2 || py == base_y + 2;
+                    let edge =
+                        px == x - 2 || px == x + 2 || py == base_y - 2 || py == base_y + 2;
                     let value = if edge { 245 } else { intensity };
                     let offset = (py as usize * width as usize + px as usize) * 4;
                     rgba[offset] = value;
