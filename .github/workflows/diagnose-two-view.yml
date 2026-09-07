@@ -25,154 +25,149 @@ jobs:
           from pathlib import Path
 
           path = Path("crates/video-to-3d-core/src/two_view.rs")
-          text = path.read_text()
+          lines = path.read_text().splitlines()
 
-          def replace_once(old, new, label):
-              global text
-              if text.count(old) != 1:
-                  raise SystemExit(f"{label} marker mismatch: {text.count(old)}")
-              text = text.replace(old, new, 1)
+          def unique_index(value):
+              matches = [index for index, line in enumerate(lines) if line == value]
+              if len(matches) != 1:
+                  raise SystemExit(f"expected one {value!r}, found {len(matches)}")
+              return matches[0]
 
-          replace_once(
-              "    let mut best_median_error = f64::INFINITY;",
-              "    let mut best_median_error = f64::INFINITY;\n    let mut best_essential = None;",
-              "RANSAC model storage",
+          best_error = unique_index("    let mut best_median_error = f64::INFINITY;")
+          lines.insert(best_error + 1, "    let mut best_essential = None;")
+
+          winner = unique_index("            best_median_error = median_error;")
+          lines.insert(winner + 1, "            best_essential = Some(essential);")
+
+          model_start = unique_index(
+              "    let essential = estimate_essential(&correspondences, &best_inliers)?;"
           )
-
-          replace_once(
-              "            best_median_error = median_error;",
-              "            best_median_error = median_error;\n            best_essential = Some(essential);",
-              "RANSAC winner storage",
+          pose_line = unique_index(
+              "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels)?;"
           )
+          lines[model_start : pose_line + 1] = [
+              "    // Keep the robust winning RANSAC hypothesis available. A consensus refit can",
+              "    // improve the geometry, but rounded pixel correspondences can also make the",
+              "    // constrained refit worse than the robust seed. Only select a refit that survives",
+              "    // the same cheirality, reprojection, and triangulation-angle gates.",
+              "    let ransac_essential = best_essential?;",
+              "    let ransac_pose = recover_pose(",
+              "        &ransac_essential,",
+              "        &correspondences,",
+              "        &best_inliers,",
+              "        focal_pixels,",
+              "    );",
+              "    let refined_model = estimate_essential(&correspondences, &best_inliers).and_then(",
+              "        |refined_essential| {",
+              "            recover_pose(",
+              "                &refined_essential,",
+              "                &correspondences,",
+              "                &best_inliers,",
+              "                focal_pixels,",
+              "            )",
+              "            .map(|pose| (refined_essential, pose))",
+              "        },",
+              "    );",
+              "",
+              "    let (essential, pose) = match (refined_model, ransac_pose) {",
+              "        (Some((refined_essential, refined_pose)), Some(ransac_pose)) => {",
+              "            let refined_is_better = refined_pose.points.len() > ransac_pose.points.len()",
+              "                || (refined_pose.points.len() == ransac_pose.points.len()",
+              "                    && refined_pose.median_reprojection_error_pixels",
+              "                        < ransac_pose.median_reprojection_error_pixels);",
+              "            if refined_is_better {",
+              "                (refined_essential, refined_pose)",
+              "            } else {",
+              "                (ransac_essential, ransac_pose)",
+              "            }",
+              "        }",
+              "        (Some(refined_model), None) => refined_model,",
+              "        (None, Some(ransac_pose)) => (ransac_essential, ransac_pose),",
+              "        (None, None) => return None,",
+              "    };",
+              "",
+              "    let mut sampson_errors_pixels: Vec<f64> = best_inliers",
+              "        .iter()",
+              "        .map(|&index| {",
+              "            sampson_error(&essential, &correspondences[index]).sqrt() * focal_pixels",
+              "        })",
+              "        .filter(|error| error.is_finite())",
+              "        .collect();",
+              "    let median_sampson_error_pixels = median_f64(&mut sampson_errors_pixels);",
+          ]
 
-          old_model = '''    let essential = estimate_essential(&correspondences, &best_inliers)?;
-          let mut sampson_errors_pixels: Vec<f64> = best_inliers
-              .iter()
-              .map(|&index| sampson_error(&essential, &correspondences[index]).sqrt() * focal_pixels)
-              .filter(|error| error.is_finite())
-              .collect();
-          let median_sampson_error_pixels = median_f64(&mut sampson_errors_pixels);
+          design = unique_index("    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);")
+          lines[design : design + 1] = [
+              "    // nalgebra computes a thin SVD for rectangular matrices. The minimal 8x9",
+              "    // design omits the ninth right-singular vector: exactly the one-dimensional",
+              "    // null space required by the eight-point algorithm. A zero row preserves the",
+              "    // homogeneous system while making the minimal fit square.",
+              "    let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);",
+          ]
 
-          let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels)?;'''
-          new_model = '''    // Keep the robust winning RANSAC hypothesis available. A consensus refit is
-          // useful when it improves the geometry, but rounded pixel correspondences can make the
-          // constrained eight-point refit worse than the robust seed. Only select a refit that
-          // survives the same cheirality, reprojection, and triangulation-angle gates.
-          let ransac_essential = best_essential?;
-          let ransac_pose = recover_pose(
-              &ransac_essential,
-              &correspondences,
-              &best_inliers,
-              focal_pixels,
-          );
-          let refined_model = estimate_essential(&correspondences, &best_inliers).and_then(
-              |refined_essential| {
-                  recover_pose(
-                      &refined_essential,
-                      &correspondences,
-                      &best_inliers,
-                      focal_pixels,
-                  )
-                  .map(|pose| (refined_essential, pose))
-              },
-          );
+          marker = unique_index("    fn triangulates_known_two_view_point() {")
+          if marker == 0 or lines[marker - 1] != "    #[test]":
+              raise SystemExit("triangulation test marker malformed")
+          insert_at = marker - 1
+          regression = [
+              "    fn exact_correspondences(",
+              "        rotation: Matrix3<f64>,",
+              "        translation: Vector3<f64>,",
+              "    ) -> Vec<Correspondence> {",
+              "        let points = [",
+              "            Vector3::new(-0.9, -0.6, 3.2),",
+              "            Vector3::new(-0.3, -0.5, 4.1),",
+              "            Vector3::new(0.4, -0.4, 5.0),",
+              "            Vector3::new(0.9, -0.2, 3.7),",
+              "            Vector3::new(-0.8, 0.3, 4.5),",
+              "            Vector3::new(-0.1, 0.6, 3.5),",
+              "            Vector3::new(0.5, 0.5, 5.3),",
+              "            Vector3::new(1.0, 0.2, 4.0),",
+              "        ];",
+              "",
+              "        points",
+              "            .into_iter()",
+              "            .enumerate()",
+              "            .map(|(index, point)| Correspondence {",
+              "                source_feature_index: index,",
+              "                descriptor_distance: 0.0,",
+              "                x1: project(point, Matrix3::identity(), Vector3::zeros()),",
+              "                x2: project(point, rotation, translation),",
+              "            })",
+              "            .collect()",
+              "    }",
+              "",
+              "    #[test]",
+              "    fn eight_point_fit_keeps_the_full_right_null_space() {",
+              "        let yaw = 0.06f64;",
+              "        let rotation = Matrix3::new(",
+              "            yaw.cos(),",
+              "            0.0,",
+              "            yaw.sin(),",
+              "            0.0,",
+              "            1.0,",
+              "            0.0,",
+              "            -yaw.sin(),",
+              "            0.0,",
+              "            yaw.cos(),",
+              "        );",
+              "        let correspondences =",
+              "            exact_correspondences(rotation, Vector3::new(-0.7, 0.04, 0.03));",
+              "        let indices: Vec<usize> = (0..8).collect();",
+              "        let essential =",
+              "            estimate_essential(&correspondences, &indices).expect(\"essential matrix\");",
+              "",
+              "        let max_error = correspondences",
+              "            .iter()",
+              "            .map(|correspondence| sampson_error(&essential, correspondence))",
+              "            .fold(0.0, f64::max);",
+              "        assert!(max_error < 1.0e-8, \"maximum Sampson error: {max_error}\");",
+              "    }",
+              "",
+          ]
+          lines[insert_at:insert_at] = regression
 
-          let (essential, pose) = match (refined_model, ransac_pose) {
-              (Some((refined_essential, refined_pose)), Some(ransac_pose)) => {
-                  let refined_is_better = refined_pose.points.len() > ransac_pose.points.len()
-                      || (refined_pose.points.len() == ransac_pose.points.len()
-                          && refined_pose.median_reprojection_error_pixels
-                              < ransac_pose.median_reprojection_error_pixels);
-                  if refined_is_better {
-                      (refined_essential, refined_pose)
-                  } else {
-                      (ransac_essential.clone(), ransac_pose)
-                  }
-              }
-              (Some(refined_model), None) => refined_model,
-              (None, Some(ransac_pose)) => (ransac_essential, ransac_pose),
-              (None, None) => return None,
-          };
-
-          let mut sampson_errors_pixels: Vec<f64> = best_inliers
-              .iter()
-              .map(|&index| sampson_error(&essential, &correspondences[index]).sqrt() * focal_pixels)
-              .filter(|error| error.is_finite())
-              .collect();
-          let median_sampson_error_pixels = median_f64(&mut sampson_errors_pixels);'''
-          replace_once(old_model, new_model, "guarded consensus refit")
-
-          replace_once(
-              "    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);",
-              '''    // nalgebra computes a thin SVD for rectangular matrices. The minimal 8x9
-              // design would omit the ninth right-singular vector: exactly the one-dimensional
-              // null space required by the eight-point algorithm. A zero row preserves the
-              // homogeneous system while making the minimal fit square.
-              let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);''',
-              "eight-point null space",
-          )
-
-          test_marker = '''    #[test]
-              fn triangulates_known_two_view_point() {'''
-          regression = '''    fn exact_correspondences(
-                  rotation: Matrix3<f64>,
-                  translation: Vector3<f64>,
-              ) -> Vec<Correspondence> {
-                  let points = [
-                      Vector3::new(-0.9, -0.6, 3.2),
-                      Vector3::new(-0.3, -0.5, 4.1),
-                      Vector3::new(0.4, -0.4, 5.0),
-                      Vector3::new(0.9, -0.2, 3.7),
-                      Vector3::new(-0.8, 0.3, 4.5),
-                      Vector3::new(-0.1, 0.6, 3.5),
-                      Vector3::new(0.5, 0.5, 5.3),
-                      Vector3::new(1.0, 0.2, 4.0),
-                  ];
-
-                  points
-                      .into_iter()
-                      .enumerate()
-                      .map(|(index, point)| Correspondence {
-                          source_feature_index: index,
-                          descriptor_distance: 0.0,
-                          x1: project(point, Matrix3::identity(), Vector3::zeros()),
-                          x2: project(point, rotation, translation),
-                      })
-                      .collect()
-              }
-
-              #[test]
-              fn eight_point_fit_keeps_the_full_right_null_space() {
-                  let yaw = 0.06f64;
-                  let rotation = Matrix3::new(
-                      yaw.cos(),
-                      0.0,
-                      yaw.sin(),
-                      0.0,
-                      1.0,
-                      0.0,
-                      -yaw.sin(),
-                      0.0,
-                      yaw.cos(),
-                  );
-                  let correspondences =
-                      exact_correspondences(rotation, Vector3::new(-0.7, 0.04, 0.03));
-                  let indices: Vec<usize> = (0..8).collect();
-                  let essential =
-                      estimate_essential(&correspondences, &indices).expect("essential matrix");
-
-                  let max_error = correspondences
-                      .iter()
-                      .map(|correspondence| sampson_error(&essential, correspondence))
-                      .fold(0.0, f64::max);
-                  assert!(max_error < 1.0e-8, "maximum Sampson error: {max_error}");
-              }
-
-              #[test]
-              fn triangulates_known_two_view_point() {'''
-          replace_once(test_marker, regression, "null-space regression test")
-
-          path.write_text(text)
+          path.write_text("\n".join(lines) + "\n")
       - name: Format Rust
         run: cargo fmt --all
       - name: Test reconstruction core
@@ -182,9 +177,15 @@ jobs:
       - name: Commit verified estimator fixes
         shell: bash
         run: |
-          rm .github/workflows/diagnose-two-view.yml
+          rm -f \
+            .github/workflows/diagnose-two-view.yml \
+            .github/workflows/finalize-two-view-with-deps.yml \
+            .github/workflows/finalize-two-view.yml \
+            .github/workflows/fix-eight-point-nullspace.yml \
+            .github/workflows/refine-pr-2.yml \
+            .github/workflows/format-pr-2.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/video-to-3d-core/src/two_view.rs .github/workflows/diagnose-two-view.yml
+          git add -A
           git commit -m "Fix calibrated two-view robust estimation"
           git push origin HEAD:feat/calibrated-two-view-sfm
