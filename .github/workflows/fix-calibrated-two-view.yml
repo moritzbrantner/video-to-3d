@@ -23,6 +23,7 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+          import re
 
           path = Path("crates/video-to-3d-core/src/two_view.rs")
           text = path.read_text()
@@ -37,30 +38,7 @@ jobs:
           assert old in text
           text = text.replace(old, new, 1)
 
-          old = '''    for iteration in 0..RANSAC_ITERATIONS {
-              let sample = deterministic_sample(correspondences.len(), iteration);
-              let Some(essential) = estimate_essential(&correspondences, &sample) else {
-                  continue;
-              };
-              let mut inliers = Vec::new();
-              let mut errors = Vec::new();
-              for (index, correspondence) in correspondences.iter().enumerate() {
-                  let error = sampson_error(&essential, correspondence);
-                  if error.is_finite() && error <= threshold {
-                      inliers.push(index);
-                      errors.push(error);
-                  }
-              }
-
-              let median_error = median_f64(&mut errors);
-              if inliers.len() > best_inliers.len()
-                  || (inliers.len() == best_inliers.len() && median_error < best_median_error)
-              {
-                  best_inliers = inliers;
-                  best_median_error = median_error;
-              }
-          }'''
-          new = '''    let mut iteration = 0;
+          loop_replacement = '''    let mut iteration = 0;
           let mut iteration_limit = required_ransac_iterations(MIN_INLIER_RATIO);
           while iteration < iteration_limit {
               let sample = deterministic_sample(correspondences.len(), iteration);
@@ -93,11 +71,19 @@ jobs:
                       );
                   }
               }
-          }'''
-          assert old in text
-          text = text.replace(old, new, 1)
+          }
 
-          marker = '''fn deterministic_sample(len: usize, iteration: usize) -> Vec<usize> {'''
+          let inlier_ratio ='''
+          text, replacements = re.subn(
+              r"    for iteration in 0\.\.RANSAC_ITERATIONS \{\n.*?\n    \}\n\n    let inlier_ratio =",
+              loop_replacement,
+              text,
+              count=1,
+              flags=re.DOTALL,
+          )
+          assert replacements == 1
+
+          marker = "fn deterministic_sample(len: usize, iteration: usize) -> Vec<usize> {"
           helper = '''fn required_ransac_iterations(inlier_ratio: f64) -> usize {
               if !inlier_ratio.is_finite() || inlier_ratio <= 0.0 {
                   return usize::MAX;
@@ -126,28 +112,13 @@ jobs:
           assert marker in text
           text = text.replace(marker, helper, 1)
 
-          text = text.replace('''    if matches.len() < 8 || focal_pixels <= 0.0 {''', '''    if matches.len() < RANSAC_SAMPLE_SIZE || focal_pixels <= 0.0 {''', 1)
-          text = text.replace('''    if len == 8 {
-                  return (0..8).collect();
-              }''', '''    if len == RANSAC_SAMPLE_SIZE {
-                  return (0..RANSAC_SAMPLE_SIZE).collect();
-              }''', 1)
-          text = text.replace('''    let mut sample = Vec::with_capacity(8);
-              while sample.len() < 8 {''', '''    let mut sample = Vec::with_capacity(RANSAC_SAMPLE_SIZE);
-              while sample.len() < RANSAC_SAMPLE_SIZE {''', 1)
-          text = text.replace('''    if indices.len() < 8 {
-                  return None;
-              }
-
-              let mut design = DMatrix::<f64>::zeros(indices.len(), 9);''', '''    if indices.len() < RANSAC_SAMPLE_SIZE {
-                  return None;
-              }
-
-              // nalgebra computes a thin SVD. An 8x9 design matrix would therefore omit
-              // the ninth right-singular vector: exactly the null-space vector needed by
-              // the eight-point algorithm. A zero row preserves the linear system while
-              // making the minimum RANSAC fit square, so V^T contains all nine vectors.
-              let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);''', 1)
+          design = "    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);"
+          padded_design = '''    // nalgebra computes a thin SVD. An 8x9 matrix omits the ninth
+              // right-singular vector, which is the null-space solution the eight-point fit needs.
+              // A zero row preserves the system while making the minimum fit square.
+              let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);'''
+          assert design in text
+          text = text.replace(design, padded_design, 1)
 
           test_marker = '''    #[test]
               fn triangulates_known_two_view_point() {'''
