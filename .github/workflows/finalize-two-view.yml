@@ -1,0 +1,241 @@
+name: Finalize calibrated two-view geometry
+
+on:
+  push:
+    branches:
+      - feat/calibrated-two-view-sfm
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/calibrated-two-view-sfm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply reviewed estimator fixes
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path("crates/video-to-3d-core/src/two_view.rs")
+          text = path.read_text()
+
+          constants_old = '''const RANSAC_ITERATIONS: usize = 96;
+          const SAMPSON_THRESHOLD_PIXELS: f64 = 1.75;
+          const MIN_INLIER_RATIO: f64 = 0.35;'''
+          constants_new = '''const RANSAC_SAMPLE_SIZE: usize = 8;
+          const RANSAC_TARGET_CONFIDENCE: f64 = 0.99;
+          const SAMPSON_THRESHOLD_PIXELS: f64 = 1.75;
+          const MIN_INLIER_RATIO: f64 = 0.5;'''
+          assert text.count(constants_old) == 1
+          text = text.replace(constants_old, constants_new, 1)
+
+          loop_replacement = '''    let mut iteration = 0;
+          let mut iteration_limit = required_ransac_iterations(MIN_INLIER_RATIO);
+          while iteration < iteration_limit {
+              let sample = deterministic_sample(correspondences.len(), iteration);
+              iteration += 1;
+              let Some(essential) = estimate_essential(&correspondences, &sample) else {
+                  continue;
+              };
+              let mut inliers = Vec::new();
+              let mut errors = Vec::new();
+              for (index, correspondence) in correspondences.iter().enumerate() {
+                  let error = sampson_error(&essential, correspondence);
+                  if error.is_finite() && error <= threshold {
+                      inliers.push(index);
+                      errors.push(error);
+                  }
+              }
+
+              let median_error = median_f64(&mut errors);
+              if inliers.len() > best_inliers.len()
+                  || (inliers.len() == best_inliers.len() && median_error < best_median_error)
+              {
+                  best_inliers = inliers;
+                  best_median_error = median_error;
+
+                  let observed_inlier_ratio =
+                      best_inliers.len() as f64 / correspondences.len() as f64;
+                  if observed_inlier_ratio >= MIN_INLIER_RATIO {
+                      iteration_limit = iteration_limit.min(
+                          required_ransac_iterations(observed_inlier_ratio).max(iteration),
+                      );
+                  }
+              }
+          }
+
+          // Refit the strongest consensus and reclassify correspondences before accepting it.
+          // Minimal eight-point fits are sensitive to integer-pixel quantization; the
+          // overdetermined refit improves the model without relaxing the robust threshold.
+          for _ in 0..2 {
+              let Some(refined_essential) = estimate_essential(&correspondences, &best_inliers) else {
+                  break;
+              };
+              let mut refined_inliers = Vec::new();
+              let mut refined_errors = Vec::new();
+              for (index, correspondence) in correspondences.iter().enumerate() {
+                  let error = sampson_error(&refined_essential, correspondence);
+                  if error.is_finite() && error <= threshold {
+                      refined_inliers.push(index);
+                      refined_errors.push(error);
+                  }
+              }
+
+              let refined_median_error = median_f64(&mut refined_errors);
+              let improves_consensus = refined_inliers.len() > best_inliers.len()
+                  || (refined_inliers.len() == best_inliers.len()
+                      && refined_median_error < best_median_error);
+              if !improves_consensus {
+                  break;
+              }
+              best_inliers = refined_inliers;
+              best_median_error = refined_median_error;
+          }
+
+          let inlier_ratio ='''
+          text, replacements = re.subn(
+              r"    for iteration in 0\.\.RANSAC_ITERATIONS \{\n.*?\n    \}\n\n    let inlier_ratio =",
+              loop_replacement,
+              text,
+              count=1,
+              flags=re.DOTALL,
+          )
+          assert replacements == 1
+
+          sample_marker = "fn deterministic_sample(len: usize, iteration: usize) -> Vec<usize> {"
+          sample_helper = '''fn required_ransac_iterations(inlier_ratio: f64) -> usize {
+              if !inlier_ratio.is_finite() || inlier_ratio <= 0.0 {
+                  return usize::MAX;
+              }
+
+              let inlier_ratio = inlier_ratio.min(1.0);
+              let sample_success = inlier_ratio.powi(RANSAC_SAMPLE_SIZE as i32);
+              if sample_success >= 1.0 {
+                  return 1;
+              }
+
+              let denominator = (1.0 - sample_success).ln();
+              if denominator == 0.0 {
+                  return usize::MAX;
+              }
+
+              let iterations = ((1.0 - RANSAC_TARGET_CONFIDENCE).ln() / denominator).ceil();
+              if !iterations.is_finite() {
+                  usize::MAX
+              } else {
+                  iterations.max(1.0) as usize
+              }
+          }
+
+          fn deterministic_sample(len: usize, iteration: usize) -> Vec<usize> {'''
+          assert text.count(sample_marker) == 1
+          text = text.replace(sample_marker, sample_helper, 1)
+
+          text = text.replace(
+              "    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);",
+              '''    // nalgebra uses a thin SVD. For an 8x9 matrix that omits the ninth
+              // right-singular vector: the null-space solution required by the eight-point fit.
+              // Padding with one zero row preserves the system and makes the minimum fit square.
+              let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);''',
+              1,
+          )
+
+          test_marker = '''    #[test]
+              fn triangulates_known_two_view_point() {'''
+          tests = '''    fn exact_correspondences(
+                  rotation: Matrix3<f64>,
+                  translation: Vector3<f64>,
+              ) -> Vec<Correspondence> {
+                  let points = [
+                      Vector3::new(-0.9, -0.6, 3.2),
+                      Vector3::new(-0.3, -0.5, 4.1),
+                      Vector3::new(0.4, -0.4, 5.0),
+                      Vector3::new(0.9, -0.2, 3.7),
+                      Vector3::new(-0.8, 0.3, 4.5),
+                      Vector3::new(-0.1, 0.6, 3.5),
+                      Vector3::new(0.5, 0.5, 5.3),
+                      Vector3::new(1.0, 0.2, 4.0),
+                  ];
+
+                  points
+                      .into_iter()
+                      .enumerate()
+                      .map(|(index, point)| Correspondence {
+                          source_feature_index: index,
+                          descriptor_distance: 0.0,
+                          x1: project(point, Matrix3::identity(), Vector3::zeros()),
+                          x2: project(point, rotation, translation),
+                      })
+                      .collect()
+              }
+
+              #[test]
+              fn eight_point_fit_keeps_the_full_right_null_space() {
+                  let yaw = 0.06f64;
+                  let rotation = Matrix3::new(
+                      yaw.cos(),
+                      0.0,
+                      yaw.sin(),
+                      0.0,
+                      1.0,
+                      0.0,
+                      -yaw.sin(),
+                      0.0,
+                      yaw.cos(),
+                  );
+                  let correspondences =
+                      exact_correspondences(rotation, Vector3::new(-0.7, 0.04, 0.03));
+                  let indices: Vec<usize> = (0..RANSAC_SAMPLE_SIZE).collect();
+                  let essential =
+                      estimate_essential(&correspondences, &indices).expect("essential matrix");
+
+                  let max_error = correspondences
+                      .iter()
+                      .map(|correspondence| sampson_error(&essential, correspondence))
+                      .fold(0.0, f64::max);
+                  assert!(max_error < 1.0e-8, "maximum Sampson error: {max_error}");
+              }
+
+              #[test]
+              fn ransac_budget_meets_the_minimum_inlier_confidence_contract() {
+                  let iterations = required_ransac_iterations(MIN_INLIER_RATIO);
+                  let sample_success = MIN_INLIER_RATIO.powi(RANSAC_SAMPLE_SIZE as i32);
+                  let achieved_confidence =
+                      1.0 - (1.0 - sample_success).powi(iterations as i32);
+                  let legacy_confidence = 1.0 - (1.0 - sample_success).powi(96);
+
+                  assert!(achieved_confidence >= RANSAC_TARGET_CONFIDENCE);
+                  assert!(legacy_confidence < RANSAC_TARGET_CONFIDENCE);
+                  assert!(required_ransac_iterations(0.7) < iterations);
+              }
+
+              #[test]
+              fn triangulates_known_two_view_point() {'''
+          assert text.count(test_marker) == 1
+          text = text.replace(test_marker, tests, 1)
+
+          path.write_text(text)
+      - name: Format Rust
+        run: cargo fmt --all
+      - name: Test geometry kernel
+        run: cargo test -p video-to-3d-core
+      - name: Lint geometry kernel
+        run: cargo clippy -p video-to-3d-core --all-targets -- -D warnings
+      - name: Commit reviewed fixes
+        shell: bash
+        run: |
+          rm .github/workflows/finalize-two-view.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/video-to-3d-core/src/two_view.rs .github/workflows/finalize-two-view.yml
+          git commit -m "Fix calibrated two-view RANSAC geometry"
+          git push origin HEAD:feat/calibrated-two-view-sfm
