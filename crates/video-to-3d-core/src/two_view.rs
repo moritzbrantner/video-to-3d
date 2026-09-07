@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 const RANSAC_ITERATIONS: usize = 96;
 const SAMPSON_THRESHOLD_PIXELS: f64 = 1.75;
 const MIN_INLIER_RATIO: f64 = 0.35;
+const MAX_ROTATION_ONLY_RESIDUAL_PIXELS: f64 = 1.25;
 const MIN_TRIANGULATION_ANGLE_DEGREES: f64 = 0.5;
 const MAX_REPROJECTION_ERROR_PIXELS: f64 = 4.0;
 
@@ -101,7 +102,9 @@ pub(super) fn estimate_two_view(
 
     for iteration in 0..RANSAC_ITERATIONS {
         let sample = deterministic_sample(correspondences.len(), iteration);
-        let essential = estimate_essential(&correspondences, &sample)?;
+        let Some(essential) = estimate_essential(&correspondences, &sample) else {
+            continue;
+        };
         let mut inliers = Vec::new();
         let mut errors = Vec::new();
         for (index, correspondence) in correspondences.iter().enumerate() {
@@ -123,6 +126,12 @@ pub(super) fn estimate_two_view(
 
     let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;
     if best_inliers.len() < 8 || inlier_ratio < MIN_INLIER_RATIO {
+        return None;
+    }
+
+    if rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels)?
+        <= MAX_ROTATION_ONLY_RESIDUAL_PIXELS
+    {
         return None;
     }
 
@@ -246,11 +255,52 @@ fn sampson_error(essential: &Matrix3<f64>, correspondence: &Correspondence) -> f
     let ex1 = essential * correspondence.x1;
     let etx2 = essential.transpose() * correspondence.x2;
     let numerator = correspondence.x2.dot(&ex1);
-    let denominator = ex1.x * ex1.x + ex1.y * ex1.y + etx2.x * etx2.x + etx2.y * etx2.y;
+    let denominator =
+        ex1.x * ex1.x + ex1.y * ex1.y + etx2.x * etx2.x + etx2.y * etx2.y;
     if denominator <= 1.0e-12 {
         return f64::INFINITY;
     }
     numerator * numerator / denominator
+}
+
+fn rotation_only_residual_pixels(
+    correspondences: &[Correspondence],
+    inliers: &[usize],
+    focal_pixels: f64,
+) -> Option<f64> {
+    let mut covariance = Matrix3::<f64>::zeros();
+    for &index in inliers {
+        let source = correspondences[index].x1.normalize();
+        let target = correspondences[index].x2.normalize();
+        covariance += target * source.transpose();
+    }
+
+    let svd = covariance.svd(true, true);
+    let mut u = svd.u?;
+    let v_t = svd.v_t?;
+    let mut rotation = u * v_t;
+    if rotation.determinant() < 0.0 {
+        for row in 0..3 {
+            u[(row, 2)] = -u[(row, 2)];
+        }
+        rotation = u * v_t;
+    }
+
+    let mut residuals: Vec<f64> = inliers
+        .iter()
+        .map(|&index| {
+            let source = correspondences[index].x1.normalize();
+            let target = correspondences[index].x2.normalize();
+            let predicted = rotation * source;
+            predicted
+                .dot(&target)
+                .clamp(-1.0, 1.0)
+                .acos()
+                * focal_pixels
+        })
+        .filter(|residual| residual.is_finite())
+        .collect();
+    Some(median_f64(&mut residuals))
 }
 
 fn recover_pose(
@@ -265,7 +315,10 @@ fn recover_pose(
     make_proper_basis(&mut u, &mut v_t);
 
     let w = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
-    let rotations = [proper_rotation(u * w * v_t), proper_rotation(u * w.transpose() * v_t)];
+    let rotations = [
+        proper_rotation(u * w * v_t),
+        proper_rotation(u * w.transpose() * v_t),
+    ];
     let translation = Vector3::new(u[(0, 2)], u[(1, 2)], u[(2, 2)]).normalize();
 
     let mut best: Option<PoseCandidate> = None;
@@ -324,7 +377,14 @@ fn evaluate_pose(
 
     for &index in inliers {
         let correspondence = &correspondences[index];
-        let position = triangulate(&correspondence.x1, &correspondence.x2, &rotation, &translation)?;
+        let Some(position) = triangulate(
+            &correspondence.x1,
+            &correspondence.x2,
+            &rotation,
+            &translation,
+        ) else {
+            continue;
+        };
         let camera_two_point = rotation * position + translation;
         if position.z <= 1.0e-6 || camera_two_point.z <= 1.0e-6 {
             continue;
@@ -385,9 +445,24 @@ fn triangulate(
         [0.0, 0.0, 1.0, 0.0],
     ];
     let p2 = [
-        [rotation[(0, 0)], rotation[(0, 1)], rotation[(0, 2)], translation.x],
-        [rotation[(1, 0)], rotation[(1, 1)], rotation[(1, 2)], translation.y],
-        [rotation[(2, 0)], rotation[(2, 1)], rotation[(2, 2)], translation.z],
+        [
+            rotation[(0, 0)],
+            rotation[(0, 1)],
+            rotation[(0, 2)],
+            translation.x,
+        ],
+        [
+            rotation[(1, 0)],
+            rotation[(1, 1)],
+            rotation[(1, 2)],
+            translation.y,
+        ],
+        [
+            rotation[(2, 0)],
+            rotation[(2, 1)],
+            rotation[(2, 2)],
+            translation.z,
+        ],
     ];
 
     for column in 0..4 {
@@ -404,8 +479,15 @@ fn triangulate(
     if !w.is_finite() || w.abs() <= 1.0e-12 {
         return None;
     }
-    let point = Vector3::new(homogeneous[0] / w, homogeneous[1] / w, homogeneous[2] / w);
-    point.iter().all(|value| value.is_finite()).then_some(point)
+    let point = Vector3::new(
+        homogeneous[0] / w,
+        homogeneous[1] / w,
+        homogeneous[2] / w,
+    );
+    point
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(point)
 }
 
 fn reprojection_error(
@@ -426,7 +508,11 @@ fn reprojection_error(
 fn triangulation_angle(point: &Vector3<f64>, camera_two_center: &Vector3<f64>) -> f64 {
     let ray_one = point.normalize();
     let ray_two = (*point - camera_two_center).normalize();
-    ray_one.dot(&ray_two).clamp(-1.0, 1.0).acos().to_degrees()
+    ray_one
+        .dot(&ray_two)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees()
 }
 
 fn median_f64(values: &mut [f64]) -> f64 {
@@ -452,7 +538,71 @@ mod tests {
         translation: Vector3<f64>,
     ) -> Vector3<f64> {
         let camera_point = rotation * point + translation;
-        Vector3::new(camera_point.x / camera_point.z, camera_point.y / camera_point.z, 1.0)
+        Vector3::new(
+            camera_point.x / camera_point.z,
+            camera_point.y / camera_point.z,
+            1.0,
+        )
+    }
+
+    fn feature_from_bearing(
+        bearing: Vector3<f64>,
+        width: u32,
+        height: u32,
+        focal: f64,
+        descriptor: i16,
+    ) -> Feature {
+        let x = (bearing.x * focal + width as f64 * 0.5).round();
+        let y = (bearing.y * focal + height as f64 * 0.5).round();
+        Feature {
+            x: x.clamp(0.0, width.saturating_sub(1) as f64) as u32,
+            y: y.clamp(0.0, height.saturating_sub(1) as f64) as u32,
+            score: 1.0,
+            descriptor: vec![descriptor],
+        }
+    }
+
+    fn synthetic_correspondences(
+        rotation: Matrix3<f64>,
+        translation: Vector3<f64>,
+    ) -> (Vec<Feature>, Vec<Feature>, Vec<FeatureMatch>) {
+        let width = 640;
+        let height = 480;
+        let focal = 500.0;
+        let mut source = Vec::new();
+        let mut target = Vec::new();
+        let mut matches = Vec::new();
+
+        for index in 0..30 {
+            let point = Vector3::new(
+                (index % 6) as f64 * 0.36 - 0.9,
+                (index / 6) as f64 * 0.28 - 0.56,
+                3.2 + (index % 5) as f64 * 0.42,
+            );
+            let x1 = project(point, Matrix3::identity(), Vector3::zeros());
+            let x2 = project(point, rotation, translation);
+            source.push(feature_from_bearing(
+                x1,
+                width,
+                height,
+                focal,
+                index as i16,
+            ));
+            target.push(feature_from_bearing(
+                x2,
+                width,
+                height,
+                focal,
+                index as i16,
+            ));
+            matches.push(FeatureMatch {
+                a: index,
+                b: index,
+                distance: 0.2,
+            });
+        }
+
+        (source, target, matches)
     }
 
     #[test]
@@ -462,29 +612,61 @@ mod tests {
         let point = Vector3::new(0.4, -0.2, 4.0);
         let x1 = project(point, Matrix3::identity(), Vector3::zeros());
         let x2 = project(point, rotation, translation);
-        let recovered = triangulate(&x1, &x2, &rotation, &translation).expect("triangulation");
+        let recovered =
+            triangulate(&x1, &x2, &rotation, &translation).expect("triangulation");
         assert!((recovered - point).norm() < 1.0e-8);
     }
 
     #[test]
-    fn pure_rotation_has_zero_triangulation_angle() {
-        let angle = 0.18f64;
+    fn recovers_translating_two_view_fixture_with_outliers() {
+        let yaw = 0.07f64;
         let rotation = Matrix3::new(
-            angle.cos(),
+            yaw.cos(),
             0.0,
-            angle.sin(),
+            yaw.sin(),
             0.0,
             1.0,
             0.0,
-            -angle.sin(),
+            -yaw.sin(),
             0.0,
-            angle.cos(),
+            yaw.cos(),
         );
-        let point = Vector3::new(0.3, 0.1, 4.0);
-        let x1 = project(point, Matrix3::identity(), Vector3::zeros());
-        let x2 = project(point, rotation, Vector3::zeros());
-        assert!((x1.norm() - x2.norm()).is_finite());
-        let camera_center = Vector3::zeros();
-        assert!(triangulation_angle(&point, &camera_center) < 1.0e-8);
+        let translation = Vector3::new(-0.72, 0.03, 0.04);
+        let (source, mut target, matches) = synthetic_correspondences(rotation, translation);
+        for feature in target.iter_mut().skip(26) {
+            feature.x = feature.x.saturating_add(70).min(635);
+            feature.y = feature.y.saturating_sub(45);
+        }
+
+        let estimate = estimate_two_view(&source, &target, &matches, 640, 480, 500.0)
+            .expect("calibrated two-view estimate");
+        assert!(estimate.inliers >= 24, "inliers: {}", estimate.inliers);
+        assert!(estimate.points.len() >= 20, "points: {}", estimate.points.len());
+        assert!(estimate.median_reprojection_error_pixels < 1.5);
+        assert!(estimate.median_triangulation_angle_degrees > 0.5);
+
+        let rotation_delta = estimate.rotation * rotation.transpose();
+        let cosine = ((rotation_delta.trace() - 1.0) * 0.5).clamp(-1.0, 1.0);
+        assert!(cosine.acos() < 0.08);
+        assert!(estimate.translation.dot(&translation.normalize()) > 0.85);
+    }
+
+    #[test]
+    fn pure_rotation_is_rejected_as_two_view_baseline() {
+        let yaw = 0.09f64;
+        let rotation = Matrix3::new(
+            yaw.cos(),
+            0.0,
+            yaw.sin(),
+            0.0,
+            1.0,
+            0.0,
+            -yaw.sin(),
+            0.0,
+            yaw.cos(),
+        );
+        let (source, target, matches) =
+            synthetic_correspondences(rotation, Vector3::zeros());
+        assert!(estimate_two_view(&source, &target, &matches, 640, 480, 500.0).is_none());
     }
 }
