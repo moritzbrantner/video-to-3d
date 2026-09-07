@@ -1,0 +1,30 @@
+name: Reconcile calibrated slice with main
+
+on:
+  push:
+    branches:
+      - feat/calibrated-two-view-sfm
+
+permissions:
+  contents: write
+
+jobs:
+  reconcile:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/calibrated-two-view-sfm
+          fetch-depth: 0
+      - name: Merge current main
+        shell: bash
+        run: |
+          git fetch origin main
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-commit --no-ff -X ours origin/main
+          rm .github/workflows/reconcile-main.yml
+          git add -A
+          git commit -m "Merge current main into calibrated two-view slice"
+          git push origin HEAD:feat/calibrated-two-view-sfm
