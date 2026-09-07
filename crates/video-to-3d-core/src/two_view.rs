@@ -143,12 +143,7 @@ pub(super) fn estimate_two_view(
         .collect();
     let median_sampson_error_pixels = median_f64(&mut sampson_errors_pixels);
 
-    let pose = recover_pose(
-        &essential,
-        &correspondences,
-        &best_inliers,
-        focal_pixels,
-    )?;
+    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels)?;
 
     Some(TwoViewEstimate {
         rotation: pose.rotation,
@@ -255,8 +250,7 @@ fn sampson_error(essential: &Matrix3<f64>, correspondence: &Correspondence) -> f
     let ex1 = essential * correspondence.x1;
     let etx2 = essential.transpose() * correspondence.x2;
     let numerator = correspondence.x2.dot(&ex1);
-    let denominator =
-        ex1.x * ex1.x + ex1.y * ex1.y + etx2.x * etx2.x + etx2.y * etx2.y;
+    let denominator = ex1.x * ex1.x + ex1.y * ex1.y + etx2.x * etx2.x + etx2.y * etx2.y;
     if denominator <= 1.0e-12 {
         return f64::INFINITY;
     }
@@ -386,12 +380,8 @@ fn evaluate_pose(
             continue;
         }
 
-        let reprojection_error_pixels = reprojection_error(
-            &position,
-            &camera_two_point,
-            correspondence,
-            focal_pixels,
-        );
+        let reprojection_error_pixels =
+            reprojection_error(&position, &camera_two_point, correspondence, focal_pixels);
         if !reprojection_error_pixels.is_finite()
             || reprojection_error_pixels > MAX_REPROJECTION_ERROR_PIXELS
         {
@@ -475,15 +465,8 @@ fn triangulate(
     if !w.is_finite() || w.abs() <= 1.0e-12 {
         return None;
     }
-    let point = Vector3::new(
-        homogeneous[0] / w,
-        homogeneous[1] / w,
-        homogeneous[2] / w,
-    );
-    point
-        .iter()
-        .all(|value| value.is_finite())
-        .then_some(point)
+    let point = Vector3::new(homogeneous[0] / w, homogeneous[1] / w, homogeneous[2] / w);
+    point.iter().all(|value| value.is_finite()).then_some(point)
 }
 
 fn reprojection_error(
@@ -492,31 +475,19 @@ fn reprojection_error(
     correspondence: &Correspondence,
     focal_pixels: f64,
 ) -> f64 {
-    let projected_one = Vector3::new(
-        point_one.x / point_one.z,
-        point_one.y / point_one.z,
-        1.0,
-    );
-    let projected_two = Vector3::new(
-        point_two.x / point_two.z,
-        point_two.y / point_two.z,
-        1.0,
-    );
-    let error_one = (projected_one.x - correspondence.x1.x)
-        .hypot(projected_one.y - correspondence.x1.y);
-    let error_two = (projected_two.x - correspondence.x2.x)
-        .hypot(projected_two.y - correspondence.x2.y);
+    let projected_one = Vector3::new(point_one.x / point_one.z, point_one.y / point_one.z, 1.0);
+    let projected_two = Vector3::new(point_two.x / point_two.z, point_two.y / point_two.z, 1.0);
+    let error_one =
+        (projected_one.x - correspondence.x1.x).hypot(projected_one.y - correspondence.x1.y);
+    let error_two =
+        (projected_two.x - correspondence.x2.x).hypot(projected_two.y - correspondence.x2.y);
     (error_one + error_two) * 0.5 * focal_pixels
 }
 
 fn triangulation_angle(point: &Vector3<f64>, camera_two_center: &Vector3<f64>) -> f64 {
     let ray_one = point.normalize();
     let ray_two = (*point - camera_two_center).normalize();
-    ray_one
-        .dot(&ray_two)
-        .clamp(-1.0, 1.0)
-        .acos()
-        .to_degrees()
+    ray_one.dot(&ray_two).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
 fn median_f64(values: &mut [f64]) -> f64 {
@@ -585,20 +556,8 @@ mod tests {
             );
             let x1 = project(point, Matrix3::identity(), Vector3::zeros());
             let x2 = project(point, rotation, translation);
-            source.push(feature_from_bearing(
-                x1,
-                width,
-                height,
-                focal,
-                index as i16,
-            ));
-            target.push(feature_from_bearing(
-                x2,
-                width,
-                height,
-                focal,
-                index as i16,
-            ));
+            source.push(feature_from_bearing(x1, width, height, focal, index as i16));
+            target.push(feature_from_bearing(x2, width, height, focal, index as i16));
             matches.push(FeatureMatch {
                 a: index,
                 b: index,
@@ -616,8 +575,7 @@ mod tests {
         let point = Vector3::new(0.4, -0.2, 4.0);
         let x1 = project(point, Matrix3::identity(), Vector3::zeros());
         let x2 = project(point, rotation, translation);
-        let recovered =
-            triangulate(&x1, &x2, &rotation, &translation).expect("triangulation");
+        let recovered = triangulate(&x1, &x2, &rotation, &translation).expect("triangulation");
         assert!((recovered - point).norm() < 1.0e-8);
     }
 

@@ -692,8 +692,7 @@ mod tests {
             let intensity = 90 + index as u8 * 16;
             for py in base_y - 2..=base_y + 2 {
                 for px in x - 2..=x + 2 {
-                    let edge =
-                        px == x - 2 || px == x + 2 || py == base_y - 2 || py == base_y + 2;
+                    let edge = px == x - 2 || px == x + 2 || py == base_y - 2 || py == base_y + 2;
                     let value = if edge { 245 } else { intensity };
                     let offset = (py as usize * width as usize + px as usize) * 4;
                     rgba[offset] = value;
@@ -831,10 +830,7 @@ mod tests {
     #[test]
     fn rejects_invalid_focal_length() {
         let request = ReconstructionRequest {
-            frames: vec![
-                synthetic_frame(96, 80, 0),
-                synthetic_frame(96, 80, 3),
-            ],
+            frames: vec![synthetic_frame(96, 80, 0), synthetic_frame(96, 80, 3)],
             options: ReconstructionOptions {
                 focal_length_pixels: Some(0.0),
                 ..ReconstructionOptions::default()
