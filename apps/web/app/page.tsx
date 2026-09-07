@@ -57,18 +57,70 @@ export default function Home() {
     );
   }
 
-  const status =
-    phase === "sampling"
-      ? "Sampling video frames locally…"
-      : phase === "reconstructing"
-        ? "Running Rust/WASM reconstruction…"
-        : phase === "done"
-          ? reconstruction?.calibrated_pair
-            ? "Calibrated two-view reconstruction ready"
-            : "Conservative sparse preview ready"
-          : phase === "error"
-            ? "Reconstruction failed"
-            : "Choose a video to begin";
+  async function handleVideos(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0 || batchRunning) return;
+
+    const nextRuns: VideoRun[] = files.map((file, index) => ({
+      id: `${file.name}:${file.size}:${file.lastModified}:${index}`,
+      fileName: file.name,
+      phase: "queued",
+      frames: [],
+      reconstruction: null,
+      error: "",
+    }));
+
+    setRuns(nextRuns);
+    setActiveRunId(nextRuns[0].id);
+    setBatchRunning(true);
+
+    for (const [index, file] of files.entries()) {
+      const runId = nextRuns[index].id;
+      try {
+        updateRun(runId, { phase: "sampling", error: "" });
+        const sampled = await sampleVideo(file);
+        updateRun(runId, {
+          phase: "reconstructing",
+          frames: previewFrames(sampled),
+        });
+        const result = await reconstructFrames(sampled);
+        updateRun(runId, { phase: "done", reconstruction: result });
+      } catch (caught) {
+        updateRun(runId, {
+          phase: "error",
+          error: caught instanceof Error ? caught.message : String(caught),
+        });
+      }
+    }
+
+    setBatchRunning(false);
+  }
+
+  const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
+  const processingRun = runs.find(
+    (run) => run.phase === "sampling" || run.phase === "reconstructing",
+  );
+  const processingIndex = processingRun
+    ? runs.findIndex((run) => run.id === processingRun.id)
+    : -1;
+  const failedCount = runs.filter((run) => run.phase === "error").length;
+  const readyCount = runs.filter((run) => run.phase === "done").length;
+  const statusPhase: StatusPhase = processingRun?.phase ?? activeRun?.phase ?? "idle";
+  const frames = activeRun?.frames ?? [];
+  const reconstruction = activeRun?.reconstruction ?? null;
+  const error = activeRun?.error ?? "";
+  const status = processingRun
+    ? processingRun.phase === "sampling"
+      ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
+      : `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`
+    : runs.length > 0
+      ? failedCount > 0
+        ? `${readyCount} ready · ${failedCount} failed`
+        : runs.length === 1 && reconstruction?.calibrated_pair
+          ? "Calibrated two-view reconstruction ready"
+          : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
+      : "Choose one or more videos to begin";
 
   return (
     <main>
@@ -77,9 +129,10 @@ export default function Home() {
           <p className="eyebrow">Next.js static export · Rust · WebAssembly · Tauri</p>
           <h1>Video to 3D</h1>
           <p className="lede">
-            Turn a moving-camera video into an inspectable sparse 3D reconstruction without uploading
-            the footage. Slice 2 now fits calibrated two-view geometry for the strongest adjacent
-            frame pair, recovers relative camera pose, and triangulates real 3D points in Rust/WASM.
+            Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
+            the footage. Choose one clip or a small batch: each clip is decoded locally, then Rust/WASM
+            selects its strongest calibrated adjacent pair, recovers relative pose, and triangulates
+            sparse 3D landmarks.
           </p>
         </div>
         <label className="upload-button">
@@ -144,15 +197,16 @@ export default function Home() {
         <aside className="method-panel">
           <h2>Slice 2 method</h2>
           <ol>
-            <li>Sample up to 18 reduced-resolution video frames in the browser.</li>
+            <li>Decode and sample up to 18 reduced-resolution frames per video in the browser.</li>
             <li>Detect and match local image features in Rust/WASM.</li>
             <li>Fit an essential matrix with deterministic RANSAC using estimated pinhole intrinsics.</li>
             <li>Recover relative rotation and translation by cheirality, then triangulate the best pair.</li>
           </ol>
           <p className="method-note">
-            Scale is still arbitrary and focal length is estimated from the analysis image unless a
-            caller supplies it. Pure-rotation solutions are rejected with a rotation-only fit and
-            triangulation-angle gate. Multi-view tracks, PnP, and bundle adjustment remain slice 3.
+            Selected videos are reconstructed independently and sequentially to keep memory bounded.
+            Scale remains arbitrary and focal length is estimated from the analysis image unless a
+            caller supplies it. Pure rotation is rejected; cross-video tracks, PnP, and bundle
+            adjustment remain slice 3.
           </p>
         </aside>
       </section>
@@ -189,7 +243,8 @@ export default function Home() {
                   <h2>Selected two-view pair</h2>
                 </div>
                 <p>
-                  Frame {reconstruction.calibrated_pair.from_frame + 1} → {reconstruction.calibrated_pair.to_frame + 1}
+                  Frame {reconstruction.calibrated_pair.from_frame + 1} →{" "}
+                  {reconstruction.calibrated_pair.to_frame + 1}
                 </p>
               </div>
               <div className="table-wrap">
@@ -207,13 +262,20 @@ export default function Home() {
                   <tbody>
                     <tr>
                       <td>
-                        {reconstruction.calibrated_pair.inliers} / {reconstruction.calibrated_pair.matches}
+                        {reconstruction.calibrated_pair.inliers} /{" "}
+                        {reconstruction.calibrated_pair.matches}
                       </td>
                       <td>{(reconstruction.calibrated_pair.inlier_ratio * 100).toFixed(0)}%</td>
                       <td>{reconstruction.calibrated_pair.focal_pixels.toFixed(1)} px</td>
-                      <td>{reconstruction.calibrated_pair.median_sampson_error_pixels.toFixed(2)} px</td>
-                      <td>{reconstruction.calibrated_pair.median_reprojection_error_pixels.toFixed(2)} px</td>
-                      <td>{reconstruction.calibrated_pair.median_triangulation_angle_degrees.toFixed(2)}°</td>
+                      <td>
+                        {reconstruction.calibrated_pair.median_sampson_error_pixels.toFixed(2)} px
+                      </td>
+                      <td>
+                        {reconstruction.calibrated_pair.median_reprojection_error_pixels.toFixed(2)} px
+                      </td>
+                      <td>
+                        {reconstruction.calibrated_pair.median_triangulation_angle_degrees.toFixed(2)}°
+                      </td>
                     </tr>
                   </tbody>
                 </table>
