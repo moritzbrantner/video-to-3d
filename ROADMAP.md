@@ -16,7 +16,7 @@ Exit criterion met: the full browser-local video → Rust/WASM → sparse previe
 
 - Normalize matched image coordinates with a supplied focal length or image-size focal estimate.
 - Estimate an essential matrix with deterministic eight-point RANSAC.
-- Refit on epipolar inliers and expose Sampson-error evidence.
+- Retain the robust winning hypothesis and accept a consensus refit only when it survives the same geometry-quality gates; expose Sampson-error evidence for the selected model.
 - Reject rotation-only degeneracy before accepting a translation baseline.
 - Recover relative rotation/translation from the four essential-matrix pose hypotheses.
 - Select pose by cheirality and minimum triangulation angle.
