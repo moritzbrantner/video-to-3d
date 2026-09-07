@@ -244,7 +244,9 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
 fn to_luma(frame: &FrameInput) -> Vec<u8> {
     frame
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| {
             ((77 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8
         })
@@ -431,7 +433,7 @@ mod tests {
 
     fn synthetic_frame(width: u32, height: u32, shift_x: i32) -> FrameInput {
         let mut rgba = vec![18u8; width as usize * height as usize * 4];
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
 
