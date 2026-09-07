@@ -1,27 +1,29 @@
 # Roadmap
 
-## Slice 1 — Sparse reconstruction MVP
+## Slice 1 — Sparse reconstruction MVP — integrated
 
 - One browser-local video input.
 - Deterministic keyframe sampling.
 - Rust/WASM corner detection and patch descriptors.
 - Adjacent-frame feature matching with diagnostics.
-- Approximate camera trajectory and sparse colored point cloud.
+- Conservative approximate camera trajectory and sparse colored point cloud.
 - Interactive 3D preview shared by web and Tauri.
 - Static Next.js export ready for GitHub Pages.
 
-Exit criterion: a suitable short handheld clip produces visible camera motion, a recognizable sparse spatial structure, and enough diagnostics to explain low-quality reconstructions.
+Exit criterion met: the full browser-local video → Rust/WASM → sparse preview loop is integrated, with low-parallax and pure-motion safeguards instead of fabricated camera movement.
 
-## Slice 2 — Calibrated two-view geometry
+## Slice 2 — Calibrated two-view geometry — current
 
-- Camera intrinsics input/estimation.
-- Normalized coordinates.
-- Essential/fundamental matrix estimation under RANSAC.
-- Relative rotation/translation recovery with cheirality checks.
-- True linear triangulation.
-- Reprojection-error diagnostics.
+- Normalize matched image coordinates with a supplied focal length or image-size focal estimate.
+- Estimate an essential matrix with deterministic eight-point RANSAC and a confidence-derived adaptive trial budget.
+- Retain the robust winning hypothesis and accept a consensus refit only when it survives the same geometry-quality gates; expose Sampson-error evidence for the selected model.
+- Reject rotation-only degeneracy before accepting a translation baseline.
+- Recover relative rotation/translation from the four essential-matrix pose hypotheses.
+- Select pose by cheirality and minimum triangulation angle.
+- Triangulate true two-view landmarks with linear DLT and filter by reprojection error.
+- Select the strongest valid adjacent pair while retaining an explicitly labeled conservative fallback.
 
-Exit criterion: synthetic and recorded two-view fixtures recover known camera motion and 3D points within explicit error bounds.
+Exit criterion: deterministic synthetic fixtures recover known camera motion and 3D points within explicit error bounds, and suitable recorded footage produces a calibrated pair with visible epipolar/reprojection diagnostics.
 
 ## Slice 3 — Multi-view sparse SfM
 
