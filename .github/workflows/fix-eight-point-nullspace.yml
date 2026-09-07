@@ -30,17 +30,74 @@ jobs:
 
           design = '    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);'
           replacement = '''    // nalgebra computes a thin SVD for rectangular matrices. For the minimal
-    // eight-point fit, an 8x9 design matrix would therefore expose only eight
-    // right-singular vectors and omit the one-dimensional null space that is the
-    // actual essential-matrix solution. A zero row preserves the linear system
-    // while making the minimal design square so V^T contains all nine vectors.
-    let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);'''
+              // eight-point fit, an 8x9 design matrix would therefore expose only eight
+              // right-singular vectors and omit the one-dimensional null space that is the
+              // actual essential-matrix solution. A zero row preserves the linear system
+              // while making the minimal design square so V^T contains all nine vectors.
+              let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);'''
+          replacement = '\n'.join(line[10:] if line.startswith('          ') else line for line in replacement.splitlines())
           if text.count(design) != 1:
               raise SystemExit(f'expected one design matrix marker, found {text.count(design)}')
           text = text.replace(design, replacement, 1)
 
-          marker = '''    #[test]\n    fn triangulates_known_two_view_point() {'''
-          tests = '''    fn exact_correspondences(\n        rotation: Matrix3<f64>,\n        translation: Vector3<f64>,\n    ) -> Vec<Correspondence> {\n        let points = [\n            Vector3::new(-0.9, -0.6, 3.2),\n            Vector3::new(-0.3, -0.5, 4.1),\n            Vector3::new(0.4, -0.4, 5.0),\n            Vector3::new(0.9, -0.2, 3.7),\n            Vector3::new(-0.8, 0.3, 4.5),\n            Vector3::new(-0.1, 0.6, 3.5),\n            Vector3::new(0.5, 0.5, 5.3),\n            Vector3::new(1.0, 0.2, 4.0),\n        ];\n\n        points\n            .into_iter()\n            .enumerate()\n            .map(|(index, point)| Correspondence {\n                source_feature_index: index,\n                descriptor_distance: 0.0,\n                x1: project(point, Matrix3::identity(), Vector3::zeros()),\n                x2: project(point, rotation, translation),\n            })\n            .collect()\n    }\n\n    #[test]\n    fn eight_point_fit_keeps_the_full_right_null_space() {\n        let yaw = 0.06f64;\n        let rotation = Matrix3::new(\n            yaw.cos(),\n            0.0,\n            yaw.sin(),\n            0.0,\n            1.0,\n            0.0,\n            -yaw.sin(),\n            0.0,\n            yaw.cos(),\n        );\n        let correspondences =\n            exact_correspondences(rotation, Vector3::new(-0.7, 0.04, 0.03));\n        let indices: Vec<usize> = (0..8).collect();\n        let essential =\n            estimate_essential(&correspondences, &indices).expect("essential matrix");\n\n        let max_error = correspondences\n            .iter()\n            .map(|correspondence| sampson_error(&essential, correspondence))\n            .fold(0.0, f64::max);\n        assert!(max_error < 1.0e-8, "maximum Sampson error: {max_error}");\n    }\n\n    #[test]\n    fn triangulates_known_two_view_point() {'''
+          marker = '    #[test]\n    fn triangulates_known_two_view_point() {'
+          tests = '''    fn exact_correspondences(
+              rotation: Matrix3<f64>,
+              translation: Vector3<f64>,
+          ) -> Vec<Correspondence> {
+              let points = [
+                  Vector3::new(-0.9, -0.6, 3.2),
+                  Vector3::new(-0.3, -0.5, 4.1),
+                  Vector3::new(0.4, -0.4, 5.0),
+                  Vector3::new(0.9, -0.2, 3.7),
+                  Vector3::new(-0.8, 0.3, 4.5),
+                  Vector3::new(-0.1, 0.6, 3.5),
+                  Vector3::new(0.5, 0.5, 5.3),
+                  Vector3::new(1.0, 0.2, 4.0),
+              ];
+
+              points
+                  .into_iter()
+                  .enumerate()
+                  .map(|(index, point)| Correspondence {
+                      source_feature_index: index,
+                      descriptor_distance: 0.0,
+                      x1: project(point, Matrix3::identity(), Vector3::zeros()),
+                      x2: project(point, rotation, translation),
+                  })
+                  .collect()
+          }
+
+          #[test]
+          fn eight_point_fit_keeps_the_full_right_null_space() {
+              let yaw = 0.06f64;
+              let rotation = Matrix3::new(
+                  yaw.cos(),
+                  0.0,
+                  yaw.sin(),
+                  0.0,
+                  1.0,
+                  0.0,
+                  -yaw.sin(),
+                  0.0,
+                  yaw.cos(),
+              );
+              let correspondences =
+                  exact_correspondences(rotation, Vector3::new(-0.7, 0.04, 0.03));
+              let indices: Vec<usize> = (0..8).collect();
+              let essential =
+                  estimate_essential(&correspondences, &indices).expect("essential matrix");
+
+              let max_error = correspondences
+                  .iter()
+                  .map(|correspondence| sampson_error(&essential, correspondence))
+                  .fold(0.0, f64::max);
+              assert!(max_error < 1.0e-8, "maximum Sampson error: {max_error}");
+          }
+
+          #[test]
+          fn triangulates_known_two_view_point() {'''
+          tests = '\n'.join(line[10:] if line.startswith('          ') else line for line in tests.splitlines())
           if text.count(marker) != 1:
               raise SystemExit(f'expected one test marker, found {text.count(marker)}')
           path.write_text(text.replace(marker, tests, 1))
