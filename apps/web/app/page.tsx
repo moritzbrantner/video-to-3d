@@ -109,13 +109,13 @@ export default function Home() {
           <ol>
             <li>Sample up to 18 reduced-resolution video frames in the browser.</li>
             <li>Detect corners and normalized patch descriptors in Rust/WASM.</li>
-            <li>Match adjacent frames and measure image-space parallax.</li>
-            <li>Estimate an approximate camera path and sparse depth preview.</li>
+            <li>Match adjacent frames and compensate dominant image translation and rotation.</li>
+            <li>Use only residual parallax to form an approximate camera path and sparse depth preview.</li>
           </ol>
           <p className="method-note">
-            This slice is deliberately uncalibrated. Metric scale and camera rotation are not yet
-            recovered; the next SfM slice adds essential-matrix RANSAC, triangulation, tracks, and
-            bundle adjustment.
+            This slice is deliberately conservative and uncalibrated. Pairs without residual parallax
+            are reported as unassessable instead of inventing a baseline. The next SfM slice adds
+            calibrated epipolar geometry, relative pose recovery, and true triangulation.
           </p>
         </aside>
       </section>
@@ -179,6 +179,7 @@ export default function Home() {
                     <th>Features</th>
                     <th>Matches</th>
                     <th>Median motion</th>
+                    <th>Parallax residual</th>
                     <th>Assessment</th>
                   </tr>
                 </thead>
@@ -193,7 +194,8 @@ export default function Home() {
                       </td>
                       <td>{pair.matches}</td>
                       <td>{pair.median_motion.toFixed(2)} px</td>
-                      <td>{pair.low_parallax ? "Weak parallax" : "Usable"}</td>
+                      <td>{pair.median_parallax_residual.toFixed(2)} px</td>
+                      <td>{pair.low_parallax ? "Unassessable" : "Usable"}</td>
                     </tr>
                   ))}
                 </tbody>
