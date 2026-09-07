@@ -24,35 +24,74 @@ jobs:
           path = Path("crates/video-to-3d-core/src/two_view.rs")
           text = path.read_text()
 
+          def replace_once(old, new, label):
+              global text
+              if text.count(old) != 1:
+                  raise SystemExit(f"{label} marker mismatch: {text.count(old)}")
+              text = text.replace(old, new, 1)
+
           design_old = "    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);"
-          design_new = "    let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);"
-          if text.count(design_old) != 1:
-              raise SystemExit("design marker mismatch")
-          text = text.replace(design_old, design_new, 1)
+          replace_once(
+              design_old,
+              "    let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);",
+              "design",
+          )
 
           ratio_old = "    let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;"
-          ratio_new = ratio_old + "\n    eprintln!(\"diag best_inliers={} ratio={:.4} median_sampson_norm={:.8}\", best_inliers.len(), inlier_ratio, best_median_error);"
-          if text.count(ratio_old) != 1:
-              raise SystemExit("ratio marker mismatch")
-          text = text.replace(ratio_old, ratio_new, 1)
+          replace_once(
+              ratio_old,
+              ratio_old + "\n    eprintln!(\"diag best_inliers={:?} ratio={:.4} median_sampson_norm={:.8}\", best_inliers, inlier_ratio, best_median_error);",
+              "ratio",
+          )
 
           rotation_old = "    if rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels)?"
-          rotation_new = "    eprintln!(\"diag rotation_residual_pixels={:?}\", rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels));\n" + rotation_old
-          if text.count(rotation_old) != 1:
-              raise SystemExit("rotation marker mismatch")
-          text = text.replace(rotation_old, rotation_new, 1)
+          replace_once(
+              rotation_old,
+              "    eprintln!(\"diag rotation_residual_pixels={:?}\", rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels));\n" + rotation_old,
+              "rotation",
+          )
 
           pose_old = "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels)?;"
-          pose_new = "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels);\n    eprintln!(\"diag recover_pose_present={}\", pose.is_some());\n    let pose = pose?;"
-          if text.count(pose_old) != 1:
-              raise SystemExit("pose marker mismatch")
-          text = text.replace(pose_old, pose_new, 1)
+          replace_once(
+              pose_old,
+              "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels);\n    eprintln!(\"diag recover_pose_present={}\", pose.is_some());\n    let pose = pose?;",
+              "pose",
+          )
+
+          center_old = "    let camera_center = -rotation.transpose() * translation;"
+          replace_once(
+              center_old,
+              center_old + "\n    eprintln!(\"diag hypothesis det={:.6} translation={:?}\", rotation.determinant(), translation);",
+              "hypothesis",
+          )
+
+          depth_old = "        if position.z <= 1.0e-6 || camera_two_point.z <= 1.0e-6 {"
+          replace_once(
+              depth_old,
+              depth_old + "\n            eprintln!(\"diag depth_reject z1={:.6} z2={:.6}\", position.z, camera_two_point.z);",
+              "depth",
+          )
+
+          repro_old = "        if !reprojection_error_pixels.is_finite()"
+          replace_once(
+              repro_old,
+              "        eprintln!(\"diag positive_depth reprojection={:.6}\", reprojection_error_pixels);\n" + repro_old,
+              "reprojection",
+          )
+
+          empty_old = "    if points.is_empty() {"
+          replace_once(
+              empty_old,
+              "    eprintln!(\"diag hypothesis accepted_points={}\", points.len());\n" + empty_old,
+              "accepted points",
+          )
 
           cheirality_old = "    let required_cheirality = (inliers.len() * 3 / 5).max(8);"
-          cheirality_new = cheirality_old + "\n    eprintln!(\"diag pose_points={} required_cheirality={} reprojection={:.6} angle={:.6}\", best.points.len(), required_cheirality, best.median_reprojection_error_pixels, best.median_triangulation_angle_degrees);"
-          if text.count(cheirality_old) != 1:
-              raise SystemExit("cheirality marker mismatch")
-          text = text.replace(cheirality_old, cheirality_new, 1)
+          replace_once(
+              cheirality_old,
+              cheirality_old + "\n    eprintln!(\"diag pose_points={} required_cheirality={} reprojection={:.6} angle={:.6}\", best.points.len(), required_cheirality, best.median_reprojection_error_pixels, best.median_triangulation_angle_degrees);",
+              "cheirality",
+          )
 
           path.write_text(text)
       - name: Run translating fixture with diagnostics
