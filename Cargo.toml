@@ -1,0 +1,12 @@
+[workspace]
+members = [
+  "apps/desktop/src-tauri",
+  "crates/video-to-3d-core",
+  "crates/video-to-3d-wasm",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"

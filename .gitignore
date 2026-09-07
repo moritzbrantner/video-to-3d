@@ -1,0 +1,7 @@
+.DS_Store
+.next/
+out/
+node_modules/
+target/
+apps/web/public/wasm/
+apps/desktop/src-tauri/gen/
