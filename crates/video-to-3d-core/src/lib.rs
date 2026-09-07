@@ -146,18 +146,12 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         let median_dx = median(&mut dx_values);
         let median_dy = median(&mut dy_values);
         let median_motion = median(&mut motion_values);
-        let (translation_x, translation_y, parallax_residuals) = compensate_global_motion(
-            source_features,
-            target_features,
-            &matches,
-            width,
-            height,
-        );
+        let (translation_x, translation_y, parallax_residuals) =
+            compensate_global_motion(source_features, target_features, &matches, width, height);
         let mut residuals_for_median = parallax_residuals.clone();
         let median_parallax_residual = median(&mut residuals_for_median);
-        let low_parallax = matches.len() < 6
-            || median_motion < 1.4
-            || median_parallax_residual < 0.55;
+        let low_parallax =
+            matches.len() < 6 || median_motion < 1.4 || median_parallax_residual < 0.55;
 
         let observed_baseline = if low_parallax {
             0.0
@@ -193,8 +187,9 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 let normalized_y = (a.y as f32 - height as f32 * 0.5) / focal;
                 let source_camera = cameras[pair_index];
                 let (r, g, b) = sample_rgb(&request.frames[pair_index], a.x, a.y);
-                let descriptor_confidence =
-                    (1.0 - feature_match.distance / options.max_descriptor_distance).clamp(0.0, 1.0);
+                let descriptor_confidence = (1.0
+                    - feature_match.distance / options.max_descriptor_distance)
+                    .clamp(0.0, 1.0);
                 let motion_confidence = (disparity / 5.0).clamp(0.15, 1.0);
 
                 points.push(Point3 {
@@ -697,8 +692,7 @@ mod tests {
             })
             .collect();
 
-        let (_, _, mut residuals) =
-            compensate_global_motion(&source, &target, &matches, 96, 80);
+        let (_, _, mut residuals) = compensate_global_motion(&source, &target, &matches, 96, 80);
         let residual = median(&mut residuals);
         assert!(residual < 0.55, "rotation residual was {residual}");
     }
