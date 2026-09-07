@@ -37,10 +37,25 @@ export type PairStats = {
   low_parallax: boolean;
 };
 
+export type CalibratedPairStats = {
+  from_frame: number;
+  to_frame: number;
+  matches: number;
+  inliers: number;
+  inlier_ratio: number;
+  focal_pixels: number;
+  median_sampson_error_pixels: number;
+  median_reprojection_error_pixels: number;
+  median_triangulation_angle_degrees: number;
+  relative_rotation: number[];
+  translation_direction: number[];
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
   pairs: PairStats[];
+  calibrated_pair: CalibratedPairStats | null;
   warnings: string[];
 };
 
