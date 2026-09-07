@@ -1,0 +1,71 @@
+name: Diagnose calibrated two-view rejection
+
+on:
+  push:
+    branches:
+      - feat/calibrated-two-view-sfm
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/calibrated-two-view-sfm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply null-space fix and diagnostics in working tree
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("crates/video-to-3d-core/src/two_view.rs")
+          text = path.read_text()
+
+          text = text.replace(
+              "    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);",
+              "    let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);",
+              1,
+          )
+
+          text = text.replace(
+              "    let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;",
+              "    let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;\n    eprintln!(\"diag best_inliers={} ratio={:.4} median_sampson_norm={:.8}\", best_inliers.len(), inlier_ratio, best_median_error);",
+              1,
+          )
+
+          old_rotation = """    if rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels)?
+              <= MAX_ROTATION_ONLY_RESIDUAL_PIXELS
+          {
+              return None;
+          }
+          """
+          new_rotation = """    let rotation_residual =
+              rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels)?;
+          eprintln!("diag rotation_residual_pixels={:.6}", rotation_residual);
+          if rotation_residual <= MAX_ROTATION_ONLY_RESIDUAL_PIXELS {
+              eprintln!("diag rejected=rotation_only");
+              return None;
+          }
+          """
+          if text.count(old_rotation) != 1:
+              raise SystemExit("rotation gate marker mismatch")
+          text = text.replace(old_rotation, new_rotation, 1)
+
+          text = text.replace(
+              "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels)?;",
+              "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels);\n    eprintln!(\"diag recover_pose_present={}\", pose.is_some());\n    let pose = pose?;",
+              1,
+          )
+
+          text = text.replace(
+              "    let required_cheirality = (inliers.len() * 3 / 5).max(8);",
+              "    let required_cheirality = (inliers.len() * 3 / 5).max(8);\n    eprintln!(\"diag pose_points={} required_cheirality={} reprojection={:.6} angle={:.6}\", best.points.len(), required_cheirality, best.median_reprojection_error_pixels, best.median_triangulation_angle_degrees);",
+              1,
+          )
+
+          path.write_text(text)
+      - name: Run translating fixture with diagnostics
+        run: cargo test -p video-to-3d-core two_view::tests::recovers_translating_two_view_fixture_with_outliers -- --nocapture
