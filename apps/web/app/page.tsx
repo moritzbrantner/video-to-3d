@@ -9,78 +9,165 @@ import {
 import { SceneCanvas } from "../src/SceneCanvas";
 import { sampleVideo } from "../src/video";
 
-type Phase = "idle" | "sampling" | "reconstructing" | "done" | "error";
+type RunPhase = "queued" | "sampling" | "reconstructing" | "done" | "error";
+type StatusPhase = "idle" | RunPhase;
+type PreviewFrame = Pick<SampledFrame, "height" | "thumbnail" | "time" | "width">;
+
+type VideoRun = {
+  id: string;
+  fileName: string;
+  phase: RunPhase;
+  frames: PreviewFrame[];
+  reconstruction: ReconstructionResult | null;
+  error: string;
+};
+
+function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
+  return frames.map((frame) => ({
+    width: frame.width,
+    height: frame.height,
+    thumbnail: frame.thumbnail,
+    time: frame.time,
+  }));
+}
+
+function phaseLabel(phase: RunPhase): string {
+  switch (phase) {
+    case "queued":
+      return "Queued";
+    case "sampling":
+      return "Sampling";
+    case "reconstructing":
+      return "Rust/WASM";
+    case "done":
+      return "Ready";
+    case "error":
+      return "Failed";
+  }
+}
 
 export default function Home() {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [fileName, setFileName] = useState("");
-  const [frames, setFrames] = useState<SampledFrame[]>([]);
-  const [reconstruction, setReconstruction] = useState<ReconstructionResult | null>(null);
-  const [error, setError] = useState("");
+  const [runs, setRuns] = useState<VideoRun[]>([]);
+  const [activeRunId, setActiveRunId] = useState("");
+  const [batchRunning, setBatchRunning] = useState(false);
 
-  async function handleVideo(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setFileName(file.name);
-    setFrames([]);
-    setReconstruction(null);
-    setError("");
-
-    try {
-      setPhase("sampling");
-      const sampled = await sampleVideo(file);
-      setFrames(sampled);
-      setPhase("reconstructing");
-      const result = await reconstructFrames(sampled);
-      setReconstruction(result);
-      setPhase("done");
-    } catch (caught) {
-      setPhase("error");
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      event.target.value = "";
-    }
+  function updateRun(id: string, update: Partial<VideoRun>) {
+    setRuns((current) =>
+      current.map((run) => (run.id === id ? { ...run, ...update } : run)),
+    );
   }
 
-  const status =
-    phase === "sampling"
-      ? "Sampling video frames locally…"
-      : phase === "reconstructing"
-        ? "Running Rust/WASM sparse reconstruction…"
-        : phase === "done"
-          ? "Sparse preview ready"
-          : phase === "error"
-            ? "Reconstruction failed"
-            : "Choose a video to begin";
+  async function handleVideos(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0 || batchRunning) return;
+
+    const nextRuns: VideoRun[] = files.map((file, index) => ({
+      id: `${file.name}:${file.size}:${file.lastModified}:${index}`,
+      fileName: file.name,
+      phase: "queued",
+      frames: [],
+      reconstruction: null,
+      error: "",
+    }));
+
+    setRuns(nextRuns);
+    setActiveRunId(nextRuns[0].id);
+    setBatchRunning(true);
+
+    for (const [index, file] of files.entries()) {
+      const runId = nextRuns[index].id;
+      try {
+        updateRun(runId, { phase: "sampling", error: "" });
+        const sampled = await sampleVideo(file);
+        updateRun(runId, {
+          phase: "reconstructing",
+          frames: previewFrames(sampled),
+        });
+        const result = await reconstructFrames(sampled);
+        updateRun(runId, { phase: "done", reconstruction: result });
+      } catch (caught) {
+        updateRun(runId, {
+          phase: "error",
+          error: caught instanceof Error ? caught.message : String(caught),
+        });
+      }
+    }
+
+    setBatchRunning(false);
+  }
+
+  const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
+  const processingRun = runs.find(
+    (run) => run.phase === "sampling" || run.phase === "reconstructing",
+  );
+  const processingIndex = processingRun
+    ? runs.findIndex((run) => run.id === processingRun.id)
+    : -1;
+  const failedCount = runs.filter((run) => run.phase === "error").length;
+  const readyCount = runs.filter((run) => run.phase === "done").length;
+  const statusPhase: StatusPhase = processingRun?.phase ?? activeRun?.phase ?? "idle";
+  const status = processingRun
+    ? processingRun.phase === "sampling"
+      ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
+      : `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`
+    : runs.length > 0
+      ? failedCount > 0
+        ? `${readyCount} ready · ${failedCount} failed`
+        : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
+      : "Choose one or more videos to begin";
+  const frames = activeRun?.frames ?? [];
+  const reconstruction = activeRun?.reconstruction ?? null;
+  const error = activeRun?.error ?? "";
 
   return (
     <main>
       <header className="hero">
         <div>
-          <p className="eyebrow">Rust · WebAssembly · Tauri</p>
+          <p className="eyebrow">Next.js static export · Rust · WebAssembly · Tauri</p>
           <h1>Video to 3D</h1>
           <p className="lede">
-            Turn a moving-camera video into an inspectable sparse 3D reconstruction without uploading
-            the footage. This MVP proves frame sampling, Rust-owned feature matching, a camera path,
-            and a colored point cloud before the project graduates to calibrated SfM.
+            Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
+            the footage. Choose one clip or a small batch: the browser decodes each video locally and
+            the reconstruction kernel runs through Rust compiled to WebAssembly.
           </p>
         </div>
         <label className="upload-button">
           <input
             type="file"
             accept="video/*"
-            onChange={handleVideo}
-            disabled={phase === "sampling" || phase === "reconstructing"}
+            multiple
+            onChange={handleVideos}
+            disabled={batchRunning}
           />
-          Select video
+          Select video files
         </label>
       </header>
 
       <section className="status-line" aria-live="polite">
-        <span className={`status-dot status-${phase}`} />
+        <span className={`status-dot status-${statusPhase}`} />
         <strong>{status}</strong>
-        {fileName ? <span>{fileName}</span> : null}
+        {processingRun?.fileName ?? activeRun?.fileName ? (
+          <span>{processingRun?.fileName ?? activeRun?.fileName}</span>
+        ) : null}
       </section>
+
+      {runs.length > 0 ? (
+        <nav className="video-runs" aria-label="Selected videos">
+          {runs.map((run) => (
+            <button
+              key={run.id}
+              type="button"
+              className={`video-run${run.id === activeRun?.id ? " video-run-active" : ""}`}
+              aria-pressed={run.id === activeRun?.id}
+              onClick={() => setActiveRunId(run.id)}
+            >
+              <span>{run.fileName}</span>
+              <small>{phaseLabel(run.phase)}</small>
+            </button>
+          ))}
+        </nav>
+      ) : null}
 
       {error ? <section className="notice notice-error">{error}</section> : null}
 
@@ -107,15 +194,16 @@ export default function Home() {
         <aside className="method-panel">
           <h2>MVP method</h2>
           <ol>
-            <li>Sample up to 18 reduced-resolution video frames in the browser.</li>
+            <li>Decode and sample up to 18 reduced-resolution frames per video in the browser.</li>
             <li>Detect corners and normalized patch descriptors in Rust/WASM.</li>
             <li>Match adjacent frames and compensate dominant image translation and rotation.</li>
             <li>Use only residual parallax to form an approximate camera path and sparse depth preview.</li>
           </ol>
           <p className="method-note">
-            This slice is deliberately conservative and uncalibrated. Pairs without residual parallax
-            are reported as unassessable instead of inventing a baseline. The next SfM slice adds
-            calibrated epipolar geometry, relative pose recovery, and true triangulation.
+            Multiple selected videos are reconstructed independently and sequentially in this demo to
+            keep memory bounded. Cross-video feature tracks and shared-camera reconstruction belong to
+            a later multi-view slice; this page does not pretend separate clips are one continuous
+            camera sequence.
           </p>
         </aside>
       </section>
@@ -205,7 +293,7 @@ export default function Home() {
         </>
       ) : null}
 
-      <footer>All video processing is local. The static site has no upload endpoint.</footer>
+      <footer>All video processing is local. The static GitHub Pages demo has no upload endpoint.</footer>
     </main>
   );
 }
