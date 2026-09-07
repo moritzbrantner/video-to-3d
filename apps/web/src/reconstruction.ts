@@ -33,6 +33,7 @@ export type PairStats = {
   median_dx: number;
   median_dy: number;
   median_motion: number;
+  median_parallax_residual: number;
   low_parallax: boolean;
 };
 
