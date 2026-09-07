@@ -46,9 +46,11 @@ export default function Home() {
     phase === "sampling"
       ? "Sampling video frames locally…"
       : phase === "reconstructing"
-        ? "Running Rust/WASM sparse reconstruction…"
+        ? "Running Rust/WASM reconstruction…"
         : phase === "done"
-          ? "Sparse preview ready"
+          ? reconstruction?.calibrated_pair
+            ? "Calibrated two-view reconstruction ready"
+            : "Conservative sparse preview ready"
           : phase === "error"
             ? "Reconstruction failed"
             : "Choose a video to begin";
@@ -61,8 +63,8 @@ export default function Home() {
           <h1>Video to 3D</h1>
           <p className="lede">
             Turn a moving-camera video into an inspectable sparse 3D reconstruction without uploading
-            the footage. This MVP proves frame sampling, Rust-owned feature matching, a camera path,
-            and a colored point cloud before the project graduates to calibrated SfM.
+            the footage. Slice 2 now fits calibrated two-view geometry for the strongest adjacent
+            frame pair, recovers relative camera pose, and triangulates real 3D points in Rust/WASM.
           </p>
         </div>
         <label className="upload-button">
@@ -90,7 +92,7 @@ export default function Home() {
             <>
               <SceneCanvas reconstruction={reconstruction} />
               <div className="viewer-caption">
-                Drag to orbit · wheel to zoom · squares are sampled camera positions
+                Drag to orbit · wheel to zoom · squares are registered or sampled camera positions
               </div>
             </>
           ) : (
@@ -98,24 +100,24 @@ export default function Home() {
               <div className="axis-mark" aria-hidden="true">
                 XYZ
               </div>
-              <p>The reconstructed camera path and sparse colored geometry will appear here.</p>
+              <p>The reconstructed cameras and sparse colored geometry will appear here.</p>
               <p>Best first test: slowly move sideways around a textured static object.</p>
             </div>
           )}
         </div>
 
         <aside className="method-panel">
-          <h2>MVP method</h2>
+          <h2>Slice 2 method</h2>
           <ol>
             <li>Sample up to 18 reduced-resolution video frames in the browser.</li>
-            <li>Detect corners and normalized patch descriptors in Rust/WASM.</li>
-            <li>Match adjacent frames and compensate dominant image translation and rotation.</li>
-            <li>Use only residual parallax to form an approximate camera path and sparse depth preview.</li>
+            <li>Detect and match local image features in Rust/WASM.</li>
+            <li>Fit an essential matrix with deterministic RANSAC using estimated pinhole intrinsics.</li>
+            <li>Recover relative rotation and translation by cheirality, then triangulate the best pair.</li>
           </ol>
           <p className="method-note">
-            This slice is deliberately conservative and uncalibrated. Pairs without residual parallax
-            are reported as unassessable instead of inventing a baseline. The next SfM slice adds
-            calibrated epipolar geometry, relative pose recovery, and true triangulation.
+            Scale is still arbitrary and focal length is estimated from the analysis image unless a
+            caller supplies it. Pure-rotation solutions are rejected with a rotation-only fit and
+            triangulation-angle gate. Multi-view tracks, PnP, and bundle adjustment remain slice 3.
           </p>
         </aside>
       </section>
@@ -144,6 +146,46 @@ export default function Home() {
 
       {reconstruction ? (
         <>
+          {reconstruction.calibrated_pair ? (
+            <section className="section-block">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Calibrated geometry evidence</p>
+                  <h2>Selected two-view pair</h2>
+                </div>
+                <p>
+                  Frame {reconstruction.calibrated_pair.from_frame + 1} → {reconstruction.calibrated_pair.to_frame + 1}
+                </p>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Inliers</th>
+                      <th>Inlier ratio</th>
+                      <th>Focal estimate</th>
+                      <th>Sampson error</th>
+                      <th>Reprojection error</th>
+                      <th>Triangulation angle</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        {reconstruction.calibrated_pair.inliers} / {reconstruction.calibrated_pair.matches}
+                      </td>
+                      <td>{(reconstruction.calibrated_pair.inlier_ratio * 100).toFixed(0)}%</td>
+                      <td>{reconstruction.calibrated_pair.focal_pixels.toFixed(1)} px</td>
+                      <td>{reconstruction.calibrated_pair.median_sampson_error_pixels.toFixed(2)} px</td>
+                      <td>{reconstruction.calibrated_pair.median_reprojection_error_pixels.toFixed(2)} px</td>
+                      <td>{reconstruction.calibrated_pair.median_triangulation_angle_degrees.toFixed(2)}°</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
           {reconstruction.warnings.length > 0 ? (
             <section className="section-block">
               <div className="section-heading">
@@ -163,12 +205,12 @@ export default function Home() {
           <section className="section-block">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">Algorithm evidence</p>
-                <h2>Adjacent-frame matching</h2>
+                <p className="eyebrow">Matching evidence</p>
+                <h2>Adjacent-frame screening</h2>
               </div>
               <p>
                 {reconstruction.points.length} sparse point observations · {reconstruction.cameras.length}{" "}
-                camera samples
+                displayed cameras
               </p>
             </div>
             <div className="table-wrap">
@@ -180,7 +222,7 @@ export default function Home() {
                     <th>Matches</th>
                     <th>Median motion</th>
                     <th>Parallax residual</th>
-                    <th>Assessment</th>
+                    <th>Screening</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -195,7 +237,7 @@ export default function Home() {
                       <td>{pair.matches}</td>
                       <td>{pair.median_motion.toFixed(2)} px</td>
                       <td>{pair.median_parallax_residual.toFixed(2)} px</td>
-                      <td>{pair.low_parallax ? "Unassessable" : "Usable"}</td>
+                      <td>{pair.low_parallax ? "Rejected early" : "RANSAC candidate"}</td>
                     </tr>
                   ))}
                 </tbody>
