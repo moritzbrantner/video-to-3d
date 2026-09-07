@@ -15,7 +15,7 @@ Exit criterion met: the full browser-local video → Rust/WASM → sparse previe
 ## Slice 2 — Calibrated two-view geometry — current
 
 - Normalize matched image coordinates with a supplied focal length or image-size focal estimate.
-- Estimate an essential matrix with deterministic eight-point RANSAC.
+- Estimate an essential matrix with deterministic eight-point RANSAC and a confidence-derived adaptive trial budget.
 - Retain the robust winning hypothesis and accept a consensus refit only when it survives the same geometry-quality gates; expose Sampson-error evidence for the selected model.
 - Reject rotation-only degeneracy before accepting a translation baseline.
 - Recover relative rotation/translation from the four essential-matrix pose hypotheses.
