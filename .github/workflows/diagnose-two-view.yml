@@ -24,47 +24,35 @@ jobs:
           path = Path("crates/video-to-3d-core/src/two_view.rs")
           text = path.read_text()
 
-          text = text.replace(
-              "    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);",
-              "    let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);",
-              1,
-          )
+          design_old = "    let mut design = DMatrix::<f64>::zeros(indices.len(), 9);"
+          design_new = "    let mut design = DMatrix::<f64>::zeros(indices.len().max(9), 9);"
+          if text.count(design_old) != 1:
+              raise SystemExit("design marker mismatch")
+          text = text.replace(design_old, design_new, 1)
 
-          text = text.replace(
-              "    let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;",
-              "    let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;\n    eprintln!(\"diag best_inliers={} ratio={:.4} median_sampson_norm={:.8}\", best_inliers.len(), inlier_ratio, best_median_error);",
-              1,
-          )
+          ratio_old = "    let inlier_ratio = best_inliers.len() as f64 / correspondences.len() as f64;"
+          ratio_new = ratio_old + "\n    eprintln!(\"diag best_inliers={} ratio={:.4} median_sampson_norm={:.8}\", best_inliers.len(), inlier_ratio, best_median_error);"
+          if text.count(ratio_old) != 1:
+              raise SystemExit("ratio marker mismatch")
+          text = text.replace(ratio_old, ratio_new, 1)
 
-          old_rotation = """    if rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels)?
-              <= MAX_ROTATION_ONLY_RESIDUAL_PIXELS
-          {
-              return None;
-          }
-          """
-          new_rotation = """    let rotation_residual =
-              rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels)?;
-          eprintln!("diag rotation_residual_pixels={:.6}", rotation_residual);
-          if rotation_residual <= MAX_ROTATION_ONLY_RESIDUAL_PIXELS {
-              eprintln!("diag rejected=rotation_only");
-              return None;
-          }
-          """
-          if text.count(old_rotation) != 1:
-              raise SystemExit("rotation gate marker mismatch")
-          text = text.replace(old_rotation, new_rotation, 1)
+          rotation_old = "    if rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels)?"
+          rotation_new = "    eprintln!(\"diag rotation_residual_pixels={:?}\", rotation_only_residual_pixels(&correspondences, &best_inliers, focal_pixels));\n" + rotation_old
+          if text.count(rotation_old) != 1:
+              raise SystemExit("rotation marker mismatch")
+          text = text.replace(rotation_old, rotation_new, 1)
 
-          text = text.replace(
-              "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels)?;",
-              "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels);\n    eprintln!(\"diag recover_pose_present={}\", pose.is_some());\n    let pose = pose?;",
-              1,
-          )
+          pose_old = "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels)?;"
+          pose_new = "    let pose = recover_pose(&essential, &correspondences, &best_inliers, focal_pixels);\n    eprintln!(\"diag recover_pose_present={}\", pose.is_some());\n    let pose = pose?;"
+          if text.count(pose_old) != 1:
+              raise SystemExit("pose marker mismatch")
+          text = text.replace(pose_old, pose_new, 1)
 
-          text = text.replace(
-              "    let required_cheirality = (inliers.len() * 3 / 5).max(8);",
-              "    let required_cheirality = (inliers.len() * 3 / 5).max(8);\n    eprintln!(\"diag pose_points={} required_cheirality={} reprojection={:.6} angle={:.6}\", best.points.len(), required_cheirality, best.median_reprojection_error_pixels, best.median_triangulation_angle_degrees);",
-              1,
-          )
+          cheirality_old = "    let required_cheirality = (inliers.len() * 3 / 5).max(8);"
+          cheirality_new = cheirality_old + "\n    eprintln!(\"diag pose_points={} required_cheirality={} reprojection={:.6} angle={:.6}\", best.points.len(), required_cheirality, best.median_reprojection_error_pixels, best.median_triangulation_angle_degrees);"
+          if text.count(cheirality_old) != 1:
+              raise SystemExit("cheirality marker mismatch")
+          text = text.replace(cheirality_old, cheirality_new, 1)
 
           path.write_text(text)
       - name: Run translating fixture with diagnostics
