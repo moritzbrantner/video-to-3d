@@ -54,6 +54,6 @@ Validation:
 bun run check
 ```
 
-## GitHub Pages
+## GitHub Pages demo
 
 The web app already exports static files with the `/video-to-3d` base path when `GITHUB_PAGES=true`. The Pages workflow builds and uploads the static export as an Actions artifact so it can remain green before repository Pages is enabled. Once Pages is enabled, deployment can be added without changing application code.

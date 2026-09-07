@@ -9,37 +9,52 @@ import {
 import { SceneCanvas } from "../src/SceneCanvas";
 import { sampleVideo } from "../src/video";
 
-type Phase = "idle" | "sampling" | "reconstructing" | "done" | "error";
+type RunPhase = "queued" | "sampling" | "reconstructing" | "done" | "error";
+type StatusPhase = "idle" | RunPhase;
+type PreviewFrame = Pick<SampledFrame, "height" | "thumbnail" | "time" | "width">;
+
+type VideoRun = {
+  id: string;
+  fileName: string;
+  phase: RunPhase;
+  frames: PreviewFrame[];
+  reconstruction: ReconstructionResult | null;
+  error: string;
+};
+
+function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
+  return frames.map((frame) => ({
+    width: frame.width,
+    height: frame.height,
+    thumbnail: frame.thumbnail,
+    time: frame.time,
+  }));
+}
+
+function phaseLabel(phase: RunPhase): string {
+  switch (phase) {
+    case "queued":
+      return "Queued";
+    case "sampling":
+      return "Sampling";
+    case "reconstructing":
+      return "Rust/WASM";
+    case "done":
+      return "Ready";
+    case "error":
+      return "Failed";
+  }
+}
 
 export default function Home() {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [fileName, setFileName] = useState("");
-  const [frames, setFrames] = useState<SampledFrame[]>([]);
-  const [reconstruction, setReconstruction] = useState<ReconstructionResult | null>(null);
-  const [error, setError] = useState("");
+  const [runs, setRuns] = useState<VideoRun[]>([]);
+  const [activeRunId, setActiveRunId] = useState("");
+  const [batchRunning, setBatchRunning] = useState(false);
 
-  async function handleVideo(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setFileName(file.name);
-    setFrames([]);
-    setReconstruction(null);
-    setError("");
-
-    try {
-      setPhase("sampling");
-      const sampled = await sampleVideo(file);
-      setFrames(sampled);
-      setPhase("reconstructing");
-      const result = await reconstructFrames(sampled);
-      setReconstruction(result);
-      setPhase("done");
-    } catch (caught) {
-      setPhase("error");
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      event.target.value = "";
-    }
+  function updateRun(id: string, update: Partial<VideoRun>) {
+    setRuns((current) =>
+      current.map((run) => (run.id === id ? { ...run, ...update } : run)),
+    );
   }
 
   const status =
@@ -59,7 +74,7 @@ export default function Home() {
     <main>
       <header className="hero">
         <div>
-          <p className="eyebrow">Rust · WebAssembly · Tauri</p>
+          <p className="eyebrow">Next.js static export · Rust · WebAssembly · Tauri</p>
           <h1>Video to 3D</h1>
           <p className="lede">
             Turn a moving-camera video into an inspectable sparse 3D reconstruction without uploading
@@ -71,18 +86,38 @@ export default function Home() {
           <input
             type="file"
             accept="video/*"
-            onChange={handleVideo}
-            disabled={phase === "sampling" || phase === "reconstructing"}
+            multiple
+            onChange={handleVideos}
+            disabled={batchRunning}
           />
-          Select video
+          Select video files
         </label>
       </header>
 
       <section className="status-line" aria-live="polite">
-        <span className={`status-dot status-${phase}`} />
+        <span className={`status-dot status-${statusPhase}`} />
         <strong>{status}</strong>
-        {fileName ? <span>{fileName}</span> : null}
+        {processingRun?.fileName ?? activeRun?.fileName ? (
+          <span>{processingRun?.fileName ?? activeRun?.fileName}</span>
+        ) : null}
       </section>
+
+      {runs.length > 0 ? (
+        <nav className="video-runs" aria-label="Selected videos">
+          {runs.map((run) => (
+            <button
+              key={run.id}
+              type="button"
+              className={`video-run${run.id === activeRun?.id ? " video-run-active" : ""}`}
+              aria-pressed={run.id === activeRun?.id}
+              onClick={() => setActiveRunId(run.id)}
+            >
+              <span>{run.fileName}</span>
+              <small>{phaseLabel(run.phase)}</small>
+            </button>
+          ))}
+        </nav>
+      ) : null}
 
       {error ? <section className="notice notice-error">{error}</section> : null}
 
@@ -247,7 +282,7 @@ export default function Home() {
         </>
       ) : null}
 
-      <footer>All video processing is local. The static site has no upload endpoint.</footer>
+      <footer>All video processing is local. The static GitHub Pages demo has no upload endpoint.</footer>
     </main>
   );
 }
