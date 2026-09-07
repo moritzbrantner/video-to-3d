@@ -1,0 +1,13 @@
+[package]
+name = "video-to-3d-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde-wasm-bindgen = "0.6"
+video-to-3d-core = { path = "../video-to-3d-core" }
+wasm-bindgen = "=0.2.104"

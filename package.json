@@ -1,0 +1,19 @@
+{
+  "name": "video-to-3d",
+  "private": true,
+  "packageManager": "bun@1.4.0",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "build": "bun run wasm:build && bun --cwd apps/web build",
+    "build:pages": "GITHUB_PAGES=true bun run build",
+    "cargo:check": "cargo check --workspace",
+    "check": "bun run typecheck && cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && bun run build",
+    "dev": "bun run wasm:build && bun --cwd apps/web dev",
+    "tauri:build": "bun run wasm:build && bun --cwd apps/desktop tauri build --no-bundle",
+    "tauri:dev": "bun run wasm:build && bun --cwd apps/desktop tauri dev",
+    "test": "cargo test --workspace",
+    "typecheck": "bun --cwd apps/web typecheck",
+    "wasm:build": "bash scripts/build-wasm.sh",
+    "wasm:check": "cargo check --target wasm32-unknown-unknown -p video-to-3d-wasm"
+  }
+}
