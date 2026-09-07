@@ -144,11 +144,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     cameras.push(camera);
 
     for pair_index in 0..request.frames.len() - 1 {
-        let matches = match_features(
-            &features[pair_index],
-            &features[pair_index + 1],
-            options,
-        );
+        let matches = match_features(&features[pair_index], &features[pair_index + 1], options);
         let mut dx_values = Vec::with_capacity(matches.len());
         let mut dy_values = Vec::with_capacity(matches.len());
         let mut motion_values = Vec::with_capacity(matches.len());
@@ -190,7 +186,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             let normalized_x = (a.x as f32 - width as f32 * 0.5) / focal;
             let normalized_y = (a.y as f32 - height as f32 * 0.5) / focal;
             let source_camera = cameras[pair_index];
-            let (r, g, b_color) = sample_rgb(&request.frames[pair_index], a.x, a.y);
+            let (r, g_color, b_color) = sample_rgb(&request.frames[pair_index], a.x, a.y);
             let descriptor_confidence =
                 (1.0 - feature_match.distance / options.max_descriptor_distance).clamp(0.0, 1.0);
             let motion_confidence = (disparity / 6.0).clamp(0.15, 1.0);
@@ -422,7 +418,7 @@ fn median(values: &mut [f32]) -> f32 {
     }
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[middle - 1] + values[middle]) * 0.5
     } else {
         values[middle]
@@ -460,8 +456,7 @@ mod tests {
             let intensity = 90 + index as u8 * 16;
             for py in base_y - 2..=base_y + 2 {
                 for px in x - 2..=x + 2 {
-                    let edge =
-                        px == x - 2 || px == x + 2 || py == base_y - 2 || py == base_y + 2;
+                    let edge = px == x - 2 || px == x + 2 || py == base_y - 2 || py == base_y + 2;
                     let value = if edge { 245 } else { intensity };
                     let offset = (py as usize * width as usize + px as usize) * 4;
                     rgba[offset] = value;
@@ -488,7 +483,11 @@ mod tests {
             frame.height,
             ReconstructionOptions::default(),
         );
-        assert!(features.len() >= 12, "found only {} features", features.len());
+        assert!(
+            features.len() >= 12,
+            "found only {} features",
+            features.len()
+        );
     }
 
     #[test]
