@@ -1,3 +1,5 @@
+mod two_view;
+
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -18,6 +20,7 @@ pub struct ReconstructionOptions {
     pub match_radius: u32,
     pub max_descriptor_distance: f32,
     pub ratio_threshold: f32,
+    pub focal_length_pixels: Option<f32>,
 }
 
 impl Default for ReconstructionOptions {
@@ -29,6 +32,7 @@ impl Default for ReconstructionOptions {
             match_radius: 42,
             max_descriptor_distance: 36.0,
             ratio_threshold: 0.82,
+            focal_length_pixels: None,
         }
     }
 }
@@ -75,10 +79,26 @@ pub struct PairStats {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct CalibratedPairStats {
+    pub from_frame: usize,
+    pub to_frame: usize,
+    pub matches: usize,
+    pub inliers: usize,
+    pub inlier_ratio: f32,
+    pub focal_pixels: f32,
+    pub median_sampson_error_pixels: f32,
+    pub median_reprojection_error_pixels: f32,
+    pub median_triangulation_angle_degrees: f32,
+    pub relative_rotation: [f32; 9],
+    pub translation_direction: [f32; 3],
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ReconstructionResult {
     pub cameras: Vec<CameraPose>,
     pub points: Vec<Point3>,
     pub pairs: Vec<PairStats>,
+    pub calibrated_pair: Option<CalibratedPairStats>,
     pub warnings: Vec<String>,
 }
 
@@ -109,12 +129,15 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         .map(|luma| detect_features(luma, width, height, options))
         .collect();
 
-    let focal = 0.86 * width.max(height) as f32;
+    let focal = options
+        .focal_length_pixels
+        .unwrap_or(0.86 * width.max(height) as f32);
     let diagonal = (width as f32).hypot(height as f32);
     let mut cameras = Vec::with_capacity(request.frames.len());
     let mut points = Vec::new();
     let mut pairs = Vec::with_capacity(request.frames.len() - 1);
     let mut warnings = Vec::new();
+    let mut best_two_view: Option<(usize, two_view::TwoViewEstimate)> = None;
 
     let mut camera = CameraPose {
         frame_index: 0,
@@ -152,6 +175,24 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         let median_parallax_residual = median(&mut residuals_for_median);
         let low_parallax =
             matches.len() < 6 || median_motion < 1.4 || median_parallax_residual < 0.55;
+
+        if !low_parallax {
+            if let Some(estimate) = two_view::estimate_two_view(
+                source_features,
+                target_features,
+                &matches,
+                width,
+                height,
+                focal as f64,
+            ) {
+                let replace = best_two_view
+                    .as_ref()
+                    .is_none_or(|(_, current)| estimate.is_better_than(current));
+                if replace {
+                    best_two_view = Some((pair_index, estimate));
+                }
+            }
+        }
 
         let observed_baseline = if low_parallax {
             0.0
@@ -218,6 +259,83 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         });
     }
 
+    let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
+        let source_features = &features[pair_index];
+        let frame = &request.frames[pair_index];
+        cameras = vec![
+            CameraPose {
+                frame_index: pair_index,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                matched_features: 0,
+            },
+            CameraPose {
+                frame_index: pair_index + 1,
+                x: estimate.camera_center.x as f32,
+                y: estimate.camera_center.y as f32,
+                z: estimate.camera_center.z as f32,
+                matched_features: estimate.inliers,
+            },
+        ];
+        points = estimate
+            .points
+            .iter()
+            .map(|triangulated| {
+                let feature = &source_features[triangulated.source_feature_index];
+                let (r, g, b) = sample_rgb(frame, feature.x, feature.y);
+                let descriptor_confidence = (1.0
+                    - triangulated.descriptor_distance / options.max_descriptor_distance)
+                    .clamp(0.0, 1.0);
+                let reprojection_confidence =
+                    (1.0 / (1.0 + triangulated.reprojection_error_pixels as f32 * 0.5))
+                        .clamp(0.15, 1.0);
+                let angle_confidence =
+                    (triangulated.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
+                Point3 {
+                    x: triangulated.position.x as f32,
+                    y: triangulated.position.y as f32,
+                    z: triangulated.position.z as f32,
+                    confidence: descriptor_confidence
+                        * reprojection_confidence
+                        * angle_confidence,
+                    r,
+                    g,
+                    b,
+                }
+            })
+            .collect();
+
+        CalibratedPairStats {
+            from_frame: pair_index,
+            to_frame: pair_index + 1,
+            matches: estimate.matches,
+            inliers: estimate.inliers,
+            inlier_ratio: estimate.inliers as f32 / estimate.matches as f32,
+            focal_pixels: focal,
+            median_sampson_error_pixels: estimate.median_sampson_error_pixels as f32,
+            median_reprojection_error_pixels: estimate.median_reprojection_error_pixels as f32,
+            median_triangulation_angle_degrees: estimate
+                .median_triangulation_angle_degrees as f32,
+            relative_rotation: [
+                estimate.rotation[(0, 0)] as f32,
+                estimate.rotation[(0, 1)] as f32,
+                estimate.rotation[(0, 2)] as f32,
+                estimate.rotation[(1, 0)] as f32,
+                estimate.rotation[(1, 1)] as f32,
+                estimate.rotation[(1, 2)] as f32,
+                estimate.rotation[(2, 0)] as f32,
+                estimate.rotation[(2, 1)] as f32,
+                estimate.rotation[(2, 2)] as f32,
+            ],
+            translation_direction: [
+                estimate.translation.x as f32,
+                estimate.translation.y as f32,
+                estimate.translation.z as f32,
+            ],
+        }
+    });
+
     let low_pairs = pairs.iter().filter(|pair| pair.low_parallax).count();
     if low_pairs > pairs.len() / 2 {
         warnings.push(
@@ -231,15 +349,23 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 .into(),
         );
     }
-    warnings.push(
-        "MVP geometry uses a conservative uncalibrated parallax approximation; metric scale and full 3D camera rotation are not recovered yet."
-            .into(),
-    );
+    if calibrated_pair.is_some() {
+        warnings.push(
+            "Slice 2 registers only the strongest adjacent frame pair. The recovered translation has arbitrary scale, and focal length is estimated from image dimensions unless supplied by the caller."
+                .into(),
+        );
+    } else {
+        warnings.push(
+            "No adjacent pair passed the calibrated epipolar, cheirality, reprojection, and triangulation-angle gates, so this result retains the conservative uncalibrated MVP preview."
+                .into(),
+        );
+    }
 
     Ok(ReconstructionResult {
         cameras,
         points,
         pairs,
+        calibrated_pair,
         warnings,
     })
 }
@@ -250,6 +376,13 @@ fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
     }
     if request.options.max_descriptor_distance <= 0.0 {
         return Err("max descriptor distance must be positive".into());
+    }
+    if request
+        .options
+        .focal_length_pixels
+        .is_some_and(|focal| !focal.is_finite() || focal <= 0.0)
+    {
+        return Err("focal length in pixels must be finite and positive".into());
     }
 
     let width = request.frames[0].width;
@@ -612,7 +745,7 @@ mod tests {
         };
 
         let result = reconstruct(&request).expect("reconstruction should succeed");
-        assert_eq!(result.cameras.len(), 3);
+        assert!(result.cameras.len() >= 2);
         assert_eq!(result.pairs.len(), 2);
         assert!(
             result.pairs[0].matches >= 6,
@@ -622,7 +755,6 @@ mod tests {
         assert!(result.pairs[0].median_dx > 1.0);
         assert!(result.pairs[0].median_parallax_residual > 0.5);
         assert!(!result.pairs[0].low_parallax);
-        assert!(result.cameras[1].z > 0.0);
         assert!(!result.points.is_empty());
     }
 
@@ -639,6 +771,7 @@ mod tests {
 
         let result = reconstruct(&request).expect("stationary reconstruction should succeed");
         assert!(result.pairs[0].low_parallax);
+        assert!(result.calibrated_pair.is_none());
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
         assert!(result.cameras[1].y.abs() < f32::EPSILON);
         assert!(result.cameras[1].z.abs() < f32::EPSILON);
@@ -695,6 +828,21 @@ mod tests {
         let (_, _, mut residuals) = compensate_global_motion(&source, &target, &matches, 96, 80);
         let residual = median(&mut residuals);
         assert!(residual < 0.55, "rotation residual was {residual}");
+    }
+
+    #[test]
+    fn rejects_invalid_focal_length() {
+        let request = ReconstructionRequest {
+            frames: vec![
+                synthetic_frame(96, 80, 0),
+                synthetic_frame(96, 80, 3),
+            ],
+            options: ReconstructionOptions {
+                focal_length_pixels: Some(0.0),
+                ..ReconstructionOptions::default()
+            },
+        };
+        assert!(reconstruct(&request).is_err());
     }
 
     #[test]
