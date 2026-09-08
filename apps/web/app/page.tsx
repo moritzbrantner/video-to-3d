@@ -131,8 +131,8 @@ export default function Home() {
           <p className="lede">
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
             the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
-            and now links actually triangulated seed landmarks into later frames to measure real
-            2D↔3D correspondence readiness. The displayed geometry still comes from the strongest
+            and now links actually triangulated seed landmarks into other selected frames to measure
+            real 2D↔3D correspondence readiness. The displayed geometry still comes from the strongest
             calibrated adjacent pair until PnP registration is implemented.
           </p>
         </div>
@@ -202,12 +202,13 @@ export default function Home() {
             <li>Detect and match local image features in Rust/WASM.</li>
             <li>Chain one-to-one adjacent matches into deterministic multi-frame feature tracks.</li>
             <li>Select keyframe candidates from track overlap and accumulated residual parallax.</li>
-            <li>Link calibrated seed landmarks through those tracks into later keyframes.</li>
+            <li>Link calibrated seed landmarks through those tracks into other selected keyframes.</li>
           </ol>
           <p className="method-note">
-            A later frame is only marked PnP-ready when at least eight triangulated seed landmarks have
-            matching 2D observations there. This does not register the camera yet. PnP, bundle
-            adjustment, loop handling, and cross-video tracks remain later work in slice 3 or 6.
+            Another selected frame is only marked PnP-ready when at least eight triangulated seed
+            landmarks have matching 2D observations there. This does not register the camera yet.
+            PnP, bundle adjustment, loop handling, and cross-video tracks remain later work in slice 3
+            or 6.
           </p>
         </aside>
       </section>
@@ -333,7 +334,7 @@ export default function Home() {
                   <p className="eyebrow">Registration evidence</p>
                   <h2>Seed landmark correspondences</h2>
                 </div>
-                <p>Readiness only; no later camera pose has been solved yet</p>
+                <p>Readiness only; no additional camera pose has been solved yet</p>
               </div>
               <div className="table-wrap">
                 <table>
