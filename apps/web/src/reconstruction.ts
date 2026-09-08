@@ -30,6 +30,7 @@ export type PairStats = {
   features_from: number;
   features_to: number;
   matches: number;
+  overlap_ratio: number;
   median_dx: number;
   median_dy: number;
   median_motion: number;
@@ -51,11 +52,21 @@ export type CalibratedPairStats = {
   translation_direction: number[];
 };
 
+export type MultiViewStats = {
+  keyframes: number[];
+  track_count: number;
+  tracks_three_plus: number;
+  longest_track: number;
+  observations: number;
+  linked_pairs: number;
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
   pairs: PairStats[];
   calibrated_pair: CalibratedPairStats | null;
+  multi_view: MultiViewStats;
   warnings: string[];
 };
 

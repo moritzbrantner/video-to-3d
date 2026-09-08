@@ -12,7 +12,7 @@
 
 Exit criterion met: the full browser-local video → Rust/WASM → sparse preview loop is integrated, with low-parallax and pure-motion safeguards instead of fabricated camera movement.
 
-## Slice 2 — Calibrated two-view geometry — current
+## Slice 2 — Calibrated two-view geometry — implementation integrated
 
 - Normalize matched image coordinates with a supplied focal length or image-size focal estimate.
 - Estimate an essential matrix with deterministic eight-point RANSAC and a confidence-derived adaptive trial budget.
@@ -23,16 +23,18 @@ Exit criterion met: the full browser-local video → Rust/WASM → sparse previe
 - Triangulate true two-view landmarks with linear DLT and filter by reprojection error.
 - Select the strongest valid adjacent pair while retaining an explicitly labeled conservative fallback.
 
-Exit criterion: deterministic synthetic fixtures recover known camera motion and 3D points within explicit error bounds, and suitable recorded footage produces a calibrated pair with visible epipolar/reprojection diagnostics.
+Implementation status: deterministic synthetic fixtures and hosted checks cover the calibrated geometry path. Recorded-footage acceptance should still be captured before treating the slice as fully field-accepted.
 
-## Slice 3 — Multi-view sparse SfM
+## Slice 3 — Multi-view sparse SfM — current
 
-- Keyframe selection based on overlap and parallax.
-- Multi-frame feature tracks rather than isolated pair matches.
+- Initial keyframe screening based on adjacent feature overlap and accumulated residual parallax.
+- Deterministic multi-frame feature tracks chained from one-to-one adjacent matches.
 - Incremental camera registration.
 - PnP for newly registered views.
 - Bundle adjustment over cameras and sparse landmarks.
 - Loop/revisit handling and failed-registration recovery.
+
+Current boundary: the keyframe/track graph is diagnostic and preparatory. The displayed reconstruction remains the strongest calibrated adjacent pair until incremental registration and optimization are implemented.
 
 Exit criterion: longer videos produce a stable sparse model without unbounded trajectory drift.
 

@@ -1,4 +1,7 @@
+mod multi_view;
 mod two_view;
+
+pub use multi_view::MultiViewStats;
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -71,6 +74,7 @@ pub struct PairStats {
     pub features_from: usize,
     pub features_to: usize,
     pub matches: usize,
+    pub overlap_ratio: f32,
     pub median_dx: f32,
     pub median_dy: f32,
     pub median_motion: f32,
@@ -99,6 +103,7 @@ pub struct ReconstructionResult {
     pub points: Vec<Point3>,
     pub pairs: Vec<PairStats>,
     pub calibrated_pair: Option<CalibratedPairStats>,
+    pub multi_view: MultiViewStats,
     pub warnings: Vec<String>,
 }
 
@@ -136,6 +141,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     let mut cameras = Vec::with_capacity(request.frames.len());
     let mut points = Vec::new();
     let mut pairs = Vec::with_capacity(request.frames.len() - 1);
+    let mut adjacent_matches = Vec::with_capacity(request.frames.len() - 1);
     let mut warnings = Vec::new();
     let mut best_two_view: Option<(usize, two_view::TwoViewEstimate)> = None;
 
@@ -152,6 +158,11 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         let source_features = &features[pair_index];
         let target_features = &features[pair_index + 1];
         let matches = match_features(source_features, target_features, options);
+        let overlap_ratio = if source_features.is_empty() || target_features.is_empty() {
+            0.0
+        } else {
+            matches.len() as f32 / source_features.len().min(target_features.len()) as f32
+        };
 
         let mut dx_values = Vec::with_capacity(matches.len());
         let mut dy_values = Vec::with_capacity(matches.len());
@@ -251,13 +262,17 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             features_from: source_features.len(),
             features_to: target_features.len(),
             matches: matches.len(),
+            overlap_ratio,
             median_dx,
             median_dy,
             median_motion,
             median_parallax_residual,
             low_parallax,
         });
+        adjacent_matches.push(matches);
     }
+
+    let multi_view = multi_view::analyze(&pairs, &adjacent_matches);
 
     let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
         let source_features = &features[pair_index];
@@ -347,10 +362,10 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         );
     }
     if calibrated_pair.is_some() {
-        warnings.push(
-            "Slice 2 registers only the strongest adjacent frame pair. The recovered translation has arbitrary scale, and focal length is estimated from image dimensions unless supplied by the caller."
-                .into(),
-        );
+        warnings.push(format!(
+            "Slice 3 currently selects {} keyframes and links {} tracks observed in at least three frames, but the displayed geometry still registers only the strongest calibrated adjacent pair. Translation scale remains arbitrary; PnP and bundle adjustment are not implemented yet.",
+            multi_view.keyframes.len(), multi_view.tracks_three_plus
+        ));
     } else {
         warnings.push(
             "No adjacent pair passed the calibrated epipolar, cheirality, reprojection, and triangulation-angle gates, so this result retains the conservative uncalibrated MVP preview."
@@ -363,6 +378,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         points,
         pairs,
         calibrated_pair,
+        multi_view,
         warnings,
     })
 }
@@ -749,9 +765,11 @@ mod tests {
             "too few matches: {}",
             result.pairs[0].matches
         );
+        assert!(result.pairs[0].overlap_ratio > 0.0);
         assert!(result.pairs[0].median_dx > 1.0);
         assert!(result.pairs[0].median_parallax_residual > 0.5);
         assert!(!result.pairs[0].low_parallax);
+        assert!(result.multi_view.track_count > 0);
         assert!(!result.points.is_empty());
     }
 
@@ -769,6 +787,7 @@ mod tests {
         let result = reconstruct(&request).expect("stationary reconstruction should succeed");
         assert!(result.pairs[0].low_parallax);
         assert!(result.calibrated_pair.is_none());
+        assert_eq!(result.multi_view.keyframes, vec![0]);
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
         assert!(result.cameras[1].y.abs() < f32::EPSILON);
         assert!(result.cameras[1].z.abs() < f32::EPSILON);

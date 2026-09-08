@@ -118,7 +118,7 @@ export default function Home() {
       ? failedCount > 0
         ? `${readyCount} ready · ${failedCount} failed`
         : runs.length === 1 && reconstruction?.calibrated_pair
-          ? "Calibrated two-view reconstruction ready"
+          ? "Calibrated two-view reconstruction and multi-view track graph ready"
           : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
       : "Choose one or more videos to begin";
 
@@ -130,9 +130,9 @@ export default function Home() {
           <h1>Video to 3D</h1>
           <p className="lede">
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
-            the footage. Choose one clip or a small batch: each clip is decoded locally, then Rust/WASM
-            selects its strongest calibrated adjacent pair, recovers relative pose, and triangulates
-            sparse 3D landmarks.
+            the footage. Rust/WASM now chains adjacent matches into multi-frame tracks and screens
+            keyframe candidates by overlap and parallax. The displayed geometry still comes from the
+            strongest calibrated adjacent pair until incremental registration is implemented.
           </p>
         </div>
         <label className="upload-button">
@@ -195,18 +195,17 @@ export default function Home() {
         </div>
 
         <aside className="method-panel">
-          <h2>Slice 2 method</h2>
+          <h2>Slice 3 foundation</h2>
           <ol>
             <li>Decode and sample up to 18 reduced-resolution frames per video in the browser.</li>
             <li>Detect and match local image features in Rust/WASM.</li>
-            <li>Fit an essential matrix with deterministic RANSAC using estimated pinhole intrinsics.</li>
-            <li>Recover relative rotation and translation by cheirality, then triangulate the best pair.</li>
+            <li>Chain one-to-one adjacent matches into deterministic multi-frame feature tracks.</li>
+            <li>Select keyframe candidates from track overlap and accumulated residual parallax.</li>
           </ol>
           <p className="method-note">
-            Selected videos are reconstructed independently and sequentially to keep memory bounded.
-            Scale remains arbitrary and focal length is estimated from the analysis image unless a
-            caller supplies it. Pure rotation is rejected; cross-video tracks, PnP, and bundle
-            adjustment remain slice 3.
+            Selected videos remain independent and local. The existing calibrated two-view result still
+            owns displayed camera pose and triangulated geometry. Incremental camera registration, PnP,
+            bundle adjustment, loop handling, and cross-video tracks remain later work in slice 3 or 6.
           </p>
         </aside>
       </section>
@@ -283,6 +282,48 @@ export default function Home() {
             </section>
           ) : null}
 
+          <section className="section-block">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Multi-view evidence</p>
+                <h2>Feature-track graph and keyframes</h2>
+              </div>
+              <p>Rust-owned diagnostics; not yet a registered multi-camera reconstruction</p>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Selected keyframes</th>
+                    <th>Feature tracks</th>
+                    <th>Tracks across 3+ frames</th>
+                    <th>Longest track</th>
+                    <th>Track observations</th>
+                    <th>Linked adjacent pairs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      {reconstruction.multi_view.keyframes.length > 0
+                        ? reconstruction.multi_view.keyframes
+                            .map((frameIndex) => frameIndex + 1)
+                            .join(", ")
+                        : "None"}
+                    </td>
+                    <td>{reconstruction.multi_view.track_count}</td>
+                    <td>{reconstruction.multi_view.tracks_three_plus}</td>
+                    <td>{reconstruction.multi_view.longest_track} frames</td>
+                    <td>{reconstruction.multi_view.observations}</td>
+                    <td>
+                      {reconstruction.multi_view.linked_pairs} / {reconstruction.pairs.length}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           {reconstruction.warnings.length > 0 ? (
             <section className="section-block">
               <div className="section-heading">
@@ -317,8 +358,10 @@ export default function Home() {
                     <th>Pair</th>
                     <th>Features</th>
                     <th>Matches</th>
+                    <th>Overlap</th>
                     <th>Median motion</th>
                     <th>Parallax residual</th>
+                    <th>Keyframe</th>
                     <th>Screening</th>
                   </tr>
                 </thead>
@@ -332,9 +375,15 @@ export default function Home() {
                         {pair.features_from} / {pair.features_to}
                       </td>
                       <td>{pair.matches}</td>
+                      <td>{(pair.overlap_ratio * 100).toFixed(0)}%</td>
                       <td>{pair.median_motion.toFixed(2)} px</td>
                       <td>{pair.median_parallax_residual.toFixed(2)} px</td>
-                      <td>{pair.low_parallax ? "Rejected early" : "RANSAC candidate"}</td>
+                      <td>
+                        {reconstruction.multi_view.keyframes.includes(pair.to_frame)
+                          ? "Selected"
+                          : "Skipped"}
+                      </td>
+                      <td>{pair.low_parallax ? "Weak adjacent baseline" : "RANSAC candidate"}</td>
                     </tr>
                   ))}
                 </tbody>
