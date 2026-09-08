@@ -1,0 +1,133 @@
+name: Runtime evidence and Moonlight
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUNTIME_PROFILER_REV: 8280c95feb2a1075efa0480a9622e40c723e0b3a
+  MOONLIGHT_REV: a615843b6497cfa0e746224673592c107d969bda
+
+jobs:
+  reconstruction-evidence:
+    name: Reconstruction runtime evidence and behavior
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+
+      - name: Check out exact base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: reference
+          fetch-depth: 0
+
+      - name: Check out pinned Moonlight
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: moritzbrantner/moonlight
+          ref: ${{ env.MOONLIGHT_REV }}
+          path: moonlight
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Install runtime-profiler
+        run: cargo install --git https://github.com/moritzbrantner/runtime-profiler --rev "$RUNTIME_PROFILER_REV" --locked
+
+      - name: Give the base the identical reconstruction workload
+        run: |
+          mkdir -p reference/crates/video-to-3d-core/examples reference/profiles/runtime-profiler
+          cp candidate/crates/video-to-3d-core/examples/profile_reconstruct.rs \
+            reference/crates/video-to-3d-core/examples/profile_reconstruct.rs
+          cp candidate/profiles/runtime-profiler/reconstruct.json reference/profiles/runtime-profiler/reconstruct.json
+          git -C reference add \
+            crates/video-to-3d-core/examples/profile_reconstruct.rs \
+            profiles/runtime-profiler/reconstruct.json
+          git -C reference \
+            -c user.name='runtime-profiler' \
+            -c user.email='runtime-profiler@invalid' \
+            commit -m 'chore: attach comparable reconstruction workload'
+
+      - name: Prime deterministic workload
+        run: |
+          (cd reference && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct)
+          (cd candidate && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct)
+          test -z "$(git -C reference status --porcelain)"
+          test -z "$(git -C candidate status --porcelain)"
+
+      - name: Capture reference evidence
+        working-directory: reference
+        run: |
+          runtime-profiler capture \
+            --scenario profiles/runtime-profiler/reconstruct.json \
+            --output "$RUNNER_TEMP/reference-reconstruct"
+          runtime-profiler validate --bundle "$RUNNER_TEMP/reference-reconstruct"
+
+      - name: Capture candidate evidence
+        working-directory: candidate
+        run: |
+          runtime-profiler capture \
+            --scenario profiles/runtime-profiler/reconstruct.json \
+            --output "$RUNNER_TEMP/candidate-reconstruct"
+          runtime-profiler validate --bundle "$RUNNER_TEMP/candidate-reconstruct"
+
+      - name: Compare runtime evidence
+        run: |
+          set -euo pipefail
+          runtime-profiler score \
+            --reference "$RUNNER_TEMP/reference-reconstruct" \
+            --candidate "$RUNNER_TEMP/candidate-reconstruct" \
+            --json | tee "$RUNNER_TEMP/runtime-reconstruct.json"
+          {
+            echo '### runtime-profiler comparison'
+            echo '```json'
+            cat "$RUNNER_TEMP/runtime-reconstruct.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Moonlight correctness evaluation
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+          cargo run --quiet \
+            --manifest-path ../moonlight/Cargo.toml \
+            -p moonlight-cli --bin moonlight -- \
+            eval run \
+            --project moonlight.eval.toml \
+            --storage-path .moonlight/runtime-evidence.jsonl \
+            --format markdown \
+            --baseline-ref "${{ github.event.pull_request.base.sha }}" \
+            --candidate-ref "${{ github.event.pull_request.head.sha }}" \
+            | tee "$RUNNER_TEMP/moonlight.md"
+          {
+            echo '### Moonlight evaluation'
+            cat "$RUNNER_TEMP/moonlight.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reconstruction-runtime-moonlight-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/reference-reconstruct
+            ${{ runner.temp }}/candidate-reconstruct
+            ${{ runner.temp }}/runtime-reconstruct.json
+            ${{ runner.temp }}/moonlight.md
+          if-no-files-found: warn

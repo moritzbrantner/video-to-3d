@@ -1,0 +1,16 @@
+{
+  "schema_version": "runtime-profiler/scenario/v1",
+  "id": "video-to-3d-reconstruct",
+  "target": {
+    "type": "command",
+    "program": "target/release/examples/profile_reconstruct",
+    "args": [],
+    "working_directory": "../.."
+  },
+  "run": {
+    "warmup_iterations": 1,
+    "measurement_iterations": 5,
+    "timeout_seconds": 120
+  },
+  "collectors": ["process"]
+}
