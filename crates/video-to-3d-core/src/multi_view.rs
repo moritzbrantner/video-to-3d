@@ -69,13 +69,7 @@ pub(super) fn analyze(
     let keyframes = select_keyframes(pairs);
     let registration_candidates = seed_pair
         .map(|(pair_index, seed_landmarks)| {
-            registration_candidates(
-                &keyframes,
-                &tracks,
-                &membership,
-                pair_index,
-                seed_landmarks,
-            )
+            registration_candidates(&keyframes, &tracks, &membership, pair_index, seed_landmarks)
         })
         .unwrap_or_default();
     let registration_candidate_stats = registration_candidates
@@ -217,7 +211,6 @@ fn select_keyframes(pairs: &[PairStats]) -> Vec<usize> {
             accumulated_parallax = 0.0;
             continue;
         }
-
         accumulated_parallax += pair.median_parallax_residual.max(0.0);
         if !pair.low_parallax && pair.median_parallax_residual >= MIN_STRONG_PAIR_PARALLAX {
             let score = pair.median_parallax_residual * pair.overlap_ratio;
@@ -321,8 +314,7 @@ mod tests {
         let (tracks, membership) = build_feature_tracks(&matches);
         let seeds = seed_landmarks(10);
 
-        let candidates =
-            registration_candidates(&[0, 2, 3], &tracks, &membership, 0, &seeds);
+        let candidates = registration_candidates(&[0, 2, 3], &tracks, &membership, 0, &seeds);
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].frame_index, 2);
