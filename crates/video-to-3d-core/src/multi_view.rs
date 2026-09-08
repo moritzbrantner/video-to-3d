@@ -25,6 +25,30 @@ pub struct MultiViewStats {
     pub registration_candidates: Vec<RegistrationCandidateStats>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SeedLandmark {
+    pub point_index: usize,
+    pub source_feature_index: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RegistrationCorrespondence {
+    pub seed_point_index: usize,
+    pub feature_index: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RegistrationCandidate {
+    pub frame_index: usize,
+    pub correspondences: Vec<RegistrationCorrespondence>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct MultiViewAnalysis {
+    pub stats: MultiViewStats,
+    pub registration_candidates: Vec<RegistrationCandidate>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Observation {
     frame_index: usize,
@@ -39,40 +63,44 @@ struct FeatureTrack {
 pub(super) fn analyze(
     pairs: &[PairStats],
     adjacent_matches: &[Vec<FeatureMatch>],
-    seed_pair: Option<(usize, &[usize])>,
-) -> MultiViewStats {
+    seed_pair: Option<(usize, &[SeedLandmark])>,
+) -> MultiViewAnalysis {
     let (tracks, membership) = build_feature_tracks(adjacent_matches);
     let keyframes = select_keyframes(pairs);
     let registration_candidates = seed_pair
-        .map(|(pair_index, source_feature_indices)| {
-            registration_candidates(
-                &keyframes,
-                &tracks,
-                &membership,
-                adjacent_matches,
-                pair_index,
-                source_feature_indices,
-            )
+        .map(|(pair_index, seed_landmarks)| {
+            registration_candidates(&keyframes, &tracks, &membership, pair_index, seed_landmarks)
         })
         .unwrap_or_default();
+    let registration_candidate_stats = registration_candidates
+        .iter()
+        .map(|candidate| RegistrationCandidateStats {
+            frame_index: candidate.frame_index,
+            seed_landmark_correspondences: candidate.correspondences.len(),
+            pnp_ready: candidate.correspondences.len() >= MIN_PNP_CORRESPONDENCES,
+        })
+        .collect();
 
-    MultiViewStats {
-        keyframes,
-        track_count: tracks.len(),
-        tracks_three_plus: tracks
-            .iter()
-            .filter(|track| track.observations.len() >= 3)
-            .count(),
-        longest_track: tracks
-            .iter()
-            .map(|track| track.observations.len())
-            .max()
-            .unwrap_or(0),
-        observations: tracks.iter().map(|track| track.observations.len()).sum(),
-        linked_pairs: adjacent_matches
-            .iter()
-            .filter(|matches| !matches.is_empty())
-            .count(),
+    MultiViewAnalysis {
+        stats: MultiViewStats {
+            keyframes,
+            track_count: tracks.len(),
+            tracks_three_plus: tracks
+                .iter()
+                .filter(|track| track.observations.len() >= 3)
+                .count(),
+            longest_track: tracks
+                .iter()
+                .map(|track| track.observations.len())
+                .max()
+                .unwrap_or(0),
+            observations: tracks.iter().map(|track| track.observations.len()).sum(),
+            linked_pairs: adjacent_matches
+                .iter()
+                .filter(|matches| !matches.is_empty())
+                .count(),
+            registration_candidates: registration_candidate_stats,
+        },
         registration_candidates,
     }
 }
@@ -128,33 +156,18 @@ fn registration_candidates(
     keyframes: &[usize],
     tracks: &[FeatureTrack],
     membership: &HashMap<Observation, usize>,
-    adjacent_matches: &[Vec<FeatureMatch>],
     seed_pair_index: usize,
-    seed_source_feature_indices: &[usize],
-) -> Vec<RegistrationCandidateStats> {
-    let Some(seed_matches) = adjacent_matches.get(seed_pair_index) else {
-        return Vec::new();
-    };
-
-    let seed_track_indices: Vec<usize> = seed_source_feature_indices
+    seed_landmarks: &[SeedLandmark],
+) -> Vec<RegistrationCandidate> {
+    let seed_track_indices: Vec<(usize, usize)> = seed_landmarks
         .iter()
-        .filter_map(|&source_feature_index| {
-            let target_feature_index = seed_matches
-                .iter()
-                .find(|feature_match| feature_match.a == source_feature_index)?
-                .b;
+        .filter_map(|seed_landmark| {
             membership
                 .get(&Observation {
                     frame_index: seed_pair_index,
-                    feature_index: source_feature_index,
+                    feature_index: seed_landmark.source_feature_index,
                 })
-                .or_else(|| {
-                    membership.get(&Observation {
-                        frame_index: seed_pair_index + 1,
-                        feature_index: target_feature_index,
-                    })
-                })
-                .copied()
+                .map(|&track_index| (seed_landmark.point_index, track_index))
         })
         .collect();
 
@@ -165,17 +178,20 @@ fn registration_candidates(
         .map(|frame_index| {
             let correspondences = seed_track_indices
                 .iter()
-                .filter(|&&track_index| {
+                .filter_map(|&(seed_point_index, track_index)| {
                     tracks[track_index]
                         .observations
                         .iter()
-                        .any(|observation| observation.frame_index == frame_index)
+                        .find(|observation| observation.frame_index == frame_index)
+                        .map(|observation| RegistrationCorrespondence {
+                            seed_point_index,
+                            feature_index: observation.feature_index,
+                        })
                 })
-                .count();
-            RegistrationCandidateStats {
+                .collect();
+            RegistrationCandidate {
                 frame_index,
-                seed_landmark_correspondences: correspondences,
-                pnp_ready: correspondences >= MIN_PNP_CORRESPONDENCES,
+                correspondences,
             }
         })
         .collect()
@@ -195,7 +211,6 @@ fn select_keyframes(pairs: &[PairStats]) -> Vec<usize> {
             accumulated_parallax = 0.0;
             continue;
         }
-
         accumulated_parallax += pair.median_parallax_residual.max(0.0);
         if !pair.low_parallax && pair.median_parallax_residual >= MIN_STRONG_PAIR_PARALLAX {
             let score = pair.median_parallax_residual * pair.overlap_ratio;
@@ -231,6 +246,15 @@ mod tests {
             b,
             distance: 0.0,
         }
+    }
+
+    fn seed_landmarks(count: usize) -> Vec<SeedLandmark> {
+        (0..count)
+            .map(|index| SeedLandmark {
+                point_index: index,
+                source_feature_index: index,
+            })
+            .collect()
     }
 
     fn pair(
@@ -288,24 +312,17 @@ mod tests {
             (0..8).map(|index| feature_match(index, index)).collect();
         let matches = vec![seed_matches, next_matches, final_matches];
         let (tracks, membership) = build_feature_tracks(&matches);
-        let seed_features: Vec<usize> = (0..10).collect();
+        let seeds = seed_landmarks(10);
 
-        let candidates = registration_candidates(
-            &[0, 2, 3],
-            &tracks,
-            &membership,
-            &matches,
-            0,
-            &seed_features,
-        );
+        let candidates = registration_candidates(&[0, 2, 3], &tracks, &membership, 0, &seeds);
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].frame_index, 2);
-        assert_eq!(candidates[0].seed_landmark_correspondences, 9);
-        assert!(candidates[0].pnp_ready);
+        assert_eq!(candidates[0].correspondences.len(), 9);
+        assert_eq!(candidates[0].correspondences[4].seed_point_index, 4);
+        assert_eq!(candidates[0].correspondences[4].feature_index, 4);
         assert_eq!(candidates[1].frame_index, 3);
-        assert_eq!(candidates[1].seed_landmark_correspondences, 8);
-        assert!(candidates[1].pnp_ready);
+        assert_eq!(candidates[1].correspondences.len(), 8);
     }
 
     #[test]
@@ -315,15 +332,18 @@ mod tests {
         let next_matches: Vec<FeatureMatch> =
             (0..5).map(|index| feature_match(index, index)).collect();
         let matches = vec![seed_matches, next_matches];
-        let (tracks, membership) = build_feature_tracks(&matches);
-        let seed_features: Vec<usize> = (0..8).collect();
+        let analysis = analyze(
+            &[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)],
+            &matches,
+            Some((0, &seed_landmarks(8))),
+        );
 
-        let candidates =
-            registration_candidates(&[0, 2], &tracks, &membership, &matches, 0, &seed_features);
-
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].seed_landmark_correspondences, 5);
-        assert!(!candidates[0].pnp_ready);
+        assert_eq!(analysis.stats.registration_candidates.len(), 1);
+        assert_eq!(
+            analysis.stats.registration_candidates[0].seed_landmark_correspondences,
+            5
+        );
+        assert!(!analysis.stats.registration_candidates[0].pnp_ready);
     }
 
     #[test]

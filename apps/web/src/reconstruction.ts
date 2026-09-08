@@ -58,6 +58,16 @@ export type RegistrationCandidateStats = {
   pnp_ready: boolean;
 };
 
+export type RegisteredViewStats = {
+  frame_index: number;
+  correspondences: number;
+  inliers: number;
+  inlier_ratio: number;
+  median_reprojection_error_pixels: number;
+  rotation: number[];
+  translation: number[];
+};
+
 export type MultiViewStats = {
   keyframes: number[];
   track_count: number;
@@ -74,6 +84,7 @@ export type ReconstructionResult = {
   pairs: PairStats[];
   calibrated_pair: CalibratedPairStats | null;
   multi_view: MultiViewStats;
+  registered_views: RegisteredViewStats[];
   warnings: string[];
 };
 

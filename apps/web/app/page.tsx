@@ -118,7 +118,7 @@ export default function Home() {
       ? failedCount > 0
         ? `${readyCount} ready · ${failedCount} failed`
         : runs.length === 1 && reconstruction?.calibrated_pair
-          ? "Calibrated seed pair and multi-view registration evidence ready"
+          ? "Calibrated seed geometry and robust registration evidence ready"
           : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
       : "Choose one or more videos to begin";
 
@@ -131,9 +131,9 @@ export default function Home() {
           <p className="lede">
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
             the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
-            and now links actually triangulated seed landmarks into other selected frames to measure
-            real 2D↔3D correspondence readiness. The displayed geometry still comes from the strongest
-            calibrated adjacent pair until PnP registration is implemented.
+            links triangulated seed landmarks into other selected frames, and uses deterministic robust
+            PnP to register additional cameras when their 3D↔2D evidence passes inlier and reprojection
+            gates. The sparse point cloud still comes only from the calibrated seed pair.
           </p>
         </div>
         <label className="upload-button">
@@ -181,7 +181,9 @@ export default function Home() {
             <>
               <SceneCanvas reconstruction={reconstruction} />
               <div className="viewer-caption">
-                Drag to orbit · wheel to zoom · squares are registered or sampled camera positions
+                {reconstruction.calibrated_pair
+                  ? "Drag to orbit · wheel to zoom · squares are accepted registered camera positions"
+                  : "Drag to orbit · wheel to zoom · squares are conservative fallback camera estimates"}
               </div>
             </>
           ) : (
@@ -196,19 +198,20 @@ export default function Home() {
         </div>
 
         <aside className="method-panel">
-          <h2>Slice 3 foundation</h2>
+          <h2>Slice 3 sparse registration</h2>
           <ol>
             <li>Decode and sample up to 18 reduced-resolution frames per video in the browser.</li>
             <li>Detect and match local image features in Rust/WASM.</li>
             <li>Chain one-to-one adjacent matches into deterministic multi-frame feature tracks.</li>
             <li>Select keyframe candidates from track overlap and accumulated residual parallax.</li>
             <li>Link calibrated seed landmarks through those tracks into other selected keyframes.</li>
+            <li>Run bounded deterministic robust PnP and accept only geometrically supported poses.</li>
           </ol>
           <p className="method-note">
-            Another selected frame is only marked PnP-ready when at least eight triangulated seed
-            landmarks have matching 2D observations there. This does not register the camera yet.
-            PnP, bundle adjustment, loop handling, and cross-video tracks remain later work in slice 3
-            or 6.
+            A selected frame needs at least eight triangulated seed landmarks before PnP is attempted,
+            then must pass inlier-ratio and reprojection-error gates. Accepted cameras share the seed
+            pair&apos;s arbitrary monocular scale. New-landmark triangulation, bundle adjustment, loop
+            handling, and cross-video tracks remain later work in slice 3 or 6.
           </p>
         </aside>
       </section>
@@ -221,7 +224,7 @@ export default function Home() {
               <h2>Sampled frames</h2>
             </div>
             <p>
-              {frames.length} local keyframe candidates at {frames[0].width} × {frames[0].height}
+              {frames.length} local frame samples at {frames[0].width} × {frames[0].height}
             </p>
           </div>
           <div className="frame-strip">
@@ -242,7 +245,7 @@ export default function Home() {
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">Calibrated geometry evidence</p>
-                  <h2>Selected two-view pair</h2>
+                  <h2>Selected two-view seed pair</h2>
                 </div>
                 <p>
                   Frame {reconstruction.calibrated_pair.from_frame + 1} →{" "}
@@ -291,7 +294,7 @@ export default function Home() {
                 <p className="eyebrow">Multi-view evidence</p>
                 <h2>Feature-track graph and keyframes</h2>
               </div>
-              <p>Rust-owned diagnostics; not yet a registered multi-camera reconstruction</p>
+              <p>Rust-owned tracking and keyframe diagnostics</p>
             </div>
             <div className="table-wrap">
               <table>
@@ -332,9 +335,9 @@ export default function Home() {
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">Registration evidence</p>
-                  <h2>Seed landmark correspondences</h2>
+                  <h2>Seed-landmark PnP acceptance</h2>
                 </div>
-                <p>Readiness only; no additional camera pose has been solved yet</p>
+                <p>Only accepted robust poses are added to the 3D viewer</p>
               </div>
               <div className="table-wrap">
                 <table>
@@ -342,21 +345,42 @@ export default function Home() {
                     <tr>
                       <th>Keyframe</th>
                       <th>Tracked seed landmarks</th>
-                      <th>PnP screening</th>
+                      <th>PnP inliers</th>
+                      <th>Median reprojection error</th>
+                      <th>Registration</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {reconstruction.multi_view.registration_candidates.map((candidate) => (
-                      <tr key={candidate.frame_index}>
-                        <td>Frame {candidate.frame_index + 1}</td>
-                        <td>{candidate.seed_landmark_correspondences}</td>
-                        <td>
-                          {candidate.pnp_ready
-                            ? "Enough correspondences for robust PnP attempt"
-                            : "Needs at least 8 tracked seed landmarks"}
-                        </td>
-                      </tr>
-                    ))}
+                    {reconstruction.multi_view.registration_candidates.map((candidate) => {
+                      const registered = reconstruction.registered_views.find(
+                        (view) => view.frame_index === candidate.frame_index,
+                      );
+                      return (
+                        <tr key={candidate.frame_index}>
+                          <td>Frame {candidate.frame_index + 1}</td>
+                          <td>{candidate.seed_landmark_correspondences}</td>
+                          <td>
+                            {registered
+                              ? `${registered.inliers} / ${registered.correspondences} (${(
+                                  registered.inlier_ratio * 100
+                                ).toFixed(0)}%)`
+                              : "—"}
+                          </td>
+                          <td>
+                            {registered
+                              ? `${registered.median_reprojection_error_pixels.toFixed(2)} px`
+                              : "—"}
+                          </td>
+                          <td>
+                            {registered
+                              ? "Registered"
+                              : candidate.pnp_ready
+                                ? "Rejected by robust PnP gates"
+                                : "Needs at least 8 tracked seed landmarks"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -386,8 +410,9 @@ export default function Home() {
                 <h2>Adjacent-frame screening</h2>
               </div>
               <p>
-                {reconstruction.points.length} sparse point observations · {reconstruction.cameras.length}{" "}
-                displayed cameras
+                {reconstruction.calibrated_pair
+                  ? `${reconstruction.points.length} seed-pair sparse points · ${reconstruction.cameras.length} accepted cameras`
+                  : `${reconstruction.points.length} fallback sparse points · ${reconstruction.cameras.length} conservative camera estimates`}
               </p>
             </div>
             <div className="table-wrap">
