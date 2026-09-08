@@ -332,12 +332,8 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             if pnp_correspondences.len() != candidate.correspondences.len() {
                 continue;
             }
-            let Some(pose) = pnp::estimate_pose(
-                &pnp_correspondences,
-                width,
-                height,
-                focal as f64,
-            ) else {
+            let Some(pose) = pnp::estimate_pose(&pnp_correspondences, width, height, focal as f64)
+            else {
                 continue;
             };
 
