@@ -153,10 +153,13 @@ fn classify_landmarks(correspondences: &[PnpCorrespondence]) -> LandmarkGeometry
             sum + correspondence.point
         })
         / correspondences.len() as f64;
-    let covariance = correspondences.iter().fold(Matrix3::zeros(), |sum, correspondence| {
-        let delta = correspondence.point - centroid;
-        sum + delta * delta.transpose()
-    }) / correspondences.len() as f64;
+    let covariance = correspondences
+        .iter()
+        .fold(Matrix3::zeros(), |sum, correspondence| {
+            let delta = correspondence.point - centroid;
+            sum + delta * delta.transpose()
+        })
+        / correspondences.len() as f64;
     let eigen = SymmetricEigen::new(covariance);
     let mut indices = [0usize, 1, 2];
     indices.sort_by(|left, right| eigen.eigenvalues[*left].total_cmp(&eigen.eigenvalues[*right]));
@@ -206,7 +209,9 @@ fn fit_spatial_dlt(
 ) -> Option<(Matrix3<f64>, Vector3<f64>)> {
     let centroid = correspondences
         .iter()
-        .fold(Vector3::zeros(), |sum, correspondence| sum + correspondence.point)
+        .fold(Vector3::zeros(), |sum, correspondence| {
+            sum + correspondence.point
+        })
         / correspondences.len() as f64;
     let rms = (correspondences
         .iter()
@@ -313,10 +318,8 @@ fn fit_planar_homography(
     let center_x = width as f64 * 0.5;
     let center_y = height as f64 * 0.5;
     let mut design = DMatrix::<f64>::zeros(correspondences.len() * 2, 9);
-    for (index, (correspondence, &(u, v))) in correspondences
-        .iter()
-        .zip(&plane_coordinates)
-        .enumerate()
+    for (index, (correspondence, &(u, v))) in
+        correspondences.iter().zip(&plane_coordinates).enumerate()
     {
         let u = u / rms;
         let v = v / rms;
@@ -354,17 +357,7 @@ fn fit_planar_homography(
             homography[(row, column)] = solution[row * 3 + column];
         }
     }
-    homography *= Matrix3::new(
-        1.0 / rms,
-        0.0,
-        0.0,
-        0.0,
-        1.0 / rms,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    );
+    homography *= Matrix3::new(1.0 / rms, 0.0, 0.0, 0.0, 1.0 / rms, 0.0, 0.0, 0.0, 1.0);
 
     let h1 = homography.column(0).into_owned();
     let h2 = homography.column(1).into_owned();
@@ -433,11 +426,8 @@ fn has_extra_null_direction(singular_values: &nalgebra::DVector<f64>) -> bool {
     }
     let largest = singular_values[0].abs();
     let second_smallest = singular_values[singular_values.len() - 2].abs();
-    !largest.is_finite()
-        || largest < 1e-12
-        || second_smallest / largest < DESIGN_RANK_RATIO
+    !largest.is_finite() || largest < 1e-12 || second_smallest / largest < DESIGN_RANK_RATIO
 }
-
 fn evaluate_pose(
     correspondences: &[PnpCorrespondence],
     rotation: Matrix3<f64>,
@@ -625,7 +615,11 @@ mod tests {
         let estimate = estimate_pose(&correspondences, 640, 480, 520.0)
             .expect("nearly planar landmarks should use the homography pose path");
 
-        assert!(estimate.inliers >= 17, "only {} planar PnP inliers", estimate.inliers);
+        assert!(
+            estimate.inliers >= 17,
+            "only {} planar PnP inliers",
+            estimate.inliers
+        );
         assert!(estimate.median_reprojection_error_pixels < 0.7);
         assert!((estimate.camera_center - expected_center).norm() < 0.08);
         assert!((estimate.rotation.determinant() - 1.0).abs() < 1e-6);
