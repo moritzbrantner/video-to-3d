@@ -44,10 +44,7 @@ pub(super) fn analyze(
             .map(|track| track.observations.len())
             .max()
             .unwrap_or(0),
-        observations: tracks
-            .iter()
-            .map(|track| track.observations.len())
-            .sum(),
+        observations: tracks.iter().map(|track| track.observations.len()).sum(),
         linked_pairs: adjacent_matches
             .iter()
             .filter(|matches| !matches.is_empty())
@@ -176,8 +173,16 @@ mod tests {
     #[test]
     fn chains_adjacent_matches_into_multi_frame_tracks() {
         let matches = vec![
-            vec![feature_match(0, 0), feature_match(1, 1), feature_match(2, 2)],
-            vec![feature_match(0, 0), feature_match(1, 1), feature_match(3, 3)],
+            vec![
+                feature_match(0, 0),
+                feature_match(1, 1),
+                feature_match(2, 2),
+            ],
+            vec![
+                feature_match(0, 0),
+                feature_match(1, 1),
+                feature_match(3, 3),
+            ],
         ];
         let tracks = build_feature_tracks(&matches);
         let mut lengths: Vec<usize> = tracks
