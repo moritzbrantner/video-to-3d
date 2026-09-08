@@ -1,7 +1,7 @@
 mod multi_view;
 mod two_view;
 
-pub use multi_view::MultiViewStats;
+pub use multi_view::{MultiViewStats, RegistrationCandidateStats};
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -272,7 +272,23 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         adjacent_matches.push(matches);
     }
 
-    let multi_view = multi_view::analyze(&pairs, &adjacent_matches);
+    let seed_landmarks = best_two_view.as_ref().map(|(pair_index, estimate)| {
+        (
+            *pair_index,
+            estimate
+                .points
+                .iter()
+                .map(|point| point.source_feature_index)
+                .collect::<Vec<_>>(),
+        )
+    });
+    let multi_view = multi_view::analyze(
+        &pairs,
+        &adjacent_matches,
+        seed_landmarks
+            .as_ref()
+            .map(|(pair_index, source_features)| (*pair_index, source_features.as_slice())),
+    );
 
     let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
         let source_features = &features[pair_index];
@@ -362,9 +378,14 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         );
     }
     if calibrated_pair.is_some() {
+        let pnp_ready = multi_view
+            .registration_candidates
+            .iter()
+            .filter(|candidate| candidate.pnp_ready)
+            .count();
         warnings.push(format!(
-            "Slice 3 currently selects {} keyframes and links {} tracks observed in at least three frames, but the displayed geometry still registers only the strongest calibrated adjacent pair. Translation scale remains arbitrary; PnP and bundle adjustment are not implemented yet.",
-            multi_view.keyframes.len(), multi_view.tracks_three_plus
+            "Slice 3 currently selects {} keyframes, links {} tracks observed in at least three frames, and finds {} later keyframes with enough seed-landmark correspondences for a robust PnP attempt. These are readiness diagnostics only: the displayed geometry still registers only the strongest calibrated adjacent pair, translation scale remains arbitrary, and PnP plus bundle adjustment are not implemented yet.",
+            multi_view.keyframes.len(), multi_view.tracks_three_plus, pnp_ready
         ));
     } else {
         warnings.push(
@@ -788,6 +809,7 @@ mod tests {
         assert!(result.pairs[0].low_parallax);
         assert!(result.calibrated_pair.is_none());
         assert_eq!(result.multi_view.keyframes, vec![0]);
+        assert!(result.multi_view.registration_candidates.is_empty());
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
         assert!(result.cameras[1].y.abs() < f32::EPSILON);
         assert!(result.cameras[1].z.abs() < f32::EPSILON);
