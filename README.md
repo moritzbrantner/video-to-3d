@@ -2,7 +2,7 @@
 
 A privacy-first Rust/Tauri + WebAssembly experiment for reconstructing a 3D scene from ordinary video.
 
-The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, and links the actually triangulated landmarks from the strongest calibrated seed pair into other selected keyframes. The displayed sparse geometry still comes from that calibrated seed pair. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
+The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, links the actually triangulated landmarks from the strongest calibrated seed pair into other selected keyframes, and can register additional cameras with bounded deterministic robust PnP when their 3D↔2D evidence passes inlier and reprojection gates. The displayed sparse point cloud still contains only landmarks triangulated by the calibrated seed pair. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
 
 ## Current slice
 
@@ -17,10 +17,11 @@ The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP 
 9. A rotation-only fit rejects pure camera rotation before it can masquerade as translation.
 10. Four relative-pose hypotheses are tested by cheirality; valid inliers are triangulated with linear DLT.
 11. Triangulated seed landmarks are associated with their deterministic feature tracks and counted as real 2D↔3D correspondences in other selected keyframes.
-12. Another selected keyframe is marked PnP-ready only when at least eight seed landmarks survive into it; this is a readiness diagnostic, not a solved camera pose.
-13. The strongest adjacent pair is displayed with its registered camera centers, colored sparse points, geometry errors, keyframe selection, feature-track diagnostics, and per-keyframe registration readiness.
+12. Another selected keyframe becomes PnP-eligible only when at least eight seed landmarks survive into it.
+13. A bounded deterministic DLT-RANSAC PnP solve estimates a candidate camera pose, rejects points behind the camera and large reprojection residuals, refits on inliers when that improves the accepted model, and requires minimum inlier-count, inlier-ratio, and median-reprojection-error gates.
+14. Accepted PnP camera centers are added to the 3D viewer in the same arbitrary monocular coordinate frame as the seed pair.
 
-Scale remains arbitrary because the displayed monocular two-view reconstruction has no metric baseline. A PnP-ready keyframe is **not** yet a registered camera: the next Slice 3 step is to solve and robustly validate those additional camera poses, followed by bundle adjustment, new-landmark triangulation, loop handling, and failed-registration recovery. Each selected video also remains independent; cross-video reconstruction belongs to slice 6.
+Scale remains arbitrary because monocular video has no metric baseline. The additional cameras are registered only against the existing seed landmarks: this slice does **not** yet triangulate new landmarks from those cameras, run bundle adjustment, close loops, or recover from failed registrations. Those are the remaining Slice 3 steps. Each selected video also remains independent; cross-video reconstruction belongs to slice 6.
 
 ## Good footage
 
@@ -30,7 +31,7 @@ Use 5–20 second clips with a slowly translating camera, a static scene, visibl
 
 - `apps/web`: Next.js static export used both by GitHub Pages and Tauri.
 - `apps/desktop`: thin Tauri 2 shell around the exported web app.
-- `crates/video-to-3d-core`: platform-neutral Rust reconstruction kernel, including deterministic feature tracking, keyframe screening, calibrated two-view geometry, seed-landmark track association, and geometry acceptance.
+- `crates/video-to-3d-core`: platform-neutral Rust reconstruction kernel, including deterministic feature tracking, keyframe screening, calibrated two-view geometry, seed-landmark track association, robust PnP camera registration, and geometry acceptance.
 - `crates/video-to-3d-wasm`: `wasm-bindgen` adapter for the browser.
 - `ROADMAP.md`: progression from sparse SfM to dense reconstruction and 3D Gaussian splatting.
 
