@@ -384,7 +384,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .filter(|candidate| candidate.pnp_ready)
             .count();
         warnings.push(format!(
-            "Slice 3 currently selects {} keyframes, links {} tracks observed in at least three frames, and finds {} later keyframes with enough seed-landmark correspondences for a robust PnP attempt. These are readiness diagnostics only: the displayed geometry still registers only the strongest calibrated adjacent pair, translation scale remains arbitrary, and PnP plus bundle adjustment are not implemented yet.",
+            "Slice 3 currently selects {} keyframes, links {} tracks observed in at least three frames, and finds {} other selected keyframes with enough seed-landmark correspondences for a robust PnP attempt. These are readiness diagnostics only: the displayed geometry still registers only the strongest calibrated adjacent pair, translation scale remains arbitrary, and PnP plus bundle adjustment are not implemented yet.",
             multi_view.keyframes.len(), multi_view.tracks_three_plus, pnp_ready
         ));
     } else {
