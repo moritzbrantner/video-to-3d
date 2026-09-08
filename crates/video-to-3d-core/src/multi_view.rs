@@ -161,9 +161,7 @@ fn registration_candidates(
     keyframes
         .iter()
         .copied()
-        .filter(|&frame_index| {
-            frame_index != seed_pair_index && frame_index != seed_pair_index + 1
-        })
+        .filter(|&frame_index| frame_index != seed_pair_index && frame_index != seed_pair_index + 1)
         .map(|frame_index| {
             let correspondences = seed_track_indices
                 .iter()
@@ -282,9 +280,12 @@ mod tests {
 
     #[test]
     fn reports_registration_ready_keyframes_from_seed_landmark_tracks() {
-        let seed_matches: Vec<FeatureMatch> = (0..10).map(|index| feature_match(index, index)).collect();
-        let next_matches: Vec<FeatureMatch> = (0..9).map(|index| feature_match(index, index)).collect();
-        let final_matches: Vec<FeatureMatch> = (0..8).map(|index| feature_match(index, index)).collect();
+        let seed_matches: Vec<FeatureMatch> =
+            (0..10).map(|index| feature_match(index, index)).collect();
+        let next_matches: Vec<FeatureMatch> =
+            (0..9).map(|index| feature_match(index, index)).collect();
+        let final_matches: Vec<FeatureMatch> =
+            (0..8).map(|index| feature_match(index, index)).collect();
         let matches = vec![seed_matches, next_matches, final_matches];
         let (tracks, membership) = build_feature_tracks(&matches);
         let seed_features: Vec<usize> = (0..10).collect();
@@ -309,20 +310,16 @@ mod tests {
 
     #[test]
     fn does_not_mark_sparse_track_overlap_as_pnp_ready() {
-        let seed_matches: Vec<FeatureMatch> = (0..8).map(|index| feature_match(index, index)).collect();
-        let next_matches: Vec<FeatureMatch> = (0..5).map(|index| feature_match(index, index)).collect();
+        let seed_matches: Vec<FeatureMatch> =
+            (0..8).map(|index| feature_match(index, index)).collect();
+        let next_matches: Vec<FeatureMatch> =
+            (0..5).map(|index| feature_match(index, index)).collect();
         let matches = vec![seed_matches, next_matches];
         let (tracks, membership) = build_feature_tracks(&matches);
         let seed_features: Vec<usize> = (0..8).collect();
 
-        let candidates = registration_candidates(
-            &[0, 2],
-            &tracks,
-            &membership,
-            &matches,
-            0,
-            &seed_features,
-        );
+        let candidates =
+            registration_candidates(&[0, 2], &tracks, &membership, &matches, 0, &seed_features);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].seed_landmark_correspondences, 5);
