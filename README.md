@@ -2,7 +2,7 @@
 
 A privacy-first Rust/Tauri + WebAssembly experiment for reconstructing a 3D scene from ordinary video.
 
-The current implementation is **calibrated two-view sparse reconstruction**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, screens adjacent pairs for useful parallax, fits essential matrices with deterministic RANSAC, recovers relative camera pose by cheirality, and linearly triangulates the strongest valid pair. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
+The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, and still uses the strongest calibrated adjacent pair for the displayed sparse geometry. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
 
 ## Current slice
 
@@ -10,13 +10,15 @@ The current implementation is **calibrated two-view sparse reconstruction**, not
 2. The browser processes selected videos sequentially and samples up to 18 reduced-resolution frames per video.
 3. Rust/WASM detects Harris-style corners and normalized local patch descriptors.
 4. Rust matches adjacent frames with a local search, ratio test, and unique-match selection.
-5. Candidate pairs are normalized using a caller-supplied focal length or an image-size focal estimate.
-6. Deterministic eight-point RANSAC estimates an essential matrix and rejects epipolar outliers; a consensus refit is used only when it survives the same downstream geometry-quality gates as the robust winning hypothesis.
-7. A rotation-only fit rejects pure camera rotation before it can masquerade as translation.
-8. Four relative-pose hypotheses are tested by cheirality; valid inliers are triangulated with linear DLT.
-9. The strongest adjacent pair is displayed with its registered camera centers, colored sparse points, Sampson error, reprojection error, and triangulation-angle evidence.
+5. Adjacent one-to-one matches are chained into deterministic feature tracks spanning multiple sampled frames.
+6. Rust selects keyframe candidates using adjacent overlap and accumulated residual parallax, while keeping weak or stationary sequences from inventing useful baselines.
+7. Candidate calibrated pairs are normalized using a caller-supplied focal length or an image-size focal estimate.
+8. Deterministic eight-point RANSAC estimates an essential matrix and rejects epipolar outliers; a consensus refit is used only when it survives the same downstream geometry-quality gates as the robust winning hypothesis.
+9. A rotation-only fit rejects pure camera rotation before it can masquerade as translation.
+10. Four relative-pose hypotheses are tested by cheirality; valid inliers are triangulated with linear DLT.
+11. The strongest adjacent pair is displayed with its registered camera centers, colored sparse points, Sampson error, reprojection error, triangulation-angle evidence, keyframe selection, and feature-track diagnostics.
 
-Scale remains arbitrary because a monocular two-view reconstruction has no metric baseline. Each selected video is reconstructed independently in this slice. Cross-video feature tracks, shared camera registration, PnP, and bundle adjustment belong to slice 3.
+Scale remains arbitrary because the displayed monocular two-view reconstruction has no metric baseline. The multi-view track graph does **not** yet mean that all selected keyframes are registered cameras: incremental registration, PnP, bundle adjustment, loop handling, and failed-registration recovery are still pending in slice 3. Each selected video also remains independent; cross-video reconstruction belongs to slice 6.
 
 ## Good footage
 
@@ -26,7 +28,7 @@ Use 5–20 second clips with a slowly translating camera, a static scene, visibl
 
 - `apps/web`: Next.js static export used both by GitHub Pages and Tauri.
 - `apps/desktop`: thin Tauri 2 shell around the exported web app.
-- `crates/video-to-3d-core`: platform-neutral Rust reconstruction kernel, including deterministic two-view geometry and geometry acceptance.
+- `crates/video-to-3d-core`: platform-neutral Rust reconstruction kernel, including deterministic feature tracking, keyframe screening, two-view geometry, and geometry acceptance.
 - `crates/video-to-3d-wasm`: `wasm-bindgen` adapter for the browser.
 - `ROADMAP.md`: progression from sparse SfM to dense reconstruction and 3D Gaussian splatting.
 
