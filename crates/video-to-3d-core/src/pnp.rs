@@ -38,19 +38,25 @@ pub(super) fn estimate_pose(
     height: u32,
     focal_pixels: f64,
 ) -> Option<PnpEstimate> {
-    if correspondences.len() < MIN_ACCEPTED_INLIERS || !focal_pixels.is_finite() || focal_pixels <= 0.0
+    if correspondences.len() < MIN_ACCEPTED_INLIERS
+        || !focal_pixels.is_finite()
+        || focal_pixels <= 0.0
     {
         return None;
     }
 
     let mut best: Option<EvaluatedPose> = None;
     for trial in 0..RANSAC_TRIALS {
-        let sample_indices = deterministic_sample(trial, correspondences.len())?;
+        let Some(sample_indices) = deterministic_sample(trial, correspondences.len()) else {
+            continue;
+        };
         let sample: Vec<PnpCorrespondence> = sample_indices
             .iter()
             .map(|&index| correspondences[index])
             .collect();
-        let (rotation, translation) = fit_dlt(&sample, width, height, focal_pixels)?;
+        let Some((rotation, translation)) = fit_dlt(&sample, width, height, focal_pixels) else {
+            continue;
+        };
         let evaluated = evaluate_pose(
             correspondences,
             rotation,
@@ -265,15 +271,15 @@ fn deterministic_sample(trial: usize, len: usize) -> Option<[usize; DLT_SAMPLE_S
     }
     let mut state = (trial as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15);
     let mut sample = [0usize; DLT_SAMPLE_SIZE];
-    for slot in &mut sample {
-        let mut attempts = 0;
+    for slot_index in 0..DLT_SAMPLE_SIZE {
+        let mut attempts = 0usize;
         loop {
             state ^= state >> 12;
             state ^= state << 25;
             state ^= state >> 27;
             let index = (state.wrapping_mul(0x2545f4914f6cdd1d) % len as u64) as usize;
-            if !sample[..attempts.min(DLT_SAMPLE_SIZE)].contains(&index) {
-                *slot = index;
+            if !sample[..slot_index].contains(&index) {
+                sample[slot_index] = index;
                 break;
             }
             attempts += 1;
