@@ -64,7 +64,8 @@ fn main() {
 
     let mut checksum = 0_usize;
     for _ in 0..3 {
-        let result = reconstruct(black_box(&request)).expect("deterministic reconstruction workload");
+        let result =
+            reconstruct(black_box(&request)).expect("deterministic reconstruction workload");
         checksum = checksum
             .wrapping_add(result.cameras.len())
             .wrapping_add(result.points.len())
