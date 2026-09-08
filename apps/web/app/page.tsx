@@ -118,7 +118,7 @@ export default function Home() {
       ? failedCount > 0
         ? `${readyCount} ready · ${failedCount} failed`
         : runs.length === 1 && reconstruction?.calibrated_pair
-          ? "Calibrated two-view reconstruction and multi-view track graph ready"
+          ? "Calibrated seed pair and multi-view registration evidence ready"
           : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
       : "Choose one or more videos to begin";
 
@@ -130,9 +130,10 @@ export default function Home() {
           <h1>Video to 3D</h1>
           <p className="lede">
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
-            the footage. Rust/WASM now chains adjacent matches into multi-frame tracks and screens
-            keyframe candidates by overlap and parallax. The displayed geometry still comes from the
-            strongest calibrated adjacent pair until incremental registration is implemented.
+            the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
+            and now links actually triangulated seed landmarks into other selected frames to measure
+            real 2D↔3D correspondence readiness. The displayed geometry still comes from the strongest
+            calibrated adjacent pair until PnP registration is implemented.
           </p>
         </div>
         <label className="upload-button">
@@ -201,11 +202,13 @@ export default function Home() {
             <li>Detect and match local image features in Rust/WASM.</li>
             <li>Chain one-to-one adjacent matches into deterministic multi-frame feature tracks.</li>
             <li>Select keyframe candidates from track overlap and accumulated residual parallax.</li>
+            <li>Link calibrated seed landmarks through those tracks into other selected keyframes.</li>
           </ol>
           <p className="method-note">
-            Selected videos remain independent and local. The existing calibrated two-view result still
-            owns displayed camera pose and triangulated geometry. Incremental camera registration, PnP,
-            bundle adjustment, loop handling, and cross-video tracks remain later work in slice 3 or 6.
+            Another selected frame is only marked PnP-ready when at least eight triangulated seed
+            landmarks have matching 2D observations there. This does not register the camera yet.
+            PnP, bundle adjustment, loop handling, and cross-video tracks remain later work in slice 3
+            or 6.
           </p>
         </aside>
       </section>
@@ -323,6 +326,42 @@ export default function Home() {
               </table>
             </div>
           </section>
+
+          {reconstruction.multi_view.registration_candidates.length > 0 ? (
+            <section className="section-block">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Registration evidence</p>
+                  <h2>Seed landmark correspondences</h2>
+                </div>
+                <p>Readiness only; no additional camera pose has been solved yet</p>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Keyframe</th>
+                      <th>Tracked seed landmarks</th>
+                      <th>PnP screening</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reconstruction.multi_view.registration_candidates.map((candidate) => (
+                      <tr key={candidate.frame_index}>
+                        <td>Frame {candidate.frame_index + 1}</td>
+                        <td>{candidate.seed_landmark_correspondences}</td>
+                        <td>
+                          {candidate.pnp_ready
+                            ? "Enough correspondences for robust PnP attempt"
+                            : "Needs at least 8 tracked seed landmarks"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
 
           {reconstruction.warnings.length > 0 ? (
             <section className="section-block">

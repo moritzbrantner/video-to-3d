@@ -52,6 +52,12 @@ export type CalibratedPairStats = {
   translation_direction: number[];
 };
 
+export type RegistrationCandidateStats = {
+  frame_index: number;
+  seed_landmark_correspondences: number;
+  pnp_ready: boolean;
+};
+
 export type MultiViewStats = {
   keyframes: number[];
   track_count: number;
@@ -59,6 +65,7 @@ export type MultiViewStats = {
   longest_track: number;
   observations: number;
   linked_pairs: number;
+  registration_candidates: RegistrationCandidateStats[];
 };
 
 export type ReconstructionResult = {
