@@ -58,10 +58,12 @@ jobs:
           git -C reference add \
             crates/video-to-3d-core/examples/profile_reconstruct.rs \
             profiles/runtime-profiler/reconstruct.json
-          git -C reference \
-            -c user.name='runtime-profiler' \
-            -c user.email='runtime-profiler@invalid' \
-            commit -m 'chore: attach comparable reconstruction workload'
+          if ! git -C reference diff --cached --quiet; then
+            git -C reference \
+              -c user.name='runtime-profiler' \
+              -c user.email='runtime-profiler@invalid' \
+              commit -m 'chore: attach comparable reconstruction workload'
+          fi
 
       - name: Prime deterministic workload
         run: |
