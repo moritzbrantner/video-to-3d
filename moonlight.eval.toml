@@ -1,0 +1,47 @@
+[project]
+name = "video-to-3d"
+repo = "."
+baseline_ref = "main"
+
+[eval]
+work_dir = ".moonlight/evals"
+keep_worktrees = "failed"
+jobs = 1
+target_timeout_ms = 900000
+max_body_capture_bytes = 20000
+
+[[checks]]
+id = "rust-format"
+name = "Rust format"
+command = "cargo fmt --all --check"
+cwd = "."
+timeout_ms = 120000
+ignore_stdout = true
+ignore_stderr = true
+
+[[checks]]
+id = "rust-clippy"
+name = "Rust clippy"
+command = "cargo clippy --workspace --all-targets -- -D warnings"
+cwd = "."
+timeout_ms = 900000
+ignore_stdout = true
+ignore_stderr = true
+
+[[checks]]
+id = "rust-tests"
+name = "Rust workspace tests"
+command = "cargo test --workspace"
+cwd = "."
+timeout_ms = 900000
+ignore_stdout = true
+ignore_stderr = true
+
+[[checks]]
+id = "wasm-check"
+name = "Wasm reconstruction check"
+command = "cargo check --target wasm32-unknown-unknown -p video-to-3d-wasm"
+cwd = "."
+timeout_ms = 900000
+ignore_stdout = true
+ignore_stderr = true
