@@ -149,7 +149,9 @@ fn classify_landmarks(correspondences: &[PnpCorrespondence]) -> LandmarkGeometry
 
     let centroid = correspondences
         .iter()
-        .fold(Vector3::zeros(), |sum, correspondence| sum + correspondence.point)
+        .fold(Vector3::zeros(), |sum, correspondence| {
+            sum + correspondence.point
+        })
         / correspondences.len() as f64;
     let covariance = correspondences.iter().fold(Matrix3::zeros(), |sum, correspondence| {
         let delta = correspondence.point - centroid;
@@ -456,8 +458,8 @@ fn evaluate_pose(
         }
         let projected_x = focal_pixels * camera_point.x / camera_point.z + center_x;
         let projected_y = focal_pixels * camera_point.y / camera_point.z + center_y;
-        let error = (projected_x - correspondence.x_pixels)
-            .hypot(projected_y - correspondence.y_pixels);
+        let error =
+            (projected_x - correspondence.x_pixels).hypot(projected_y - correspondence.y_pixels);
         if error.is_finite() && error <= MAX_REPROJECTION_ERROR_PIXELS {
             inlier_indices.push(index);
             inlier_errors.push(error);
@@ -606,7 +608,11 @@ mod tests {
         let estimate = estimate_pose(&correspondences, 640, 480, 520.0)
             .expect("synthetic camera should register");
 
-        assert!(estimate.inliers >= 20, "only {} PnP inliers", estimate.inliers);
+        assert!(
+            estimate.inliers >= 20,
+            "only {} PnP inliers",
+            estimate.inliers
+        );
         assert!(estimate.median_reprojection_error_pixels < 0.7);
         assert!((estimate.camera_center - expected_center).norm() < 0.08);
         assert!((estimate.rotation.determinant() - 1.0).abs() < 1e-6);
