@@ -1,4 +1,5 @@
 mod multi_view;
+mod pnp;
 mod two_view;
 
 pub use multi_view::{MultiViewStats, RegistrationCandidateStats};
@@ -98,12 +99,24 @@ pub struct CalibratedPairStats {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct RegisteredViewStats {
+    pub frame_index: usize,
+    pub correspondences: usize,
+    pub inliers: usize,
+    pub inlier_ratio: f32,
+    pub median_reprojection_error_pixels: f32,
+    pub rotation: [f32; 9],
+    pub translation: [f32; 3],
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ReconstructionResult {
     pub cameras: Vec<CameraPose>,
     pub points: Vec<Point3>,
     pub pairs: Vec<PairStats>,
     pub calibrated_pair: Option<CalibratedPairStats>,
     pub multi_view: MultiViewStats,
+    pub registered_views: Vec<RegisteredViewStats>,
     pub warnings: Vec<String>,
 }
 
@@ -278,17 +291,91 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             estimate
                 .points
                 .iter()
-                .map(|point| point.source_feature_index)
+                .enumerate()
+                .map(|(point_index, point)| multi_view::SeedLandmark {
+                    point_index,
+                    source_feature_index: point.source_feature_index,
+                })
                 .collect::<Vec<_>>(),
         )
     });
-    let multi_view = multi_view::analyze(
+    let multi_view_analysis = multi_view::analyze(
         &pairs,
         &adjacent_matches,
         seed_landmarks
             .as_ref()
-            .map(|(pair_index, source_features)| (*pair_index, source_features.as_slice())),
+            .map(|(pair_index, landmarks)| (*pair_index, landmarks.as_slice())),
     );
+
+    let mut registered_views = Vec::new();
+    let mut registered_cameras = Vec::new();
+    if let Some((_, estimate)) = best_two_view.as_ref() {
+        for candidate in &multi_view_analysis.registration_candidates {
+            if candidate.correspondences.len() < 8 {
+                continue;
+            }
+            let pnp_correspondences: Vec<pnp::PnpCorrespondence> = candidate
+                .correspondences
+                .iter()
+                .filter_map(|correspondence| {
+                    let point = estimate.points.get(correspondence.seed_point_index)?;
+                    let feature = features
+                        .get(candidate.frame_index)?
+                        .get(correspondence.feature_index)?;
+                    Some(pnp::PnpCorrespondence {
+                        point: point.position,
+                        x_pixels: feature.x as f64,
+                        y_pixels: feature.y as f64,
+                    })
+                })
+                .collect();
+            if pnp_correspondences.len() != candidate.correspondences.len() {
+                continue;
+            }
+            let Some(pose) = pnp::estimate_pose(
+                &pnp_correspondences,
+                width,
+                height,
+                focal as f64,
+            ) else {
+                continue;
+            };
+
+            registered_cameras.push(CameraPose {
+                frame_index: candidate.frame_index,
+                x: pose.camera_center.x as f32,
+                y: pose.camera_center.y as f32,
+                z: pose.camera_center.z as f32,
+                matched_features: pose.inliers,
+            });
+            registered_views.push(RegisteredViewStats {
+                frame_index: candidate.frame_index,
+                correspondences: pnp_correspondences.len(),
+                inliers: pose.inliers,
+                inlier_ratio: pose.inliers as f32 / pnp_correspondences.len() as f32,
+                median_reprojection_error_pixels: pose.median_reprojection_error_pixels as f32,
+                rotation: [
+                    pose.rotation[(0, 0)] as f32,
+                    pose.rotation[(0, 1)] as f32,
+                    pose.rotation[(0, 2)] as f32,
+                    pose.rotation[(1, 0)] as f32,
+                    pose.rotation[(1, 1)] as f32,
+                    pose.rotation[(1, 2)] as f32,
+                    pose.rotation[(2, 0)] as f32,
+                    pose.rotation[(2, 1)] as f32,
+                    pose.rotation[(2, 2)] as f32,
+                ],
+                translation: [
+                    pose.translation.x as f32,
+                    pose.translation.y as f32,
+                    pose.translation.z as f32,
+                ],
+            });
+        }
+    }
+    registered_views.sort_by_key(|view| view.frame_index);
+    registered_cameras.sort_by_key(|camera| camera.frame_index);
+    let multi_view = multi_view_analysis.stats;
 
     let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
         let source_features = &features[pair_index];
@@ -309,6 +396,8 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 matched_features: estimate.inliers,
             },
         ];
+        cameras.extend(registered_cameras.iter().copied());
+        cameras.sort_by_key(|camera| camera.frame_index);
         points = estimate
             .points
             .iter()
@@ -383,10 +472,16 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .iter()
             .filter(|candidate| candidate.pnp_ready)
             .count();
-        warnings.push(format!(
-            "Slice 3 currently selects {} keyframes, links {} tracks observed in at least three frames, and finds {} other selected keyframes with enough seed-landmark correspondences for a robust PnP attempt. These are readiness diagnostics only: the displayed geometry still registers only the strongest calibrated adjacent pair, translation scale remains arbitrary, and PnP plus bundle adjustment are not implemented yet.",
-            multi_view.keyframes.len(), multi_view.tracks_three_plus, pnp_ready
-        ));
+        if registered_views.is_empty() {
+            warnings.push(format!(
+                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but no additional camera pose passed the current deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and new-landmark triangulation plus bundle adjustment are not implemented yet."
+            ));
+        } else {
+            warnings.push(format!(
+                "Slice 3 registered {} additional selected keyframes with deterministic robust seed-landmark PnP. Camera centers share the seed pair's arbitrary monocular scale, while the sparse cloud still contains only seed-pair landmarks. New-landmark triangulation and bundle adjustment are not implemented yet.",
+                registered_views.len()
+            ));
+        }
     } else {
         warnings.push(
             "No adjacent pair passed the calibrated epipolar, cheirality, reprojection, and triangulation-angle gates, so this result retains the conservative uncalibrated MVP preview."
@@ -400,6 +495,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         pairs,
         calibrated_pair,
         multi_view,
+        registered_views,
         warnings,
     })
 }
@@ -810,6 +906,7 @@ mod tests {
         assert!(result.calibrated_pair.is_none());
         assert_eq!(result.multi_view.keyframes, vec![0]);
         assert!(result.multi_view.registration_candidates.is_empty());
+        assert!(result.registered_views.is_empty());
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
         assert!(result.cameras[1].y.abs() < f32::EPSILON);
         assert!(result.cameras[1].z.abs() < f32::EPSILON);
