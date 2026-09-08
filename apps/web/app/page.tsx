@@ -181,7 +181,9 @@ export default function Home() {
             <>
               <SceneCanvas reconstruction={reconstruction} />
               <div className="viewer-caption">
-                Drag to orbit · wheel to zoom · squares are accepted registered camera positions
+                {reconstruction.calibrated_pair
+                  ? "Drag to orbit · wheel to zoom · squares are accepted registered camera positions"
+                  : "Drag to orbit · wheel to zoom · squares are conservative fallback camera estimates"}
               </div>
             </>
           ) : (
@@ -408,8 +410,9 @@ export default function Home() {
                 <h2>Adjacent-frame screening</h2>
               </div>
               <p>
-                {reconstruction.points.length} seed-pair sparse points · {reconstruction.cameras.length}{" "}
-                accepted cameras
+                {reconstruction.calibrated_pair
+                  ? `${reconstruction.points.length} seed-pair sparse points · ${reconstruction.cameras.length} accepted cameras`
+                  : `${reconstruction.points.length} fallback sparse points · ${reconstruction.cameras.length} conservative camera estimates`}
               </p>
             </div>
             <div className="table-wrap">
