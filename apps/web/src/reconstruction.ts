@@ -68,6 +68,13 @@ export type RegisteredViewStats = {
   translation: number[];
 };
 
+export type NewLandmarkStats = {
+  candidate_tracks: number;
+  triangulated_tracks: number;
+  observations_considered: number;
+  inlier_observations: number;
+};
+
 export type MultiViewStats = {
   keyframes: number[];
   track_count: number;
@@ -85,6 +92,7 @@ export type ReconstructionResult = {
   calibrated_pair: CalibratedPairStats | null;
   multi_view: MultiViewStats;
   registered_views: RegisteredViewStats[];
+  new_landmarks: NewLandmarkStats;
   warnings: string[];
 };
 
