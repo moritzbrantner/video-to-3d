@@ -2,7 +2,7 @@
 
 A privacy-first Rust/Tauri + WebAssembly experiment for reconstructing a 3D scene from ordinary video.
 
-The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, and links the actually triangulated landmarks from the strongest calibrated seed pair into later keyframes. The displayed sparse geometry still comes from that calibrated seed pair. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
+The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, and links the actually triangulated landmarks from the strongest calibrated seed pair into other selected keyframes. The displayed sparse geometry still comes from that calibrated seed pair. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
 
 ## Current slice
 
@@ -16,11 +16,11 @@ The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP 
 8. Deterministic eight-point RANSAC estimates an essential matrix and rejects epipolar outliers; a consensus refit is used only when it survives the same downstream geometry-quality gates as the robust winning hypothesis.
 9. A rotation-only fit rejects pure camera rotation before it can masquerade as translation.
 10. Four relative-pose hypotheses are tested by cheirality; valid inliers are triangulated with linear DLT.
-11. Triangulated seed landmarks are associated with their deterministic feature tracks and counted as real 2D↔3D correspondences in later selected keyframes.
-12. A later keyframe is marked PnP-ready only when at least eight seed landmarks survive into it; this is a readiness diagnostic, not a solved camera pose.
+11. Triangulated seed landmarks are associated with their deterministic feature tracks and counted as real 2D↔3D correspondences in other selected keyframes.
+12. Another selected keyframe is marked PnP-ready only when at least eight seed landmarks survive into it; this is a readiness diagnostic, not a solved camera pose.
 13. The strongest adjacent pair is displayed with its registered camera centers, colored sparse points, geometry errors, keyframe selection, feature-track diagnostics, and per-keyframe registration readiness.
 
-Scale remains arbitrary because the displayed monocular two-view reconstruction has no metric baseline. A PnP-ready keyframe is **not** yet a registered camera: the next Slice 3 step is to solve and robustly validate those later camera poses, followed by bundle adjustment, new-landmark triangulation, loop handling, and failed-registration recovery. Each selected video also remains independent; cross-video reconstruction belongs to slice 6.
+Scale remains arbitrary because the displayed monocular two-view reconstruction has no metric baseline. A PnP-ready keyframe is **not** yet a registered camera: the next Slice 3 step is to solve and robustly validate those additional camera poses, followed by bundle adjustment, new-landmark triangulation, loop handling, and failed-registration recovery. Each selected video also remains independent; cross-video reconstruction belongs to slice 6.
 
 ## Good footage
 
