@@ -1,9 +1,11 @@
 mod multi_view;
+mod multi_view_triangulation;
 mod pnp;
 mod two_view;
 
 pub use multi_view::{MultiViewStats, RegistrationCandidateStats};
 
+use nalgebra::{Matrix3, Vector3};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -109,6 +111,14 @@ pub struct RegisteredViewStats {
     pub translation: [f32; 3],
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct NewLandmarkStats {
+    pub candidate_tracks: usize,
+    pub triangulated_tracks: usize,
+    pub observations_considered: usize,
+    pub inlier_observations: usize,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ReconstructionResult {
     pub cameras: Vec<CameraPose>,
@@ -117,6 +127,7 @@ pub struct ReconstructionResult {
     pub calibrated_pair: Option<CalibratedPairStats>,
     pub multi_view: MultiViewStats,
     pub registered_views: Vec<RegisteredViewStats>,
+    pub new_landmarks: NewLandmarkStats,
     pub warnings: Vec<String>,
 }
 
@@ -309,6 +320,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
 
     let mut registered_views = Vec::new();
     let mut registered_cameras = Vec::new();
+    let mut registered_geometry = Vec::new();
     if let Some((_, estimate)) = best_two_view.as_ref() {
         for candidate in &multi_view_analysis.registration_candidates {
             if candidate.correspondences.len() < 8 {
@@ -367,11 +379,18 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                     pose.translation.z as f32,
                 ],
             });
+            registered_geometry.push(multi_view_triangulation::KnownCamera {
+                frame_index: candidate.frame_index,
+                rotation: pose.rotation,
+                translation: pose.translation,
+            });
         }
     }
     registered_views.sort_by_key(|view| view.frame_index);
     registered_cameras.sort_by_key(|camera| camera.frame_index);
-    let multi_view = multi_view_analysis.stats;
+    registered_geometry.sort_by_key(|camera| camera.frame_index);
+    let multi_view = multi_view_analysis.stats.clone();
+    let mut new_landmarks = NewLandmarkStats::default();
 
     let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
         let source_features = &features[pair_index];
@@ -419,6 +438,107 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 }
             })
             .collect();
+
+        let registered_frame_indices: HashSet<usize> =
+            registered_geometry.iter().map(|camera| camera.frame_index).collect();
+        if !registered_frame_indices.is_empty() {
+            let mut known_cameras = vec![
+                multi_view_triangulation::KnownCamera {
+                    frame_index: pair_index,
+                    rotation: Matrix3::identity(),
+                    translation: Vector3::zeros(),
+                },
+                multi_view_triangulation::KnownCamera {
+                    frame_index: pair_index + 1,
+                    rotation: estimate.rotation,
+                    translation: estimate.translation,
+                },
+            ];
+            known_cameras.extend(registered_geometry.iter().cloned());
+
+            for (track_index, track) in multi_view_analysis.tracks.iter().enumerate() {
+                if multi_view_analysis.seed_track_indices.contains(&track_index)
+                    || !track
+                        .observations
+                        .iter()
+                        .any(|observation| registered_frame_indices.contains(&observation.frame_index))
+                {
+                    continue;
+                }
+
+                let observations: Vec<multi_view_triangulation::ImageObservation> = track
+                    .observations
+                    .iter()
+                    .filter_map(|observation| {
+                        if !known_cameras
+                            .iter()
+                            .any(|camera| camera.frame_index == observation.frame_index)
+                        {
+                            return None;
+                        }
+                        let feature = features
+                            .get(observation.frame_index)?
+                            .get(observation.feature_index)?;
+                        Some(multi_view_triangulation::ImageObservation {
+                            frame_index: observation.frame_index,
+                            x_pixels: feature.x as f64,
+                            y_pixels: feature.y as f64,
+                        })
+                    })
+                    .collect();
+                if observations.len() < 2 {
+                    continue;
+                }
+
+                new_landmarks.candidate_tracks += 1;
+                new_landmarks.observations_considered += observations.len();
+                let Some(triangulated) = multi_view_triangulation::triangulate_track(
+                    &observations,
+                    &known_cameras,
+                    width,
+                    height,
+                    focal as f64,
+                ) else {
+                    continue;
+                };
+                let Some(source_observation) = track.observations.iter().find(|observation| {
+                    known_cameras
+                        .iter()
+                        .any(|camera| camera.frame_index == observation.frame_index)
+                }) else {
+                    continue;
+                };
+                let Some(source_feature) = features
+                    .get(source_observation.frame_index)
+                    .and_then(|frame_features| frame_features.get(source_observation.feature_index))
+                else {
+                    continue;
+                };
+                let (r, g, b) = sample_rgb(
+                    &request.frames[source_observation.frame_index],
+                    source_feature.x,
+                    source_feature.y,
+                );
+                let support_confidence =
+                    triangulated.inliers as f32 / triangulated.observations as f32;
+                let reprojection_confidence = (1.0
+                    / (1.0 + triangulated.median_reprojection_error_pixels as f32 * 0.5))
+                    .clamp(0.15, 1.0);
+                let angle_confidence =
+                    (triangulated.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
+                points.push(Point3 {
+                    x: triangulated.position.x as f32,
+                    y: triangulated.position.y as f32,
+                    z: triangulated.position.z as f32,
+                    confidence: support_confidence * reprojection_confidence * angle_confidence,
+                    r,
+                    g,
+                    b,
+                });
+                new_landmarks.triangulated_tracks += 1;
+                new_landmarks.inlier_observations += triangulated.inliers;
+            }
+        }
 
         CalibratedPairStats {
             from_frame: pair_index,
@@ -470,12 +590,17 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .count();
         if registered_views.is_empty() {
             warnings.push(format!(
-                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but no additional camera pose passed the current deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and new-landmark triangulation plus bundle adjustment are not implemented yet."
+                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but no additional camera pose passed the current deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and accepted-view new-landmark triangulation cannot proceed until another camera registers."
+            ));
+        } else if new_landmarks.triangulated_tracks == 0 {
+            warnings.push(format!(
+                "Slice 3 registered {} additional selected keyframes with deterministic robust seed-landmark PnP, but none of {} non-seed feature tracks with registered-view support passed the current cheirality, reprojection-support, and triangulation-angle gates. Camera centers still share the seed pair's arbitrary monocular scale; bundle adjustment is not implemented yet.",
+                registered_views.len(), new_landmarks.candidate_tracks
             ));
         } else {
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes with deterministic robust seed-landmark PnP. Camera centers share the seed pair's arbitrary monocular scale, while the sparse cloud still contains only seed-pair landmarks. New-landmark triangulation and bundle adjustment are not implemented yet.",
-                registered_views.len()
+                "Slice 3 registered {} additional selected keyframes and triangulated {} new feature-track landmarks from accepted camera views. The sparse cloud now combines calibrated seed landmarks with bounded accepted-view additions in the same arbitrary monocular coordinate system. Bundle adjustment, loop/revisit handling, and failed-registration recovery are not implemented yet.",
+                registered_views.len(), new_landmarks.triangulated_tracks
             ));
         }
     } else {
@@ -492,6 +617,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         calibrated_pair,
         multi_view,
         registered_views,
+        new_landmarks,
         warnings,
     })
 }
@@ -903,6 +1029,7 @@ mod tests {
         assert_eq!(result.multi_view.keyframes, vec![0]);
         assert!(result.multi_view.registration_candidates.is_empty());
         assert!(result.registered_views.is_empty());
+        assert_eq!(result.new_landmarks.triangulated_tracks, 0);
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
         assert!(result.cameras[1].y.abs() < f32::EPSILON);
         assert!(result.cameras[1].z.abs() < f32::EPSILON);
