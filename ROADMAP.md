@@ -25,7 +25,7 @@ Exit criterion met: the full browser-local video → Rust/WASM → sparse previe
 
 Implementation status: deterministic synthetic fixtures and hosted checks cover the calibrated geometry path. Recorded-footage acceptance should still be captured before treating the slice as fully field-accepted.
 
-## Slice 3 — Multi-view sparse SfM — implementation integrated
+## Slice 3 — Multi-view sparse SfM — integrated
 
 - Initial keyframe screening based on adjacent feature overlap and accumulated residual parallax.
 - Deterministic multi-frame feature tracks chained from one-to-one adjacent matches.
@@ -37,18 +37,23 @@ Implementation status: deterministic synthetic fixtures and hosted checks cover 
 - Triangulate new landmarks from newly registered or recovered views with positive-depth, multi-view support, reprojection, and triangulation-angle acceptance gates.
 - Bundle adjustment over cameras and sparse landmarks, with a fixed calibrated seed gauge and explicit no-regression acceptance.
 - Seed-anchored bounded drift correction for already registered selected keyframes when validated direct non-adjacent evidence back to the calibrated seed produces an independent robust PnP pose. Closure candidates are limited by seed-normalized center disagreement and rotation disagreement, then must survive the existing bundle-adjustment no-regression gate; otherwise the entire closure attempt rolls back.
+- Deterministic external acceptance matrix against COLMAP on rendered scenes with known camera trajectories, plus runtime-profiler and Moonlight evidence. COLMAP remains a CI reference rather than a product dependency or geometry authority.
 
-Current boundary: Rust can register additional selected camera poses, recover an otherwise unregistered selected keyframe from strong direct non-adjacent seed evidence, grow the sparse map from genuinely supported non-seed tracks, jointly refine accepted cameras and landmarks, and close bounded accumulated drift when a registered selected keyframe directly revisits the calibrated seed. Descriptor recurrence alone never changes geometry; every recovery or closure still passes explicit 3D↔2D and reprojection gates. The calibrated seed-pair cameras remain fixed, preserving the arbitrary monocular coordinate frame. This is not yet a general pose graph: arbitrary non-seed-to-non-seed loop constraints, metric-scale recovery, and cross-video tracks remain outside this slice.
+Current boundary: Rust can register additional selected camera poses, recover an otherwise unregistered selected keyframe from strong direct non-adjacent seed evidence, grow the sparse map from genuinely supported non-seed tracks, jointly refine accepted cameras and landmarks, and close bounded accumulated drift when a registered selected keyframe directly revisits the calibrated seed. Descriptor recurrence alone never changes geometry; every recovery or closure still passes explicit 3D↔2D and reprojection gates. The calibrated seed-pair cameras remain fixed, preserving the arbitrary monocular coordinate frame. This is not a general pose graph: arbitrary non-seed-to-non-seed loop constraints, metric-scale recovery, and cross-video tracks remain outside this slice.
 
-Implementation exit criterion: the in-product sparse pipeline now has a fail-closed mechanism for bounded seed-return drift rather than allowing a direct revisit to be evidence-only. The next acceptance step is to compare deterministic reconstruction quality and runtime against a classic external SfM reference such as COLMAP, while keeping that reference outside product ownership.
+Implementation exit criterion met: the in-product sparse pipeline has fail-closed registration, map growth, refinement, bounded seed-return drift correction, and an external deterministic quality/runtime reference without transferring product ownership to COLMAP.
 
-## Slice 4 — Dense reconstruction
+## Slice 4 — Dense reconstruction — in progress
 
-- Depth-map estimation from registered views.
-- Multi-view consistency filtering.
-- Dense point fusion.
+- **Coarse registered-view depth estimation — current slice.** Choose a reference from the final accepted sparse camera geometry, derive a bounded depth-search envelope from visible accepted sparse landmarks, evaluate a memory-bounded inverse-depth plane sweep over textured sample pixels, and retain only photometrically supported, non-ambiguous depth hypotheses. Emit accepted dense samples separately from the sparse map with explicit diagnostics; do not fabricate dense geometry when texture, baseline, or matching evidence is insufficient.
+- Multi-view depth consistency filtering. Require reciprocal or cross-reference agreement before treating independently estimated depth as fused scene evidence.
+- Dense point fusion. Merge consistent depth observations while preserving support/confidence and rejecting duplicates/outliers.
 - Optional mesh reconstruction and texture projection.
-- Memory-aware native and WASM execution strategies.
+- Memory-aware native and WASM execution strategies, including progressive/chunked processing where full-resolution depth would exceed practical browser memory budgets.
+
+Current boundary: the first dense pass is deliberately a coarse depth-estimation foundation, not a completed dense reconstruction system. It consumes the final Rust-owned sparse camera geometry after bundle adjustment/closure and produces separate coarse dense points. It does not yet claim multi-view consistency, fused dense surfaces, meshing, metric scale, or full-resolution depth maps.
+
+Next implementation slice: multi-view depth consistency filtering over accepted coarse depth hypotheses, followed by dense point fusion as a separate acceptance boundary.
 
 ## Slice 5 — 3D Gaussian splatting
 
