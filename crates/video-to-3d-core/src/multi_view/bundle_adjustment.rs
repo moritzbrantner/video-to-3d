@@ -372,8 +372,7 @@ fn run_iterations(
             break;
         };
         let improvement = previous_cost - current_cost;
-        if accepted_blocks == 0
-            || improvement <= CONVERGENCE_EPSILON * (1.0 + previous_cost.abs())
+        if accepted_blocks == 0 || improvement <= CONVERGENCE_EPSILON * (1.0 + previous_cost.abs())
         {
             break;
         }
@@ -427,8 +426,8 @@ fn refine_landmark(
             projection_gradients(&camera_point, focal_pixels);
         let gradient_u = camera.rotation.transpose() * gradient_u_camera;
         let gradient_v = camera.rotation.transpose() * gradient_v_camera;
-        hessian += weight
-            * (gradient_u * gradient_u.transpose() + gradient_v * gradient_v.transpose());
+        hessian +=
+            weight * (gradient_u * gradient_u.transpose() + gradient_v * gradient_v.transpose());
         gradient += weight * (gradient_u * residual.x + gradient_v * residual.y);
     }
 
@@ -521,9 +520,8 @@ fn refine_camera(
             gradient_v_camera.y,
             gradient_v_camera.z,
         );
-        hessian += weight
-            * (jacobian_u * jacobian_u.transpose()
-                + jacobian_v * jacobian_v.transpose());
+        hessian +=
+            weight * (jacobian_u * jacobian_u.transpose() + jacobian_v * jacobian_v.transpose());
         gradient += weight * (jacobian_u * residual.x + jacobian_v * residual.y);
     }
 
@@ -884,9 +882,8 @@ mod tests {
         }
         let camera_observations = observation_indices_by_camera(cameras.len(), &observations);
         let landmark_observations = observation_indices_by_landmark(landmarks.len(), &observations);
-        let initial =
-            error_metrics(&cameras, &landmarks, &observations, width, height, focal)
-                .expect("initial geometry should project");
+        let initial = error_metrics(&cameras, &landmarks, &observations, width, height, focal)
+            .expect("initial geometry should project");
         let initial_camera_error =
             (cameras[2].camera_center() - true_cameras[2].camera_center()).norm();
 
