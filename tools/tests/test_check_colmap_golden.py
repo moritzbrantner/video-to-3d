@@ -75,6 +75,14 @@ class GoldenGateTests(unittest.TestCase):
         )
         self.assertTrue(any("registered 4/8" in error for error in errors))
 
+    def test_incomplete_case_still_has_actionable_markdown(self):
+        markdown = module.render_incomplete_markdown(
+            "forward", FileNotFoundError("missing COLMAP metrics")
+        )
+        self.assertIn("COLMAP golden reference — forward", markdown)
+        self.assertIn("Status: FAIL", markdown)
+        self.assertIn("missing COLMAP metrics", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()
