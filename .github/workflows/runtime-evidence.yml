@@ -106,8 +106,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate shared golden fixture matrix and reconstruction evidence
-        id: golden-generate
-        continue-on-error: true
+        if: always()
         working-directory: candidate
         run: |
           set -uo pipefail
@@ -128,12 +127,11 @@ jobs:
               status=1
             fi
           done
-          exit "$status"
+          printf '%s\n' "$status" > "$RUNNER_TEMP/golden-generate.status"
+          exit 0
 
       - name: Capture golden runtime matrix
-        id: golden-runtime
         if: always()
-        continue-on-error: true
         working-directory: candidate
         run: |
           set -uo pipefail
@@ -167,12 +165,11 @@ jobs:
               status=1
             fi
           done
-          exit "$status"
+          printf '%s\n' "$status" > "$RUNNER_TEMP/golden-runtime.status"
+          exit 0
 
       - name: Evaluate COLMAP golden quality matrix
-        id: colmap-golden
         if: always()
-        continue-on-error: true
         working-directory: candidate
         run: |
           set -uo pipefail
@@ -201,7 +198,8 @@ jobs:
               printf '\n' >> "$RUNNER_TEMP/colmap-golden.md"
             fi
           done
-          exit "$status"
+          printf '%s\n' "$status" > "$RUNNER_TEMP/colmap-golden.status"
+          exit 0
 
       - name: Publish COLMAP golden diagnostics
         if: always()
@@ -209,19 +207,9 @@ jobs:
           if test -f "$RUNNER_TEMP/colmap-golden.md"; then
             cat "$RUNNER_TEMP/colmap-golden.md" >> "$GITHUB_STEP_SUMMARY"
           fi
-          status=0
-          if test "${{ steps.golden-generate.outcome }}" != success; then
-            status=1
-          fi
-          if test "${{ steps.golden-runtime.outcome }}" != success; then
-            status=1
-          fi
-          if test "${{ steps.colmap-golden.outcome }}" != success; then
-            status=1
-          fi
-          exit "$status"
 
       - name: Run Moonlight correctness evaluation
+        if: always()
         working-directory: candidate
         run: |
           set -euo pipefail
@@ -241,6 +229,19 @@ jobs:
             cat "$RUNNER_TEMP/moonlight.md"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Enforce COLMAP golden matrix
+        if: always()
+        run: |
+          status=0
+          for phase in golden-generate golden-runtime colmap-golden; do
+            phase_status="$RUNNER_TEMP/$phase.status"
+            if ! test -f "$phase_status" || test "$(cat "$phase_status")" != 0; then
+              echo "golden-gate: $phase failed or did not report status"
+              status=1
+            fi
+          done
+          exit "$status"
+
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -254,6 +255,7 @@ jobs:
             ${{ runner.temp }}/golden-colmap-*.txt
             ${{ runner.temp }}/golden-rust-runtime-*
             ${{ runner.temp }}/golden-colmap-runtime-*
+            ${{ runner.temp }}/golden-*.status
             ${{ runner.temp }}/colmap-golden-*.md
             ${{ runner.temp }}/colmap-golden.md
             ${{ runner.temp }}/moonlight.md
