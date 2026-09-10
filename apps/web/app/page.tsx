@@ -46,6 +46,10 @@ function phaseLabel(phase: RunPhase): string {
   }
 }
 
+function errorValue(value: number | null): string {
+  return value === null ? "—" : `${value.toFixed(2)} px`;
+}
+
 export default function Home() {
   const [runs, setRuns] = useState<VideoRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
@@ -118,7 +122,9 @@ export default function Home() {
       ? failedCount > 0
         ? `${readyCount} ready · ${failedCount} failed`
         : runs.length === 1 && reconstruction?.calibrated_pair
-          ? "Calibrated multi-view sparse geometry ready"
+          ? reconstruction.multi_view.bundle_adjustment.accepted
+            ? "Bundle-adjusted multi-view sparse geometry ready"
+            : "Calibrated multi-view sparse geometry ready"
           : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
       : "Choose one or more videos to begin";
 
@@ -131,10 +137,10 @@ export default function Home() {
           <p className="lede">
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
             the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
-            registers additional cameras with deterministic robust PnP, and triangulates non-seed
-            tracks when accepted views provide enough geometric support. New points must pass positive
-            depth, reprojection, support-ratio, and triangulation-angle gates before they enter the
-            sparse cloud.
+            registers additional cameras with deterministic robust PnP, triangulates supported
+            non-seed tracks, and jointly refines accepted camera poses and sparse landmarks with
+            deterministic bundle adjustment. The calibrated seed-pair cameras stay fixed so the
+            arbitrary monocular gauge cannot drift.
           </p>
         </div>
         <label className="upload-button">
@@ -183,7 +189,9 @@ export default function Home() {
               <SceneCanvas reconstruction={reconstruction} />
               <div className="viewer-caption">
                 {reconstruction.calibrated_pair
-                  ? "Drag to orbit · wheel to zoom · squares are accepted registered camera positions"
+                  ? reconstruction.multi_view.bundle_adjustment.accepted
+                    ? "Drag to orbit · wheel to zoom · cameras and sparse points include accepted bundle-adjustment refinement"
+                    : "Drag to orbit · wheel to zoom · squares are accepted registered camera positions"
                   : "Drag to orbit · wheel to zoom · squares are conservative fallback camera estimates"}
               </div>
             </>
@@ -210,14 +218,19 @@ export default function Home() {
             <li>
               Triangulate non-seed tracks from accepted registered views and reject weak new geometry.
             </li>
+            <li>
+              Jointly refine supported landmarks and non-seed camera poses with bounded robust bundle
+              adjustment, adopting the result only when the reconstruction error improves.
+            </li>
           </ol>
           <p className="method-note">
             A selected frame needs at least eight triangulated seed landmarks before PnP is attempted,
-            then must pass inlier-ratio and reprojection-error gates. New landmarks need an accepted
-            additional view and must pass multi-view support, positive-depth, reprojection, and
-            triangulation-angle gates. All accepted geometry shares the seed pair&apos;s arbitrary
-            monocular scale. Bundle adjustment, loop handling, and cross-video tracks remain later
-            work in slice 3 or 6.
+            then must pass inlier-ratio and reprojection-error gates. New landmarks require genuine
+            support from an accepted additional view. Bundle adjustment uses only initially supported
+            observations, Huber-weighted reprojection residuals, bounded Gauss–Newton updates, and a
+            no-regression acceptance boundary. Both seed cameras remain fixed, preserving the
+            arbitrary monocular coordinate frame. Loop/revisit handling remains later Slice 3 work;
+            cross-video tracks remain Slice 6.
           </p>
         </aside>
       </section>
@@ -343,7 +356,10 @@ export default function Home() {
                   <p className="eyebrow">Registration evidence</p>
                   <h2>Seed-landmark PnP acceptance</h2>
                 </div>
-                <p>Only accepted robust poses are added to the 3D viewer</p>
+                <p>
+                  These are the initial robust registration measurements; accepted BA may refine the
+                  final displayed non-seed camera poses.
+                </p>
               </div>
               <div className="table-wrap">
                 <table>
@@ -429,6 +445,70 @@ export default function Home() {
                           .median_triangulation_angle_degrees === null
                           ? "—"
                           : `${reconstruction.multi_view.new_landmarks.median_triangulation_angle_degrees.toFixed(2)}°`}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
+          {reconstruction.calibrated_pair ? (
+            <section className="section-block">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Joint optimization evidence</p>
+                  <h2>Bundle adjustment</h2>
+                </div>
+                <p>The two seed cameras are fixed; candidate geometry is adopted only if it improves.</p>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Status</th>
+                      <th>Iterations</th>
+                      <th>Supported observations</th>
+                      <th>Optimized cameras</th>
+                      <th>Optimized landmarks</th>
+                      <th>Median reprojection</th>
+                      <th>RMSE reprojection</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        {reconstruction.multi_view.bundle_adjustment.accepted
+                          ? "Accepted"
+                          : reconstruction.multi_view.bundle_adjustment.attempted
+                            ? "Rejected; pre-BA geometry retained"
+                            : "Not run"}
+                      </td>
+                      <td>{reconstruction.multi_view.bundle_adjustment.iterations}</td>
+                      <td>{reconstruction.multi_view.bundle_adjustment.observations}</td>
+                      <td>{reconstruction.multi_view.bundle_adjustment.optimized_cameras}</td>
+                      <td>{reconstruction.multi_view.bundle_adjustment.optimized_landmarks}</td>
+                      <td>
+                        {errorValue(
+                          reconstruction.multi_view.bundle_adjustment
+                            .initial_median_reprojection_error_pixels,
+                        )}{" "}
+                        →{" "}
+                        {errorValue(
+                          reconstruction.multi_view.bundle_adjustment
+                            .final_median_reprojection_error_pixels,
+                        )}
+                      </td>
+                      <td>
+                        {errorValue(
+                          reconstruction.multi_view.bundle_adjustment
+                            .initial_rmse_reprojection_error_pixels,
+                        )}{" "}
+                        →{" "}
+                        {errorValue(
+                          reconstruction.multi_view.bundle_adjustment
+                            .final_rmse_reprojection_error_pixels,
+                        )}
                       </td>
                     </tr>
                   </tbody>
