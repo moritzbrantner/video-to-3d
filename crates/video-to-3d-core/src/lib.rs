@@ -527,8 +527,8 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                     let reprojection_confidence = (1.0
                         / (1.0 + landmark.median_reprojection_error_pixels as f32 * 0.5))
                         .clamp(0.15, 1.0);
-                    let angle_confidence = (landmark.triangulation_angle_degrees as f32 / 3.0)
-                        .clamp(0.15, 1.0);
+                    let angle_confidence =
+                        (landmark.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
                     let position = optimized_new_landmark_positions
                         .get(new_index)
                         .copied()
@@ -537,9 +537,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                         x: position.x as f32,
                         y: position.y as f32,
                         z: position.z as f32,
-                        confidence: support_confidence
-                            * reprojection_confidence
-                            * angle_confidence,
+                        confidence: support_confidence * reprojection_confidence * angle_confidence,
                         r,
                         g,
                         b,
