@@ -24,7 +24,7 @@ fn lcg(state: &mut u64) -> f64 {
 }
 
 fn scene() -> Vec<ScenePoint> {
-    let mut state = 0x5eed_3d_u64;
+    let mut state = 0x005e_ed3d_u64;
     (0..POINT_COUNT)
         .map(|index| ScenePoint {
             x: (lcg(&mut state) - 0.5) * 5.2,
@@ -41,7 +41,7 @@ fn camera_x(frame: usize) -> f64 {
 
 fn render_frame(frame: usize, points: &[ScenePoint]) -> FrameInput {
     let mut rgba = vec![238_u8; (WIDTH * HEIGHT * 4) as usize];
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
 
@@ -83,7 +83,7 @@ fn render_frame(frame: usize, points: &[ScenePoint]) -> FrameInput {
 fn write_ppm(path: &Path, frame: &FrameInput) {
     let mut bytes = format!("P6\n{} {}\n255\n", frame.width, frame.height).into_bytes();
     bytes.reserve((frame.width * frame.height * 3) as usize);
-    for pixel in frame.rgba.chunks_exact(4) {
+    for pixel in frame.rgba.as_chunks::<4>().0 {
         bytes.extend_from_slice(&pixel[..3]);
     }
     fs::write(path, bytes).expect("write PPM fixture");
