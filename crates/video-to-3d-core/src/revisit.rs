@@ -44,13 +44,37 @@ pub(super) struct RecoveredView {
     pub camera_center: Vector3<f64>,
 }
 
-pub(super) fn analyze(
-    features: &[Vec<Feature>],
-    keyframes: &[usize],
-    seed_pair_index: Option<usize>,
+#[derive(Clone, Copy)]
+pub(super) struct RevisitContext<'a> {
+    features: &'a [Vec<Feature>],
     width: u32,
     height: u32,
+    focal_pixels: f64,
     options: ReconstructionOptions,
+}
+
+impl<'a> RevisitContext<'a> {
+    pub(super) fn new(
+        features: &'a [Vec<Feature>],
+        width: u32,
+        height: u32,
+        focal_pixels: f64,
+        options: ReconstructionOptions,
+    ) -> Self {
+        Self {
+            features,
+            width,
+            height,
+            focal_pixels,
+            options,
+        }
+    }
+}
+
+pub(super) fn analyze(
+    context: &RevisitContext<'_>,
+    keyframes: &[usize],
+    seed_pair_index: Option<usize>,
 ) -> RevisitStats {
     let mut frames = keyframes.to_vec();
     if let Some(seed_pair_index) = seed_pair_index {
@@ -66,13 +90,13 @@ pub(super) fn analyze(
             if to_frame <= from_frame + 1 {
                 continue;
             }
-            let Some(source) = features.get(from_frame) else {
+            let Some(source) = context.features.get(from_frame) else {
                 continue;
             };
-            let Some(target) = features.get(to_frame) else {
+            let Some(target) = context.features.get(to_frame) else {
                 continue;
             };
-            let matches = mutual_unbounded_matches(source, target, width, height, options);
+            let matches = mutual_unbounded_matches(source, target, context);
             let overlap_ratio = overlap_ratio(source.len(), target.len(), matches.len());
             if matches.len() < MIN_REVISIT_MATCHES || overlap_ratio < MIN_REVISIT_OVERLAP {
                 continue;
@@ -102,20 +126,15 @@ pub(super) fn analyze(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn recover_failed_registrations(
     stats: &mut RevisitStats,
     seed_pair_index: usize,
     estimate: &two_view::TwoViewEstimate,
     candidate_frames: &[usize],
     registered_frames: &HashSet<usize>,
-    features: &[Vec<Feature>],
-    width: u32,
-    height: u32,
-    focal_pixels: f64,
-    options: ReconstructionOptions,
+    context: &RevisitContext<'_>,
 ) -> Vec<RecoveredView> {
-    let Some(seed_features) = features.get(seed_pair_index) else {
+    let Some(seed_features) = context.features.get(seed_pair_index) else {
         return Vec::new();
     };
     let seed_points_by_feature: HashMap<usize, Vector3<f64>> = estimate
@@ -132,11 +151,10 @@ pub(super) fn recover_failed_registrations(
         {
             continue;
         }
-        let Some(target_features) = features.get(frame_index) else {
+        let Some(target_features) = context.features.get(frame_index) else {
             continue;
         };
-        let matches =
-            mutual_unbounded_matches(seed_features, target_features, width, height, options);
+        let matches = mutual_unbounded_matches(seed_features, target_features, context);
         let candidate_overlap = overlap_ratio(seed_features.len(), target_features.len(), matches.len());
         if matches.len() < MIN_REVISIT_MATCHES || candidate_overlap < MIN_REVISIT_OVERLAP {
             continue;
@@ -156,7 +174,12 @@ pub(super) fn recover_failed_registrations(
             .collect();
 
         let pose = if correspondences.len() >= MIN_RECOVERY_CORRESPONDENCES {
-            pnp::estimate_pose(&correspondences, width, height, focal_pixels)
+            pnp::estimate_pose(
+                &correspondences,
+                context.width,
+                context.height,
+                context.focal_pixels,
+            )
         } else {
             None
         };
@@ -193,12 +216,10 @@ pub(super) fn recover_failed_registrations(
 fn mutual_unbounded_matches(
     source: &[Feature],
     target: &[Feature],
-    width: u32,
-    height: u32,
-    options: ReconstructionOptions,
+    context: &RevisitContext<'_>,
 ) -> Vec<FeatureMatch> {
-    let mut revisit_options = options;
-    revisit_options.match_radius = width.saturating_add(height);
+    let mut revisit_options = context.options;
+    revisit_options.match_radius = context.width.saturating_add(context.height);
     let forward = match_features(source, target, revisit_options);
     let reverse = match_features(target, source, revisit_options);
     let reverse_pairs: HashSet<(usize, usize)> = reverse
@@ -246,9 +267,11 @@ mod tests {
             match_radius: 8,
             ..ReconstructionOptions::default()
         };
+        let features = vec![source.clone(), target.clone()];
+        let context = RevisitContext::new(&features, 640, 480, 500.0, options);
 
         assert!(match_features(&source, &target, options).is_empty());
-        let matches = mutual_unbounded_matches(&source, &target, 640, 480, options);
+        let matches = mutual_unbounded_matches(&source, &target, &context);
         assert_eq!(matches.len(), 12);
         assert!(
             matches
@@ -264,14 +287,14 @@ mod tests {
             .map(|index| feature(index, 40 + index as u32, 60 + index as u32))
             .collect();
         let features = vec![base.clone(), base.clone(), base.clone()];
-        let stats = analyze(
+        let context = RevisitContext::new(
             &features,
-            &[0, 1, 2],
-            Some(0),
             640,
             480,
+            500.0,
             ReconstructionOptions::default(),
         );
+        let stats = analyze(&context, &[0, 1, 2], Some(0));
 
         assert_eq!(stats.candidates.len(), 1);
         assert_eq!(stats.candidates[0].from_frame, 0);
@@ -349,6 +372,13 @@ mod tests {
             seed_features.clone(),
             target_features,
         ];
+        let context = RevisitContext::new(
+            &features,
+            width,
+            height,
+            focal,
+            ReconstructionOptions::default(),
+        );
         let mut stats = RevisitStats::default();
         let recovered = recover_failed_registrations(
             &mut stats,
@@ -356,11 +386,7 @@ mod tests {
             &estimate,
             &[3],
             &HashSet::from([0, 1]),
-            &features,
-            width,
-            height,
-            focal,
-            ReconstructionOptions::default(),
+            &context,
         );
 
         assert_eq!(stats.recoveries.len(), 1);
