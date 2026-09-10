@@ -14,6 +14,7 @@ const MIN_AMBIGUITY_MARGIN: f64 = 1.0;
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DenseStats {
     pub attempted: bool,
+    pub skip_reason: Option<String>,
     pub reference_frame: Option<usize>,
     pub source_views: usize,
     pub sampled_pixels: usize,
@@ -31,6 +32,18 @@ pub(super) struct DenseAnalysis {
     pub points: Vec<Point3>,
 }
 
+impl DenseAnalysis {
+    fn skipped(reason: impl Into<String>) -> Self {
+        Self {
+            stats: DenseStats {
+                skip_reason: Some(reason.into()),
+                ..DenseStats::default()
+            },
+            points: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Candidate {
     depth: f64,
@@ -45,14 +58,30 @@ pub(super) fn estimate_depth_points(
     sparse_points: &[Vector3<f64>],
     focal: f64,
 ) -> DenseAnalysis {
-    if cameras.len() < 2 || sparse_points.len() < MIN_VISIBLE_SPARSE_POINTS || frames.is_empty() {
-        return DenseAnalysis::default();
+    if frames.is_empty() {
+        return DenseAnalysis::skipped("no sampled frames are available");
+    }
+    if cameras.len() < 2 {
+        return DenseAnalysis::skipped(
+            "fewer than two accepted registered cameras are available",
+        );
+    }
+    if sparse_points.len() < MIN_VISIBLE_SPARSE_POINTS {
+        return DenseAnalysis::skipped(format!(
+            "fewer than {MIN_VISIBLE_SPARSE_POINTS} accepted sparse landmarks are available"
+        ));
+    }
+
+    let width = frames[0].width;
+    let height = frames[0].height;
+    if width < 16 || height < 16 {
+        return DenseAnalysis::skipped("sampled frames are too small for coarse depth estimation");
     }
 
     let Some((reference, mut visible_depths)) = cameras
         .iter()
         .filter_map(|camera| {
-            let depths = visible_depths(camera, sparse_points);
+            let depths = visible_depths(camera, sparse_points, width, height, focal);
             (depths.len() >= MIN_VISIBLE_SPARSE_POINTS).then_some((camera, depths))
         })
         .max_by(|(left_camera, left_depths), (right_camera, right_depths)| {
@@ -62,27 +91,26 @@ pub(super) fn estimate_depth_points(
                 .then_with(|| right_camera.frame_index.cmp(&left_camera.frame_index))
         })
     else {
-        return DenseAnalysis::default();
+        return DenseAnalysis::skipped(format!(
+            "no registered camera sees at least {MIN_VISIBLE_SPARSE_POINTS} accepted sparse landmarks inside its image"
+        ));
     };
 
     visible_depths.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
     let lower = quantile(&visible_depths, 0.10);
     let upper = quantile(&visible_depths, 0.90);
     if !lower.is_finite() || !upper.is_finite() || lower <= 0.0 || upper <= 0.0 {
-        return DenseAnalysis::default();
+        return DenseAnalysis::skipped(
+            "visible sparse landmarks do not provide a finite positive depth-search envelope",
+        );
     }
     let search_min_depth = (lower * 0.8).max(1.0e-4);
     let search_max_depth = (upper * 1.25).max(search_min_depth * 1.2);
     let median_depth = quantile(&visible_depths, 0.50);
 
     let Some(reference_frame) = frames.get(reference.frame_index) else {
-        return DenseAnalysis::default();
+        return DenseAnalysis::skipped("the selected reference camera has no sampled frame");
     };
-    let width = reference_frame.width;
-    let height = reference_frame.height;
-    if width < 16 || height < 16 {
-        return DenseAnalysis::default();
-    }
 
     let mut sources: Vec<&RegisteredCamera> = cameras
         .iter()
@@ -102,7 +130,9 @@ pub(super) fn estimate_depth_points(
     });
     sources.truncate(MAX_SOURCE_VIEWS);
     if sources.is_empty() {
-        return DenseAnalysis::default();
+        return DenseAnalysis::skipped(
+            "no second registered camera has sufficient baseline and image overlap with the selected reference",
+        );
     }
 
     let reference_luma = to_luma(reference_frame);
@@ -114,7 +144,7 @@ pub(super) fn estimate_depth_points(
         })
         .collect();
     if source_luma.is_empty() {
-        return DenseAnalysis::default();
+        return DenseAnalysis::skipped("no sampled source frame is available for the selected cameras");
     }
 
     let stride = (width.min(height) / 48).clamp(4, 12) as usize;
@@ -240,6 +270,7 @@ pub(super) fn estimate_depth_points(
     DenseAnalysis {
         stats: DenseStats {
             attempted: true,
+            skip_reason: None,
             reference_frame: Some(reference.frame_index),
             source_views: source_luma.len(),
             sampled_pixels,
@@ -254,12 +285,18 @@ pub(super) fn estimate_depth_points(
     }
 }
 
-fn visible_depths(camera: &RegisteredCamera, sparse_points: &[Vector3<f64>]) -> Vec<f64> {
+fn visible_depths(
+    camera: &RegisteredCamera,
+    sparse_points: &[Vector3<f64>],
+    width: u32,
+    height: u32,
+    focal: f64,
+) -> Vec<f64> {
     sparse_points
         .iter()
         .filter_map(|point| {
-            let camera_point = camera.rotation * point + camera.translation;
-            (camera_point.z.is_finite() && camera_point.z > 1.0e-4).then_some(camera_point.z)
+            let (x, y, depth) = project(camera, *point, width, height, focal)?;
+            in_image_bounds(x, y, width, height).then_some(depth)
         })
         .collect()
 }
@@ -418,6 +455,15 @@ fn sample_bilinear(luma: &[u8], width: u32, height: u32, x: f64, y: f64) -> Opti
     Some(top * (1.0 - ty) + bottom * ty)
 }
 
+fn in_image_bounds(x: f64, y: f64, width: u32, height: u32) -> bool {
+    x.is_finite()
+        && y.is_finite()
+        && x >= 0.0
+        && y >= 0.0
+        && x < width as f64
+        && y < height as f64
+}
+
 fn in_bilinear_bounds(x: f64, y: f64, width: u32, height: u32) -> bool {
     x.is_finite()
         && y.is_finite()
@@ -556,6 +602,7 @@ mod tests {
         let result = estimate_depth_points(&frames, &cameras, &sparse, focal);
 
         assert!(result.stats.attempted);
+        assert!(result.stats.skip_reason.is_none());
         assert_eq!(result.stats.reference_frame, Some(0));
         assert_eq!(result.stats.source_views, 2);
         assert!(
@@ -588,6 +635,7 @@ mod tests {
         let result = estimate_depth_points(&[frame.clone(), frame], &cameras, &sparse, focal);
 
         assert!(result.stats.attempted);
+        assert!(result.stats.skip_reason.is_none());
         assert!(result.points.is_empty());
         assert_eq!(result.stats.accepted_points, 0);
     }
@@ -603,6 +651,28 @@ mod tests {
         let result = estimate_depth_points(&[frame], &[camera(0, 0.0)], &sparse, focal);
 
         assert!(!result.stats.attempted);
+        assert!(result
+            .stats
+            .skip_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("two accepted registered cameras")));
         assert!(result.points.is_empty());
+    }
+
+    #[test]
+    fn visible_depths_ignore_offscreen_landmarks() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let camera = camera(0, 0.0);
+        let sparse = vec![
+            Vector3::new(0.0, 0.0, 4.0),
+            Vector3::new(100.0, 0.0, 4.0),
+            Vector3::new(0.0, -100.0, 4.0),
+        ];
+
+        let depths = visible_depths(&camera, &sparse, width, height, focal);
+
+        assert_eq!(depths, vec![4.0]);
     }
 }
