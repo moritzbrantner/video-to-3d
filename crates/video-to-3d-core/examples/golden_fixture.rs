@@ -59,10 +59,8 @@ impl Scenario {
                 z: 0.0,
             },
             Self::Revisit => {
-                const X: [f64; FRAME_COUNT] =
-                    [-0.42, -0.25, -0.08, 0.10, 0.29, 0.14, -0.03, -0.21];
-                const Y: [f64; FRAME_COUNT] =
-                    [0.00, 0.02, 0.04, 0.05, 0.04, 0.02, 0.00, -0.02];
+                const X: [f64; FRAME_COUNT] = [-0.42, -0.25, -0.08, 0.10, 0.29, 0.14, -0.03, -0.21];
+                const Y: [f64; FRAME_COUNT] = [0.00, 0.02, 0.04, 0.05, 0.04, 0.02, 0.00, -0.02];
                 CameraCenter {
                     x: X[frame],
                     y: Y[frame],
@@ -70,7 +68,7 @@ impl Scenario {
                 }
             }
             Self::Forward => CameraCenter {
-                x: -0.14 + frame as f64 * 0.04,
+                x: -0.21 + frame as f64 * 0.06,
                 y: 0.0,
                 z: frame as f64 * 0.08,
             },
