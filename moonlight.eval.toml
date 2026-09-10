@@ -45,3 +45,12 @@ cwd = "."
 timeout_ms = 900000
 ignore_stdout = true
 ignore_stderr = true
+
+[[checks]]
+id = "classic-runtime-budget"
+name = "Classic COLMAP runtime budget"
+command = "python3 scripts/assert_classic_runtime.py"
+cwd = "."
+timeout_ms = 120000
+ignore_stdout = false
+ignore_stderr = false
