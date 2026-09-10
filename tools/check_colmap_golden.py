@@ -114,6 +114,10 @@ def render_markdown(
             f"\n| runtime-profiler median wall time | {rust_ms:.1f} ms | {colmap_ms:.1f} ms | {ratio:.2f}× COLMAP |\n"
         )
 
+    details = ""
+    if errors:
+        details = "\n" + "\n".join(f"- {error}" for error in errors) + "\n"
+
     return f"""#### COLMAP golden reference — {case}
 
 | Evidence | video-to-3d | COLMAP | Gate |
@@ -124,6 +128,15 @@ def render_markdown(
 | Normalized camera-center RMSE | {pose_rmse:.3f} | known trajectory | Rust ≤ {max_normalized_pose_rmse:.3f} after Sim(3) alignment |
 {runtime_rows}
 Status: {'PASS' if not errors else 'FAIL'}
+{details}"""
+
+
+def render_incomplete_markdown(case: str, error: Exception) -> str:
+    return f"""#### COLMAP golden reference — {case}
+
+Status: FAIL
+
+- Incomplete benchmark evidence: {error}
 """
 
 
@@ -162,7 +175,11 @@ def main() -> int:
             colmap_runtime=args.colmap_runtime,
             errors=errors,
         )
-    except (ValueError, KeyError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        markdown = render_incomplete_markdown(args.case, error)
+        print(markdown)
+        if args.markdown:
+            args.markdown.write_text(markdown)
         print(f"golden-gate: {error}")
         return 1
 
