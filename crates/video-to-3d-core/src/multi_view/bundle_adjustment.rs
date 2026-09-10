@@ -22,6 +22,23 @@ type Matrix6 = SMatrix<f64, 6, 6>;
 type Vector6 = SVector<f64, 6>;
 
 #[derive(Clone, Copy, Debug)]
+pub(super) struct ProjectionModel {
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+}
+
+impl ProjectionModel {
+    pub(super) fn new(width: u32, height: u32, focal_pixels: f64) -> Self {
+        Self {
+            width,
+            height,
+            focal_pixels,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct BundleObservation {
     camera_index: usize,
     landmark_index: usize,
@@ -42,9 +59,7 @@ pub(super) fn optimize(
     new_landmarks: &[NewLandmark],
     cameras: &[RegisteredCamera],
     features: &[Vec<Feature>],
-    width: u32,
-    height: u32,
-    focal_pixels: f64,
+    projection: ProjectionModel,
 ) -> BundleAdjustmentResult {
     let original_seed_points = seed_points.to_vec();
     let original_new_points: Vec<Vector3<f64>> = new_landmarks
@@ -62,7 +77,10 @@ pub(super) fn optimize(
             new_landmark_positions: original_new_points,
         };
     };
-    if cameras.len() < 3 || !focal_pixels.is_finite() || focal_pixels <= 0.0 {
+    if cameras.len() < 3
+        || !projection.focal_pixels.is_finite()
+        || projection.focal_pixels <= 0.0
+    {
         return BundleAdjustmentResult {
             stats,
             cameras: original_cameras,
@@ -101,9 +119,7 @@ pub(super) fn optimize(
         cameras,
         &camera_by_frame,
         features,
-        width,
-        height,
-        focal_pixels,
+        projection,
     );
     let landmark_observations = observation_indices_by_landmark(landmarks.len(), &observations);
     let camera_observations = observation_indices_by_camera(cameras.len(), &observations);
@@ -138,9 +154,9 @@ pub(super) fn optimize(
         cameras,
         &landmarks,
         &observations,
-        width,
-        height,
-        focal_pixels,
+        projection.width,
+        projection.height,
+        projection.focal_pixels,
     ) else {
         return BundleAdjustmentResult {
             stats,
@@ -161,9 +177,9 @@ pub(super) fn optimize(
         &camera_observations,
         &landmark_observations,
         &fixed_frames,
-        width,
-        height,
-        focal_pixels,
+        projection.width,
+        projection.height,
+        projection.focal_pixels,
     );
     stats.iterations = iterations;
 
@@ -171,9 +187,9 @@ pub(super) fn optimize(
         &working_cameras,
         &working_landmarks,
         &observations,
-        width,
-        height,
-        focal_pixels,
+        projection.width,
+        projection.height,
+        projection.focal_pixels,
     ) else {
         return BundleAdjustmentResult {
             stats,
@@ -231,9 +247,7 @@ fn build_observations(
     cameras: &[RegisteredCamera],
     camera_by_frame: &HashMap<usize, usize>,
     features: &[Vec<Feature>],
-    width: u32,
-    height: u32,
-    focal_pixels: f64,
+    projection: ProjectionModel,
 ) -> Vec<BundleObservation> {
     let mut observations = Vec::new();
     for (landmark_index, landmark) in landmarks.iter().enumerate() {
@@ -260,9 +274,9 @@ fn build_observations(
                 &cameras[camera_index],
                 &landmark.position,
                 &observation,
-                width,
-                height,
-                focal_pixels,
+                projection.width,
+                projection.height,
+                projection.focal_pixels,
             ) else {
                 continue;
             };
