@@ -118,7 +118,7 @@ export default function Home() {
       ? failedCount > 0
         ? `${readyCount} ready · ${failedCount} failed`
         : runs.length === 1 && reconstruction?.calibrated_pair
-          ? "Calibrated seed geometry and robust registration evidence ready"
+          ? "Calibrated multi-view sparse geometry ready"
           : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
       : "Choose one or more videos to begin";
 
@@ -131,9 +131,10 @@ export default function Home() {
           <p className="lede">
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
             the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
-            links triangulated seed landmarks into other selected frames, and uses deterministic robust
-            PnP to register additional cameras when their 3D↔2D evidence passes inlier and reprojection
-            gates. The sparse point cloud still comes only from the calibrated seed pair.
+            registers additional cameras with deterministic robust PnP, and triangulates non-seed
+            tracks when accepted views provide enough geometric support. New points must pass positive
+            depth, reprojection, support-ratio, and triangulation-angle gates before they enter the
+            sparse cloud.
           </p>
         </div>
         <label className="upload-button">
@@ -198,7 +199,7 @@ export default function Home() {
         </div>
 
         <aside className="method-panel">
-          <h2>Slice 3 sparse registration</h2>
+          <h2>Slice 3 multi-view sparse geometry</h2>
           <ol>
             <li>Decode and sample up to 18 reduced-resolution frames per video in the browser.</li>
             <li>Detect and match local image features in Rust/WASM.</li>
@@ -206,12 +207,17 @@ export default function Home() {
             <li>Select keyframe candidates from track overlap and accumulated residual parallax.</li>
             <li>Link calibrated seed landmarks through those tracks into other selected keyframes.</li>
             <li>Run bounded deterministic robust PnP and accept only geometrically supported poses.</li>
+            <li>
+              Triangulate non-seed tracks from accepted registered views and reject weak new geometry.
+            </li>
           </ol>
           <p className="method-note">
             A selected frame needs at least eight triangulated seed landmarks before PnP is attempted,
-            then must pass inlier-ratio and reprojection-error gates. Accepted cameras share the seed
-            pair&apos;s arbitrary monocular scale. New-landmark triangulation, bundle adjustment, loop
-            handling, and cross-video tracks remain later work in slice 3 or 6.
+            then must pass inlier-ratio and reprojection-error gates. New landmarks need an accepted
+            additional view and must pass multi-view support, positive-depth, reprojection, and
+            triangulation-angle gates. All accepted geometry shares the seed pair&apos;s arbitrary
+            monocular scale. Bundle adjustment, loop handling, and cross-video tracks remain later
+            work in slice 3 or 6.
           </p>
         </aside>
       </section>
@@ -387,6 +393,50 @@ export default function Home() {
             </section>
           ) : null}
 
+          {reconstruction.calibrated_pair ? (
+            <section className="section-block">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Triangulation evidence</p>
+                  <h2>New-landmark acceptance</h2>
+                </div>
+                <p>Only non-seed tracks observed by an accepted additional view are eligible</p>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Candidate tracks</th>
+                      <th>Accepted new landmarks</th>
+                      <th>Supporting observations</th>
+                      <th>Median reprojection error</th>
+                      <th>Median triangulation angle</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>{reconstruction.multi_view.new_landmarks.candidate_tracks}</td>
+                      <td>{reconstruction.multi_view.new_landmarks.accepted_landmarks}</td>
+                      <td>{reconstruction.multi_view.new_landmarks.supporting_observations}</td>
+                      <td>
+                        {reconstruction.multi_view.new_landmarks.median_reprojection_error_pixels ===
+                        null
+                          ? "—"
+                          : `${reconstruction.multi_view.new_landmarks.median_reprojection_error_pixels.toFixed(2)} px`}
+                      </td>
+                      <td>
+                        {reconstruction.multi_view.new_landmarks
+                          .median_triangulation_angle_degrees === null
+                          ? "—"
+                          : `${reconstruction.multi_view.new_landmarks.median_triangulation_angle_degrees.toFixed(2)}°`}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
           {reconstruction.warnings.length > 0 ? (
             <section className="section-block">
               <div className="section-heading">
@@ -411,7 +461,7 @@ export default function Home() {
               </div>
               <p>
                 {reconstruction.calibrated_pair
-                  ? `${reconstruction.points.length} seed-pair sparse points · ${reconstruction.cameras.length} accepted cameras`
+                  ? `${reconstruction.points.length} accepted sparse points · ${reconstruction.cameras.length} accepted cameras`
                   : `${reconstruction.points.length} fallback sparse points · ${reconstruction.cameras.length} conservative camera estimates`}
               </p>
             </div>
