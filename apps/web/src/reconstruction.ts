@@ -138,9 +138,25 @@ export type MultiViewStats = {
   bundle_adjustment: BundleAdjustmentStats;
 };
 
+export type DenseStats = {
+  attempted: boolean;
+  skip_reason: string | null;
+  reference_frame: number | null;
+  source_views: number;
+  sampled_pixels: number;
+  depth_hypotheses: number;
+  accepted_points: number;
+  median_supporting_views: number | null;
+  median_photometric_error: number | null;
+  search_min_depth: number | null;
+  search_max_depth: number | null;
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
+  dense_points: Point3[];
+  dense: DenseStats;
   pairs: PairStats[];
   calibrated_pair: CalibratedPairStats | null;
   multi_view: MultiViewStats;
