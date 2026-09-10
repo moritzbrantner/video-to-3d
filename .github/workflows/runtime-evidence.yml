@@ -1,4 +1,4 @@
-name: Runtime evidence and Moonlight
+name: Runtime evidence, COLMAP golden, and Moonlight
 
 on:
   pull_request:
@@ -17,7 +17,7 @@ env:
 
 jobs:
   reconstruction-evidence:
-    name: Reconstruction runtime evidence and behavior
+    name: Reconstruction runtime, COLMAP golden, and behavior
     runs-on: ubuntu-24.04
     steps:
       - name: Check out exact candidate
@@ -41,15 +41,18 @@ jobs:
           ref: ${{ env.MOONLIGHT_REV }}
           path: moonlight
 
-      - name: Install Rust
+      - name: Install Rust and COLMAP
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
           rustup default stable
+          sudo apt-get update
+          sudo apt-get install -y colmap
+          colmap -h | head -n 4
 
       - name: Install runtime-profiler
         run: cargo install --git https://github.com/moritzbrantner/runtime-profiler --rev "$RUNTIME_PROFILER_REV" --locked
 
-      - name: Give the base the identical reconstruction workload
+      - name: Give the base the identical revision workload
         run: |
           mkdir -p reference/crates/video-to-3d-core/examples reference/profiles/runtime-profiler
           cp candidate/crates/video-to-3d-core/examples/profile_reconstruct.rs \
@@ -65,14 +68,14 @@ jobs:
               commit -m 'chore: attach comparable reconstruction workload'
           fi
 
-      - name: Prime deterministic workload
+      - name: Prime deterministic workloads
         run: |
           (cd reference && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct)
-          (cd candidate && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct)
+          (cd candidate && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct --example golden_fixture)
           test -z "$(git -C reference status --porcelain)"
           test -z "$(git -C candidate status --porcelain)"
 
-      - name: Capture reference evidence
+      - name: Capture reference revision evidence
         working-directory: reference
         run: |
           runtime-profiler capture \
@@ -80,7 +83,7 @@ jobs:
             --output "$RUNNER_TEMP/reference-reconstruct"
           runtime-profiler validate --bundle "$RUNNER_TEMP/reference-reconstruct"
 
-      - name: Capture candidate evidence
+      - name: Capture candidate revision evidence
         working-directory: candidate
         run: |
           runtime-profiler capture \
@@ -88,7 +91,7 @@ jobs:
             --output "$RUNNER_TEMP/candidate-reconstruct"
           runtime-profiler validate --bundle "$RUNNER_TEMP/candidate-reconstruct"
 
-      - name: Compare runtime evidence
+      - name: Compare revision runtime evidence
         run: |
           set -euo pipefail
           runtime-profiler score \
@@ -96,11 +99,68 @@ jobs:
             --candidate "$RUNNER_TEMP/candidate-reconstruct" \
             --json | tee "$RUNNER_TEMP/runtime-reconstruct.json"
           {
-            echo '### runtime-profiler comparison'
+            echo '### runtime-profiler revision comparison'
             echo '```json'
             cat "$RUNNER_TEMP/runtime-reconstruct.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate shared golden fixture and reconstruction evidence
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          rm -rf target/golden-reference
+          mkdir -p target/golden-reference/images
+          target/release/examples/golden_fixture target/golden-reference/images \
+            | tee "$RUNNER_TEMP/golden-rust.txt"
+          bash tools/run_colmap_golden.sh \
+            target/golden-reference/images \
+            target/golden-reference/colmap-quality \
+            | tee "$RUNNER_TEMP/golden-colmap.txt"
+
+      - name: Capture Rust golden runtime
+        working-directory: candidate
+        run: |
+          runtime-profiler capture \
+            --scenario profiles/runtime-profiler/golden-rust.json \
+            --output "$RUNNER_TEMP/golden-rust-runtime"
+          runtime-profiler validate --bundle "$RUNNER_TEMP/golden-rust-runtime"
+          runtime-profiler summarize \
+            --bundle "$RUNNER_TEMP/golden-rust-runtime" \
+            --json > "$RUNNER_TEMP/golden-rust-runtime.json"
+
+      - name: Capture COLMAP golden runtime
+        working-directory: candidate
+        run: |
+          runtime-profiler capture \
+            --scenario profiles/runtime-profiler/golden-colmap.json \
+            --output "$RUNNER_TEMP/golden-colmap-runtime"
+          runtime-profiler validate --bundle "$RUNNER_TEMP/golden-colmap-runtime"
+          runtime-profiler summarize \
+            --bundle "$RUNNER_TEMP/golden-colmap-runtime" \
+            --json > "$RUNNER_TEMP/golden-colmap-runtime.json"
+
+      - name: Evaluate COLMAP golden quality envelope
+        id: colmap-golden
+        continue-on-error: true
+        working-directory: candidate
+        run: |
+          python3 tools/check_colmap_golden.py \
+            --rust "$RUNNER_TEMP/golden-rust.txt" \
+            --colmap "$RUNNER_TEMP/golden-colmap.txt" \
+            --rust-runtime "$RUNNER_TEMP/golden-rust-runtime.json" \
+            --colmap-runtime "$RUNNER_TEMP/golden-colmap-runtime.json" \
+            --markdown "$RUNNER_TEMP/colmap-golden.md"
+
+      - name: Publish COLMAP golden diagnostics
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/colmap-golden.md"; then
+            cat "$RUNNER_TEMP/colmap-golden.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test "${{ steps.colmap-golden.outcome }}" != success; then
+            exit 1
+          fi
 
       - name: Run Moonlight correctness evaluation
         working-directory: candidate
@@ -126,10 +186,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: reconstruction-runtime-moonlight-${{ github.event.pull_request.head.sha }}
+          name: reconstruction-runtime-colmap-moonlight-${{ github.event.pull_request.head.sha }}
           path: |
             ${{ runner.temp }}/reference-reconstruct
             ${{ runner.temp }}/candidate-reconstruct
             ${{ runner.temp }}/runtime-reconstruct.json
+            ${{ runner.temp }}/golden-rust.txt
+            ${{ runner.temp }}/golden-colmap.txt
+            ${{ runner.temp }}/golden-rust-runtime
+            ${{ runner.temp }}/golden-colmap-runtime
+            ${{ runner.temp }}/golden-rust-runtime.json
+            ${{ runner.temp }}/golden-colmap-runtime.json
+            ${{ runner.temp }}/colmap-golden.md
             ${{ runner.temp }}/moonlight.md
           if-no-files-found: warn
