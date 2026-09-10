@@ -1,0 +1,83 @@
+name: COLMAP golden reference
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  golden-reference:
+    name: Shared-scene sparse SfM reference
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install COLMAP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y colmap
+          colmap -h | head -n 20
+
+      - name: Generate shared deterministic scene
+        run: python3 scripts/generate_golden_scene.py "$RUNNER_TEMP/golden-scene"
+
+      - name: Build Rust golden evaluator
+        run: cargo build --locked --release -p video-to-3d-core --example golden_reconstruct
+
+      - name: Reconstruct with video-to-3d
+        run: |
+          target/release/examples/golden_reconstruct \
+            "$RUNNER_TEMP/golden-scene" \
+            "$RUNNER_TEMP/ours-cameras.tsv"
+
+      - name: Reconstruct with COLMAP
+        run: |
+          bash scripts/run_colmap_reference.sh \
+            "$RUNNER_TEMP/golden-scene" \
+            "$RUNNER_TEMP/colmap-cameras.tsv"
+
+      - name: Compare scale-invariant reconstruction quality
+        run: |
+          set -euo pipefail
+          python3 scripts/compare_golden_reconstruction.py \
+            --truth "$RUNNER_TEMP/golden-scene/ground_truth.tsv" \
+            --ours "$RUNNER_TEMP/ours-cameras.tsv" \
+            --colmap "$RUNNER_TEMP/colmap-cameras.tsv" \
+            --output "$RUNNER_TEMP/colmap-golden.json" \
+            --gate \
+            | tee "$RUNNER_TEMP/colmap-golden.txt"
+          {
+            echo '### COLMAP golden sparse-SfM comparison'
+            echo 'The shared fixture is scored with registered-camera coverage, scale/rotation/translation-invariant pairwise trajectory distances, and normalized return-to-start error. Raw monocular coordinates and point counts are not compared.'
+            echo '```json'
+            cat "$RUNNER_TEMP/colmap-golden.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload golden evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: colmap-golden-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/golden-scene/ground_truth.tsv
+            ${{ runner.temp }}/ours-cameras.tsv
+            ${{ runner.temp }}/colmap-cameras.tsv
+            ${{ runner.temp }}/colmap-golden.json
+            ${{ runner.temp }}/colmap-golden.txt
+          if-no-files-found: warn
