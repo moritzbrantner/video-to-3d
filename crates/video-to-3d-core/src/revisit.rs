@@ -29,11 +29,19 @@ pub struct RevisitRecoveryStats {
     pub median_reprojection_error_pixels: Option<f32>,
 }
 
+#[derive(Clone, Debug)]
+struct SeedRevisitEvidence {
+    target_frame: usize,
+    matches: Vec<FeatureMatch>,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RevisitStats {
     pub evaluated_pairs: usize,
     pub candidates: Vec<RevisitCandidateStats>,
     pub recoveries: Vec<RevisitRecoveryStats>,
+    #[serde(skip)]
+    seed_evidence: Vec<SeedRevisitEvidence>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,23 +82,11 @@ impl<'a> RevisitContext<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
-struct SeedRevisitEvidence {
-    target_frame: usize,
-    matches: Vec<FeatureMatch>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct RevisitAnalysis {
-    pub stats: RevisitStats,
-    seed_evidence: Vec<SeedRevisitEvidence>,
-}
-
 pub(super) fn analyze(
     context: &RevisitContext<'_>,
     keyframes: &[usize],
     seed_pair_index: Option<usize>,
-) -> RevisitAnalysis {
+) -> RevisitStats {
     let mut frames = keyframes.to_vec();
     if let Some(seed_pair_index) = seed_pair_index {
         frames.push(seed_pair_index);
@@ -155,18 +151,16 @@ pub(super) fn analyze(
     candidates.truncate(MAX_REVISIT_CANDIDATES);
     seed_evidence.sort_by_key(|evidence| evidence.target_frame);
 
-    RevisitAnalysis {
-        stats: RevisitStats {
-            evaluated_pairs: pairs.len(),
-            candidates,
-            recoveries: Vec::new(),
-        },
+    RevisitStats {
+        evaluated_pairs: pairs.len(),
+        candidates,
+        recoveries: Vec::new(),
         seed_evidence,
     }
 }
 
 pub(super) fn recover_failed_registrations(
-    analysis: &mut RevisitAnalysis,
+    stats: &mut RevisitStats,
     seed_pair_index: usize,
     estimate: &two_view::TwoViewEstimate,
     candidate_frames: &[usize],
@@ -181,7 +175,7 @@ pub(super) fn recover_failed_registrations(
         .collect();
     let mut recovered = Vec::new();
 
-    for evidence in &analysis.seed_evidence {
+    for evidence in &stats.seed_evidence {
         let frame_index = evidence.target_frame;
         if !candidate_frames.contains(&frame_index) || registered_frames.contains(&frame_index) {
             continue;
@@ -215,7 +209,7 @@ pub(super) fn recover_failed_registrations(
         } else {
             None
         };
-        analysis.stats.recoveries.push(RevisitRecoveryStats {
+        stats.recoveries.push(RevisitRecoveryStats {
             frame_index,
             source_frame_index: seed_pair_index,
             matches: evidence.matches.len(),
@@ -241,8 +235,7 @@ pub(super) fn recover_failed_registrations(
     }
 
     recovered.sort_by_key(|view| view.frame_index);
-    analysis
-        .stats
+    stats
         .recoveries
         .sort_by_key(|attempt| attempt.frame_index);
     recovered
@@ -263,10 +256,8 @@ fn preselect_pairs(
     }
 
     pairs.sort_by(|left, right| {
-        let left_seed = seed_pair_index
-            .is_some_and(|seed| left.0 == seed || left.1 == seed);
-        let right_seed = seed_pair_index
-            .is_some_and(|seed| right.0 == seed || right.1 == seed);
+        let left_seed = seed_pair_index.is_some_and(|seed| left.0 == seed || left.1 == seed);
+        let right_seed = seed_pair_index.is_some_and(|seed| right.0 == seed || right.1 == seed);
         right_seed
             .cmp(&left_seed)
             .then_with(|| (right.1 - right.0).cmp(&(left.1 - left.0)))
@@ -355,13 +346,13 @@ mod tests {
         let features = vec![base.clone(), base.clone(), base.clone()];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let analysis = analyze(&context, &[0, 1, 2], Some(0));
+        let stats = analyze(&context, &[0, 1, 2], Some(0));
 
-        assert_eq!(analysis.stats.evaluated_pairs, 1);
-        assert_eq!(analysis.stats.candidates.len(), 1);
-        assert_eq!(analysis.stats.candidates[0].from_frame, 0);
-        assert_eq!(analysis.stats.candidates[0].to_frame, 2);
-        assert_eq!(analysis.stats.candidates[0].matches, 12);
+        assert_eq!(stats.evaluated_pairs, 1);
+        assert_eq!(stats.candidates.len(), 1);
+        assert_eq!(stats.candidates[0].from_frame, 0);
+        assert_eq!(stats.candidates[0].to_frame, 2);
+        assert_eq!(stats.candidates[0].matches, 12);
     }
 
     #[test]
@@ -370,8 +361,8 @@ mod tests {
         let pairs = preselect_pairs(&frames, Some(0));
 
         assert_eq!(pairs.len(), MAX_REVISIT_PAIR_EVALUATIONS);
-        assert!(pairs.iter().all(|(from, to)| to > &(from + 1)));
-        assert!(pairs.iter().take(12).all(|(from, to)| *from == 0 || *to == 0));
+        assert!(pairs.iter().all(|(from, to)| *to > *from + 1));
+        assert!(pairs.iter().all(|(from, to)| *from == 0 || *to == 0));
     }
 
     #[test]
@@ -451,9 +442,9 @@ mod tests {
             focal,
             ReconstructionOptions::default(),
         );
-        let mut analysis = analyze(&context, &[0, 3], Some(0));
+        let mut stats = analyze(&context, &[0, 3], Some(0));
         let recovered = recover_failed_registrations(
-            &mut analysis,
+            &mut stats,
             0,
             &estimate,
             &[3],
@@ -461,8 +452,8 @@ mod tests {
             &context,
         );
 
-        assert_eq!(analysis.stats.recoveries.len(), 1);
-        assert!(analysis.stats.recoveries[0].accepted);
+        assert_eq!(stats.recoveries.len(), 1);
+        assert!(stats.recoveries[0].accepted);
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].frame_index, 3);
         assert!((recovered[0].camera_center - camera_center).norm() < 0.2);
@@ -476,18 +467,17 @@ mod tests {
         let features = vec![base.clone(), base.clone(), base.clone(), base];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let analysis = analyze(&context, &[1, 2, 3], Some(2));
+        let stats = analyze(&context, &[1, 2, 3], Some(2));
 
-        assert!(analysis
-            .stats
+        assert!(stats
             .candidates
             .iter()
             .all(|candidate| candidate.from_frame.abs_diff(candidate.to_frame) > 1));
-        assert!(analysis
+        assert!(stats
             .seed_evidence
             .iter()
             .all(|evidence| evidence.target_frame.abs_diff(2) > 1));
-        assert!(!analysis
+        assert!(!stats
             .seed_evidence
             .iter()
             .any(|evidence| evidence.target_frame == 1));
