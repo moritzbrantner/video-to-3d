@@ -524,13 +524,11 @@ mod tests {
     }
 
     fn texture(world_x: f64, world_y: f64) -> u8 {
-        let x = ((world_x + 20.0) * 17.0).floor() as i64;
-        let y = ((world_y + 20.0) * 19.0).floor() as i64;
-        let hash = x
-            .wrapping_mul(73_856_093)
-            .wrapping_add(y.wrapping_mul(19_349_663))
-            .unsigned_abs();
-        35 + (hash % 190) as u8
+        let value = 128.0
+            + 55.0 * (world_x * 15.0 + world_y * 2.7).sin()
+            + 40.0 * (world_y * 17.0 - world_x * 3.1).cos()
+            + 25.0 * ((world_x + world_y) * 11.0).sin();
+        value.round().clamp(0.0, 255.0) as u8
     }
 
     fn plane_frame(width: u32, height: u32, focal: f64, center_x: f64, depth: f64) -> FrameInput {
