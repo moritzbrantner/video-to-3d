@@ -66,6 +66,29 @@ export type RegisteredViewStats = {
   median_reprojection_error_pixels: number;
   rotation: number[];
   translation: number[];
+  recovered_from_revisit: boolean;
+};
+
+export type RevisitCandidateStats = {
+  from_frame: number;
+  to_frame: number;
+  matches: number;
+  overlap_ratio: number;
+};
+
+export type RevisitRecoveryStats = {
+  frame_index: number;
+  source_frame_index: number;
+  matches: number;
+  correspondences: number;
+  accepted: boolean;
+  inliers: number;
+  median_reprojection_error_pixels: number | null;
+};
+
+export type RevisitStats = {
+  candidates: RevisitCandidateStats[];
+  recoveries: RevisitRecoveryStats[];
 };
 
 export type NewLandmarkStats = {
@@ -107,6 +130,7 @@ export type ReconstructionResult = {
   pairs: PairStats[];
   calibrated_pair: CalibratedPairStats | null;
   multi_view: MultiViewStats;
+  revisits: RevisitStats;
   registered_views: RegisteredViewStats[];
   warnings: string[];
 };
