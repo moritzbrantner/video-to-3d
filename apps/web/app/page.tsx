@@ -138,10 +138,10 @@ export default function Home() {
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
             the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
             registers additional cameras with deterministic robust PnP, checks bounded non-adjacent
-            keyframe revisits to recover failed registrations, triangulates supported non-seed tracks,
-            and jointly refines accepted camera poses and sparse landmarks with deterministic bundle
-            adjustment. The calibrated seed-pair cameras stay fixed so the arbitrary monocular gauge
-            cannot drift.
+            keyframe revisits to recover failed registrations or close bounded registered-pose drift,
+            triangulates supported non-seed tracks, and jointly refines accepted camera poses and
+            sparse landmarks with deterministic bundle adjustment. The calibrated seed-pair cameras
+            stay fixed so the arbitrary monocular gauge cannot drift.
           </p>
         </div>
         <label className="upload-button">
@@ -217,27 +217,30 @@ export default function Home() {
             <li>Link calibrated seed landmarks through those tracks into other selected keyframes.</li>
             <li>Run bounded deterministic robust PnP and accept only geometrically supported poses.</li>
             <li>
-              Screen non-adjacent selected keyframes with mutual descriptor matches and retry failed
-              registrations only when direct seed-frame revisit evidence supports robust PnP.
+              Screen non-adjacent selected keyframes with mutual descriptor matches. Direct seed-frame
+              revisit evidence may recover a failed registration or propose a bounded correction for an
+              already registered camera.
             </li>
             <li>
               Triangulate non-seed tracks from accepted registered views and reject weak new geometry.
             </li>
             <li>
               Jointly refine supported landmarks and non-seed camera poses with bounded robust bundle
-              adjustment, adopting the result only when the reconstruction error improves.
+              adjustment. A revisit correction is retained only when this downstream pass also accepts
+              it and does not move the endpoint away from its closure evidence.
             </li>
           </ol>
           <p className="method-note">
             A selected frame needs at least eight triangulated seed landmarks before initial PnP is
-            attempted, then must pass inlier-ratio and reprojection-error gates. Revisit recovery is
-            deliberately narrower than loop closure: only strong mutual non-adjacent matches to the
-            calibrated seed frame can create a second PnP attempt, and that attempt uses the same
-            acceptance gates. New landmarks require genuine support from an accepted additional view.
-            Bundle adjustment uses only supported observations, Huber-weighted reprojection residuals,
-            bounded Gauss–Newton updates, and a no-regression acceptance boundary. Both seed cameras
-            remain fixed, preserving the arbitrary monocular coordinate frame. Pose-graph loop closure
-            and cross-video tracks remain outside this slice.
+            attempted, then must pass inlier-ratio and reprojection-error gates. Revisit evidence is
+            deliberately bounded: only strong mutual non-adjacent matches to the calibrated seed frame
+            can create recovery or closure PnP evidence, and an existing pose is corrected only for a
+            meaningful but limited disagreement. New landmarks require genuine support from an accepted
+            additional view. Bundle adjustment uses only supported observations, Huber-weighted
+            reprojection residuals, bounded Gauss–Newton updates, and a no-regression acceptance
+            boundary. Both seed cameras remain fixed, preserving the arbitrary monocular coordinate
+            frame. Arbitrary non-seed pose-graph constraints and cross-video tracks remain outside this
+            slice.
           </p>
         </aside>
       </section>
@@ -419,16 +422,17 @@ export default function Home() {
           ) : null}
 
           {reconstruction.revisits.candidates.length > 0 ||
-          reconstruction.revisits.recoveries.length > 0 ? (
+          reconstruction.revisits.recoveries.length > 0 ||
+          reconstruction.revisits.closures.length > 0 ? (
             <section className="section-block">
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">Revisit evidence</p>
-                  <h2>Non-adjacent screening and failed-registration recovery</h2>
+                  <h2>Non-adjacent screening, recovery, and bounded closure</h2>
                 </div>
                 <p>
-                  Mutual descriptor evidence may trigger direct seed-frame PnP; it never changes a
-                  pose by itself.
+                  Mutual descriptor evidence can trigger strict seed-frame PnP; geometry changes only
+                  after the downstream acceptance gates also hold.
                 </p>
               </div>
               {reconstruction.revisits.candidates.length > 0 ? (
@@ -479,6 +483,52 @@ export default function Home() {
                           <td>{recovery.accepted ? recovery.inliers : "—"}</td>
                           <td>{errorValue(recovery.median_reprojection_error_pixels)}</td>
                           <td>{recovery.accepted ? "Recovered" : "Rejected by robust PnP gates"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              {reconstruction.revisits.closures.length > 0 ? (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Closure target</th>
+                        <th>Seed revisit matches</th>
+                        <th>3D ↔ 2D correspondences</th>
+                        <th>PnP inliers</th>
+                        <th>Median reprojection error</th>
+                        <th>Center disagreement</th>
+                        <th>Rotation disagreement</th>
+                        <th>Decision</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reconstruction.revisits.closures.map((closure) => (
+                        <tr key={closure.frame_index}>
+                          <td>
+                            Frame {closure.frame_index + 1} from Frame {closure.source_frame_index + 1}
+                          </td>
+                          <td>{closure.matches}</td>
+                          <td>{closure.correspondences}</td>
+                          <td>{closure.inliers || "—"}</td>
+                          <td>{errorValue(closure.median_reprojection_error_pixels)}</td>
+                          <td>
+                            {closure.camera_center_delta_seed_baselines === null
+                              ? "—"
+                              : `${closure.camera_center_delta_seed_baselines.toFixed(3)} seed baselines`}
+                          </td>
+                          <td>
+                            {closure.rotation_delta_degrees === null
+                              ? "—"
+                              : `${closure.rotation_delta_degrees.toFixed(2)}°`}
+                          </td>
+                          <td>
+                            {closure.accepted
+                              ? "Integrated through bundle adjustment"
+                              : "Rejected or rolled back"}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

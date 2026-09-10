@@ -1,4 +1,7 @@
-use super::{match_features, pnp, two_view, Feature, FeatureMatch, ReconstructionOptions};
+use super::{
+    match_features, multi_view::RegisteredCamera, pnp, two_view, Feature, FeatureMatch,
+    ReconstructionOptions,
+};
 use nalgebra::{Matrix3, Vector3};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -9,6 +12,10 @@ const MIN_RECOVERY_CORRESPONDENCES: usize = 8;
 const MAX_REVISIT_CANDIDATES: usize = 16;
 const MAX_REVISIT_PAIR_EVALUATIONS: usize = 12;
 const MAX_REVISIT_FEATURES_PER_FRAME: usize = 192;
+const MAX_LOOP_CENTER_DELTA_SEED_BASELINES: f64 = 0.35;
+const MAX_LOOP_ROTATION_DELTA_DEGREES: f64 = 8.0;
+const MIN_LOOP_CENTER_DELTA_SEED_BASELINES: f64 = 0.005;
+const MIN_LOOP_ROTATION_DELTA_DEGREES: f64 = 0.1;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RevisitCandidateStats {
@@ -29,6 +36,19 @@ pub struct RevisitRecoveryStats {
     pub median_reprojection_error_pixels: Option<f32>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct RevisitClosureStats {
+    pub frame_index: usize,
+    pub source_frame_index: usize,
+    pub matches: usize,
+    pub correspondences: usize,
+    pub accepted: bool,
+    pub inliers: usize,
+    pub median_reprojection_error_pixels: Option<f32>,
+    pub camera_center_delta_seed_baselines: Option<f32>,
+    pub rotation_delta_degrees: Option<f32>,
+}
+
 #[derive(Clone, Debug)]
 struct SeedRevisitEvidence {
     target_frame: usize,
@@ -40,6 +60,7 @@ pub struct RevisitStats {
     pub evaluated_pairs: usize,
     pub candidates: Vec<RevisitCandidateStats>,
     pub recoveries: Vec<RevisitRecoveryStats>,
+    pub closures: Vec<RevisitClosureStats>,
     #[serde(skip)]
     seed_evidence: Vec<SeedRevisitEvidence>,
 }
@@ -50,6 +71,14 @@ pub(super) struct RecoveredView {
     pub correspondences: usize,
     pub inliers: usize,
     pub median_reprojection_error_pixels: f64,
+    pub rotation: Matrix3<f64>,
+    pub translation: Vector3<f64>,
+    pub camera_center: Vector3<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ClosureView {
+    pub frame_index: usize,
     pub rotation: Matrix3<f64>,
     pub translation: Vector3<f64>,
     pub camera_center: Vector3<f64>,
@@ -155,6 +184,7 @@ pub(super) fn analyze(
         evaluated_pairs: pairs.len(),
         candidates,
         recoveries: Vec::new(),
+        closures: Vec::new(),
         seed_evidence,
     }
 }
@@ -168,11 +198,7 @@ pub(super) fn recover_failed_registrations(
     context: &RevisitContext<'_>,
 ) -> Vec<RecoveredView> {
     let candidate_frames: HashSet<usize> = candidate_frames.iter().copied().collect();
-    let seed_points_by_feature: HashMap<usize, Vector3<f64>> = estimate
-        .points
-        .iter()
-        .map(|point| (point.source_feature_index, point.position))
-        .collect();
+    let seed_points_by_feature = seed_points_by_feature(estimate);
     let mut recovered = Vec::new();
 
     for evidence in &stats.seed_evidence {
@@ -184,31 +210,10 @@ pub(super) fn recover_failed_registrations(
         let Some(target_features) = context.features.get(frame_index) else {
             continue;
         };
+        let correspondences =
+            seed_correspondences(evidence, target_features, &seed_points_by_feature);
+        let pose = estimate_seed_pose(&correspondences, context);
 
-        let correspondences: Vec<pnp::PnpCorrespondence> = evidence
-            .matches
-            .iter()
-            .filter_map(|feature_match| {
-                let point = seed_points_by_feature.get(&feature_match.a)?;
-                let feature = target_features.get(feature_match.b)?;
-                Some(pnp::PnpCorrespondence {
-                    point: *point,
-                    x_pixels: feature.x as f64,
-                    y_pixels: feature.y as f64,
-                })
-            })
-            .collect();
-
-        let pose = if correspondences.len() >= MIN_RECOVERY_CORRESPONDENCES {
-            pnp::estimate_pose(
-                &correspondences,
-                context.width,
-                context.height,
-                context.focal_pixels,
-            )
-        } else {
-            None
-        };
         stats.recoveries.push(RevisitRecoveryStats {
             frame_index,
             source_frame_index: seed_pair_index,
@@ -237,6 +242,181 @@ pub(super) fn recover_failed_registrations(
     recovered.sort_by_key(|view| view.frame_index);
     stats.recoveries.sort_by_key(|attempt| attempt.frame_index);
     recovered
+}
+
+pub(super) fn close_registered_drift(
+    stats: &mut RevisitStats,
+    seed_pair_index: usize,
+    estimate: &two_view::TwoViewEstimate,
+    registered_cameras: &[RegisteredCamera],
+    context: &RevisitContext<'_>,
+) -> Vec<ClosureView> {
+    let seed_points_by_feature = seed_points_by_feature(estimate);
+    let seed_baseline = estimate.camera_center.norm().max(1.0e-9);
+    let camera_by_frame: HashMap<usize, &RegisteredCamera> = registered_cameras
+        .iter()
+        .map(|camera| (camera.frame_index, camera))
+        .collect();
+    let mut closures = Vec::new();
+
+    for evidence in &stats.seed_evidence {
+        let frame_index = evidence.target_frame;
+        let Some(current_camera) = camera_by_frame.get(&frame_index).copied() else {
+            continue;
+        };
+        debug_assert!(frame_index.abs_diff(seed_pair_index) > 1);
+        let Some(target_features) = context.features.get(frame_index) else {
+            continue;
+        };
+        let correspondences =
+            seed_correspondences(evidence, target_features, &seed_points_by_feature);
+        let pose = estimate_seed_pose(&correspondences, context);
+
+        let (center_delta_seed_baselines, rotation_delta) =
+            pose.as_ref().map_or((None, None), |pose| {
+                (
+                    Some(
+                        ((pose.camera_center - current_camera.camera_center()).norm()
+                            / seed_baseline) as f32,
+                    ),
+                    Some(rotation_delta_degrees(&pose.rotation, &current_camera.rotation) as f32),
+                )
+            });
+        let accepted = pose.as_ref().is_some_and(|pose| {
+            let center_delta =
+                (pose.camera_center - current_camera.camera_center()).norm() / seed_baseline;
+            let rotation_delta = rotation_delta_degrees(&pose.rotation, &current_camera.rotation);
+            let bounded = center_delta <= MAX_LOOP_CENTER_DELTA_SEED_BASELINES
+                && rotation_delta <= MAX_LOOP_ROTATION_DELTA_DEGREES;
+            let meaningful = center_delta >= MIN_LOOP_CENTER_DELTA_SEED_BASELINES
+                || rotation_delta >= MIN_LOOP_ROTATION_DELTA_DEGREES;
+            bounded && meaningful
+        });
+
+        stats.closures.push(RevisitClosureStats {
+            frame_index,
+            source_frame_index: seed_pair_index,
+            matches: evidence.matches.len(),
+            correspondences: correspondences.len(),
+            accepted,
+            inliers: pose.as_ref().map_or(0, |pose| pose.inliers),
+            median_reprojection_error_pixels: pose
+                .as_ref()
+                .map(|pose| pose.median_reprojection_error_pixels as f32),
+            camera_center_delta_seed_baselines: center_delta_seed_baselines,
+            rotation_delta_degrees: rotation_delta,
+        });
+
+        if accepted {
+            if let Some(pose) = pose {
+                closures.push(ClosureView {
+                    frame_index,
+                    rotation: pose.rotation,
+                    translation: pose.translation,
+                    camera_center: pose.camera_center,
+                });
+            }
+        }
+    }
+
+    closures.sort_by_key(|view| view.frame_index);
+    stats.closures.sort_by_key(|attempt| attempt.frame_index);
+    closures
+}
+
+pub(super) fn closure_corrections_retained(
+    closures: &[ClosureView],
+    before: &[RegisteredCamera],
+    after: &[RegisteredCamera],
+) -> bool {
+    if closures.is_empty() {
+        return false;
+    }
+
+    let before_by_frame: HashMap<usize, &RegisteredCamera> = before
+        .iter()
+        .map(|camera| (camera.frame_index, camera))
+        .collect();
+    let after_by_frame: HashMap<usize, &RegisteredCamera> = after
+        .iter()
+        .map(|camera| (camera.frame_index, camera))
+        .collect();
+    let mut improved = false;
+
+    for closure in closures {
+        let Some(before_camera) = before_by_frame.get(&closure.frame_index).copied() else {
+            return false;
+        };
+        let Some(after_camera) = after_by_frame.get(&closure.frame_index).copied() else {
+            return false;
+        };
+        let before_center_error = (before_camera.camera_center() - closure.camera_center).norm();
+        let after_center_error = (after_camera.camera_center() - closure.camera_center).norm();
+        let before_rotation_error =
+            rotation_delta_degrees(&before_camera.rotation, &closure.rotation);
+        let after_rotation_error =
+            rotation_delta_degrees(&after_camera.rotation, &closure.rotation);
+
+        if after_center_error > before_center_error + 1.0e-5
+            || after_rotation_error > before_rotation_error + 0.02
+        {
+            return false;
+        }
+        improved |= after_center_error + 1.0e-5 < before_center_error * 0.95
+            || after_rotation_error + 0.02 < before_rotation_error * 0.95;
+    }
+
+    improved
+}
+
+fn seed_points_by_feature(estimate: &two_view::TwoViewEstimate) -> HashMap<usize, Vector3<f64>> {
+    estimate
+        .points
+        .iter()
+        .map(|point| (point.source_feature_index, point.position))
+        .collect()
+}
+
+fn seed_correspondences(
+    evidence: &SeedRevisitEvidence,
+    target_features: &[Feature],
+    seed_points_by_feature: &HashMap<usize, Vector3<f64>>,
+) -> Vec<pnp::PnpCorrespondence> {
+    evidence
+        .matches
+        .iter()
+        .filter_map(|feature_match| {
+            let point = seed_points_by_feature.get(&feature_match.a)?;
+            let feature = target_features.get(feature_match.b)?;
+            Some(pnp::PnpCorrespondence {
+                point: *point,
+                x_pixels: feature.x as f64,
+                y_pixels: feature.y as f64,
+            })
+        })
+        .collect()
+}
+
+fn estimate_seed_pose(
+    correspondences: &[pnp::PnpCorrespondence],
+    context: &RevisitContext<'_>,
+) -> Option<pnp::PnpEstimate> {
+    (correspondences.len() >= MIN_RECOVERY_CORRESPONDENCES)
+        .then(|| {
+            pnp::estimate_pose(
+                correspondences,
+                context.width,
+                context.height,
+                context.focal_pixels,
+            )
+        })
+        .flatten()
+}
+
+fn rotation_delta_degrees(left: &Matrix3<f64>, right: &Matrix3<f64>) -> f64 {
+    let delta = left * right.transpose();
+    let cosine = ((delta.trace() - 1.0) * 0.5).clamp(-1.0, 1.0);
+    cosine.acos().to_degrees()
 }
 
 fn preselect_pairs(frames: &[usize], seed_pair_index: Option<usize>) -> Vec<(usize, usize)> {
@@ -309,6 +489,76 @@ mod tests {
         }
     }
 
+    fn synthetic_seed_fixture() -> (
+        Vec<Vector3<f64>>,
+        Vec<Feature>,
+        Vec<Feature>,
+        two_view::TwoViewEstimate,
+    ) {
+        let width = 640;
+        let height = 480;
+        let focal = 500.0;
+        let points = vec![
+            Vector3::new(-0.8, -0.5, 3.8),
+            Vector3::new(-0.3, 0.4, 4.4),
+            Vector3::new(0.2, -0.6, 5.1),
+            Vector3::new(0.7, 0.5, 5.8),
+            Vector3::new(-0.6, 0.7, 6.2),
+            Vector3::new(0.5, -0.2, 6.8),
+            Vector3::new(-0.1, 0.1, 7.4),
+            Vector3::new(0.9, -0.7, 8.0),
+            Vector3::new(-0.9, 0.2, 8.5),
+            Vector3::new(0.4, 0.8, 9.0),
+            Vector3::new(0.1, -0.8, 9.6),
+            Vector3::new(-0.4, -0.1, 10.2),
+        ];
+        let camera_center = Vector3::new(0.65, -0.08, 0.12);
+        let translation = -camera_center;
+        let seed_features: Vec<Feature> = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let x = (point.x / point.z * focal + width as f64 * 0.5).round() as u32;
+                let y = (point.y / point.z * focal + height as f64 * 0.5).round() as u32;
+                feature(index, x, y)
+            })
+            .collect();
+        let target_features: Vec<Feature> = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let camera_point = *point + translation;
+                let x =
+                    (camera_point.x / camera_point.z * focal + width as f64 * 0.5).round() as u32;
+                let y =
+                    (camera_point.y / camera_point.z * focal + height as f64 * 0.5).round() as u32;
+                feature(index, x, y)
+            })
+            .collect();
+        let estimate = two_view::TwoViewEstimate {
+            rotation: Matrix3::identity(),
+            translation: Vector3::new(-0.5, 0.0, 0.0),
+            camera_center: Vector3::new(0.5, 0.0, 0.0),
+            matches: points.len(),
+            inliers: points.len(),
+            median_sampson_error_pixels: 0.0,
+            median_reprojection_error_pixels: 0.0,
+            median_triangulation_angle_degrees: 4.0,
+            points: points
+                .iter()
+                .enumerate()
+                .map(|(index, point)| two_view::TriangulatedPoint {
+                    source_feature_index: index,
+                    descriptor_distance: 0.0,
+                    position: *point,
+                    reprojection_error_pixels: 0.0,
+                    triangulation_angle_degrees: 4.0,
+                })
+                .collect(),
+        };
+        (points, seed_features, target_features, estimate)
+    }
+
     #[test]
     fn revisit_matching_is_mutual_and_not_limited_by_adjacent_radius() {
         let source: Vec<Feature> = (0..12)
@@ -362,81 +612,15 @@ mod tests {
 
     #[test]
     fn direct_seed_revisit_can_recover_a_failed_keyframe_pose() {
-        let width = 640;
-        let height = 480;
-        let focal = 500.0;
-        let points = [
-            Vector3::new(-0.8, -0.5, 3.8),
-            Vector3::new(-0.3, 0.4, 4.4),
-            Vector3::new(0.2, -0.6, 5.1),
-            Vector3::new(0.7, 0.5, 5.8),
-            Vector3::new(-0.6, 0.7, 6.2),
-            Vector3::new(0.5, -0.2, 6.8),
-            Vector3::new(-0.1, 0.1, 7.4),
-            Vector3::new(0.9, -0.7, 8.0),
-            Vector3::new(-0.9, 0.2, 8.5),
-            Vector3::new(0.4, 0.8, 9.0),
-            Vector3::new(0.1, -0.8, 9.6),
-            Vector3::new(-0.4, -0.1, 10.2),
-        ];
-        let camera_center = Vector3::new(0.65, -0.08, 0.12);
-        let rotation = Matrix3::identity();
-        let translation = -camera_center;
-        let seed_features: Vec<Feature> = points
-            .iter()
-            .enumerate()
-            .map(|(index, point)| {
-                let x = (point.x / point.z * focal + width as f64 * 0.5).round() as u32;
-                let y = (point.y / point.z * focal + height as f64 * 0.5).round() as u32;
-                feature(index, x, y)
-            })
-            .collect();
-        let target_features: Vec<Feature> = points
-            .iter()
-            .enumerate()
-            .map(|(index, point)| {
-                let camera_point = rotation * point + translation;
-                let x =
-                    (camera_point.x / camera_point.z * focal + width as f64 * 0.5).round() as u32;
-                let y =
-                    (camera_point.y / camera_point.z * focal + height as f64 * 0.5).round() as u32;
-                feature(index, x, y)
-            })
-            .collect();
-        let estimate = two_view::TwoViewEstimate {
-            rotation: Matrix3::identity(),
-            translation: Vector3::new(-0.5, 0.0, 0.0),
-            camera_center: Vector3::new(0.5, 0.0, 0.0),
-            matches: points.len(),
-            inliers: points.len(),
-            median_sampson_error_pixels: 0.0,
-            median_reprojection_error_pixels: 0.0,
-            median_triangulation_angle_degrees: 4.0,
-            points: points
-                .iter()
-                .enumerate()
-                .map(|(index, point)| two_view::TriangulatedPoint {
-                    source_feature_index: index,
-                    descriptor_distance: 0.0,
-                    position: *point,
-                    reprojection_error_pixels: 0.0,
-                    triangulation_angle_degrees: 4.0,
-                })
-                .collect(),
-        };
+        let (_, seed_features, target_features, estimate) = synthetic_seed_fixture();
         let features = vec![
             seed_features.clone(),
             seed_features.clone(),
             seed_features.clone(),
             target_features,
         ];
-        let context = RevisitContext::new(
-            &features,
-            width,
-            height,
-            focal,
-            ReconstructionOptions::default(),
-        );
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
         let mut stats = analyze(&context, &[0, 3], Some(0));
         let recovered = recover_failed_registrations(
             &mut stats,
@@ -451,7 +635,72 @@ mod tests {
         assert!(stats.recoveries[0].accepted);
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].frame_index, 3);
-        assert!((recovered[0].camera_center - camera_center).norm() < 0.2);
+        assert!((recovered[0].camera_center - Vector3::new(0.65, -0.08, 0.12)).norm() < 0.2);
+    }
+
+    #[test]
+    fn direct_seed_revisit_can_bound_registered_drift() {
+        let (_, seed_features, target_features, estimate) = synthetic_seed_fixture();
+        let features = vec![
+            seed_features.clone(),
+            seed_features.clone(),
+            seed_features.clone(),
+            target_features,
+        ];
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
+        let mut stats = analyze(&context, &[0, 3], Some(0));
+        let drifted_center = Vector3::new(0.69, -0.06, 0.11);
+        let registered = vec![
+            RegisteredCamera {
+                frame_index: 0,
+                rotation: Matrix3::identity(),
+                translation: Vector3::zeros(),
+            },
+            RegisteredCamera {
+                frame_index: 1,
+                rotation: Matrix3::identity(),
+                translation: Vector3::new(-0.5, 0.0, 0.0),
+            },
+            RegisteredCamera {
+                frame_index: 3,
+                rotation: Matrix3::identity(),
+                translation: -drifted_center,
+            },
+        ];
+
+        let closures = close_registered_drift(&mut stats, 0, &estimate, &registered, &context);
+
+        assert_eq!(stats.closures.len(), 1);
+        assert!(stats.closures[0].accepted);
+        assert_eq!(closures.len(), 1);
+        assert_eq!(closures[0].frame_index, 3);
+        assert!((closures[0].camera_center - Vector3::new(0.65, -0.08, 0.12)).norm() < 0.2);
+    }
+
+    #[test]
+    fn direct_seed_revisit_rejects_unbounded_registered_drift() {
+        let (_, seed_features, target_features, estimate) = synthetic_seed_fixture();
+        let features = vec![
+            seed_features.clone(),
+            seed_features.clone(),
+            seed_features.clone(),
+            target_features,
+        ];
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
+        let mut stats = analyze(&context, &[0, 3], Some(0));
+        let registered = vec![RegisteredCamera {
+            frame_index: 3,
+            rotation: Matrix3::identity(),
+            translation: -Vector3::new(1.8, -0.08, 0.12),
+        }];
+
+        let closures = close_registered_drift(&mut stats, 0, &estimate, &registered, &context);
+
+        assert_eq!(stats.closures.len(), 1);
+        assert!(!stats.closures[0].accepted);
+        assert!(closures.is_empty());
     }
 
     #[test]
