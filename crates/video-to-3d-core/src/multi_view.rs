@@ -1,3 +1,5 @@
+mod bundle_adjustment;
+
 use super::{Feature, FeatureMatch, PairStats};
 use nalgebra::{Matrix3, Matrix4, Vector3};
 use serde::Serialize;
@@ -11,6 +13,20 @@ const MIN_NEW_LANDMARK_TRIANGULATION_ANGLE_DEGREES: f64 = 0.5;
 const MAX_NEW_LANDMARK_REPROJECTION_ERROR_PIXELS: f64 = 4.0;
 const MAX_NEW_LANDMARK_MEDIAN_REPROJECTION_ERROR_PIXELS: f64 = 2.5;
 const MIN_NEW_LANDMARK_SUPPORT_RATIO: f64 = 0.6;
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct BundleAdjustmentStats {
+    pub attempted: bool,
+    pub accepted: bool,
+    pub iterations: usize,
+    pub observations: usize,
+    pub optimized_cameras: usize,
+    pub optimized_landmarks: usize,
+    pub initial_median_reprojection_error_pixels: Option<f32>,
+    pub final_median_reprojection_error_pixels: Option<f32>,
+    pub initial_rmse_reprojection_error_pixels: Option<f32>,
+    pub final_rmse_reprojection_error_pixels: Option<f32>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RegistrationCandidateStats {
@@ -38,6 +54,7 @@ pub struct MultiViewStats {
     pub linked_pairs: usize,
     pub registration_candidates: Vec<RegistrationCandidateStats>,
     pub new_landmarks: NewLandmarkStats,
+    pub bundle_adjustment: BundleAdjustmentStats,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -66,7 +83,7 @@ pub(super) struct RegisteredCamera {
 }
 
 impl RegisteredCamera {
-    fn camera_center(&self) -> Vector3<f64> {
+    pub(super) fn camera_center(&self) -> Vector3<f64> {
         -self.rotation.transpose() * self.translation
     }
 }
@@ -79,6 +96,7 @@ pub(super) struct NewLandmark {
     pub supporting_observations: usize,
     pub median_reprojection_error_pixels: f64,
     pub triangulation_angle_degrees: f64,
+    pub track_index: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -87,12 +105,33 @@ pub(super) struct NewLandmarkAnalysis {
     pub landmarks: Vec<NewLandmark>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum LandmarkSource {
+    Seed(usize),
+    New(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SeedTrackLandmark {
+    point_index: usize,
+    track_index: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct BundleAdjustmentResult {
+    pub stats: BundleAdjustmentStats,
+    pub cameras: Vec<RegisteredCamera>,
+    pub seed_points: Vec<Vector3<f64>>,
+    pub new_landmark_positions: Vec<Vector3<f64>>,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct MultiViewAnalysis {
     pub stats: MultiViewStats,
     pub registration_candidates: Vec<RegistrationCandidate>,
     tracks: Vec<FeatureTrack>,
     seed_track_indices: HashSet<usize>,
+    seed_tracks: Vec<SeedTrackLandmark>,
     seed_pair_index: Option<usize>,
 }
 
@@ -134,11 +173,12 @@ pub(super) fn analyze(
     let (tracks, membership) = build_feature_tracks(adjacent_matches);
     let keyframes = select_keyframes(pairs);
     let seed_pair_index = seed_pair.map(|(pair_index, _)| pair_index);
-    let seed_track_indices = seed_pair
+    let seed_tracks = seed_pair
         .map(|(pair_index, seed_landmarks)| {
-            collect_seed_track_indices(&membership, pair_index, seed_landmarks)
+            collect_seed_tracks(&membership, pair_index, seed_landmarks)
         })
         .unwrap_or_default();
+    let seed_track_indices = seed_tracks.iter().map(|seed| seed.track_index).collect();
     let registration_candidates = seed_pair
         .map(|(pair_index, seed_landmarks)| {
             registration_candidates(&keyframes, &tracks, &membership, pair_index, seed_landmarks)
@@ -173,10 +213,12 @@ pub(super) fn analyze(
                 .count(),
             registration_candidates: registration_candidate_stats,
             new_landmarks: NewLandmarkStats::default(),
+            bundle_adjustment: BundleAdjustmentStats::default(),
         },
         registration_candidates,
         tracks,
         seed_track_indices,
+        seed_tracks,
         seed_pair_index,
     }
 }
@@ -259,6 +301,7 @@ pub(super) fn triangulate_new_landmarks(
             supporting_observations: triangulated.supporting_observations,
             median_reprojection_error_pixels: triangulated.median_reprojection_error_pixels,
             triangulation_angle_degrees: triangulated.triangulation_angle_degrees,
+            track_index,
         });
     }
 
@@ -279,11 +322,34 @@ pub(super) fn triangulate_new_landmarks(
     NewLandmarkAnalysis { stats, landmarks }
 }
 
-fn collect_seed_track_indices(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn bundle_adjust(
+    analysis: &MultiViewAnalysis,
+    seed_points: &[Vector3<f64>],
+    new_landmarks: &[NewLandmark],
+    cameras: &[RegisteredCamera],
+    features: &[Vec<Feature>],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+) -> BundleAdjustmentResult {
+    bundle_adjustment::optimize(
+        analysis,
+        seed_points,
+        new_landmarks,
+        cameras,
+        features,
+        width,
+        height,
+        focal_pixels,
+    )
+}
+
+fn collect_seed_tracks(
     membership: &HashMap<Observation, usize>,
     seed_pair_index: usize,
     seed_landmarks: &[SeedLandmark],
-) -> HashSet<usize> {
+) -> Vec<SeedTrackLandmark> {
     seed_landmarks
         .iter()
         .filter_map(|seed_landmark| {
@@ -293,6 +359,10 @@ fn collect_seed_track_indices(
                     feature_index: seed_landmark.source_feature_index,
                 })
                 .copied()
+                .map(|track_index| SeedTrackLandmark {
+                    point_index: seed_landmark.point_index,
+                    track_index,
+                })
         })
         .collect()
 }
