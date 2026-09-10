@@ -11,7 +11,7 @@ case "$implementation" in
     target/release/examples/golden_reconstruct "$fixture" "$output" >/dev/null
     ;;
   colmap)
-    scripts/run_colmap_reference.sh "$fixture" "$output" >/dev/null
+    bash scripts/run_colmap_reference.sh "$fixture" "$output" >/dev/null
     ;;
   *)
     echo "unsupported VIDEO_TO_3D_IMPLEMENTATION=$implementation" >&2
