@@ -7,6 +7,8 @@ const MIN_REVISIT_MATCHES: usize = 12;
 const MIN_REVISIT_OVERLAP: f32 = 0.18;
 const MIN_RECOVERY_CORRESPONDENCES: usize = 8;
 const MAX_REVISIT_CANDIDATES: usize = 16;
+const MAX_REVISIT_PAIR_EVALUATIONS: usize = 12;
+const MAX_REVISIT_FEATURES_PER_FRAME: usize = 192;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RevisitCandidateStats {
@@ -29,6 +31,7 @@ pub struct RevisitRecoveryStats {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RevisitStats {
+    pub evaluated_pairs: usize,
     pub candidates: Vec<RevisitCandidateStats>,
     pub recoveries: Vec<RevisitRecoveryStats>,
 }
@@ -71,11 +74,23 @@ impl<'a> RevisitContext<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SeedRevisitEvidence {
+    target_frame: usize,
+    matches: Vec<FeatureMatch>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RevisitAnalysis {
+    pub stats: RevisitStats,
+    seed_evidence: Vec<SeedRevisitEvidence>,
+}
+
 pub(super) fn analyze(
     context: &RevisitContext<'_>,
     keyframes: &[usize],
     seed_pair_index: Option<usize>,
-) -> RevisitStats {
+) -> RevisitAnalysis {
     let mut frames = keyframes.to_vec();
     if let Some(seed_pair_index) = seed_pair_index {
         frames.push(seed_pair_index);
@@ -84,29 +99,48 @@ pub(super) fn analyze(
     frames.sort_unstable();
     frames.dedup();
 
+    let pairs = preselect_pairs(&frames, seed_pair_index);
     let mut candidates = Vec::new();
-    for (left_offset, &from_frame) in frames.iter().enumerate() {
-        for &to_frame in frames.iter().skip(left_offset + 1) {
-            if to_frame <= from_frame + 1 {
-                continue;
+    let mut seed_evidence = Vec::new();
+
+    for &(from_frame, to_frame) in &pairs {
+        let Some(source) = context.features.get(from_frame) else {
+            continue;
+        };
+        let Some(target) = context.features.get(to_frame) else {
+            continue;
+        };
+        let matches = mutual_unbounded_matches(source, target, context);
+        let overlap_ratio = overlap_ratio(source.len(), target.len(), matches.len());
+        if matches.len() < MIN_REVISIT_MATCHES || overlap_ratio < MIN_REVISIT_OVERLAP {
+            continue;
+        }
+
+        candidates.push(RevisitCandidateStats {
+            from_frame,
+            to_frame,
+            matches: matches.len(),
+            overlap_ratio,
+        });
+        if let Some(seed_pair_index) = seed_pair_index {
+            if from_frame == seed_pair_index {
+                seed_evidence.push(SeedRevisitEvidence {
+                    target_frame: to_frame,
+                    matches,
+                });
+            } else if to_frame == seed_pair_index {
+                seed_evidence.push(SeedRevisitEvidence {
+                    target_frame: from_frame,
+                    matches: matches
+                        .into_iter()
+                        .map(|feature_match| FeatureMatch {
+                            a: feature_match.b,
+                            b: feature_match.a,
+                            distance: feature_match.distance,
+                        })
+                        .collect(),
+                });
             }
-            let Some(source) = context.features.get(from_frame) else {
-                continue;
-            };
-            let Some(target) = context.features.get(to_frame) else {
-                continue;
-            };
-            let matches = mutual_unbounded_matches(source, target, context);
-            let overlap_ratio = overlap_ratio(source.len(), target.len(), matches.len());
-            if matches.len() < MIN_REVISIT_MATCHES || overlap_ratio < MIN_REVISIT_OVERLAP {
-                continue;
-            }
-            candidates.push(RevisitCandidateStats {
-                from_frame,
-                to_frame,
-                matches: matches.len(),
-                overlap_ratio,
-            });
         }
     }
 
@@ -119,24 +153,27 @@ pub(super) fn analyze(
             .then_with(|| left.to_frame.cmp(&right.to_frame))
     });
     candidates.truncate(MAX_REVISIT_CANDIDATES);
+    seed_evidence.sort_by_key(|evidence| evidence.target_frame);
 
-    RevisitStats {
-        candidates,
-        recoveries: Vec::new(),
+    RevisitAnalysis {
+        stats: RevisitStats {
+            evaluated_pairs: pairs.len(),
+            candidates,
+            recoveries: Vec::new(),
+        },
+        seed_evidence,
     }
 }
 
 pub(super) fn recover_failed_registrations(
-    stats: &mut RevisitStats,
+    analysis: &mut RevisitAnalysis,
     seed_pair_index: usize,
     estimate: &two_view::TwoViewEstimate,
     candidate_frames: &[usize],
     registered_frames: &HashSet<usize>,
     context: &RevisitContext<'_>,
 ) -> Vec<RecoveredView> {
-    let Some(seed_features) = context.features.get(seed_pair_index) else {
-        return Vec::new();
-    };
+    let candidate_frames: HashSet<usize> = candidate_frames.iter().copied().collect();
     let seed_points_by_feature: HashMap<usize, Vector3<f64>> = estimate
         .points
         .iter()
@@ -144,24 +181,18 @@ pub(super) fn recover_failed_registrations(
         .collect();
     let mut recovered = Vec::new();
 
-    for &frame_index in candidate_frames {
-        if frame_index == seed_pair_index
-            || frame_index == seed_pair_index + 1
-            || registered_frames.contains(&frame_index)
-        {
+    for evidence in &analysis.seed_evidence {
+        let frame_index = evidence.target_frame;
+        if !candidate_frames.contains(&frame_index) || registered_frames.contains(&frame_index) {
             continue;
         }
+        debug_assert!(frame_index.abs_diff(seed_pair_index) > 1);
         let Some(target_features) = context.features.get(frame_index) else {
             continue;
         };
-        let matches = mutual_unbounded_matches(seed_features, target_features, context);
-        let candidate_overlap =
-            overlap_ratio(seed_features.len(), target_features.len(), matches.len());
-        if matches.len() < MIN_REVISIT_MATCHES || candidate_overlap < MIN_REVISIT_OVERLAP {
-            continue;
-        }
 
-        let correspondences: Vec<pnp::PnpCorrespondence> = matches
+        let correspondences: Vec<pnp::PnpCorrespondence> = evidence
+            .matches
             .iter()
             .filter_map(|feature_match| {
                 let point = seed_points_by_feature.get(&feature_match.a)?;
@@ -184,10 +215,10 @@ pub(super) fn recover_failed_registrations(
         } else {
             None
         };
-        stats.recoveries.push(RevisitRecoveryStats {
+        analysis.stats.recoveries.push(RevisitRecoveryStats {
             frame_index,
             source_frame_index: seed_pair_index,
-            matches: matches.len(),
+            matches: evidence.matches.len(),
             correspondences: correspondences.len(),
             accepted: pose.is_some(),
             inliers: pose.as_ref().map_or(0, |pose| pose.inliers),
@@ -210,8 +241,40 @@ pub(super) fn recover_failed_registrations(
     }
 
     recovered.sort_by_key(|view| view.frame_index);
-    stats.recoveries.sort_by_key(|attempt| attempt.frame_index);
+    analysis
+        .stats
+        .recoveries
+        .sort_by_key(|attempt| attempt.frame_index);
     recovered
+}
+
+fn preselect_pairs(
+    frames: &[usize],
+    seed_pair_index: Option<usize>,
+) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for (left_offset, &from_frame) in frames.iter().enumerate() {
+        for &to_frame in frames.iter().skip(left_offset + 1) {
+            if to_frame <= from_frame + 1 {
+                continue;
+            }
+            pairs.push((from_frame, to_frame));
+        }
+    }
+
+    pairs.sort_by(|left, right| {
+        let left_seed = seed_pair_index
+            .is_some_and(|seed| left.0 == seed || left.1 == seed);
+        let right_seed = seed_pair_index
+            .is_some_and(|seed| right.0 == seed || right.1 == seed);
+        right_seed
+            .cmp(&left_seed)
+            .then_with(|| (right.1 - right.0).cmp(&(left.1 - left.0)))
+            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    pairs.truncate(MAX_REVISIT_PAIR_EVALUATIONS);
+    pairs
 }
 
 fn mutual_unbounded_matches(
@@ -219,6 +282,8 @@ fn mutual_unbounded_matches(
     target: &[Feature],
     context: &RevisitContext<'_>,
 ) -> Vec<FeatureMatch> {
+    let source = &source[..source.len().min(MAX_REVISIT_FEATURES_PER_FRAME)];
+    let target = &target[..target.len().min(MAX_REVISIT_FEATURES_PER_FRAME)];
     let mut revisit_options = context.options;
     revisit_options.match_radius = context.width.saturating_add(context.height);
     let forward = match_features(source, target, revisit_options);
@@ -235,7 +300,9 @@ fn mutual_unbounded_matches(
 }
 
 fn overlap_ratio(source_features: usize, target_features: usize, matches: usize) -> f32 {
-    let denominator = source_features.min(target_features);
+    let denominator = source_features
+        .min(MAX_REVISIT_FEATURES_PER_FRAME)
+        .min(target_features.min(MAX_REVISIT_FEATURES_PER_FRAME));
     if denominator == 0 {
         0.0
     } else {
@@ -288,12 +355,23 @@ mod tests {
         let features = vec![base.clone(), base.clone(), base.clone()];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let stats = analyze(&context, &[0, 1, 2], Some(0));
+        let analysis = analyze(&context, &[0, 1, 2], Some(0));
 
-        assert_eq!(stats.candidates.len(), 1);
-        assert_eq!(stats.candidates[0].from_frame, 0);
-        assert_eq!(stats.candidates[0].to_frame, 2);
-        assert_eq!(stats.candidates[0].matches, 12);
+        assert_eq!(analysis.stats.evaluated_pairs, 1);
+        assert_eq!(analysis.stats.candidates.len(), 1);
+        assert_eq!(analysis.stats.candidates[0].from_frame, 0);
+        assert_eq!(analysis.stats.candidates[0].to_frame, 2);
+        assert_eq!(analysis.stats.candidates[0].matches, 12);
+    }
+
+    #[test]
+    fn revisit_analysis_bounds_pair_evaluations_before_matching() {
+        let frames: Vec<usize> = (0..18).collect();
+        let pairs = preselect_pairs(&frames, Some(0));
+
+        assert_eq!(pairs.len(), MAX_REVISIT_PAIR_EVALUATIONS);
+        assert!(pairs.iter().all(|(from, to)| to > &(from + 1)));
+        assert!(pairs.iter().take(12).all(|(from, to)| *from == 0 || *to == 0));
     }
 
     #[test]
@@ -373,9 +451,9 @@ mod tests {
             focal,
             ReconstructionOptions::default(),
         );
-        let mut stats = RevisitStats::default();
+        let mut analysis = analyze(&context, &[0, 3], Some(0));
         let recovered = recover_failed_registrations(
-            &mut stats,
+            &mut analysis,
             0,
             &estimate,
             &[3],
@@ -383,10 +461,35 @@ mod tests {
             &context,
         );
 
-        assert_eq!(stats.recoveries.len(), 1);
-        assert!(stats.recoveries[0].accepted);
+        assert_eq!(analysis.stats.recoveries.len(), 1);
+        assert!(analysis.stats.recoveries[0].accepted);
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].frame_index, 3);
         assert!((recovered[0].camera_center - camera_center).norm() < 0.2);
+    }
+
+    #[test]
+    fn adjacent_frame_before_seed_is_never_revisit_recovery_evidence() {
+        let base: Vec<Feature> = (0..12)
+            .map(|index| feature(index, 40 + index as u32, 60 + index as u32))
+            .collect();
+        let features = vec![base.clone(), base.clone(), base.clone(), base];
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
+        let analysis = analyze(&context, &[1, 2, 3], Some(2));
+
+        assert!(analysis
+            .stats
+            .candidates
+            .iter()
+            .all(|candidate| candidate.from_frame.abs_diff(candidate.to_frame) > 1));
+        assert!(analysis
+            .seed_evidence
+            .iter()
+            .all(|evidence| evidence.target_frame.abs_diff(2) > 1));
+        assert!(!analysis
+            .seed_evidence
+            .iter()
+            .any(|evidence| evidence.target_frame == 1));
     }
 }
