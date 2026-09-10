@@ -410,8 +410,11 @@ fn triangulate_track(
             else {
                 continue;
             };
-            let triangulation_angle_degrees =
-                triangulation_angle(&position, left.camera, right.camera)?;
+            let Some(triangulation_angle_degrees) =
+                triangulation_angle(&position, left.camera, right.camera)
+            else {
+                continue;
+            };
             if triangulation_angle_degrees < MIN_NEW_LANDMARK_TRIANGULATION_ANGLE_DEGREES {
                 continue;
             }
@@ -782,6 +785,64 @@ mod tests {
                 .unwrap_or_default()
                 > 0.5
         );
+    }
+
+    #[test]
+    fn skips_degenerate_pair_and_uses_later_supported_pair() {
+        let width = 640;
+        let height = 480;
+        let focal = 500.0;
+        let cameras = [
+            camera(0, 0.0),
+            camera(1, 0.5),
+            RegisteredCamera {
+                frame_index: 2,
+                rotation: Matrix3::identity(),
+                translation: Vector3::new(0.2, 0.0, 1.0),
+            },
+            camera(3, 1.0),
+        ];
+        let point = Vector3::new(0.0, 0.0, 4.0);
+        let projected: Vec<Feature> = cameras
+            .iter()
+            .map(|camera| project_feature(point, camera, width, height, focal))
+            .collect();
+        let observations = [
+            RegisteredObservation {
+                camera: &cameras[0],
+                frame_index: 0,
+                feature_index: 0,
+                x_pixels: projected[0].x as f64,
+                y_pixels: projected[0].y as f64,
+            },
+            RegisteredObservation {
+                camera: &cameras[1],
+                frame_index: 1,
+                feature_index: 0,
+                x_pixels: projected[1].x as f64,
+                y_pixels: projected[1].y as f64,
+            },
+            RegisteredObservation {
+                camera: &cameras[2],
+                frame_index: 2,
+                feature_index: 0,
+                x_pixels: 420.0,
+                y_pixels: 240.0,
+            },
+            RegisteredObservation {
+                camera: &cameras[3],
+                frame_index: 3,
+                feature_index: 0,
+                x_pixels: projected[3].x as f64,
+                y_pixels: projected[3].y as f64,
+            },
+        ];
+
+        let result = triangulate_track(&observations, &[0, 1], width, height, focal)
+            .expect("later supported pair should recover the track");
+
+        assert_eq!(result.supporting_observations, 3);
+        assert!((result.position - point).norm() < 0.03);
     }
 
     #[test]
