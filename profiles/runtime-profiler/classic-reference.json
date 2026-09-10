@@ -1,0 +1,19 @@
+{
+  "schema_version": "runtime-profiler/scenario/v1",
+  "id": "video-to-3d-classic-reference",
+  "target": {
+    "type": "command",
+    "program": "scripts/run_classic_reference.sh",
+    "working_directory": "../..",
+    "inherit_env": [
+      "VIDEO_TO_3D_IMPLEMENTATION",
+      "VIDEO_TO_3D_FIXTURE"
+    ]
+  },
+  "run": {
+    "warmup_iterations": 0,
+    "measurement_iterations": 3,
+    "timeout_seconds": 180
+  },
+  "collectors": ["process"]
+}
