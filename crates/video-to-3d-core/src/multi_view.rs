@@ -440,6 +440,11 @@ fn triangulate_track(
                 }
             }
 
+            if !supporting_indices.contains(&left_index)
+                || !supporting_indices.contains(&right_index)
+            {
+                continue;
+            }
             let support_ratio = supporting_indices.len() as f64 / observations.len() as f64;
             if supporting_indices.len() < 2 || support_ratio < MIN_NEW_LANDMARK_SUPPORT_RATIO {
                 continue;
@@ -785,6 +790,42 @@ mod tests {
                 .unwrap_or_default()
                 > 0.5
         );
+    }
+
+    #[test]
+    fn rejects_triangulation_when_non_seed_pair_view_is_behind_landmark() {
+        let width = 640;
+        let height = 480;
+        let focal = 500.0;
+        let rotation = Matrix3::new(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0);
+        let camera_center = Vector3::new(1.0, 0.0, 0.0);
+        let cameras = [
+            camera(0, 0.0),
+            camera(1, 0.5),
+            RegisteredCamera {
+                frame_index: 2,
+                rotation,
+                translation: -(rotation * camera_center),
+            },
+        ];
+        let point = Vector3::new(0.0, 0.0, 4.0);
+        let projected: Vec<Feature> = cameras
+            .iter()
+            .map(|camera| project_feature(point, camera, width, height, focal))
+            .collect();
+        let observations: Vec<RegisteredObservation<'_>> = cameras
+            .iter()
+            .enumerate()
+            .map(|(index, camera)| RegisteredObservation {
+                camera,
+                frame_index: index,
+                feature_index: 0,
+                x_pixels: projected[index].x as f64,
+                y_pixels: projected[index].y as f64,
+            })
+            .collect();
+
+        assert!(triangulate_track(&observations, &[0, 1], width, height, focal).is_none());
     }
 
     #[test]
