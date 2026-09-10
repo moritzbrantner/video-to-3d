@@ -77,10 +77,7 @@ pub(super) fn optimize(
             new_landmark_positions: original_new_points,
         };
     };
-    if cameras.len() < 3
-        || !projection.focal_pixels.is_finite()
-        || projection.focal_pixels <= 0.0
-    {
+    if cameras.len() < 3 || !projection.focal_pixels.is_finite() || projection.focal_pixels <= 0.0 {
         return BundleAdjustmentResult {
             stats,
             cameras: original_cameras,
