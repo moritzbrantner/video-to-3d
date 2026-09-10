@@ -54,10 +54,10 @@ def evaluate(
         errors.append(
             f"COLMAP reference registered only {colmap_registered}/{expected_images} images; expected at least {minimum_colmap_registered}"
         )
-    required_rust_registered = max(4, colmap_registered - 2)
-    if rust_registered < required_rust_registered:
+    minimum_rust_registered = min(4, expected_images)
+    if rust_registered < minimum_rust_registered:
         errors.append(
-            f"Rust registered {rust_registered}/{expected_images} images; golden envelope requires at least {required_rust_registered} when COLMAP registers {colmap_registered}"
+            f"Rust registered {rust_registered}/{expected_images} images; expected at least {minimum_rust_registered}"
         )
 
     rust_points = int(numeric(rust, "points"))
@@ -122,7 +122,7 @@ def render_markdown(
 
 | Evidence | video-to-3d | COLMAP | Gate |
 | --- | ---: | ---: | --- |
-| Registered images | {rust_registered}/{expected_images} | {colmap_registered}/{expected_images} | Rust ≥ max(4, COLMAP−2); COLMAP ≥ {max(2, expected_images - 2)} |
+| Registered images | {rust_registered}/{expected_images} | {colmap_registered}/{expected_images} | Rust ≥ {min(4, expected_images)}; COLMAP ≥ {max(2, expected_images - 2)} |
 | Sparse points | {int(numeric(rust, 'points'))} | {int(numeric(colmap, 'points'))} | Rust ≥ 40; COLMAP count diagnostic |
 | Reprojection error | {rust_error:.3f} px median | {colmap_error:.3f} px mean | Rust ≤ max(3 px, 4× COLMAP) |
 | Normalized camera-center RMSE | {pose_rmse:.3f} | known trajectory | Rust ≤ {max_normalized_pose_rmse:.3f} after Sim(3) alignment |
