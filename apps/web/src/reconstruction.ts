@@ -87,6 +87,7 @@ export type RevisitRecoveryStats = {
 };
 
 export type RevisitStats = {
+  evaluated_pairs: number;
   candidates: RevisitCandidateStats[];
   recoveries: RevisitRecoveryStats[];
 };
