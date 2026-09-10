@@ -1,0 +1,20 @@
+{
+  "schema_version": "runtime-profiler/scenario/v1",
+  "id": "video-to-3d-golden-colmap",
+  "target": {
+    "type": "command",
+    "program": "bash",
+    "args": [
+      "tools/run_colmap_golden.sh",
+      "target/golden-reference/images",
+      "target/golden-reference/colmap-runtime"
+    ],
+    "working_directory": "../.."
+  },
+  "run": {
+    "warmup_iterations": 0,
+    "measurement_iterations": 3,
+    "timeout_seconds": 300
+  },
+  "collectors": ["process"]
+}
