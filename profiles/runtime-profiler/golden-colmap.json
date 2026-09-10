@@ -4,12 +4,9 @@
   "target": {
     "type": "command",
     "program": "bash",
-    "args": [
-      "tools/run_colmap_golden.sh",
-      "target/golden-reference/images",
-      "target/golden-reference/colmap-runtime"
-    ],
-    "working_directory": "../.."
+    "args": ["tools/run_colmap_golden_runtime.sh"],
+    "working_directory": "../..",
+    "inherit_env": ["GOLDEN_CASE"]
   },
   "run": {
     "warmup_iterations": 0,

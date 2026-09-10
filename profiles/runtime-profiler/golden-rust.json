@@ -3,9 +3,10 @@
   "id": "video-to-3d-golden-rust",
   "target": {
     "type": "command",
-    "program": "target/release/examples/golden_fixture",
-    "args": ["-"],
-    "working_directory": "../.."
+    "program": "bash",
+    "args": ["tools/run_rust_golden_runtime.sh"],
+    "working_directory": "../..",
+    "inherit_env": ["GOLDEN_CASE"]
   },
   "run": {
     "warmup_iterations": 1,
