@@ -33,10 +33,10 @@ Implementation status: deterministic synthetic fixtures and hosted checks cover 
 - Screen other selected keyframes for real seed-landmark 2D↔3D correspondence readiness.
 - Register eligible additional cameras with bounded deterministic robust PnP and explicit inlier/reprojection acceptance gates.
 - Triangulate new landmarks from newly registered views with positive-depth, multi-view support, reprojection, and triangulation-angle acceptance gates.
-- Bundle adjustment over cameras and sparse landmarks.
+- Bundle adjustment over cameras and sparse landmarks, with a fixed calibrated seed gauge and explicit no-regression acceptance.
 - Loop/revisit handling and failed-registration recovery.
 
-Current boundary: Rust can register additional selected camera poses against the calibrated seed landmarks and use accepted registered views to triangulate non-seed feature tracks into new sparse landmarks. Cameras and points share the seed pair's arbitrary monocular coordinate system, but they have not yet been jointly optimized. The next implementation slice is bundle adjustment, followed by loop/revisit handling and failed-registration recovery.
+Current boundary: Rust can register additional selected camera poses, grow the sparse map from genuinely supported non-seed tracks, and jointly refine the accepted registered cameras and sparse landmarks with bounded Huber-weighted block-coordinate bundle adjustment. The calibrated seed-pair cameras remain fixed, preserving the arbitrary monocular coordinate frame, and candidate adjusted geometry is adopted only when robust cost and reprojection quality satisfy the acceptance boundary. The next implementation slice is loop/revisit handling and failed-registration recovery.
 
 Exit criterion: longer videos produce a stable sparse model without unbounded trajectory drift.
 

@@ -2,7 +2,7 @@
 
 A privacy-first Rust/Tauri + WebAssembly experiment for reconstructing a 3D scene from ordinary video.
 
-The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, links the actually triangulated landmarks from the strongest calibrated seed pair into other selected keyframes, and can register additional cameras with bounded deterministic robust PnP when their 3D↔2D evidence passes inlier and reprojection gates. Once an additional view is accepted, non-seed tracks observed by registered cameras can be triangulated into new sparse landmarks when they pass positive-depth, multi-view support, reprojection, and triangulation-angle gates. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
+The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP replacement yet. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, links the actually triangulated landmarks from the strongest calibrated seed pair into other selected keyframes, and can register additional cameras with bounded deterministic robust PnP when their 3D↔2D evidence passes inlier and reprojection gates. Once an additional view is accepted, non-seed tracks observed by registered cameras can be triangulated into new sparse landmarks when they pass positive-depth, multi-view support, reprojection, and triangulation-angle gates. The accepted multi-view graph can then be refined with bounded deterministic block-coordinate bundle adjustment. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
 
 ## Current slice
 
@@ -19,10 +19,12 @@ The current implementation is a **Slice 3 sparse-SfM foundation**, not a COLMAP 
 11. Triangulated seed landmarks are associated with their deterministic feature tracks and counted as real 2D↔3D correspondences in other selected keyframes.
 12. Another selected keyframe becomes PnP-eligible only when at least eight seed landmarks survive into it.
 13. A bounded deterministic robust pose solve uses spatial DLT for well-conditioned 3D landmark sets and a plane-homography decomposition for planar or nearly planar landmark sets. Both paths reject degenerate samples, points behind the camera, and large reprojection residuals, refit on inliers when that improves the accepted model, and require minimum inlier-count, inlier-ratio, and median-reprojection-error gates.
-14. Accepted PnP camera centers are added to the 3D viewer in the same arbitrary monocular coordinate frame as the seed pair.
+14. Accepted PnP camera centers are added in the same arbitrary monocular coordinate frame as the seed pair.
 15. Non-seed feature tracks observed by at least one accepted additional camera are triangulated across registered views. New landmarks require positive depth, sufficient observation support, bounded reprojection error, and a minimum triangulation angle before they are added to the sparse cloud.
+16. Bundle adjustment gathers only registered observations that already satisfy the positive-depth and 4 px support boundary, then alternates bounded Huber-weighted Gauss–Newton landmark and camera-pose updates. The two calibrated seed cameras remain fixed to preserve the monocular gauge.
+17. Adjusted geometry replaces the pre-adjustment reconstruction only when robust cost improves, reprojection RMSE does not regress, and median reprojection error stays within the explicit no-regression boundary. Otherwise the original accepted PnP/triangulated geometry is retained.
 
-Scale remains arbitrary because monocular video has no metric baseline. Additional registered cameras and newly triangulated landmarks share the seed pair's coordinate frame, but they are not jointly optimized yet. Bundle adjustment, loop/revisit handling, and failed-registration recovery are the remaining Slice 3 steps. Each selected video also remains independent; cross-video reconstruction belongs to slice 6.
+Scale remains arbitrary because monocular video has no metric baseline. Additional registered cameras and sparse landmarks share the seed pair's coordinate frame, and accepted bundle adjustment can now refine their joint reprojection consistency without moving that seed gauge. Loop/revisit handling and failed-registration recovery are the remaining Slice 3 steps. Each selected video also remains independent; cross-video reconstruction belongs to slice 6.
 
 ## Good footage
 
@@ -32,7 +34,7 @@ Use 5–20 second clips with a slowly translating camera, a static scene, visibl
 
 - `apps/web`: Next.js static export used both by GitHub Pages and Tauri.
 - `apps/desktop`: thin Tauri 2 shell around the exported web app.
-- `crates/video-to-3d-core`: platform-neutral Rust reconstruction kernel, including deterministic feature tracking, keyframe screening, calibrated two-view geometry, seed-landmark track association, spatial and planar robust PnP camera registration, multi-view new-landmark triangulation, and geometry acceptance.
+- `crates/video-to-3d-core`: platform-neutral Rust reconstruction kernel, including deterministic feature tracking, keyframe screening, calibrated two-view geometry, seed-landmark track association, spatial and planar robust PnP camera registration, multi-view new-landmark triangulation, bounded block-coordinate bundle adjustment, and geometry acceptance.
 - `crates/video-to-3d-wasm`: `wasm-bindgen` adapter for the browser.
 - `ROADMAP.md`: progression from sparse SfM to dense reconstruction and 3D Gaussian splatting.
 

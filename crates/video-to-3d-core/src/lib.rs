@@ -2,7 +2,9 @@ mod multi_view;
 mod pnp;
 mod two_view;
 
-pub use multi_view::{MultiViewStats, NewLandmarkStats, RegistrationCandidateStats};
+pub use multi_view::{
+    BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
+};
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -400,6 +402,56 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     );
     multi_view_analysis.stats.new_landmarks = new_landmark_analysis.stats.clone();
     let new_landmarks = new_landmark_analysis.landmarks;
+
+    let mut optimized_seed_points = best_two_view
+        .as_ref()
+        .map(|(_, estimate)| {
+            estimate
+                .points
+                .iter()
+                .map(|point| point.position)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut optimized_new_landmark_positions: Vec<nalgebra::Vector3<f64>> = new_landmarks
+        .iter()
+        .map(|landmark| landmark.position)
+        .collect();
+    if let Some((seed_pair_index, _)) = best_two_view.as_ref() {
+        let adjustment = multi_view::bundle_adjust(
+            &multi_view_analysis,
+            &optimized_seed_points,
+            &new_landmarks,
+            &registered_geometry,
+            &features,
+            width,
+            height,
+            focal as f64,
+        );
+        multi_view_analysis.stats.bundle_adjustment = adjustment.stats;
+        optimized_seed_points = adjustment.seed_points;
+        optimized_new_landmark_positions = adjustment.new_landmark_positions;
+        registered_cameras = adjustment
+            .cameras
+            .iter()
+            .filter(|camera| {
+                camera.frame_index != *seed_pair_index && camera.frame_index != *seed_pair_index + 1
+            })
+            .filter_map(|camera| {
+                let view = registered_views
+                    .iter()
+                    .find(|view| view.frame_index == camera.frame_index)?;
+                let center = camera.camera_center();
+                Some(CameraPose {
+                    frame_index: camera.frame_index,
+                    x: center.x as f32,
+                    y: center.y as f32,
+                    z: center.z as f32,
+                    matched_features: view.inliers,
+                })
+            })
+            .collect();
+    }
     let multi_view = multi_view_analysis.stats;
 
     let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
@@ -426,7 +478,8 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         points = estimate
             .points
             .iter()
-            .map(|triangulated| {
+            .enumerate()
+            .map(|(point_index, triangulated)| {
                 let feature = &source_features[triangulated.source_feature_index];
                 let (r, g, b) = sample_rgb(frame, feature.x, feature.y);
                 let descriptor_confidence = (1.0
@@ -437,10 +490,14 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                     .clamp(0.15, 1.0);
                 let angle_confidence =
                     (triangulated.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
+                let position = optimized_seed_points
+                    .get(point_index)
+                    .copied()
+                    .unwrap_or(triangulated.position);
                 Point3 {
-                    x: triangulated.position.x as f32,
-                    y: triangulated.position.y as f32,
-                    z: triangulated.position.z as f32,
+                    x: position.x as f32,
+                    y: position.y as f32,
+                    z: position.z as f32,
                     confidence: descriptor_confidence * reprojection_confidence * angle_confidence,
                     r,
                     g,
@@ -448,29 +505,38 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 }
             })
             .collect();
-        points.extend(new_landmarks.iter().filter_map(|landmark| {
-            let feature = features
-                .get(landmark.source_frame_index)?
-                .get(landmark.source_feature_index)?;
-            let frame = request.frames.get(landmark.source_frame_index)?;
-            let (r, g, b) = sample_rgb(frame, feature.x, feature.y);
-            let support_confidence =
-                (landmark.supporting_observations as f32 / 4.0).clamp(0.5, 1.0);
-            let reprojection_confidence = (1.0
-                / (1.0 + landmark.median_reprojection_error_pixels as f32 * 0.5))
-                .clamp(0.15, 1.0);
-            let angle_confidence =
-                (landmark.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
-            Some(Point3 {
-                x: landmark.position.x as f32,
-                y: landmark.position.y as f32,
-                z: landmark.position.z as f32,
-                confidence: support_confidence * reprojection_confidence * angle_confidence,
-                r,
-                g,
-                b,
-            })
-        }));
+        points.extend(
+            new_landmarks
+                .iter()
+                .enumerate()
+                .filter_map(|(new_index, landmark)| {
+                    let feature = features
+                        .get(landmark.source_frame_index)?
+                        .get(landmark.source_feature_index)?;
+                    let frame = request.frames.get(landmark.source_frame_index)?;
+                    let (r, g, b) = sample_rgb(frame, feature.x, feature.y);
+                    let support_confidence =
+                        (landmark.supporting_observations as f32 / 4.0).clamp(0.5, 1.0);
+                    let reprojection_confidence = (1.0
+                        / (1.0 + landmark.median_reprojection_error_pixels as f32 * 0.5))
+                        .clamp(0.15, 1.0);
+                    let angle_confidence =
+                        (landmark.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
+                    let position = optimized_new_landmark_positions
+                        .get(new_index)
+                        .copied()
+                        .unwrap_or(landmark.position);
+                    Some(Point3 {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                        z: position.z as f32,
+                        confidence: support_confidence * reprojection_confidence * angle_confidence,
+                        r,
+                        g,
+                        b,
+                    })
+                }),
+        );
 
         CalibratedPairStats {
             from_frame: pair_index,
@@ -522,16 +588,37 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .count();
         if registered_views.is_empty() {
             warnings.push(format!(
-                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but no additional camera pose passed the current deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and new-landmark triangulation requires an accepted additional view before bundle adjustment can begin."
+                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but no additional camera pose passed the current deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and bundle adjustment requires at least one accepted additional view."
             ));
-        } else if multi_view.new_landmarks.accepted_landmarks == 0 {
+        } else if multi_view.bundle_adjustment.accepted {
+            let initial_rmse = multi_view
+                .bundle_adjustment
+                .initial_rmse_reprojection_error_pixels
+                .unwrap_or_default();
+            let final_rmse = multi_view
+                .bundle_adjustment
+                .final_rmse_reprojection_error_pixels
+                .unwrap_or_default();
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes with deterministic robust seed-landmark PnP, but no non-seed feature track passed the current multi-view support, reprojection, and triangulation-angle gates. Camera centers share the seed pair's arbitrary monocular scale; bundle adjustment is not implemented yet.",
-                registered_views.len()
+                "Slice 3 registered {} additional selected keyframes, triangulated {} new landmarks, and accepted deterministic bundle adjustment across {} cameras, {} landmarks, and {} supported observations. Reprojection RMSE improved from {:.2} px to {:.2} px while the calibrated seed-pair cameras remained fixed to preserve the arbitrary monocular gauge. Loop/revisit handling and failed-registration recovery remain later Slice 3 work.",
+                registered_views.len(),
+                multi_view.new_landmarks.accepted_landmarks,
+                multi_view.bundle_adjustment.optimized_cameras,
+                multi_view.bundle_adjustment.optimized_landmarks,
+                multi_view.bundle_adjustment.observations,
+                initial_rmse,
+                final_rmse
+            ));
+        } else if multi_view.bundle_adjustment.attempted {
+            warnings.push(format!(
+                "Slice 3 registered {} additional selected keyframes and triangulated {} new landmarks. Bundle adjustment ran across {} supported observations but its candidate geometry did not satisfy the no-regression acceptance boundary, so the pre-adjustment cameras and landmarks were retained. The calibrated seed pair remains the fixed arbitrary monocular gauge.",
+                registered_views.len(),
+                multi_view.new_landmarks.accepted_landmarks,
+                multi_view.bundle_adjustment.observations
             ));
         } else {
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes and triangulated {} new landmarks from non-seed tracks with deterministic multi-view support, reprojection, and triangulation-angle gates. All geometry shares the seed pair's arbitrary monocular scale; bundle adjustment is the next implementation slice.",
+                "Slice 3 registered {} additional selected keyframes and triangulated {} new landmarks, but there were not enough mutually supported registered observations to run bundle adjustment. All geometry remains in the seed pair's arbitrary monocular coordinate frame.",
                 registered_views.len(),
                 multi_view.new_landmarks.accepted_landmarks
             ));
@@ -961,6 +1048,7 @@ mod tests {
         assert_eq!(result.multi_view.keyframes, vec![0]);
         assert!(result.multi_view.registration_candidates.is_empty());
         assert!(result.registered_views.is_empty());
+        assert!(!result.multi_view.bundle_adjustment.attempted);
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
         assert!(result.cameras[1].y.abs() < f32::EPSILON);
         assert!(result.cameras[1].z.abs() < f32::EPSILON);
