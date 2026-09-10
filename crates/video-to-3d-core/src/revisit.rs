@@ -210,7 +210,8 @@ pub(super) fn recover_failed_registrations(
         let Some(target_features) = context.features.get(frame_index) else {
             continue;
         };
-        let correspondences = seed_correspondences(evidence, target_features, &seed_points_by_feature);
+        let correspondences =
+            seed_correspondences(evidence, target_features, &seed_points_by_feature);
         let pose = estimate_seed_pose(&correspondences, context);
 
         stats.recoveries.push(RevisitRecoveryStats {
@@ -267,12 +268,12 @@ pub(super) fn close_registered_drift(
         let Some(target_features) = context.features.get(frame_index) else {
             continue;
         };
-        let correspondences = seed_correspondences(evidence, target_features, &seed_points_by_feature);
+        let correspondences =
+            seed_correspondences(evidence, target_features, &seed_points_by_feature);
         let pose = estimate_seed_pose(&correspondences, context);
 
-        let (center_delta_seed_baselines, rotation_delta) = pose.as_ref().map_or(
-            (None, None),
-            |pose| {
+        let (center_delta_seed_baselines, rotation_delta) =
+            pose.as_ref().map_or((None, None), |pose| {
                 (
                     Some(
                         ((pose.camera_center - current_camera.camera_center()).norm()
@@ -280,8 +281,7 @@ pub(super) fn close_registered_drift(
                     ),
                     Some(rotation_delta_degrees(&pose.rotation, &current_camera.rotation) as f32),
                 )
-            },
-        );
+            });
         let accepted = pose.as_ref().is_some_and(|pose| {
             let center_delta =
                 (pose.camera_center - current_camera.camera_center()).norm() / seed_baseline;
@@ -352,8 +352,10 @@ pub(super) fn closure_corrections_retained(
         };
         let before_center_error = (before_camera.camera_center() - closure.camera_center).norm();
         let after_center_error = (after_camera.camera_center() - closure.camera_center).norm();
-        let before_rotation_error = rotation_delta_degrees(&before_camera.rotation, &closure.rotation);
-        let after_rotation_error = rotation_delta_degrees(&after_camera.rotation, &closure.rotation);
+        let before_rotation_error =
+            rotation_delta_degrees(&before_camera.rotation, &closure.rotation);
+        let after_rotation_error =
+            rotation_delta_degrees(&after_camera.rotation, &closure.rotation);
 
         if after_center_error > before_center_error + 1.0e-5
             || after_rotation_error > before_rotation_error + 0.02
@@ -617,13 +619,8 @@ mod tests {
             seed_features.clone(),
             target_features,
         ];
-        let context = RevisitContext::new(
-            &features,
-            640,
-            480,
-            500.0,
-            ReconstructionOptions::default(),
-        );
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
         let mut stats = analyze(&context, &[0, 3], Some(0));
         let recovered = recover_failed_registrations(
             &mut stats,
@@ -650,13 +647,8 @@ mod tests {
             seed_features.clone(),
             target_features,
         ];
-        let context = RevisitContext::new(
-            &features,
-            640,
-            480,
-            500.0,
-            ReconstructionOptions::default(),
-        );
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
         let mut stats = analyze(&context, &[0, 3], Some(0));
         let drifted_center = Vector3::new(0.69, -0.06, 0.11);
         let registered = vec![
@@ -695,13 +687,8 @@ mod tests {
             seed_features.clone(),
             target_features,
         ];
-        let context = RevisitContext::new(
-            &features,
-            640,
-            480,
-            500.0,
-            ReconstructionOptions::default(),
-        );
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
         let mut stats = analyze(&context, &[0, 3], Some(0));
         let registered = vec![RegisteredCamera {
             frame_index: 3,
