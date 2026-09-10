@@ -398,7 +398,7 @@ fn seed_correspondences(
 fn estimate_seed_pose(
     correspondences: &[pnp::PnpCorrespondence],
     context: &RevisitContext<'_>,
-) -> Option<pnp::PnpPose> {
+) -> Option<pnp::PnpEstimate> {
     (correspondences.len() >= MIN_RECOVERY_CORRESPONDENCES)
         .then(|| {
             pnp::estimate_pose(
