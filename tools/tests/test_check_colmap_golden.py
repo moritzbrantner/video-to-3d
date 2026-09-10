@@ -39,6 +39,20 @@ class GoldenGateTests(unittest.TestCase):
             [],
         )
 
+    def test_accepts_independent_rust_camera_coverage(self):
+        rust, colmap = self.metrics()
+        rust["registered_images"] = "5"
+        self.assertEqual(
+            module.evaluate(
+                rust,
+                colmap,
+                case="revisit",
+                expected_images=8,
+                max_normalized_pose_rmse=0.25,
+            ),
+            [],
+        )
+
     def test_rejects_wrong_case_identity(self):
         rust, colmap = self.metrics()
         rust["case"] = "lateral"
@@ -65,7 +79,7 @@ class GoldenGateTests(unittest.TestCase):
 
     def test_rejects_camera_coverage_regression(self):
         rust, colmap = self.metrics()
-        rust["registered_images"] = "4"
+        rust["registered_images"] = "3"
         errors = module.evaluate(
             rust,
             colmap,
@@ -73,7 +87,7 @@ class GoldenGateTests(unittest.TestCase):
             expected_images=8,
             max_normalized_pose_rmse=0.25,
         )
-        self.assertTrue(any("registered 4/8" in error for error in errors))
+        self.assertTrue(any("registered 3/8" in error for error in errors))
 
     def test_incomplete_case_still_has_actionable_markdown(self):
         markdown = module.render_incomplete_markdown(
