@@ -48,6 +48,9 @@ colmap mapper \
   --database_path "$workspace/database.db" \
   --image_path "$fixture/images" \
   --output_path "$workspace/sparse" \
+  --Mapper.init_min_tri_angle 1.0 \
+  --Mapper.filter_min_tri_angle 0.5 \
+  --Mapper.tri_min_angle 0.5 \
   --Mapper.ba_refine_focal_length 0 \
   --Mapper.ba_refine_principal_point 0 \
   --Mapper.ba_refine_extra_params 0 >/dev/null
