@@ -17,7 +17,9 @@ struct ScenePoint {
 }
 
 fn lcg(state: &mut u64) -> f64 {
-    *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
     ((*state >> 11) as f64) / ((1_u64 << 53) as f64)
 }
 
@@ -59,7 +61,11 @@ fn render_frame(frame: usize, points: &[ScenePoint]) -> FrameInput {
                 let y = py + dy;
                 let offset = ((y as u32 * WIDTH + x as u32) * 4) as usize;
                 let checker = ((dx + dy + index as i32) & 1) == 0;
-                let value = if checker { point.shade } else { 255_u8.saturating_sub(point.shade / 2) };
+                let value = if checker {
+                    point.shade
+                } else {
+                    255_u8.saturating_sub(point.shade / 2)
+                };
                 rgba[offset] = value;
                 rgba[offset + 1] = value.saturating_add((index % 17) as u8);
                 rgba[offset + 2] = value.saturating_sub((index % 13) as u8);
@@ -67,7 +73,11 @@ fn render_frame(frame: usize, points: &[ScenePoint]) -> FrameInput {
         }
     }
 
-    FrameInput { width: WIDTH, height: HEIGHT, rgba }
+    FrameInput {
+        width: WIDTH,
+        height: HEIGHT,
+        rgba,
+    }
 }
 
 fn write_ppm(path: &Path, frame: &FrameInput) {
@@ -80,13 +90,22 @@ fn write_ppm(path: &Path, frame: &FrameInput) {
 }
 
 fn main() {
-    let output_dir = env::args().nth(1).unwrap_or_else(|| "golden-fixture".to_owned());
-    fs::create_dir_all(&output_dir).expect("create fixture directory");
-
+    let output_dir = env::args().nth(1);
     let points = scene();
-    let frames: Vec<FrameInput> = (0..FRAME_COUNT).map(|frame| render_frame(frame, &points)).collect();
-    for (index, frame) in frames.iter().enumerate() {
-        write_ppm(Path::new(&output_dir).join(format!("frame-{index:02}.ppm")).as_path(), frame);
+    let frames: Vec<FrameInput> = (0..FRAME_COUNT)
+        .map(|frame| render_frame(frame, &points))
+        .collect();
+
+    if let Some(output_dir) = output_dir.as_deref().filter(|value| *value != "-") {
+        fs::create_dir_all(output_dir).expect("create fixture directory");
+        for (index, frame) in frames.iter().enumerate() {
+            write_ppm(
+                Path::new(output_dir)
+                    .join(format!("frame-{index:02}.ppm"))
+                    .as_path(),
+                frame,
+            );
+        }
     }
 
     let result = reconstruct(&ReconstructionRequest {
@@ -102,12 +121,20 @@ fn main() {
     })
     .expect("golden fixture reconstruction");
 
-    let registered_images = result.calibrated_pair.as_ref().map_or(0, |_| 2 + result.registered_views.len());
+    let registered_images = result
+        .calibrated_pair
+        .as_ref()
+        .map_or(0, |_| 2 + result.registered_views.len());
     let reprojection = result
         .multi_view
         .bundle_adjustment
         .final_median_reprojection_error_pixels
-        .or_else(|| result.calibrated_pair.as_ref().map(|pair| pair.median_reprojection_error_pixels));
+        .or_else(|| {
+            result
+                .calibrated_pair
+                .as_ref()
+                .map(|pair| pair.median_reprojection_error_pixels)
+        });
 
     println!(
         "golden-rust registered_images={} points={} median_reprojection_error_pixels={}",
