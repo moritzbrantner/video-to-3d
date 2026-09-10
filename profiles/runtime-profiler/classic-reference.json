@@ -3,7 +3,8 @@
   "id": "video-to-3d-classic-reference",
   "target": {
     "type": "command",
-    "program": "scripts/run_classic_reference.sh",
+    "program": "bash",
+    "args": ["scripts/run_classic_reference.sh"],
     "working_directory": "../..",
     "inherit_env": [
       "VIDEO_TO_3D_IMPLEMENTATION",
