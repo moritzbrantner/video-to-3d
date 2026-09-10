@@ -287,3 +287,70 @@ fn main() {
         pose_rmse.map_or_else(|| "nan".to_owned(), |value| format!("{value:.6}"))
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::{Matrix3, Vector3};
+
+    fn pose(frame_index: usize, position: Vector3<f64>) -> CameraPose {
+        CameraPose {
+            frame_index,
+            x: position.x as f32,
+            y: position.y as f32,
+            z: position.z as f32,
+            matched_features: 0,
+        }
+    }
+
+    #[test]
+    fn pose_alignment_removes_similarity_gauge() {
+        let angle = 0.47_f64;
+        let rotation = Matrix3::new(
+            angle.cos(),
+            -angle.sin(),
+            0.0,
+            angle.sin(),
+            angle.cos(),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        let scale = 2.3;
+        let offset = Vector3::new(1.2, -0.7, 0.4);
+        let cameras: Vec<CameraPose> = (0..FRAME_COUNT)
+            .map(|frame_index| {
+                let truth = Scenario::Revisit.camera_center(frame_index);
+                let truth = Vector3::new(truth.x, truth.y, truth.z);
+                pose(frame_index, scale * rotation * truth + offset)
+            })
+            .collect();
+
+        let error = normalized_pose_rmse(&cameras, Scenario::Revisit).expect("valid alignment");
+        assert!(error < 1e-5, "similarity gauge should align exactly, got {error}");
+    }
+
+    #[test]
+    fn pose_alignment_preserves_real_drift() {
+        let mut cameras: Vec<CameraPose> = (0..FRAME_COUNT)
+            .map(|frame_index| {
+                let truth = Scenario::Revisit.camera_center(frame_index);
+                pose(frame_index, Vector3::new(truth.x, truth.y, truth.z))
+            })
+            .collect();
+        cameras[4].y += 0.35;
+
+        let error = normalized_pose_rmse(&cameras, Scenario::Revisit).expect("valid alignment");
+        assert!(error > 0.1, "pose drift should survive Sim(3) alignment, got {error}");
+    }
+
+    #[test]
+    fn pose_alignment_rejects_degenerate_camera_centers() {
+        let cameras: Vec<CameraPose> = (0..FRAME_COUNT)
+            .map(|frame_index| pose(frame_index, Vector3::new(1.0, 1.0, 1.0)))
+            .collect();
+
+        assert!(normalized_pose_rmse(&cameras, Scenario::Revisit).is_none());
+    }
+}
