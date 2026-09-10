@@ -244,13 +244,9 @@ pub(super) fn triangulate_new_landmarks(
         }
         candidate_tracks += 1;
 
-        let Some(triangulated) = triangulate_track(
-            &observations,
-            &seed_frames,
-            width,
-            height,
-            focal_pixels,
-        ) else {
+        let Some(triangulated) =
+            triangulate_track(&observations, &seed_frames, width, height, focal_pixels)
+        else {
             continue;
         };
 
@@ -274,7 +270,8 @@ pub(super) fn triangulate_new_landmarks(
         candidate_tracks,
         accepted_landmarks: landmarks.len(),
         supporting_observations,
-        median_reprojection_error_pixels: median_f64(&mut reprojection_errors).map(|value| value as f32),
+        median_reprojection_error_pixels: median_f64(&mut reprojection_errors)
+            .map(|value| value as f32),
         median_triangulation_angle_degrees: median_f64(&mut triangulation_angles)
             .map(|value| value as f32),
     };
@@ -409,7 +406,8 @@ fn triangulate_track(
                 continue;
             }
 
-            let Some(position) = triangulate_pair(&left, &right, width, height, focal_pixels) else {
+            let Some(position) = triangulate_pair(&left, &right, width, height, focal_pixels)
+            else {
                 continue;
             };
             let triangulation_angle_degrees =
@@ -421,7 +419,8 @@ fn triangulate_track(
             let mut supporting_indices = Vec::new();
             let mut reprojection_errors = Vec::new();
             for (index, observation) in observations.iter().enumerate() {
-                let camera_point = observation.camera.rotation * position + observation.camera.translation;
+                let camera_point =
+                    observation.camera.rotation * position + observation.camera.translation;
                 if camera_point.z <= 1.0e-6 {
                     continue;
                 }
@@ -443,8 +442,7 @@ fn triangulate_track(
                 continue;
             }
             let median_reprojection_error_pixels = median_f64(&mut reprojection_errors)?;
-            if median_reprojection_error_pixels
-                > MAX_NEW_LANDMARK_MEDIAN_REPROJECTION_ERROR_PIXELS
+            if median_reprojection_error_pixels > MAX_NEW_LANDMARK_MEDIAN_REPROJECTION_ERROR_PIXELS
             {
                 continue;
             }
@@ -513,11 +511,7 @@ fn triangulate_pair(
     if !w.is_finite() || w.abs() <= 1.0e-12 {
         return None;
     }
-    let position = Vector3::new(
-        homogeneous[0] / w,
-        homogeneous[1] / w,
-        homogeneous[2] / w,
-    );
+    let position = Vector3::new(homogeneous[0] / w, homogeneous[1] / w, homogeneous[2] / w);
     position
         .iter()
         .all(|value| value.is_finite())
@@ -767,21 +761,19 @@ mod tests {
             Some((0, &[])),
         );
 
-        let result = triangulate_new_landmarks(
-            &analysis,
-            &cameras,
-            &features,
-            width,
-            height,
-            focal,
-        );
+        let result =
+            triangulate_new_landmarks(&analysis, &cameras, &features, width, height, focal);
 
         assert_eq!(result.stats.candidate_tracks, 1);
         assert_eq!(result.stats.accepted_landmarks, 1);
         assert_eq!(result.stats.supporting_observations, 3);
         assert!((result.landmarks[0].position - point).norm() < 0.03);
         assert!(
-            result.stats.median_reprojection_error_pixels.unwrap_or(f32::INFINITY) < 1.0
+            result
+                .stats
+                .median_reprojection_error_pixels
+                .unwrap_or(f32::INFINITY)
+                < 1.0
         );
         assert!(
             result
@@ -810,14 +802,8 @@ mod tests {
             Some((0, &[])),
         );
 
-        let result = triangulate_new_landmarks(
-            &analysis,
-            &cameras,
-            &features,
-            width,
-            height,
-            focal,
-        );
+        let result =
+            triangulate_new_landmarks(&analysis, &cameras, &features, width, height, focal);
 
         assert_eq!(result.stats.candidate_tracks, 1);
         assert_eq!(result.stats.accepted_landmarks, 0);
