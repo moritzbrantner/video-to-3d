@@ -6,7 +6,9 @@ mod two_view;
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
 };
-pub use revisit::{RevisitCandidateStats, RevisitRecoveryStats, RevisitStats};
+pub use revisit::{
+    RevisitCandidateStats, RevisitClosureStats, RevisitRecoveryStats, RevisitStats,
+};
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -468,7 +470,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         focal as f64,
     );
     multi_view_analysis.stats.new_landmarks = new_landmark_analysis.stats.clone();
-    let new_landmarks = new_landmark_analysis.landmarks;
+    let mut new_landmarks = new_landmark_analysis.landmarks;
 
     let mut optimized_seed_points = best_two_view
         .as_ref()
@@ -484,7 +486,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         .iter()
         .map(|landmark| landmark.position)
         .collect();
-    if let Some((seed_pair_index, _)) = best_two_view.as_ref() {
+    if let Some((seed_pair_index, estimate)) = best_two_view.as_ref() {
         let adjustment = multi_view::bundle_adjust(
             &multi_view_analysis,
             &optimized_seed_points,
@@ -495,11 +497,90 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             height,
             focal as f64,
         );
-        multi_view_analysis.stats.bundle_adjustment = adjustment.stats;
+        multi_view_analysis.stats.bundle_adjustment = adjustment.stats.clone();
         optimized_seed_points = adjustment.seed_points;
         optimized_new_landmark_positions = adjustment.new_landmark_positions;
-        registered_cameras = adjustment
-            .cameras
+        registered_geometry = adjustment.cameras;
+        for (landmark, position) in new_landmarks
+            .iter_mut()
+            .zip(&optimized_new_landmark_positions)
+        {
+            landmark.position = *position;
+        }
+
+        let pre_loop_geometry = registered_geometry.clone();
+        let pre_loop_seed_points = optimized_seed_points.clone();
+        let pre_loop_new_landmark_positions = optimized_new_landmark_positions.clone();
+        let pre_loop_adjustment = multi_view_analysis.stats.bundle_adjustment.clone();
+        let closures = revisit::close_registered_drift(
+            &mut revisits,
+            *seed_pair_index,
+            estimate,
+            &registered_geometry,
+            &revisit_context,
+        );
+
+        if !closures.is_empty() {
+            for closure in &closures {
+                if let Some(camera) = registered_geometry
+                    .iter_mut()
+                    .find(|camera| camera.frame_index == closure.frame_index)
+                {
+                    camera.rotation = closure.rotation;
+                    camera.translation = closure.translation;
+                }
+            }
+
+            let loop_adjustment = multi_view::bundle_adjust(
+                &multi_view_analysis,
+                &optimized_seed_points,
+                &new_landmarks,
+                &registered_geometry,
+                &features,
+                width,
+                height,
+                focal as f64,
+            );
+            let retained = loop_adjustment.stats.accepted
+                && revisit::closure_corrections_retained(
+                    &closures,
+                    &pre_loop_geometry,
+                    &loop_adjustment.cameras,
+                );
+
+            if retained {
+                multi_view_analysis.stats.bundle_adjustment = loop_adjustment.stats;
+                optimized_seed_points = loop_adjustment.seed_points;
+                optimized_new_landmark_positions = loop_adjustment.new_landmark_positions;
+                registered_geometry = loop_adjustment.cameras;
+                for (landmark, position) in new_landmarks
+                    .iter_mut()
+                    .zip(&optimized_new_landmark_positions)
+                {
+                    landmark.position = *position;
+                }
+            } else {
+                let closure_frames: HashSet<usize> =
+                    closures.iter().map(|closure| closure.frame_index).collect();
+                for closure in &mut revisits.closures {
+                    if closure_frames.contains(&closure.frame_index) {
+                        closure.accepted = false;
+                    }
+                }
+                registered_geometry = pre_loop_geometry;
+                optimized_seed_points = pre_loop_seed_points;
+                optimized_new_landmark_positions = pre_loop_new_landmark_positions;
+                multi_view_analysis.stats.bundle_adjustment = pre_loop_adjustment;
+                for (landmark, position) in new_landmarks
+                    .iter_mut()
+                    .zip(&optimized_new_landmark_positions)
+                {
+                    landmark.position = *position;
+                }
+            }
+        }
+
+        registered_cameras = registered_geometry
             .iter()
             .filter(|camera| {
                 camera.frame_index != *seed_pair_index && camera.frame_index != *seed_pair_index + 1
@@ -653,21 +734,25 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         .iter()
         .filter(|recovery| recovery.accepted)
         .count();
+    let closed_drift = revisits
+        .closures
+        .iter()
+        .filter(|closure| closure.accepted)
+        .count();
     if !revisits.candidates.is_empty() {
-        if recovered_from_revisit > 0 {
+        if recovered_from_revisit > 0 || closed_drift > 0 {
             warnings.push(format!(
-                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates and recovered {recovered_from_revisit} previously unregistered selected keyframe poses through direct seed-frame associations that passed the existing robust PnP gates. Recovered cameras participate in triangulation and bundle adjustment; this is not a pose-graph loop-closure correction.",
+                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates, recovered {recovered_from_revisit} previously unregistered selected keyframe poses, and retained {closed_drift} seed-anchored registered-pose drift corrections. Revisit evidence changes geometry only through strict seed-landmark PnP and the existing rollback-safe bundle-adjustment acceptance boundary; broader arbitrary non-seed pose-graph closure is still out of scope.",
                 revisits.candidates.len()
             ));
-        } else if !revisits.recoveries.is_empty() {
+        } else if !revisits.recoveries.is_empty() || !revisits.closures.is_empty() {
             warnings.push(format!(
-                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates and attempted direct seed-frame recovery for {} selected keyframes, but none passed the existing robust PnP gates. No camera pose was invented from revisit evidence.",
-                revisits.candidates.len(),
-                revisits.recoveries.len()
+                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates and produced recovery or registered-pose closure attempts, but no additional revisit-driven geometry survived the deterministic PnP, bounded-drift, and bundle-adjustment no-regression gates. No camera pose was invented or half-integrated from revisit evidence.",
+                revisits.candidates.len()
             ));
         } else {
             warnings.push(format!(
-                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates, but none corresponded to a currently unregistered selected keyframe with enough accepted seed geometry for recovery. No loop-closure correction was applied.",
+                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates, but none had enough accepted seed geometry to recover or close a selected camera pose. No revisit correction was applied.",
                 revisits.candidates.len()
             ));
         }
@@ -693,7 +778,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 .final_rmse_reprojection_error_pixels
                 .unwrap_or_default();
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, triangulated {} new landmarks, and accepted deterministic bundle adjustment across {} cameras, {} landmarks, and {} supported observations. Reprojection RMSE improved from {:.2} px to {:.2} px while the calibrated seed-pair cameras remained fixed to preserve the arbitrary monocular gauge. No pose-graph loop-closure correction or metric-scale claim is made.",
+                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, triangulated {} new landmarks, retained {closed_drift} seed-anchored loop corrections, and accepted deterministic bundle adjustment across {} cameras, {} landmarks, and {} supported observations. Reprojection RMSE improved from {:.2} px to {:.2} px while the calibrated seed-pair cameras remained fixed to preserve the arbitrary monocular gauge. No metric-scale claim or arbitrary non-seed pose-graph optimization is made.",
                 registered_views.len(),
                 multi_view.new_landmarks.accepted_landmarks,
                 multi_view.bundle_adjustment.optimized_cameras,
@@ -704,14 +789,14 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             ));
         } else if multi_view.bundle_adjustment.attempted {
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, and triangulated {} new landmarks. Bundle adjustment ran across {} supported observations but its candidate geometry did not satisfy the no-regression acceptance boundary, so the pre-adjustment cameras and landmarks were retained. The calibrated seed pair remains the fixed arbitrary monocular gauge.",
+                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, and triangulated {} new landmarks. Bundle adjustment ran across {} supported observations but its candidate geometry did not satisfy the no-regression acceptance boundary, so the pre-adjustment cameras and landmarks were retained and no loop correction was committed. The calibrated seed pair remains the fixed arbitrary monocular gauge.",
                 registered_views.len(),
                 multi_view.new_landmarks.accepted_landmarks,
                 multi_view.bundle_adjustment.observations
             ));
         } else {
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, and triangulated {} new landmarks, but there were not enough mutually supported registered observations to run bundle adjustment. All geometry remains in the seed pair's arbitrary monocular coordinate frame.",
+                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, and triangulated {} new landmarks, but there were not enough mutually supported registered observations to run bundle adjustment. No loop correction can be retained without that downstream gate; all geometry remains in the seed pair's arbitrary monocular coordinate frame.",
                 registered_views.len(),
                 multi_view.new_landmarks.accepted_landmarks
             ));
@@ -1143,6 +1228,7 @@ mod tests {
         assert!(result.multi_view.registration_candidates.is_empty());
         assert!(result.revisits.candidates.is_empty());
         assert!(result.revisits.recoveries.is_empty());
+        assert!(result.revisits.closures.is_empty());
         assert!(result.registered_views.is_empty());
         assert!(!result.multi_view.bundle_adjustment.attempted);
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
