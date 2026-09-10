@@ -339,9 +339,7 @@ pub(super) fn bundle_adjust(
         new_landmarks,
         cameras,
         features,
-        width,
-        height,
-        focal_pixels,
+        bundle_adjustment::ProjectionModel::new(width, height, focal_pixels),
     )
 }
 
