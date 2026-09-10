@@ -403,7 +403,6 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     multi_view_analysis.stats.new_landmarks = new_landmark_analysis.stats.clone();
     let new_landmarks = new_landmark_analysis.landmarks;
 
-    let mut optimized_registered_geometry = registered_geometry.clone();
     let mut optimized_seed_points = best_two_view
         .as_ref()
         .map(|(_, estimate)| {
@@ -418,7 +417,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         .iter()
         .map(|landmark| landmark.position)
         .collect();
-    if let Some((_, estimate)) = best_two_view.as_ref() {
+    if let Some((seed_pair_index, _)) = best_two_view.as_ref() {
         let adjustment = multi_view::bundle_adjust(
             &multi_view_analysis,
             &optimized_seed_points,
@@ -430,34 +429,29 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             focal as f64,
         );
         multi_view_analysis.stats.bundle_adjustment = adjustment.stats;
-        optimized_registered_geometry = adjustment.cameras;
         optimized_seed_points = adjustment.seed_points;
         optimized_new_landmark_positions = adjustment.new_landmark_positions;
-
-        if let Some((seed_pair_index, _)) = best_two_view.as_ref() {
-            registered_cameras = optimized_registered_geometry
-                .iter()
-                .filter(|camera| {
-                    camera.frame_index != *seed_pair_index
-                        && camera.frame_index != *seed_pair_index + 1
+        registered_cameras = adjustment
+            .cameras
+            .iter()
+            .filter(|camera| {
+                camera.frame_index != *seed_pair_index
+                    && camera.frame_index != *seed_pair_index + 1
+            })
+            .filter_map(|camera| {
+                let view = registered_views
+                    .iter()
+                    .find(|view| view.frame_index == camera.frame_index)?;
+                let center = camera.camera_center();
+                Some(CameraPose {
+                    frame_index: camera.frame_index,
+                    x: center.x as f32,
+                    y: center.y as f32,
+                    z: center.z as f32,
+                    matched_features: view.inliers,
                 })
-                .filter_map(|camera| {
-                    let view = registered_views
-                        .iter()
-                        .find(|view| view.frame_index == camera.frame_index)?;
-                    let center = camera.camera_center();
-                    Some(CameraPose {
-                        frame_index: camera.frame_index,
-                        x: center.x as f32,
-                        y: center.y as f32,
-                        z: center.z as f32,
-                        matched_features: view.inliers,
-                    })
-                })
-                .collect();
-        }
-
-        let _ = estimate;
+            })
+            .collect();
     }
     let multi_view = multi_view_analysis.stats;
 
