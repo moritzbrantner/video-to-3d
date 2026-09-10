@@ -68,9 +68,9 @@ impl Scenario {
                 }
             }
             Self::Forward => CameraCenter {
-                x: -0.21 + frame as f64 * 0.06,
+                x: -0.35 + frame as f64 * 0.10,
                 y: 0.0,
-                z: frame as f64 * 0.08,
+                z: frame as f64 * 0.12,
             },
         }
     }
@@ -276,7 +276,9 @@ fn main() {
                 .as_ref()
                 .map(|pair| pair.median_reprojection_error_pixels)
         });
-    let pose_rmse = normalized_pose_rmse(&result.cameras, scenario);
+    let pose_rmse = (registered_images >= 3)
+        .then(|| normalized_pose_rmse(&result.cameras, scenario))
+        .flatten();
 
     println!(
         "golden-rust case={} registered_images={} points={} median_reprojection_error_pixels={} normalized_pose_rmse={}",
