@@ -435,8 +435,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .cameras
             .iter()
             .filter(|camera| {
-                camera.frame_index != *seed_pair_index
-                    && camera.frame_index != *seed_pair_index + 1
+                camera.frame_index != *seed_pair_index && camera.frame_index != *seed_pair_index + 1
             })
             .filter_map(|camera| {
                 let view = registered_views
