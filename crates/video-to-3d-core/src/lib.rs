@@ -1,8 +1,10 @@
+mod dense;
 mod multi_view;
 mod pnp;
 mod revisit;
 mod two_view;
 
+pub use dense::DenseStats;
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
 };
@@ -118,6 +120,8 @@ pub struct RegisteredViewStats {
 pub struct ReconstructionResult {
     pub cameras: Vec<CameraPose>,
     pub points: Vec<Point3>,
+    pub dense_points: Vec<Point3>,
+    pub dense: DenseStats,
     pub pairs: Vec<PairStats>,
     pub calibrated_pair: Option<CalibratedPairStats>,
     pub multi_view: MultiViewStats,
@@ -598,6 +602,20 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             })
             .collect();
     }
+
+    let dense_sparse_points: Vec<nalgebra::Vector3<f64>> = optimized_seed_points
+        .iter()
+        .chain(&optimized_new_landmark_positions)
+        .copied()
+        .collect();
+    let dense_analysis = dense::estimate_depth_points(
+        &request.frames,
+        &registered_geometry,
+        &dense_sparse_points,
+        focal as f64,
+    );
+    let dense = dense_analysis.stats;
+    let dense_points = dense_analysis.points;
     let multi_view = multi_view_analysis.stats;
 
     let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
@@ -727,6 +745,24 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         );
     }
 
+    if dense.attempted {
+        if dense.accepted_points > 0 {
+            warnings.push(format!(
+                "Slice 4 coarse depth estimation accepted {} depth samples from reference frame {} using {} registered source views and {} inverse-depth hypotheses. These samples are derived from final accepted sparse camera geometry and are rendered separately from the sparse map; multi-view depth consistency, dense fusion, meshing, and metric scale are not claimed yet.",
+                dense.accepted_points,
+                dense.reference_frame.map_or(0, |frame| frame + 1),
+                dense.source_views,
+                dense.depth_hypotheses
+            ));
+        } else {
+            warnings.push(format!(
+                "Slice 4 coarse depth estimation ran from reference frame {} with {} registered source views, but no sampled pixel passed the texture, photometric-error, and ambiguity gates. No dense geometry was invented; multi-view consistency and fusion remain future slices.",
+                dense.reference_frame.map_or(0, |frame| frame + 1),
+                dense.source_views
+            ));
+        }
+    }
+
     let recovered_from_revisit = revisits
         .recoveries
         .iter()
@@ -809,6 +845,8 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     Ok(ReconstructionResult {
         cameras,
         points,
+        dense_points,
+        dense,
         pairs,
         calibrated_pair,
         multi_view,
@@ -1229,6 +1267,8 @@ mod tests {
         assert!(result.revisits.closures.is_empty());
         assert!(result.registered_views.is_empty());
         assert!(!result.multi_view.bundle_adjustment.attempted);
+        assert!(!result.dense.attempted);
+        assert!(result.dense_points.is_empty());
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
         assert!(result.cameras[1].y.abs() < f32::EPSILON);
         assert!(result.cameras[1].z.abs() < f32::EPSILON);
