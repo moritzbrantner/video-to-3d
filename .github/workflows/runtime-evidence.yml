@@ -46,18 +46,25 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
           rustup default stable
 
+      - name: Install COLMAP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y colmap
+
       - name: Install runtime-profiler
         run: cargo install --git https://github.com/moritzbrantner/runtime-profiler --rev "$RUNTIME_PROFILER_REV" --locked
 
       - name: Give the base the identical reconstruction workload
         run: |
-          mkdir -p reference/crates/video-to-3d-core/examples reference/profiles/runtime-profiler
+          mkdir -p reference/crates/video-to-3d-core/examples reference/profiles/runtime-profiler reference/scripts
           cp candidate/crates/video-to-3d-core/examples/profile_reconstruct.rs \
             reference/crates/video-to-3d-core/examples/profile_reconstruct.rs
           cp candidate/profiles/runtime-profiler/reconstruct.json reference/profiles/runtime-profiler/reconstruct.json
+          cp candidate/scripts/assert_classic_runtime.py reference/scripts/assert_classic_runtime.py
           git -C reference add \
             crates/video-to-3d-core/examples/profile_reconstruct.rs \
-            profiles/runtime-profiler/reconstruct.json
+            profiles/runtime-profiler/reconstruct.json \
+            scripts/assert_classic_runtime.py
           if ! git -C reference diff --cached --quiet; then
             git -C reference \
               -c user.name='runtime-profiler' \
@@ -65,10 +72,14 @@ jobs:
               commit -m 'chore: attach comparable reconstruction workload'
           fi
 
+      - name: Generate shared classic-reference fixture
+        run: python3 candidate/scripts/generate_golden_scene.py "$RUNNER_TEMP/golden-scene"
+
       - name: Prime deterministic workload
         run: |
           (cd reference && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct)
           (cd candidate && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct)
+          (cd candidate && cargo build --locked --release -p video-to-3d-core --example golden_reconstruct)
           test -z "$(git -C reference status --porcelain)"
           test -z "$(git -C candidate status --porcelain)"
 
@@ -88,7 +99,7 @@ jobs:
             --output "$RUNNER_TEMP/candidate-reconstruct"
           runtime-profiler validate --bundle "$RUNNER_TEMP/candidate-reconstruct"
 
-      - name: Compare runtime evidence
+      - name: Compare candidate runtime to base
         run: |
           set -euo pipefail
           runtime-profiler score \
@@ -96,13 +107,59 @@ jobs:
             --candidate "$RUNNER_TEMP/candidate-reconstruct" \
             --json | tee "$RUNNER_TEMP/runtime-reconstruct.json"
           {
-            echo '### runtime-profiler comparison'
+            echo '### runtime-profiler candidate/base comparison'
             echo '```json'
             cat "$RUNNER_TEMP/runtime-reconstruct.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run Moonlight correctness evaluation
+      - name: Prime classic implementation paths
+        working-directory: candidate
+        run: |
+          VIDEO_TO_3D_IMPLEMENTATION=ours \
+          VIDEO_TO_3D_FIXTURE="$RUNNER_TEMP/golden-scene" \
+            bash scripts/run_classic_reference.sh
+          VIDEO_TO_3D_IMPLEMENTATION=colmap \
+          VIDEO_TO_3D_FIXTURE="$RUNNER_TEMP/golden-scene" \
+            bash scripts/run_classic_reference.sh
+
+      - name: Capture COLMAP classic evidence
+        working-directory: candidate
+        run: |
+          VIDEO_TO_3D_IMPLEMENTATION=colmap \
+          VIDEO_TO_3D_FIXTURE="$RUNNER_TEMP/golden-scene" \
+            runtime-profiler capture \
+              --scenario profiles/runtime-profiler/classic-reference.json \
+              --output "$RUNNER_TEMP/classic-colmap"
+          runtime-profiler validate --bundle "$RUNNER_TEMP/classic-colmap"
+
+      - name: Capture video-to-3d classic evidence
+        working-directory: candidate
+        run: |
+          VIDEO_TO_3D_IMPLEMENTATION=ours \
+          VIDEO_TO_3D_FIXTURE="$RUNNER_TEMP/golden-scene" \
+            runtime-profiler capture \
+              --scenario profiles/runtime-profiler/classic-reference.json \
+              --output "$RUNNER_TEMP/classic-ours"
+          runtime-profiler validate --bundle "$RUNNER_TEMP/classic-ours"
+
+      - name: Compare runtime to COLMAP
+        run: |
+          set -euo pipefail
+          runtime-profiler score \
+            --reference "$RUNNER_TEMP/classic-colmap" \
+            --candidate "$RUNNER_TEMP/classic-ours" \
+            --json | tee "$RUNNER_TEMP/classic-runtime.json"
+          echo "VIDEO_TO_3D_CLASSIC_SCORE_JSON=$RUNNER_TEMP/classic-runtime.json" >> "$GITHUB_ENV"
+          {
+            echo '### runtime-profiler classic COLMAP comparison'
+            echo 'COLMAP is the reference and video-to-3d is the candidate. A score of 100 means the local Rust path meets or beats the classic reference on the measured process evidence.'
+            echo '```json'
+            cat "$RUNNER_TEMP/classic-runtime.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Moonlight correctness and classic-runtime policy
         working-directory: candidate
         run: |
           set -euo pipefail
@@ -131,5 +188,8 @@ jobs:
             ${{ runner.temp }}/reference-reconstruct
             ${{ runner.temp }}/candidate-reconstruct
             ${{ runner.temp }}/runtime-reconstruct.json
+            ${{ runner.temp }}/classic-colmap
+            ${{ runner.temp }}/classic-ours
+            ${{ runner.temp }}/classic-runtime.json
             ${{ runner.temp }}/moonlight.md
           if-no-files-found: warn
