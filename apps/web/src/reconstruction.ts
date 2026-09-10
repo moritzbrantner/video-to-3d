@@ -140,6 +140,7 @@ export type MultiViewStats = {
 
 export type DenseStats = {
   attempted: boolean;
+  skip_reason: string | null;
   reference_frame: number | null;
   source_views: number;
   sampled_pixels: number;
