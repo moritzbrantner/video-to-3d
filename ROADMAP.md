@@ -32,11 +32,11 @@ Implementation status: deterministic synthetic fixtures and hosted checks cover 
 - Associate triangulated seed landmarks with their multi-frame tracks.
 - Screen other selected keyframes for real seed-landmark 2D↔3D correspondence readiness.
 - Register eligible additional cameras with bounded deterministic robust PnP and explicit inlier/reprojection acceptance gates.
-- Triangulate new landmarks from newly registered views.
+- Triangulate new landmarks from newly registered views with positive-depth, multi-view support, reprojection, and triangulation-angle acceptance gates.
 - Bundle adjustment over cameras and sparse landmarks.
 - Loop/revisit handling and failed-registration recovery.
 
-Current boundary: Rust can register additional selected camera centers against the calibrated seed landmarks when robust PnP passes. Those cameras share the seed pair's arbitrary monocular coordinate system, but the sparse cloud still contains only seed-pair landmarks and has not been jointly optimized. The next implementation slice is new-landmark triangulation from accepted registered views, followed by bundle adjustment.
+Current boundary: Rust can register additional selected camera poses against the calibrated seed landmarks and use accepted registered views to triangulate non-seed feature tracks into new sparse landmarks. Cameras and points share the seed pair's arbitrary monocular coordinate system, but they have not yet been jointly optimized. The next implementation slice is bundle adjustment, followed by loop/revisit handling and failed-registration recovery.
 
 Exit criterion: longer videos produce a stable sparse model without unbounded trajectory drift.
 
