@@ -155,7 +155,8 @@ pub(super) fn recover_failed_registrations(
             continue;
         };
         let matches = mutual_unbounded_matches(seed_features, target_features, context);
-        let candidate_overlap = overlap_ratio(seed_features.len(), target_features.len(), matches.len());
+        let candidate_overlap =
+            overlap_ratio(seed_features.len(), target_features.len(), matches.len());
         if matches.len() < MIN_REVISIT_MATCHES || candidate_overlap < MIN_REVISIT_OVERLAP {
             continue;
         }
@@ -273,12 +274,10 @@ mod tests {
         assert!(match_features(&source, &target, options).is_empty());
         let matches = mutual_unbounded_matches(&source, &target, &context);
         assert_eq!(matches.len(), 12);
-        assert!(
-            matches
-                .iter()
-                .enumerate()
-                .all(|(index, feature_match)| feature_match.a == index && feature_match.b == index)
-        );
+        assert!(matches
+            .iter()
+            .enumerate()
+            .all(|(index, feature_match)| feature_match.a == index && feature_match.b == index));
     }
 
     #[test]
@@ -287,13 +286,8 @@ mod tests {
             .map(|index| feature(index, 40 + index as u32, 60 + index as u32))
             .collect();
         let features = vec![base.clone(), base.clone(), base.clone()];
-        let context = RevisitContext::new(
-            &features,
-            640,
-            480,
-            500.0,
-            ReconstructionOptions::default(),
-        );
+        let context =
+            RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
         let stats = analyze(&context, &[0, 1, 2], Some(0));
 
         assert_eq!(stats.candidates.len(), 1);
@@ -338,10 +332,10 @@ mod tests {
             .enumerate()
             .map(|(index, point)| {
                 let camera_point = rotation * point + translation;
-                let x = (camera_point.x / camera_point.z * focal + width as f64 * 0.5).round()
-                    as u32;
-                let y = (camera_point.y / camera_point.z * focal + height as f64 * 0.5).round()
-                    as u32;
+                let x =
+                    (camera_point.x / camera_point.z * focal + width as f64 * 0.5).round() as u32;
+                let y =
+                    (camera_point.y / camera_point.z * focal + height as f64 * 0.5).round() as u32;
                 feature(index, x, y)
             })
             .collect();
