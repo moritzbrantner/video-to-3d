@@ -21,6 +21,7 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
   const bounds = useMemo(() => {
     const positions = [
       ...reconstruction.points.map((point) => [point.x, point.y, point.z] as const),
+      ...reconstruction.dense_points.map((point) => [point.x, point.y, point.z] as const),
       ...reconstruction.cameras.map((camera) => [camera.x, camera.y, camera.z] as const),
     ];
     if (positions.length === 0) {
@@ -81,6 +82,20 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
         scale,
       };
     };
+
+    const projectedDensePoints = reconstruction.dense_points
+      .filter((point) => point.confidence > 0.05)
+      .map((point) => ({ point, projected: project(point.x, point.y, point.z) }))
+      .filter(({ projected }) => projected.z > 0.05)
+      .sort((a, b) => b.projected.z - a.projected.z);
+
+    for (const { point, projected } of projectedDensePoints) {
+      const radius = Math.max(0.55 * ratio, Math.min(1.8 * ratio, projected.scale * 0.009));
+      context.beginPath();
+      context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
+      context.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${0.18 + point.confidence * 0.48})`;
+      context.fill();
+    }
 
     const projectedPoints = reconstruction.points
       .filter((point) => point.confidence > 0.08)
@@ -164,7 +179,7 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
           ),
         }));
       }}
-      aria-label="Interactive sparse 3D reconstruction. Drag to orbit and use the mouse wheel to zoom."
+      aria-label="Interactive 3D reconstruction with sparse landmarks, accepted coarse dense depth samples, and registered cameras. Drag to orbit and use the mouse wheel to zoom."
     />
   );
 }
