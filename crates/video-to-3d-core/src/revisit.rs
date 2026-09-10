@@ -235,16 +235,11 @@ pub(super) fn recover_failed_registrations(
     }
 
     recovered.sort_by_key(|view| view.frame_index);
-    stats
-        .recoveries
-        .sort_by_key(|attempt| attempt.frame_index);
+    stats.recoveries.sort_by_key(|attempt| attempt.frame_index);
     recovered
 }
 
-fn preselect_pairs(
-    frames: &[usize],
-    seed_pair_index: Option<usize>,
-) -> Vec<(usize, usize)> {
+fn preselect_pairs(frames: &[usize], seed_pair_index: Option<usize>) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for (left_offset, &from_frame) in frames.iter().enumerate() {
         for &to_frame in frames.iter().skip(left_offset + 1) {
