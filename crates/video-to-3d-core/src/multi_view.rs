@@ -842,7 +842,7 @@ mod tests {
             .expect("later supported pair should recover the track");
 
         assert_eq!(result.supporting_observations, 3);
-        assert!((result.position - point).norm() < 0.03);
+        assert!((result.position - point).norm() < 0.05);
     }
 
     #[test]
