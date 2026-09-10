@@ -512,33 +512,40 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 }
             })
             .collect();
-        points.extend(new_landmarks.iter().enumerate().filter_map(|(new_index, landmark)| {
-            let feature = features
-                .get(landmark.source_frame_index)?
-                .get(landmark.source_feature_index)?;
-            let frame = request.frames.get(landmark.source_frame_index)?;
-            let (r, g, b) = sample_rgb(frame, feature.x, feature.y);
-            let support_confidence =
-                (landmark.supporting_observations as f32 / 4.0).clamp(0.5, 1.0);
-            let reprojection_confidence = (1.0
-                / (1.0 + landmark.median_reprojection_error_pixels as f32 * 0.5))
-                .clamp(0.15, 1.0);
-            let angle_confidence =
-                (landmark.triangulation_angle_degrees as f32 / 3.0).clamp(0.15, 1.0);
-            let position = optimized_new_landmark_positions
-                .get(new_index)
-                .copied()
-                .unwrap_or(landmark.position);
-            Some(Point3 {
-                x: position.x as f32,
-                y: position.y as f32,
-                z: position.z as f32,
-                confidence: support_confidence * reprojection_confidence * angle_confidence,
-                r,
-                g,
-                b,
-            })
-        }));
+        points.extend(
+            new_landmarks
+                .iter()
+                .enumerate()
+                .filter_map(|(new_index, landmark)| {
+                    let feature = features
+                        .get(landmark.source_frame_index)?
+                        .get(landmark.source_feature_index)?;
+                    let frame = request.frames.get(landmark.source_frame_index)?;
+                    let (r, g, b) = sample_rgb(frame, feature.x, feature.y);
+                    let support_confidence =
+                        (landmark.supporting_observations as f32 / 4.0).clamp(0.5, 1.0);
+                    let reprojection_confidence = (1.0
+                        / (1.0 + landmark.median_reprojection_error_pixels as f32 * 0.5))
+                        .clamp(0.15, 1.0);
+                    let angle_confidence = (landmark.triangulation_angle_degrees as f32 / 3.0)
+                        .clamp(0.15, 1.0);
+                    let position = optimized_new_landmark_positions
+                        .get(new_index)
+                        .copied()
+                        .unwrap_or(landmark.position);
+                    Some(Point3 {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                        z: position.z as f32,
+                        confidence: support_confidence
+                            * reprojection_confidence
+                            * angle_confidence,
+                        r,
+                        g,
+                        b,
+                    })
+                }),
+        );
 
         CalibratedPairStats {
             from_frame: pair_index,
