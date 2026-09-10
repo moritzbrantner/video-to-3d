@@ -68,6 +68,14 @@ export type RegisteredViewStats = {
   translation: number[];
 };
 
+export type NewLandmarkStats = {
+  candidate_tracks: number;
+  accepted_landmarks: number;
+  supporting_observations: number;
+  median_reprojection_error_pixels: number | null;
+  median_triangulation_angle_degrees: number | null;
+};
+
 export type MultiViewStats = {
   keyframes: number[];
   track_count: number;
@@ -76,6 +84,7 @@ export type MultiViewStats = {
   observations: number;
   linked_pairs: number;
   registration_candidates: RegistrationCandidateStats[];
+  new_landmarks: NewLandmarkStats;
 };
 
 export type ReconstructionResult = {
