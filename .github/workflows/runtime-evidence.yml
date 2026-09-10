@@ -106,48 +106,72 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate shared golden fixture matrix and reconstruction evidence
+        id: golden-generate
+        continue-on-error: true
         working-directory: candidate
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          status=0
           rm -rf target/golden-reference
           for case_name in lateral revisit forward; do
             case_dir="target/golden-reference/$case_name"
             mkdir -p "$case_dir/images"
-            target/release/examples/golden_fixture "$case_dir/images" "$case_name" \
-              | tee "$RUNNER_TEMP/golden-rust-$case_name.txt"
-            bash tools/run_colmap_golden.sh \
+            if ! target/release/examples/golden_fixture "$case_dir/images" "$case_name" \
+              | tee "$RUNNER_TEMP/golden-rust-$case_name.txt"; then
+              status=1
+            fi
+            if ! bash tools/run_colmap_golden.sh \
               "$case_dir/images" \
               "$case_dir/colmap-quality" \
               "$case_name" \
-              | tee "$RUNNER_TEMP/golden-colmap-$case_name.txt"
+              | tee "$RUNNER_TEMP/golden-colmap-$case_name.txt"; then
+              status=1
+            fi
           done
+          exit "$status"
 
       - name: Capture golden runtime matrix
+        id: golden-runtime
+        if: always()
+        continue-on-error: true
         working-directory: candidate
         run: |
-          set -euo pipefail
-          for case_name in lateral revisit forward; do
-            GOLDEN_CASE="$case_name" runtime-profiler capture \
-              --scenario profiles/runtime-profiler/golden-rust.json \
-              --output "$RUNNER_TEMP/golden-rust-runtime-$case_name"
-            runtime-profiler validate \
-              --bundle "$RUNNER_TEMP/golden-rust-runtime-$case_name"
-            runtime-profiler summarize \
-              --bundle "$RUNNER_TEMP/golden-rust-runtime-$case_name" \
-              --json > "$RUNNER_TEMP/golden-rust-runtime-$case_name.json"
+          set -uo pipefail
+          status=0
 
+          capture_case() {
+            local case_name="$1"
+            local scenario="$2"
+            local output="$3"
+            local summary="$4"
             GOLDEN_CASE="$case_name" runtime-profiler capture \
-              --scenario profiles/runtime-profiler/golden-colmap.json \
-              --output "$RUNNER_TEMP/golden-colmap-runtime-$case_name"
-            runtime-profiler validate \
-              --bundle "$RUNNER_TEMP/golden-colmap-runtime-$case_name"
-            runtime-profiler summarize \
-              --bundle "$RUNNER_TEMP/golden-colmap-runtime-$case_name" \
-              --json > "$RUNNER_TEMP/golden-colmap-runtime-$case_name.json"
+              --scenario "$scenario" \
+              --output "$output" &&
+              runtime-profiler validate --bundle "$output" &&
+              runtime-profiler summarize --bundle "$output" --json > "$summary"
+          }
+
+          for case_name in lateral revisit forward; do
+            if ! capture_case \
+              "$case_name" \
+              profiles/runtime-profiler/golden-rust.json \
+              "$RUNNER_TEMP/golden-rust-runtime-$case_name" \
+              "$RUNNER_TEMP/golden-rust-runtime-$case_name.json"; then
+              status=1
+            fi
+            if ! capture_case \
+              "$case_name" \
+              profiles/runtime-profiler/golden-colmap.json \
+              "$RUNNER_TEMP/golden-colmap-runtime-$case_name" \
+              "$RUNNER_TEMP/golden-colmap-runtime-$case_name.json"; then
+              status=1
+            fi
           done
+          exit "$status"
 
       - name: Evaluate COLMAP golden quality matrix
         id: colmap-golden
+        if: always()
         continue-on-error: true
         working-directory: candidate
         run: |
@@ -156,13 +180,20 @@ jobs:
           : > "$RUNNER_TEMP/colmap-golden.md"
           for case_name in lateral revisit forward; do
             case_report="$RUNNER_TEMP/colmap-golden-$case_name.md"
-            if ! python3 tools/check_colmap_golden.py \
-              --rust "$RUNNER_TEMP/golden-rust-$case_name.txt" \
-              --colmap "$RUNNER_TEMP/golden-colmap-$case_name.txt" \
-              --case "$case_name" \
-              --rust-runtime "$RUNNER_TEMP/golden-rust-runtime-$case_name.json" \
-              --colmap-runtime "$RUNNER_TEMP/golden-colmap-runtime-$case_name.json" \
-              --markdown "$case_report"; then
+            args=(
+              --rust "$RUNNER_TEMP/golden-rust-$case_name.txt"
+              --colmap "$RUNNER_TEMP/golden-colmap-$case_name.txt"
+              --case "$case_name"
+              --markdown "$case_report"
+            )
+            if test -f "$RUNNER_TEMP/golden-rust-runtime-$case_name.json" \
+              && test -f "$RUNNER_TEMP/golden-colmap-runtime-$case_name.json"; then
+              args+=(
+                --rust-runtime "$RUNNER_TEMP/golden-rust-runtime-$case_name.json"
+                --colmap-runtime "$RUNNER_TEMP/golden-colmap-runtime-$case_name.json"
+              )
+            fi
+            if ! python3 tools/check_colmap_golden.py "${args[@]}"; then
               status=1
             fi
             if test -f "$case_report"; then
@@ -178,9 +209,17 @@ jobs:
           if test -f "$RUNNER_TEMP/colmap-golden.md"; then
             cat "$RUNNER_TEMP/colmap-golden.md" >> "$GITHUB_STEP_SUMMARY"
           fi
-          if test "${{ steps.colmap-golden.outcome }}" != success; then
-            exit 1
+          status=0
+          if test "${{ steps.golden-generate.outcome }}" != success; then
+            status=1
           fi
+          if test "${{ steps.golden-runtime.outcome }}" != success; then
+            status=1
+          fi
+          if test "${{ steps.colmap-golden.outcome }}" != success; then
+            status=1
+          fi
+          exit "$status"
 
       - name: Run Moonlight correctness evaluation
         working-directory: candidate
