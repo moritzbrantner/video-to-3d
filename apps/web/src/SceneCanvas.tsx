@@ -144,42 +144,65 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
     return () => observer.disconnect();
   }, [draw]);
 
+  const denseDiagnostic = reconstruction.dense.skip_reason
+    ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
+    : reconstruction.dense.accepted_points > 0
+      ? `Coarse dense depth: ${reconstruction.dense.accepted_points} accepted samples from ${reconstruction.dense.source_views} source view${reconstruction.dense.source_views === 1 ? "" : "s"}`
+      : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
+
   return (
-    <canvas
-      ref={canvasRef}
-      className="scene-canvas"
-      onPointerDown={(event) => {
-        event.currentTarget.setPointerCapture(event.pointerId);
-        dragRef.current = { x: event.clientX, y: event.clientY };
-      }}
-      onPointerMove={(event) => {
-        if (!dragRef.current) return;
-        const dx = event.clientX - dragRef.current.x;
-        const dy = event.clientY - dragRef.current.y;
-        dragRef.current = { x: event.clientX, y: event.clientY };
-        setView((current) => ({
-          ...current,
-          yaw: current.yaw + dx * 0.008,
-          pitch: Math.max(-1.2, Math.min(1.2, current.pitch + dy * 0.008)),
-        }));
-      }}
-      onPointerUp={() => {
-        dragRef.current = null;
-      }}
-      onPointerCancel={() => {
-        dragRef.current = null;
-      }}
-      onWheel={(event) => {
-        event.preventDefault();
-        setView((current) => ({
-          ...current,
-          zoom: Math.max(
-            0.45,
-            Math.min(3.5, current.zoom * Math.exp(-event.deltaY * 0.001)),
-          ),
-        }));
-      }}
-      aria-label="Interactive 3D reconstruction with sparse landmarks, accepted coarse dense depth samples, and registered cameras. Drag to orbit and use the mouse wheel to zoom."
-    />
+    <>
+      <canvas
+        ref={canvasRef}
+        className="scene-canvas"
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragRef.current = { x: event.clientX, y: event.clientY };
+        }}
+        onPointerMove={(event) => {
+          if (!dragRef.current) return;
+          const dx = event.clientX - dragRef.current.x;
+          const dy = event.clientY - dragRef.current.y;
+          dragRef.current = { x: event.clientX, y: event.clientY };
+          setView((current) => ({
+            ...current,
+            yaw: current.yaw + dx * 0.008,
+            pitch: Math.max(-1.2, Math.min(1.2, current.pitch + dy * 0.008)),
+          }));
+        }}
+        onPointerUp={() => {
+          dragRef.current = null;
+        }}
+        onPointerCancel={() => {
+          dragRef.current = null;
+        }}
+        onWheel={(event) => {
+          event.preventDefault();
+          setView((current) => ({
+            ...current,
+            zoom: Math.max(
+              0.45,
+              Math.min(3.5, current.zoom * Math.exp(-event.deltaY * 0.001)),
+            ),
+          }));
+        }}
+        aria-label="Interactive 3D reconstruction with sparse landmarks, accepted coarse dense depth samples, and registered cameras. Drag to orbit and use the mouse wheel to zoom."
+      />
+      <div
+        aria-live="polite"
+        style={{
+          position: "absolute",
+          top: 14,
+          left: 16,
+          right: 16,
+          color: "var(--muted)",
+          fontSize: "0.76rem",
+          lineHeight: 1.4,
+          pointerEvents: "none",
+        }}
+      >
+        {denseDiagnostic}
+      </div>
+    </>
   );
 }
