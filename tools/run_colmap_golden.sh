@@ -3,6 +3,7 @@ set -euo pipefail
 
 images_dir="${1:?images directory required}"
 work_dir="${2:?work directory required}"
+case_name="${3:-lateral}"
 
 rm -rf "$work_dir"
 mkdir -p "$work_dir/sparse" "$work_dir/text"
@@ -46,5 +47,5 @@ registered_images="$((registered_lines / 2))"
 points="$(grep -v '^#' "$work_dir/text/points3D.txt" | sed '/^[[:space:]]*$/d' | wc -l)"
 mean_reprojection_error="$(awk '!/^#/ && NF >= 8 {sum += $8; count += 1} END {if (count == 0) print "nan"; else printf "%.6f", sum / count}' "$work_dir/text/points3D.txt")"
 
-printf 'golden-colmap registered_images=%s points=%s mean_reprojection_error_pixels=%s\n' \
-  "$registered_images" "$points" "$mean_reprojection_error"
+printf 'golden-colmap case=%s registered_images=%s points=%s mean_reprojection_error_pixels=%s\n' \
+  "$case_name" "$registered_images" "$points" "$mean_reprojection_error"
