@@ -76,6 +76,19 @@ export type NewLandmarkStats = {
   median_triangulation_angle_degrees: number | null;
 };
 
+export type BundleAdjustmentStats = {
+  attempted: boolean;
+  accepted: boolean;
+  iterations: number;
+  observations: number;
+  optimized_cameras: number;
+  optimized_landmarks: number;
+  initial_median_reprojection_error_pixels: number | null;
+  final_median_reprojection_error_pixels: number | null;
+  initial_rmse_reprojection_error_pixels: number | null;
+  final_rmse_reprojection_error_pixels: number | null;
+};
+
 export type MultiViewStats = {
   keyframes: number[];
   track_count: number;
@@ -85,6 +98,7 @@ export type MultiViewStats = {
   linked_pairs: number;
   registration_candidates: RegistrationCandidateStats[];
   new_landmarks: NewLandmarkStats;
+  bundle_adjustment: BundleAdjustmentStats;
 };
 
 export type ReconstructionResult = {
