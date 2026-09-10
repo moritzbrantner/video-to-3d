@@ -1,10 +1,12 @@
 mod multi_view;
 mod pnp;
+mod revisit;
 mod two_view;
 
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
 };
+pub use revisit::{RevisitCandidateStats, RevisitRecoveryStats, RevisitStats};
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -109,6 +111,7 @@ pub struct RegisteredViewStats {
     pub median_reprojection_error_pixels: f32,
     pub rotation: [f32; 9],
     pub translation: [f32; 3],
+    pub recovered_from_revisit: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -118,6 +121,7 @@ pub struct ReconstructionResult {
     pub pairs: Vec<PairStats>,
     pub calibrated_pair: Option<CalibratedPairStats>,
     pub multi_view: MultiViewStats,
+    pub revisits: RevisitStats,
     pub registered_views: Vec<RegisteredViewStats>,
     pub warnings: Vec<String>,
 }
@@ -308,6 +312,13 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .as_ref()
             .map(|(pair_index, landmarks)| (*pair_index, landmarks.as_slice())),
     );
+    let revisit_context =
+        revisit::RevisitContext::new(&features, width, height, focal as f64, options);
+    let mut revisits = revisit::analyze(
+        &revisit_context,
+        &multi_view_analysis.stats.keyframes,
+        best_two_view.as_ref().map(|(pair_index, _)| *pair_index),
+    );
 
     let mut registered_views = Vec::new();
     let mut registered_cameras = Vec::new();
@@ -385,6 +396,62 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                     pose.translation.y as f32,
                     pose.translation.z as f32,
                 ],
+                recovered_from_revisit: false,
+            });
+        }
+
+        let registered_frames: HashSet<usize> = registered_geometry
+            .iter()
+            .map(|camera| camera.frame_index)
+            .collect();
+        let candidate_frames: Vec<usize> = multi_view_analysis
+            .registration_candidates
+            .iter()
+            .map(|candidate| candidate.frame_index)
+            .collect();
+        for recovered in revisit::recover_failed_registrations(
+            &mut revisits,
+            *seed_pair_index,
+            estimate,
+            &candidate_frames,
+            &registered_frames,
+            &revisit_context,
+        ) {
+            registered_geometry.push(multi_view::RegisteredCamera {
+                frame_index: recovered.frame_index,
+                rotation: recovered.rotation,
+                translation: recovered.translation,
+            });
+            registered_cameras.push(CameraPose {
+                frame_index: recovered.frame_index,
+                x: recovered.camera_center.x as f32,
+                y: recovered.camera_center.y as f32,
+                z: recovered.camera_center.z as f32,
+                matched_features: recovered.inliers,
+            });
+            registered_views.push(RegisteredViewStats {
+                frame_index: recovered.frame_index,
+                correspondences: recovered.correspondences,
+                inliers: recovered.inliers,
+                inlier_ratio: recovered.inliers as f32 / recovered.correspondences as f32,
+                median_reprojection_error_pixels: recovered.median_reprojection_error_pixels as f32,
+                rotation: [
+                    recovered.rotation[(0, 0)] as f32,
+                    recovered.rotation[(0, 1)] as f32,
+                    recovered.rotation[(0, 2)] as f32,
+                    recovered.rotation[(1, 0)] as f32,
+                    recovered.rotation[(1, 1)] as f32,
+                    recovered.rotation[(1, 2)] as f32,
+                    recovered.rotation[(2, 0)] as f32,
+                    recovered.rotation[(2, 1)] as f32,
+                    recovered.rotation[(2, 2)] as f32,
+                ],
+                translation: [
+                    recovered.translation.x as f32,
+                    recovered.translation.y as f32,
+                    recovered.translation.z as f32,
+                ],
+                recovered_from_revisit: true,
             });
         }
     }
@@ -580,6 +647,32 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 .into(),
         );
     }
+
+    let recovered_from_revisit = revisits
+        .recoveries
+        .iter()
+        .filter(|recovery| recovery.accepted)
+        .count();
+    if !revisits.candidates.is_empty() {
+        if recovered_from_revisit > 0 {
+            warnings.push(format!(
+                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates and recovered {recovered_from_revisit} previously unregistered selected keyframe poses through direct seed-frame associations that passed the existing robust PnP gates. Recovered cameras participate in triangulation and bundle adjustment; this is not a pose-graph loop-closure correction.",
+                revisits.candidates.len()
+            ));
+        } else if !revisits.recoveries.is_empty() {
+            warnings.push(format!(
+                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates and attempted direct seed-frame recovery for {} selected keyframes, but none passed the existing robust PnP gates. No camera pose was invented from revisit evidence.",
+                revisits.candidates.len(),
+                revisits.recoveries.len()
+            ));
+        } else {
+            warnings.push(format!(
+                "Bounded non-adjacent revisit screening found {} strong keyframe-pair candidates, but none corresponded to a currently unregistered selected keyframe with enough accepted seed geometry for recovery. No loop-closure correction was applied.",
+                revisits.candidates.len()
+            ));
+        }
+    }
+
     if calibrated_pair.is_some() {
         let pnp_ready = multi_view
             .registration_candidates
@@ -588,7 +681,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .count();
         if registered_views.is_empty() {
             warnings.push(format!(
-                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but no additional camera pose passed the current deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and bundle adjustment requires at least one accepted additional view."
+                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but neither the initial track-based registration nor bounded direct-revisit recovery produced an additional camera pose that passed the deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and bundle adjustment requires at least one accepted additional view."
             ));
         } else if multi_view.bundle_adjustment.accepted {
             let initial_rmse = multi_view
@@ -600,7 +693,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
                 .final_rmse_reprojection_error_pixels
                 .unwrap_or_default();
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes, triangulated {} new landmarks, and accepted deterministic bundle adjustment across {} cameras, {} landmarks, and {} supported observations. Reprojection RMSE improved from {:.2} px to {:.2} px while the calibrated seed-pair cameras remained fixed to preserve the arbitrary monocular gauge. Loop/revisit handling and failed-registration recovery remain later Slice 3 work.",
+                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, triangulated {} new landmarks, and accepted deterministic bundle adjustment across {} cameras, {} landmarks, and {} supported observations. Reprojection RMSE improved from {:.2} px to {:.2} px while the calibrated seed-pair cameras remained fixed to preserve the arbitrary monocular gauge. No pose-graph loop-closure correction or metric-scale claim is made.",
                 registered_views.len(),
                 multi_view.new_landmarks.accepted_landmarks,
                 multi_view.bundle_adjustment.optimized_cameras,
@@ -611,14 +704,14 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             ));
         } else if multi_view.bundle_adjustment.attempted {
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes and triangulated {} new landmarks. Bundle adjustment ran across {} supported observations but its candidate geometry did not satisfy the no-regression acceptance boundary, so the pre-adjustment cameras and landmarks were retained. The calibrated seed pair remains the fixed arbitrary monocular gauge.",
+                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, and triangulated {} new landmarks. Bundle adjustment ran across {} supported observations but its candidate geometry did not satisfy the no-regression acceptance boundary, so the pre-adjustment cameras and landmarks were retained. The calibrated seed pair remains the fixed arbitrary monocular gauge.",
                 registered_views.len(),
                 multi_view.new_landmarks.accepted_landmarks,
                 multi_view.bundle_adjustment.observations
             ));
         } else {
             warnings.push(format!(
-                "Slice 3 registered {} additional selected keyframes and triangulated {} new landmarks, but there were not enough mutually supported registered observations to run bundle adjustment. All geometry remains in the seed pair's arbitrary monocular coordinate frame.",
+                "Slice 3 registered {} additional selected keyframes, including {recovered_from_revisit} recovered from bounded direct revisit evidence, and triangulated {} new landmarks, but there were not enough mutually supported registered observations to run bundle adjustment. All geometry remains in the seed pair's arbitrary monocular coordinate frame.",
                 registered_views.len(),
                 multi_view.new_landmarks.accepted_landmarks
             ));
@@ -636,6 +729,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         pairs,
         calibrated_pair,
         multi_view,
+        revisits,
         registered_views,
         warnings,
     })
@@ -1047,6 +1141,8 @@ mod tests {
         assert!(result.calibrated_pair.is_none());
         assert_eq!(result.multi_view.keyframes, vec![0]);
         assert!(result.multi_view.registration_candidates.is_empty());
+        assert!(result.revisits.candidates.is_empty());
+        assert!(result.revisits.recoveries.is_empty());
         assert!(result.registered_views.is_empty());
         assert!(!result.multi_view.bundle_adjustment.attempted);
         assert!(result.cameras[1].x.abs() < f32::EPSILON);
