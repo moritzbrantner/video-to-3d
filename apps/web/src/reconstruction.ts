@@ -86,10 +86,23 @@ export type RevisitRecoveryStats = {
   median_reprojection_error_pixels: number | null;
 };
 
+export type RevisitClosureStats = {
+  frame_index: number;
+  source_frame_index: number;
+  matches: number;
+  correspondences: number;
+  accepted: boolean;
+  inliers: number;
+  median_reprojection_error_pixels: number | null;
+  camera_center_delta_seed_baselines: number | null;
+  rotation_delta_degrees: number | null;
+};
+
 export type RevisitStats = {
   evaluated_pairs: number;
   candidates: RevisitCandidateStats[];
   recoveries: RevisitRecoveryStats[];
+  closures: RevisitClosureStats[];
 };
 
 export type NewLandmarkStats = {
