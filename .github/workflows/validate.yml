@@ -28,5 +28,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Test COLMAP golden gate
+        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
       - run: bun run wasm:check
       - run: bun run build
