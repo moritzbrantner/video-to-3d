@@ -62,9 +62,7 @@ pub(super) fn estimate_depth_points(
         return DenseAnalysis::skipped("no sampled frames are available");
     }
     if cameras.len() < 2 {
-        return DenseAnalysis::skipped(
-            "fewer than two accepted registered cameras are available",
-        );
+        return DenseAnalysis::skipped("fewer than two accepted registered cameras are available");
     }
     if sparse_points.len() < MIN_VISIBLE_SPARSE_POINTS {
         return DenseAnalysis::skipped(format!(
@@ -144,7 +142,9 @@ pub(super) fn estimate_depth_points(
         })
         .collect();
     if source_luma.is_empty() {
-        return DenseAnalysis::skipped("no sampled source frame is available for the selected cameras");
+        return DenseAnalysis::skipped(
+            "no sampled source frame is available for the selected cameras",
+        );
     }
 
     let stride = (width.min(height) / 48).clamp(4, 12) as usize;
@@ -456,12 +456,7 @@ fn sample_bilinear(luma: &[u8], width: u32, height: u32, x: f64, y: f64) -> Opti
 }
 
 fn in_image_bounds(x: f64, y: f64, width: u32, height: u32) -> bool {
-    x.is_finite()
-        && y.is_finite()
-        && x >= 0.0
-        && y >= 0.0
-        && x < width as f64
-        && y < height as f64
+    x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0 && x < width as f64 && y < height as f64
 }
 
 fn in_bilinear_bounds(x: f64, y: f64, width: u32, height: u32) -> bool {
@@ -538,18 +533,11 @@ mod tests {
         35 + (hash % 190) as u8
     }
 
-    fn plane_frame(
-        width: u32,
-        height: u32,
-        focal: f64,
-        center_x: f64,
-        depth: f64,
-    ) -> FrameInput {
+    fn plane_frame(width: u32, height: u32, focal: f64, center_x: f64, depth: f64) -> FrameInput {
         let mut rgba = vec![0u8; width as usize * height as usize * 4];
         for y in 0..height {
             for x in 0..width {
-                let world_x =
-                    center_x + (x as f64 - width as f64 * 0.5) / focal * depth;
+                let world_x = center_x + (x as f64 - width as f64 * 0.5) / focal * depth;
                 let world_y = (y as f64 - height as f64 * 0.5) / focal * depth;
                 let value = texture(world_x, world_y);
                 let index = (y as usize * width as usize + x as usize) * 4;
@@ -566,12 +554,7 @@ mod tests {
         }
     }
 
-    fn plane_sparse_points(
-        width: u32,
-        height: u32,
-        focal: f64,
-        depth: f64,
-    ) -> Vec<Vector3<f64>> {
+    fn plane_sparse_points(width: u32, height: u32, focal: f64, depth: f64) -> Vec<Vector3<f64>> {
         let mut points = Vec::new();
         for y in [10u32, 18, 26, 34] {
             for x in [12u32, 24, 36, 48, 56] {
