@@ -28,7 +28,6 @@ colmap mapper \
   --database_path "$database" \
   --image_path "$images_dir" \
   --output_path "$work_dir/sparse" \
-  --Mapper.random_seed 0 \
   --Mapper.num_threads 1 \
   --Mapper.init_min_tri_angle 8 \
   --Mapper.ba_refine_focal_length 0 \
