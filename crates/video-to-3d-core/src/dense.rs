@@ -91,14 +91,7 @@ pub(super) fn estimate_depth_points(
         .filter(|camera| {
             let baseline = (camera.camera_center() - reference.camera_center()).norm();
             baseline >= median_depth * 0.005
-                && projects_reference_center(
-                    reference,
-                    camera,
-                    median_depth,
-                    width,
-                    height,
-                    focal,
-                )
+                && projects_reference_center(reference, camera, median_depth, width, height, focal)
         })
         .collect();
     sources.sort_by(|left, right| {
@@ -150,7 +143,8 @@ pub(super) fn estimate_depth_points(
                 let inverse_depth =
                     (1.0 / search_min_depth) * (1.0 - t) + (1.0 / search_max_depth) * t;
                 let depth = 1.0 / inverse_depth;
-                let position = unproject(reference, x as f64, y as f64, depth, width, height, focal);
+                let position =
+                    unproject(reference, x as f64, y as f64, depth, width, height, focal);
 
                 let mut source_errors = Vec::new();
                 for (source_camera, source_frame, luma) in &source_luma {
@@ -177,7 +171,8 @@ pub(super) fn estimate_depth_points(
                 if source_errors.is_empty() {
                     continue;
                 }
-                source_errors.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+                source_errors
+                    .sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
                 candidates.push(Candidate {
                     depth,
                     position,
@@ -190,8 +185,16 @@ pub(super) fn estimate_depth_points(
                 right
                     .support
                     .cmp(&left.support)
-                    .then_with(|| left.error.partial_cmp(&right.error).unwrap_or(Ordering::Equal))
-                    .then_with(|| left.depth.partial_cmp(&right.depth).unwrap_or(Ordering::Equal))
+                    .then_with(|| {
+                        left.error
+                            .partial_cmp(&right.error)
+                            .unwrap_or(Ordering::Equal)
+                    })
+                    .then_with(|| {
+                        left.depth
+                            .partial_cmp(&right.depth)
+                            .unwrap_or(Ordering::Equal)
+                    })
             });
             let Some(best) = candidates.first().copied() else {
                 continue;
@@ -204,7 +207,8 @@ pub(super) fn estimate_depth_points(
                 .iter()
                 .skip(1)
                 .find(|candidate| candidate.support == best.support);
-            let ambiguity_margin = comparable_second.map_or(f64::INFINITY, |second| second.error - best.error);
+            let ambiguity_margin =
+                comparable_second.map_or(f64::INFINITY, |second| second.error - best.error);
             if ambiguity_margin < MIN_AMBIGUITY_MARGIN {
                 continue;
             }
@@ -216,8 +220,8 @@ pub(super) fn estimate_depth_points(
             } else {
                 1.0
             };
-            let confidence = (support_confidence * error_confidence * margin_confidence)
-                .clamp(0.05, 1.0) as f32;
+            let confidence =
+                (support_confidence * error_confidence * margin_confidence).clamp(0.05, 1.0) as f32;
             let (r, g, b) = sample_rgb(reference_frame, x, y);
             points.push(Point3 {
                 x: best.position.x as f32,
@@ -346,13 +350,8 @@ fn patch_error(
                 reference_height,
                 focal,
             );
-            let (source_x, source_y, _) = project(
-                source_camera,
-                world,
-                source_width,
-                source_height,
-                focal,
-            )?;
+            let (source_x, source_y, _) =
+                project(source_camera, world, source_width, source_height, focal)?;
             if !in_bilinear_bounds(source_x, source_y, source_width, source_height) {
                 return None;
             }
@@ -379,7 +378,9 @@ fn patch_error(
         reference_values
             .iter()
             .zip(&source_values)
-            .map(|(reference, source)| ((reference - reference_mean) - (source - source_mean)).abs())
+            .map(|(reference, source)| {
+                ((reference - reference_mean) - (source - source_mean)).abs()
+            })
             .sum::<f64>()
             / reference_values.len() as f64,
     )
@@ -491,11 +492,18 @@ mod tests {
         35 + (hash % 190) as u8
     }
 
-    fn plane_frame(width: u32, height: u32, focal: f64, center_x: f64, depth: f64) -> FrameInput {
+    fn plane_frame(
+        width: u32,
+        height: u32,
+        focal: f64,
+        center_x: f64,
+        depth: f64,
+    ) -> FrameInput {
         let mut rgba = vec![0u8; width as usize * height as usize * 4];
         for y in 0..height {
             for x in 0..width {
-                let world_x = center_x + (x as f64 - width as f64 * 0.5) / focal * depth;
+                let world_x =
+                    center_x + (x as f64 - width as f64 * 0.5) / focal * depth;
                 let world_y = (y as f64 - height as f64 * 0.5) / focal * depth;
                 let value = texture(world_x, world_y);
                 let index = (y as usize * width as usize + x as usize) * 4;
@@ -505,10 +513,19 @@ mod tests {
                 rgba[index + 3] = 255;
             }
         }
-        FrameInput { width, height, rgba }
+        FrameInput {
+            width,
+            height,
+            rgba,
+        }
     }
 
-    fn plane_sparse_points(width: u32, height: u32, focal: f64, depth: f64) -> Vec<Vector3<f64>> {
+    fn plane_sparse_points(
+        width: u32,
+        height: u32,
+        focal: f64,
+        depth: f64,
+    ) -> Vec<Vector3<f64>> {
         let mut points = Vec::new();
         for y in [10u32, 18, 26, 34] {
             for x in [12u32, 24, 36, 48, 56] {
@@ -541,11 +558,18 @@ mod tests {
         assert!(result.stats.attempted);
         assert_eq!(result.stats.reference_frame, Some(0));
         assert_eq!(result.stats.source_views, 2);
-        assert!(result.points.len() >= 12, "accepted only {} dense samples", result.points.len());
+        assert!(
+            result.points.len() >= 12,
+            "accepted only {} dense samples",
+            result.points.len()
+        );
         let mut depths: Vec<f64> = result.points.iter().map(|point| point.z as f64).collect();
         depths.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
         let median_depth = quantile(&depths, 0.50);
-        assert!((median_depth - depth).abs() < 0.55, "median dense depth was {median_depth}");
+        assert!(
+            (median_depth - depth).abs() < 0.55,
+            "median dense depth was {median_depth}"
+        );
     }
 
     #[test]
