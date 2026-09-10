@@ -140,7 +140,9 @@ jobs:
             --bundle "$RUNNER_TEMP/golden-colmap-runtime" \
             --json > "$RUNNER_TEMP/golden-colmap-runtime.json"
 
-      - name: Enforce COLMAP golden quality envelope
+      - name: Evaluate COLMAP golden quality envelope
+        id: colmap-golden
+        continue-on-error: true
         working-directory: candidate
         run: |
           python3 tools/check_colmap_golden.py \
@@ -149,7 +151,16 @@ jobs:
             --rust-runtime "$RUNNER_TEMP/golden-rust-runtime.json" \
             --colmap-runtime "$RUNNER_TEMP/golden-colmap-runtime.json" \
             --markdown "$RUNNER_TEMP/colmap-golden.md"
-          cat "$RUNNER_TEMP/colmap-golden.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish COLMAP golden diagnostics
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/colmap-golden.md"; then
+            cat "$RUNNER_TEMP/colmap-golden.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test "${{ steps.colmap-golden.outcome }}" != success; then
+            exit 1
+          fi
 
       - name: Run Moonlight correctness evaluation
         working-directory: candidate
