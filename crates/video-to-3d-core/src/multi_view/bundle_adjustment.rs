@@ -47,8 +47,10 @@ pub(super) fn optimize(
     focal_pixels: f64,
 ) -> BundleAdjustmentResult {
     let original_seed_points = seed_points.to_vec();
-    let original_new_points: Vec<Vector3<f64>> =
-        new_landmarks.iter().map(|landmark| landmark.position).collect();
+    let original_new_points: Vec<Vector3<f64>> = new_landmarks
+        .iter()
+        .map(|landmark| landmark.position)
+        .collect();
     let original_cameras = cameras.to_vec();
     let mut stats = BundleAdjustmentStats::default();
 
@@ -421,7 +423,8 @@ fn refine_landmark(
             return false;
         };
         let weight = huber_weight(residual.norm());
-        let (gradient_u_camera, gradient_v_camera) = projection_gradients(&camera_point, focal_pixels);
+        let (gradient_u_camera, gradient_v_camera) =
+            projection_gradients(&camera_point, focal_pixels);
         let gradient_u = camera.rotation.transpose() * gradient_u_camera;
         let gradient_v = camera.rotation.transpose() * gradient_v_camera;
         hessian += weight
@@ -498,7 +501,8 @@ fn refine_camera(
             return false;
         };
         let weight = huber_weight(residual.norm());
-        let (gradient_u_camera, gradient_v_camera) = projection_gradients(&camera_point, focal_pixels);
+        let (gradient_u_camera, gradient_v_camera) =
+            projection_gradients(&camera_point, focal_pixels);
         let gradient_u_rotation = skew(&camera_point) * gradient_u_camera;
         let gradient_v_rotation = skew(&camera_point) * gradient_v_camera;
         let jacobian_u = Vector6::new(
@@ -518,7 +522,8 @@ fn refine_camera(
             gradient_v_camera.z,
         );
         hessian += weight
-            * (jacobian_u * jacobian_u.transpose() + jacobian_v * jacobian_v.transpose());
+            * (jacobian_u * jacobian_u.transpose()
+                + jacobian_v * jacobian_v.transpose());
         gradient += weight * (jacobian_u * residual.x + jacobian_v * residual.y);
     }
 
@@ -665,8 +670,15 @@ fn total_cost(
     height: u32,
     focal_pixels: f64,
 ) -> Option<f64> {
-    error_metrics(cameras, landmarks, observations, width, height, focal_pixels)
-        .map(|metrics| metrics.cost)
+    error_metrics(
+        cameras,
+        landmarks,
+        observations,
+        width,
+        height,
+        focal_pixels,
+    )
+    .map(|metrics| metrics.cost)
 }
 
 fn reprojection_error(
@@ -727,15 +739,7 @@ fn projection_gradients(
 
 fn skew(vector: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(
-        0.0,
-        -vector.z,
-        vector.y,
-        vector.z,
-        0.0,
-        -vector.x,
-        -vector.y,
-        vector.x,
-        0.0,
+        0.0, -vector.z, vector.y, vector.z, 0.0, -vector.x, -vector.y, vector.x, 0.0,
     )
 }
 
@@ -880,16 +884,11 @@ mod tests {
         }
         let camera_observations = observation_indices_by_camera(cameras.len(), &observations);
         let landmark_observations = observation_indices_by_landmark(landmarks.len(), &observations);
-        let initial = error_metrics(
-            &cameras,
-            &landmarks,
-            &observations,
-            width,
-            height,
-            focal,
-        )
-        .expect("initial geometry should project");
-        let initial_camera_error = (cameras[2].camera_center() - true_cameras[2].camera_center()).norm();
+        let initial =
+            error_metrics(&cameras, &landmarks, &observations, width, height, focal)
+                .expect("initial geometry should project");
+        let initial_camera_error =
+            (cameras[2].camera_center() - true_cameras[2].camera_center()).norm();
 
         let iterations = run_iterations(
             &mut cameras,
@@ -902,16 +901,11 @@ mod tests {
             height,
             focal,
         );
-        let final_metrics = error_metrics(
-            &cameras,
-            &landmarks,
-            &observations,
-            width,
-            height,
-            focal,
-        )
-        .expect("adjusted geometry should project");
-        let final_camera_error = (cameras[2].camera_center() - true_cameras[2].camera_center()).norm();
+        let final_metrics =
+            error_metrics(&cameras, &landmarks, &observations, width, height, focal)
+                .expect("adjusted geometry should project");
+        let final_camera_error =
+            (cameras[2].camera_center() - true_cameras[2].camera_center()).norm();
 
         assert!(iterations > 0);
         assert!(final_metrics.rmse < initial.rmse);
