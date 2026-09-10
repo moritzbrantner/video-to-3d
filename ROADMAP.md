@@ -25,7 +25,7 @@ Exit criterion met: the full browser-local video → Rust/WASM → sparse previe
 
 Implementation status: deterministic synthetic fixtures and hosted checks cover the calibrated geometry path. Recorded-footage acceptance should still be captured before treating the slice as fully field-accepted.
 
-## Slice 3 — Multi-view sparse SfM — current
+## Slice 3 — Multi-view sparse SfM — implementation integrated
 
 - Initial keyframe screening based on adjacent feature overlap and accumulated residual parallax.
 - Deterministic multi-frame feature tracks chained from one-to-one adjacent matches.
@@ -36,11 +36,11 @@ Implementation status: deterministic synthetic fixtures and hosted checks cover 
 - Failed-registration recovery through direct calibrated-seed-frame associations, reusing the existing robust PnP acceptance gate and leaving failed retries unregistered.
 - Triangulate new landmarks from newly registered or recovered views with positive-depth, multi-view support, reprojection, and triangulation-angle acceptance gates.
 - Bundle adjustment over cameras and sparse landmarks, with a fixed calibrated seed gauge and explicit no-regression acceptance.
-- Bounded global drift correction from geometrically validated non-adjacent revisit constraints without introducing metric-scale claims.
+- Seed-anchored bounded drift correction for already registered selected keyframes when validated direct non-adjacent evidence back to the calibrated seed produces an independent robust PnP pose. Closure candidates are limited by seed-normalized center disagreement and rotation disagreement, then must survive the existing bundle-adjustment no-regression gate; otherwise the entire closure attempt rolls back.
 
-Current boundary: Rust can register additional selected camera poses, recover an otherwise unregistered selected keyframe when strong direct non-adjacent evidence back to the calibrated seed frame yields enough accepted seed-landmark correspondences for the existing robust PnP gate, grow the sparse map from genuinely supported non-seed tracks, and jointly refine the accepted registered cameras and sparse landmarks with bounded Huber-weighted block-coordinate bundle adjustment. Revisit evidence and recovery attempts are explicit outputs; descriptor recurrence alone never changes geometry. The calibrated seed-pair cameras remain fixed, preserving the arbitrary monocular coordinate frame. The next implementation slice is bounded global drift correction using validated non-adjacent constraints rather than treating a recovery pose as full loop closure.
+Current boundary: Rust can register additional selected camera poses, recover an otherwise unregistered selected keyframe from strong direct non-adjacent seed evidence, grow the sparse map from genuinely supported non-seed tracks, jointly refine accepted cameras and landmarks, and close bounded accumulated drift when a registered selected keyframe directly revisits the calibrated seed. Descriptor recurrence alone never changes geometry; every recovery or closure still passes explicit 3D↔2D and reprojection gates. The calibrated seed-pair cameras remain fixed, preserving the arbitrary monocular coordinate frame. This is not yet a general pose graph: arbitrary non-seed-to-non-seed loop constraints, metric-scale recovery, and cross-video tracks remain outside this slice.
 
-Exit criterion: longer videos produce a stable sparse model without unbounded trajectory drift.
+Implementation exit criterion: the in-product sparse pipeline now has a fail-closed mechanism for bounded seed-return drift rather than allowing a direct revisit to be evidence-only. The next acceptance step is to compare deterministic reconstruction quality and runtime against a classic external SfM reference such as COLMAP, while keeping that reference outside product ownership.
 
 ## Slice 4 — Dense reconstruction
 
