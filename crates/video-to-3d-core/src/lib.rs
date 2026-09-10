@@ -6,9 +6,7 @@ mod two_view;
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
 };
-pub use revisit::{
-    RevisitCandidateStats, RevisitClosureStats, RevisitRecoveryStats, RevisitStats,
-};
+pub use revisit::{RevisitCandidateStats, RevisitClosureStats, RevisitRecoveryStats, RevisitStats};
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
