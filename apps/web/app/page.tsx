@@ -137,10 +137,11 @@ export default function Home() {
           <p className="lede">
             Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
             the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
-            registers additional cameras with deterministic robust PnP, triangulates supported
-            non-seed tracks, and jointly refines accepted camera poses and sparse landmarks with
-            deterministic bundle adjustment. The calibrated seed-pair cameras stay fixed so the
-            arbitrary monocular gauge cannot drift.
+            registers additional cameras with deterministic robust PnP, checks bounded non-adjacent
+            keyframe revisits to recover failed registrations, triangulates supported non-seed tracks,
+            and jointly refines accepted camera poses and sparse landmarks with deterministic bundle
+            adjustment. The calibrated seed-pair cameras stay fixed so the arbitrary monocular gauge
+            cannot drift.
           </p>
         </div>
         <label className="upload-button">
@@ -216,6 +217,10 @@ export default function Home() {
             <li>Link calibrated seed landmarks through those tracks into other selected keyframes.</li>
             <li>Run bounded deterministic robust PnP and accept only geometrically supported poses.</li>
             <li>
+              Screen non-adjacent selected keyframes with mutual descriptor matches and retry failed
+              registrations only when direct seed-frame revisit evidence supports robust PnP.
+            </li>
+            <li>
               Triangulate non-seed tracks from accepted registered views and reject weak new geometry.
             </li>
             <li>
@@ -224,13 +229,15 @@ export default function Home() {
             </li>
           </ol>
           <p className="method-note">
-            A selected frame needs at least eight triangulated seed landmarks before PnP is attempted,
-            then must pass inlier-ratio and reprojection-error gates. New landmarks require genuine
-            support from an accepted additional view. Bundle adjustment uses only initially supported
-            observations, Huber-weighted reprojection residuals, bounded Gauss–Newton updates, and a
-            no-regression acceptance boundary. Both seed cameras remain fixed, preserving the
-            arbitrary monocular coordinate frame. Loop/revisit handling remains later Slice 3 work;
-            cross-video tracks remain Slice 6.
+            A selected frame needs at least eight triangulated seed landmarks before initial PnP is
+            attempted, then must pass inlier-ratio and reprojection-error gates. Revisit recovery is
+            deliberately narrower than loop closure: only strong mutual non-adjacent matches to the
+            calibrated seed frame can create a second PnP attempt, and that attempt uses the same
+            acceptance gates. New landmarks require genuine support from an accepted additional view.
+            Bundle adjustment uses only supported observations, Huber-weighted reprojection residuals,
+            bounded Gauss–Newton updates, and a no-regression acceptance boundary. Both seed cameras
+            remain fixed, preserving the arbitrary monocular coordinate frame. Pose-graph loop closure
+            and cross-video tracks remain outside this slice.
           </p>
         </aside>
       </section>
@@ -357,8 +364,8 @@ export default function Home() {
                   <h2>Seed-landmark PnP acceptance</h2>
                 </div>
                 <p>
-                  These are the initial robust registration measurements; accepted BA may refine the
-                  final displayed non-seed camera poses.
+                  Initial adjacent-track evidence stays visible even when bounded revisit recovery
+                  later supplies a stronger direct seed-frame registration.
                 </p>
               </div>
               <div className="table-wrap">
@@ -366,7 +373,7 @@ export default function Home() {
                   <thead>
                     <tr>
                       <th>Keyframe</th>
-                      <th>Tracked seed landmarks</th>
+                      <th>Initial tracked seed landmarks</th>
                       <th>PnP inliers</th>
                       <th>Median reprojection error</th>
                       <th>Registration</th>
@@ -395,10 +402,12 @@ export default function Home() {
                           </td>
                           <td>
                             {registered
-                              ? "Registered"
+                              ? registered.recovered_from_revisit
+                                ? "Registered via revisit recovery"
+                                : "Registered from adjacent tracks"
                               : candidate.pnp_ready
                                 ? "Rejected by robust PnP gates"
-                                : "Needs at least 8 tracked seed landmarks"}
+                                : "Needs at least 8 initial tracked seed landmarks"}
                           </td>
                         </tr>
                       );
@@ -406,6 +415,76 @@ export default function Home() {
                   </tbody>
                 </table>
               </div>
+            </section>
+          ) : null}
+
+          {reconstruction.revisits.candidates.length > 0 ||
+          reconstruction.revisits.recoveries.length > 0 ? (
+            <section className="section-block">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Revisit evidence</p>
+                  <h2>Non-adjacent screening and failed-registration recovery</h2>
+                </div>
+                <p>
+                  Mutual descriptor evidence may trigger direct seed-frame PnP; it never changes a
+                  pose by itself.
+                </p>
+              </div>
+              {reconstruction.revisits.candidates.length > 0 ? (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Non-adjacent pair</th>
+                        <th>Mutual matches</th>
+                        <th>Overlap</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reconstruction.revisits.candidates.map((candidate) => (
+                        <tr key={`${candidate.from_frame}-${candidate.to_frame}`}>
+                          <td>
+                            Frame {candidate.from_frame + 1} → Frame {candidate.to_frame + 1}
+                          </td>
+                          <td>{candidate.matches}</td>
+                          <td>{(candidate.overlap_ratio * 100).toFixed(0)}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              {reconstruction.revisits.recoveries.length > 0 ? (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Recovery target</th>
+                        <th>Seed revisit matches</th>
+                        <th>3D ↔ 2D correspondences</th>
+                        <th>PnP inliers</th>
+                        <th>Median reprojection error</th>
+                        <th>Decision</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reconstruction.revisits.recoveries.map((recovery) => (
+                        <tr key={recovery.frame_index}>
+                          <td>
+                            Frame {recovery.frame_index + 1} from Frame {recovery.source_frame_index + 1}
+                          </td>
+                          <td>{recovery.matches}</td>
+                          <td>{recovery.correspondences}</td>
+                          <td>{recovery.accepted ? recovery.inliers : "—"}</td>
+                          <td>{errorValue(recovery.median_reprojection_error_pixels)}</td>
+                          <td>{recovery.accepted ? "Recovered" : "Rejected by robust PnP gates"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
             </section>
           ) : null}
 

@@ -32,11 +32,13 @@ Implementation status: deterministic synthetic fixtures and hosted checks cover 
 - Associate triangulated seed landmarks with their multi-frame tracks.
 - Screen other selected keyframes for real seed-landmark 2D↔3D correspondence readiness.
 - Register eligible additional cameras with bounded deterministic robust PnP and explicit inlier/reprojection acceptance gates.
-- Triangulate new landmarks from newly registered views with positive-depth, multi-view support, reprojection, and triangulation-angle acceptance gates.
+- Bounded non-adjacent selected-keyframe revisit screening using mutual descriptor evidence.
+- Failed-registration recovery through direct calibrated-seed-frame associations, reusing the existing robust PnP acceptance gate and leaving failed retries unregistered.
+- Triangulate new landmarks from newly registered or recovered views with positive-depth, multi-view support, reprojection, and triangulation-angle acceptance gates.
 - Bundle adjustment over cameras and sparse landmarks, with a fixed calibrated seed gauge and explicit no-regression acceptance.
-- Loop/revisit handling and failed-registration recovery.
+- Bounded global drift correction from geometrically validated non-adjacent revisit constraints without introducing metric-scale claims.
 
-Current boundary: Rust can register additional selected camera poses, grow the sparse map from genuinely supported non-seed tracks, and jointly refine the accepted registered cameras and sparse landmarks with bounded Huber-weighted block-coordinate bundle adjustment. The calibrated seed-pair cameras remain fixed, preserving the arbitrary monocular coordinate frame, and candidate adjusted geometry is adopted only when robust cost and reprojection quality satisfy the acceptance boundary. The next implementation slice is loop/revisit handling and failed-registration recovery.
+Current boundary: Rust can register additional selected camera poses, recover an otherwise unregistered selected keyframe when strong direct non-adjacent evidence back to the calibrated seed frame yields enough accepted seed-landmark correspondences for the existing robust PnP gate, grow the sparse map from genuinely supported non-seed tracks, and jointly refine the accepted registered cameras and sparse landmarks with bounded Huber-weighted block-coordinate bundle adjustment. Revisit evidence and recovery attempts are explicit outputs; descriptor recurrence alone never changes geometry. The calibrated seed-pair cameras remain fixed, preserving the arbitrary monocular coordinate frame. The next implementation slice is bounded global drift correction using validated non-adjacent constraints rather than treating a recovery pose as full loop closure.
 
 Exit criterion: longer videos produce a stable sparse model without unbounded trajectory drift.
 
