@@ -328,7 +328,10 @@ mod tests {
             .collect();
 
         let error = normalized_pose_rmse(&cameras, Scenario::Revisit).expect("valid alignment");
-        assert!(error < 1e-5, "similarity gauge should align exactly, got {error}");
+        assert!(
+            error < 1e-5,
+            "similarity gauge should align exactly, got {error}"
+        );
     }
 
     #[test]
@@ -342,7 +345,10 @@ mod tests {
         cameras[4].y += 0.35;
 
         let error = normalized_pose_rmse(&cameras, Scenario::Revisit).expect("valid alignment");
-        assert!(error > 0.1, "pose drift should survive Sim(3) alignment, got {error}");
+        assert!(
+            error > 0.1,
+            "pose drift should survive Sim(3) alignment, got {error}"
+        );
     }
 
     #[test]
