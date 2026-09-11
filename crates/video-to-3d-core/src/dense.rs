@@ -132,13 +132,8 @@ pub(super) fn estimate_depth_points(
             {
                 return None;
             }
-            let (source_min_depth, source_max_depth) = depth_search_bounds(
-                camera,
-                sparse_points,
-                frame.width,
-                frame.height,
-                focal,
-            )?;
+            let (source_min_depth, source_max_depth) =
+                depth_search_bounds(camera, sparse_points, frame.width, frame.height, focal)?;
             Some((camera, frame, source_min_depth, source_max_depth))
         })
         .collect();
@@ -444,8 +439,7 @@ fn estimate_single_view_depth(
         } else {
             hypothesis as f64 / (DEPTH_HYPOTHESES - 1) as f64
         };
-        let inverse_depth =
-            (1.0 / search_min_depth) * (1.0 - t) + (1.0 / search_max_depth) * t;
+        let inverse_depth = (1.0 / search_min_depth) * (1.0 - t) + (1.0 / search_max_depth) * t;
         let depth = 1.0 / inverse_depth;
         let Some(error) = patch_error(
             reference_camera,
