@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "apps/desktop/src-tauri",
-  "crates/video-to-3d-colmap",
   "crates/video-to-3d-core",
   "crates/video-to-3d-wasm",
 ]
