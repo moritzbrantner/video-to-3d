@@ -187,7 +187,9 @@ fn parse_points2d(path: &Path, line_number: usize, line: &str) -> Result<Vec<Col
     }
 
     parts
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|chunk| {
             let point3d_id: i64 = parse(path, line_number, chunk[2], "point3D id")?;
             Ok(ColmapPoint2d {
@@ -222,7 +224,9 @@ fn read_points(path: PathBuf) -> Result<Vec<ColmapPoint3d>> {
             }
 
             let track = parts[8..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| {
                     Ok(ColmapTrackElement {
                         image_id: parse(&path, line_number, chunk[0], "track image id")?,
