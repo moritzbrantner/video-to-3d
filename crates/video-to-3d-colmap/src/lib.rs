@@ -152,7 +152,8 @@ fn read_images(path: PathBuf) -> Result<Vec<ColmapImage>> {
             points_line = Some((points_index + 1, candidate));
             break;
         }
-        let (points_line_number, points) = points_line.unwrap_or((metadata_line + 1, String::new()));
+        let (points_line_number, points) =
+            points_line.unwrap_or((metadata_line + 1, String::new()));
 
         images.push(ColmapImage {
             id: parse(&path, metadata_line, parts[0], "image id")?,
@@ -178,7 +179,11 @@ fn parse_points2d(path: &Path, line_number: usize, line: &str) -> Result<Vec<Col
         return Ok(Vec::new());
     }
     if parts.len() % 3 != 0 {
-        return parse_error(path, line_number, "point2D line must contain x y point3D-id triples");
+        return parse_error(
+            path,
+            line_number,
+            "point2D line must contain x y point3D-id triples",
+        );
     }
 
     parts
@@ -202,7 +207,11 @@ fn read_points(path: PathBuf) -> Result<Vec<ColmapPoint3d>> {
         .map(|(line_number, line)| {
             let parts = line.split_whitespace().collect::<Vec<_>>();
             if parts.len() < 8 {
-                return parse_error(&path, line_number, "point3D line requires at least 8 fields");
+                return parse_error(
+                    &path,
+                    line_number,
+                    "point3D line requires at least 8 fields",
+                );
             }
             if (parts.len() - 8) % 2 != 0 {
                 return parse_error(
@@ -217,12 +226,7 @@ fn read_points(path: PathBuf) -> Result<Vec<ColmapPoint3d>> {
                 .map(|chunk| {
                     Ok(ColmapTrackElement {
                         image_id: parse(&path, line_number, chunk[0], "track image id")?,
-                        point2d_index: parse(
-                            &path,
-                            line_number,
-                            chunk[1],
-                            "track point2D index",
-                        )?,
+                        point2d_index: parse(&path, line_number, chunk[1], "track point2D index")?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -315,15 +319,25 @@ mod tests {
         assert_eq!(dataset.images[1].name, "frame with spaces.png");
         assert!(dataset.images[1].points2d.is_empty());
         assert_eq!(dataset.points.len(), 1);
-        assert_eq!(dataset.points[0].xyz, Vec3 { x: 1.0, y: 2.0, z: 3.0 });
+        assert_eq!(
+            dataset.points[0].xyz,
+            Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0
+            }
+        );
         assert_eq!(dataset.points[0].track.len(), 2);
     }
 
     #[test]
     fn rejects_malformed_point_track() {
         let directory = tempdir().expect("temp directory");
-        fs::write(directory.path().join("cameras.txt"), "1 PINHOLE 1 1 1 1 0 0\n")
-            .expect("camera fixture");
+        fs::write(
+            directory.path().join("cameras.txt"),
+            "1 PINHOLE 1 1 1 1 0 0\n",
+        )
+        .expect("camera fixture");
         fs::write(directory.path().join("images.txt"), "").expect("image fixture");
         fs::write(
             directory.path().join("points3D.txt"),
