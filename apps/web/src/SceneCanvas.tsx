@@ -147,8 +147,10 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
   const denseDiagnostic = reconstruction.dense.skip_reason
     ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
     : reconstruction.dense.accepted_points > 0
-      ? `Coarse dense depth: ${reconstruction.dense.accepted_points} accepted samples from ${reconstruction.dense.source_views} source view${reconstruction.dense.source_views === 1 ? "" : "s"}`
-      : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
+      ? `Coarse dense depth: ${reconstruction.dense.accepted_points} reciprocal-consistent samples from ${reconstruction.dense.source_views} source view${reconstruction.dense.source_views === 1 ? "" : "s"}; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates`
+      : reconstruction.dense.reciprocal_checked_points > 0
+        ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
+        : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
 
   return (
     <>
