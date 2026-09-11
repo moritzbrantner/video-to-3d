@@ -45,15 +45,15 @@ Implementation exit criterion met: the in-product sparse pipeline has fail-close
 
 ## Slice 4 — Dense reconstruction — in progress
 
-- **Coarse registered-view depth estimation — current slice.** Choose a reference from the final accepted sparse camera geometry, derive a bounded depth-search envelope from visible accepted sparse landmarks, evaluate a memory-bounded inverse-depth plane sweep over textured sample pixels, and retain only photometrically supported, non-ambiguous depth hypotheses. Emit accepted dense samples separately from the sparse map with explicit diagnostics; do not fabricate dense geometry when texture, baseline, or matching evidence is insufficient.
-- Multi-view depth consistency filtering. Require reciprocal or cross-reference agreement before treating independently estimated depth as fused scene evidence.
+- **Coarse registered-view depth estimation — integrated.** Choose a reference from the final accepted sparse camera geometry, derive a bounded depth-search envelope from visible accepted sparse landmarks, evaluate a memory-bounded inverse-depth plane sweep over textured sample pixels, and retain only photometrically supported, non-ambiguous depth hypotheses. Emit accepted dense samples separately from the sparse map with explicit diagnostics; do not fabricate dense geometry when texture, baseline, or matching evidence is insufficient.
+- **Reciprocal depth consistency — current slice.** Give each eligible source view its own sparse-landmark-derived depth-search envelope. A primary reference-view hypothesis that already passed texture, photometric-support, and ambiguity gates is retained only when at least one directly supporting source view independently selects a reverse-search depth within an 8% relative-depth envelope of the projected candidate. Surface how many primary candidates reached this veto and how many it rejected.
 - Dense point fusion. Merge consistent depth observations while preserving support/confidence and rejecting duplicates/outliers.
 - Optional mesh reconstruction and texture projection.
 - Memory-aware native and WASM execution strategies, including progressive/chunked processing where full-resolution depth would exceed practical browser memory budgets.
 
-Current boundary: the first dense pass is deliberately a coarse depth-estimation foundation, not a completed dense reconstruction system. It consumes the final Rust-owned sparse camera geometry after bundle adjustment/closure and produces separate coarse dense points. It does not yet claim multi-view consistency, fused dense surfaces, meshing, metric scale, or full-resolution depth maps.
+Current boundary: Rust now applies a bounded reciprocal source-view consistency veto to coarse depth hypotheses after the original reference-view acceptance gates. The surviving points are still separate coarse samples from one selected reference, not fused scene evidence. Dense point fusion, fused surfaces, meshing, metric scale, full-resolution depth maps, and general multi-reference aggregation remain outside the implemented boundary.
 
-Next implementation slice: multi-view depth consistency filtering over accepted coarse depth hypotheses, followed by dense point fusion as a separate acceptance boundary.
+Next implementation slice: fuse reciprocal-consistent depth observations without creating duplicate or weakly supported geometry, while preserving the current confidence and fail-closed semantics.
 
 ## Slice 5 — 3D Gaussian splatting
 

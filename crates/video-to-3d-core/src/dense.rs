@@ -10,6 +10,7 @@ const PATCH_RADIUS: i32 = 1;
 const MIN_REFERENCE_CONTRAST: f64 = 14.0;
 const MAX_PHOTOMETRIC_ERROR: f64 = 18.0;
 const MIN_AMBIGUITY_MARGIN: f64 = 1.0;
+const MAX_RECIPROCAL_RELATIVE_DEPTH_ERROR: f64 = 0.08;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DenseStats {
@@ -20,6 +21,8 @@ pub struct DenseStats {
     pub sampled_pixels: usize,
     pub depth_hypotheses: usize,
     pub accepted_points: usize,
+    pub reciprocal_checked_points: usize,
+    pub reciprocal_rejected_points: usize,
     pub median_supporting_views: Option<f32>,
     pub median_photometric_error: Option<f32>,
     pub search_min_depth: Option<f32>,
@@ -50,6 +53,14 @@ struct Candidate {
     position: Vector3<f64>,
     support: usize,
     error: f64,
+}
+
+struct SourceView<'a> {
+    camera: &'a RegisteredCamera,
+    frame: &'a FrameInput,
+    luma: Vec<u8>,
+    search_min_depth: f64,
+    search_max_depth: f64,
 }
 
 pub(super) fn estimate_depth_points(
@@ -110,17 +121,23 @@ pub(super) fn estimate_depth_points(
         return DenseAnalysis::skipped("the selected reference camera has no sampled frame");
     };
 
-    let mut sources: Vec<&RegisteredCamera> = cameras
+    let mut sources: Vec<(&RegisteredCamera, &FrameInput, f64, f64)> = cameras
         .iter()
         .filter(|camera| camera.frame_index != reference.frame_index)
-        .filter(|camera| frames.get(camera.frame_index).is_some())
-        .filter(|camera| {
+        .filter_map(|camera| {
+            let frame = frames.get(camera.frame_index)?;
             let baseline = (camera.camera_center() - reference.camera_center()).norm();
-            baseline >= median_depth * 0.005
-                && projects_reference_center(reference, camera, median_depth, width, height, focal)
+            if baseline < median_depth * 0.005
+                || !projects_reference_center(reference, camera, median_depth, width, height, focal)
+            {
+                return None;
+            }
+            let (source_min_depth, source_max_depth) =
+                depth_search_bounds(camera, sparse_points, frame.width, frame.height, focal)?;
+            Some((camera, frame, source_min_depth, source_max_depth))
         })
         .collect();
-    sources.sort_by(|left, right| {
+    sources.sort_by(|(left, _, _, _), (right, _, _, _)| {
         left.frame_index
             .abs_diff(reference.frame_index)
             .cmp(&right.frame_index.abs_diff(reference.frame_index))
@@ -128,24 +145,24 @@ pub(super) fn estimate_depth_points(
     });
     sources.truncate(MAX_SOURCE_VIEWS);
     if sources.is_empty() {
-        return DenseAnalysis::skipped(
-            "no second registered camera has sufficient baseline and image overlap with the selected reference",
-        );
+        return DenseAnalysis::skipped(format!(
+            "no second registered camera has sufficient baseline, overlap, and at least {MIN_VISIBLE_SPARSE_POINTS} visible sparse landmarks for reciprocal depth consistency"
+        ));
     }
 
     let reference_luma = to_luma(reference_frame);
-    let source_luma: Vec<(&RegisteredCamera, &FrameInput, Vec<u8>)> = sources
-        .iter()
-        .filter_map(|camera| {
-            let frame = frames.get(camera.frame_index)?;
-            Some((*camera, frame, to_luma(frame)))
-        })
+    let source_views: Vec<SourceView<'_>> = sources
+        .into_iter()
+        .map(
+            |(camera, frame, source_min_depth, source_max_depth)| SourceView {
+                camera,
+                frame,
+                luma: to_luma(frame),
+                search_min_depth: source_min_depth,
+                search_max_depth: source_max_depth,
+            },
+        )
         .collect();
-    if source_luma.is_empty() {
-        return DenseAnalysis::skipped(
-            "no sampled source frame is available for the selected cameras",
-        );
-    }
 
     let stride = (width.min(height) / 48).clamp(4, 12) as usize;
     let border = (PATCH_RADIUS + 2) as u32;
@@ -153,6 +170,8 @@ pub(super) fn estimate_depth_points(
     let mut errors = Vec::new();
     let mut supports = Vec::new();
     let mut sampled_pixels = 0usize;
+    let mut reciprocal_checked_points = 0usize;
+    let mut reciprocal_rejected_points = 0usize;
 
     for y in (border..height - border).step_by(stride) {
         for x in (border..width - border).step_by(stride) {
@@ -177,16 +196,16 @@ pub(super) fn estimate_depth_points(
                     unproject(reference, x as f64, y as f64, depth, width, height, focal);
 
                 let mut source_errors = Vec::new();
-                for (source_camera, source_frame, luma) in &source_luma {
+                for source in &source_views {
                     let Some(error) = patch_error(
                         reference,
-                        source_camera,
+                        source.camera,
                         &reference_luma,
-                        luma,
+                        &source.luma,
                         width,
                         height,
-                        source_frame.width,
-                        source_frame.height,
+                        source.frame.width,
+                        source.frame.height,
                         x as f64,
                         y as f64,
                         depth,
@@ -242,8 +261,20 @@ pub(super) fn estimate_depth_points(
             if ambiguity_margin < MIN_AMBIGUITY_MARGIN {
                 continue;
             }
+            reciprocal_checked_points += 1;
+            if !has_reciprocal_depth_agreement(
+                best.position,
+                reference,
+                reference_frame,
+                &reference_luma,
+                &source_views,
+                focal,
+            ) {
+                reciprocal_rejected_points += 1;
+                continue;
+            }
 
-            let support_confidence = best.support as f64 / source_luma.len() as f64;
+            let support_confidence = best.support as f64 / source_views.len() as f64;
             let error_confidence = 1.0 / (1.0 + best.error / 8.0);
             let margin_confidence = if ambiguity_margin.is_finite() {
                 (ambiguity_margin / 6.0).clamp(0.2, 1.0)
@@ -272,10 +303,12 @@ pub(super) fn estimate_depth_points(
             attempted: true,
             skip_reason: None,
             reference_frame: Some(reference.frame_index),
-            source_views: source_luma.len(),
+            source_views: source_views.len(),
             sampled_pixels,
             depth_hypotheses: DEPTH_HYPOTHESES,
             accepted_points: points.len(),
+            reciprocal_checked_points,
+            reciprocal_rejected_points,
             median_supporting_views: median_option(&mut supports).map(|value| value as f32),
             median_photometric_error: median_option(&mut errors).map(|value| value as f32),
             search_min_depth: Some(search_min_depth as f32),
@@ -283,6 +316,171 @@ pub(super) fn estimate_depth_points(
         },
         points,
     }
+}
+
+fn depth_search_bounds(
+    camera: &RegisteredCamera,
+    sparse_points: &[Vector3<f64>],
+    width: u32,
+    height: u32,
+    focal: f64,
+) -> Option<(f64, f64)> {
+    let mut depths = visible_depths(camera, sparse_points, width, height, focal);
+    if depths.len() < MIN_VISIBLE_SPARSE_POINTS {
+        return None;
+    }
+    depths.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    let lower = quantile(&depths, 0.10);
+    let upper = quantile(&depths, 0.90);
+    if !lower.is_finite() || !upper.is_finite() || lower <= 0.0 || upper <= 0.0 {
+        return None;
+    }
+    let minimum = (lower * 0.8).max(1.0e-4);
+    let maximum = (upper * 1.25).max(minimum * 1.2);
+    Some((minimum, maximum))
+}
+
+fn has_reciprocal_depth_agreement(
+    position: Vector3<f64>,
+    reference_camera: &RegisteredCamera,
+    reference_frame: &FrameInput,
+    reference_luma: &[u8],
+    sources: &[SourceView<'_>],
+    focal: f64,
+) -> bool {
+    let Some((reference_x, reference_y, reference_depth)) = project(
+        reference_camera,
+        position,
+        reference_frame.width,
+        reference_frame.height,
+        focal,
+    ) else {
+        return false;
+    };
+
+    sources.iter().any(|source| {
+        let Some(direct_error) = patch_error(
+            reference_camera,
+            source.camera,
+            reference_luma,
+            &source.luma,
+            reference_frame.width,
+            reference_frame.height,
+            source.frame.width,
+            source.frame.height,
+            reference_x,
+            reference_y,
+            reference_depth,
+            focal,
+        ) else {
+            return false;
+        };
+        if direct_error > MAX_PHOTOMETRIC_ERROR {
+            return false;
+        }
+
+        let Some((source_x, source_y, expected_source_depth)) = project(
+            source.camera,
+            position,
+            source.frame.width,
+            source.frame.height,
+            focal,
+        ) else {
+            return false;
+        };
+        let Some(reciprocal_depth) = estimate_single_view_depth(
+            source.camera,
+            reference_camera,
+            &source.luma,
+            reference_luma,
+            source.frame.width,
+            source.frame.height,
+            reference_frame.width,
+            reference_frame.height,
+            source_x,
+            source_y,
+            source.search_min_depth,
+            source.search_max_depth,
+            focal,
+        ) else {
+            return false;
+        };
+
+        reciprocal_depth_agrees(expected_source_depth, reciprocal_depth)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn estimate_single_view_depth(
+    reference_camera: &RegisteredCamera,
+    source_camera: &RegisteredCamera,
+    reference_luma: &[u8],
+    source_luma: &[u8],
+    reference_width: u32,
+    reference_height: u32,
+    source_width: u32,
+    source_height: u32,
+    x: f64,
+    y: f64,
+    search_min_depth: f64,
+    search_max_depth: f64,
+    focal: f64,
+) -> Option<f64> {
+    if patch_contrast(reference_luma, reference_width, reference_height, x, y)
+        < MIN_REFERENCE_CONTRAST
+    {
+        return None;
+    }
+
+    let mut candidates = Vec::with_capacity(DEPTH_HYPOTHESES);
+    for hypothesis in 0..DEPTH_HYPOTHESES {
+        let t = if DEPTH_HYPOTHESES == 1 {
+            0.0
+        } else {
+            hypothesis as f64 / (DEPTH_HYPOTHESES - 1) as f64
+        };
+        let inverse_depth = (1.0 / search_min_depth) * (1.0 - t) + (1.0 / search_max_depth) * t;
+        let depth = 1.0 / inverse_depth;
+        let Some(error) = patch_error(
+            reference_camera,
+            source_camera,
+            reference_luma,
+            source_luma,
+            reference_width,
+            reference_height,
+            source_width,
+            source_height,
+            x,
+            y,
+            depth,
+            focal,
+        ) else {
+            continue;
+        };
+        if error <= MAX_PHOTOMETRIC_ERROR {
+            candidates.push((depth, error));
+        }
+    }
+
+    candidates.sort_by(|(left_depth, left_error), (right_depth, right_error)| {
+        left_error
+            .partial_cmp(right_error)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                left_depth
+                    .partial_cmp(right_depth)
+                    .unwrap_or(Ordering::Equal)
+            })
+    });
+    candidates.first().map(|(depth, _)| *depth)
+}
+
+fn reciprocal_depth_agrees(expected: f64, estimated: f64) -> bool {
+    if !expected.is_finite() || !estimated.is_finite() || expected <= 0.0 || estimated <= 0.0 {
+        return false;
+    }
+    let scale = expected.max(estimated).max(1.0e-9);
+    (expected - estimated).abs() / scale <= MAX_RECIPROCAL_RELATIVE_DEPTH_ERROR
 }
 
 fn visible_depths(
@@ -586,9 +784,13 @@ mod tests {
         assert!(result.stats.skip_reason.is_none());
         assert_eq!(result.stats.reference_frame, Some(0));
         assert_eq!(result.stats.source_views, 2);
+        assert_eq!(
+            result.stats.reciprocal_checked_points,
+            result.stats.accepted_points + result.stats.reciprocal_rejected_points
+        );
         assert!(
             result.points.len() >= 12,
-            "accepted only {} dense samples",
+            "accepted only {} reciprocal-consistent dense samples",
             result.points.len()
         );
         let mut depths: Vec<f64> = result.points.iter().map(|point| point.z as f64).collect();
@@ -598,6 +800,55 @@ mod tests {
             (median_depth - depth).abs() < 0.55,
             "median dense depth was {median_depth}"
         );
+    }
+
+    #[test]
+    fn reciprocal_depth_search_recovers_source_view_depth() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let depth = 4.0;
+        let frames = [
+            plane_frame(width, height, focal, 0.0, depth),
+            plane_frame(width, height, focal, 0.18, depth),
+        ];
+        let cameras = [camera(0, 0.0), camera(1, 0.18)];
+        let sparse = plane_sparse_points(width, height, focal, depth);
+        let (minimum, maximum) =
+            depth_search_bounds(&cameras[1], &sparse, width, height, focal).expect("depth bounds");
+        let world = Vector3::new(0.0, 0.0, depth);
+        let (x, y, expected_depth) =
+            project(&cameras[1], world, width, height, focal).expect("visible source point");
+        let source_luma = to_luma(&frames[1]);
+        let reference_luma = to_luma(&frames[0]);
+
+        let estimated_depth = estimate_single_view_depth(
+            &cameras[1],
+            &cameras[0],
+            &source_luma,
+            &reference_luma,
+            width,
+            height,
+            width,
+            height,
+            x,
+            y,
+            minimum,
+            maximum,
+            focal,
+        )
+        .expect("reciprocal source depth");
+
+        assert!(
+            reciprocal_depth_agrees(expected_depth, estimated_depth),
+            "expected source depth {expected_depth}, got {estimated_depth}"
+        );
+    }
+
+    #[test]
+    fn reciprocal_consistency_rejects_wrong_depth() {
+        assert!(reciprocal_depth_agrees(4.0, 4.2));
+        assert!(!reciprocal_depth_agrees(4.0, 5.0));
     }
 
     #[test]
