@@ -299,10 +299,8 @@ mod tests {
 
     impl TestDir {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "video-to-3d-colmap-{}-{name}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("video-to-3d-colmap-{}-{name}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).expect("create test directory");
             Self { path }
