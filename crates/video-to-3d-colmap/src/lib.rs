@@ -1,14 +1,18 @@
 //! Focused COLMAP text-format interoperability for `video-to-3d`.
 //!
-//! This crate owns parsing of COLMAP's sparse text interchange files. It does not
-//! own reconstruction algorithms, camera estimation, radiance fields, Gaussian
-//! splatting, or COLMAP execution.
+//! This crate owns parsing of COLMAP's sparse text interchange files. Reusable scene-data types
+//! live in `video-to-3d-core`; this adapter does not own reconstruction algorithms, camera
+//! estimation, radiance fields, Gaussian splatting, or COLMAP execution.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+pub use video_to_3d_core::colmap::{
+    ColmapCamera, ColmapDataset, ColmapImage, ColmapPoint2d, ColmapPoint3d, ColmapTrackElement,
+    Vec2, Vec3,
+};
 
 #[derive(Debug, Error)]
 pub enum ColmapError {
@@ -23,71 +27,6 @@ pub enum ColmapError {
 }
 
 pub type Result<T> = std::result::Result<T, ColmapError>;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Vec2 {
-    pub x: f32,
-    pub y: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Vec3 {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColmapDataset {
-    pub cameras: Vec<ColmapCamera>,
-    pub images: Vec<ColmapImage>,
-    pub points: Vec<ColmapPoint3d>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColmapCamera {
-    pub id: u32,
-    pub raw_model: String,
-    pub width: u32,
-    pub height: u32,
-    pub params: Vec<f32>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColmapImage {
-    pub id: u32,
-    pub qw: f32,
-    pub qx: f32,
-    pub qy: f32,
-    pub qz: f32,
-    pub tx: f32,
-    pub ty: f32,
-    pub tz: f32,
-    pub camera_id: u32,
-    pub name: String,
-    pub points2d: Vec<ColmapPoint2d>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ColmapPoint2d {
-    pub xy: Vec2,
-    pub point3d_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColmapPoint3d {
-    pub id: u64,
-    pub xyz: Vec3,
-    pub color: [u8; 3],
-    pub error: f32,
-    pub track: Vec<ColmapTrackElement>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ColmapTrackElement {
-    pub image_id: u32,
-    pub point2d_index: usize,
-}
 
 /// Reads the three COLMAP sparse text files from a directory.
 pub fn read_colmap_text_dir(path: impl AsRef<Path>) -> Result<ColmapDataset> {
@@ -191,13 +130,17 @@ fn parse_points2d(path: &Path, line_number: usize, line: &str) -> Result<Vec<Col
         .0
         .iter()
         .map(|chunk| {
-            let point3d_id: i64 = parse(path, line_number, chunk[2], "point3D id")?;
+            let point3d_id = if chunk[2] == "-1" {
+                None
+            } else {
+                Some(parse(path, line_number, chunk[2], "point3D id")?)
+            };
             Ok(ColmapPoint2d {
                 xy: Vec2 {
                     x: parse(path, line_number, chunk[0], "point2D x")?,
                     y: parse(path, line_number, chunk[1], "point2D y")?,
                 },
-                point3d_id: u64::try_from(point3d_id).ok(),
+                point3d_id,
             })
         })
         .collect()
@@ -317,6 +260,16 @@ mod tests {
         }
     }
 
+    fn write_empty_sparse_files(directory: &TestDir, images: &str) {
+        fs::write(
+            directory.path().join("cameras.txt"),
+            "1 PINHOLE 640 480 500 501 320 240\n",
+        )
+        .expect("camera fixture");
+        fs::write(directory.path().join("images.txt"), images).expect("image fixture");
+        fs::write(directory.path().join("points3D.txt"), "").expect("point fixture");
+    }
+
     #[test]
     fn reads_sparse_colmap_text_directory() {
         let directory = TestDir::new("reads-sparse");
@@ -355,6 +308,27 @@ mod tests {
             }
         );
         assert_eq!(dataset.points[0].track.len(), 2);
+    }
+
+    #[test]
+    fn preserves_full_u64_point_ids() {
+        let directory = TestDir::new("u64-point-id");
+        write_empty_sparse_files(
+            &directory,
+            "1 1 0 0 0 0 0 0 1 frame.png\n10 20 18446744073709551615\n",
+        );
+
+        let dataset = read_colmap_text_dir(directory.path()).expect("u64 point id parses");
+        assert_eq!(dataset.images[0].points2d[0].point3d_id, Some(u64::MAX));
+    }
+
+    #[test]
+    fn rejects_negative_point_ids_other_than_the_colmap_sentinel() {
+        let directory = TestDir::new("negative-point-id");
+        write_empty_sparse_files(&directory, "1 1 0 0 0 0 0 0 1 frame.png\n10 20 -2\n");
+
+        let error = read_colmap_text_dir(directory.path()).expect_err("-2 is not a sentinel");
+        assert!(error.to_string().contains("point3D id"));
     }
 
     #[test]
