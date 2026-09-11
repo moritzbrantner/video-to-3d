@@ -201,11 +201,7 @@ fn read_images(path: PathBuf) -> ColmapResult<Vec<ColmapImage>> {
     Ok(images)
 }
 
-fn parse_points2d(
-    path: &Path,
-    line_number: usize,
-    line: &str,
-) -> ColmapResult<Vec<ColmapPoint2d>> {
+fn parse_points2d(path: &Path, line_number: usize, line: &str) -> ColmapResult<Vec<ColmapPoint2d>> {
     let parts = line.split_whitespace().collect::<Vec<_>>();
     if parts.is_empty() {
         return Ok(Vec::new());
