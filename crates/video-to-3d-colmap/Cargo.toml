@@ -1,9 +1,0 @@
-[package]
-name = "video-to-3d-colmap"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-thiserror = "2"
-video-to-3d-core = { path = "../video-to-3d-core" }
