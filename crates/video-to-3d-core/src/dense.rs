@@ -470,11 +470,7 @@ fn estimate_single_view_depth(
                     .unwrap_or(Ordering::Equal)
             })
     });
-    let &(best_depth, best_error) = candidates.first()?;
-    let ambiguity_margin = candidates
-        .get(1)
-        .map_or(f64::INFINITY, |(_, second_error)| second_error - best_error);
-    (ambiguity_margin >= MIN_AMBIGUITY_MARGIN).then_some(best_depth)
+    candidates.first().map(|(depth, _)| *depth)
 }
 
 fn reciprocal_depth_agrees(expected: f64, estimated: f64) -> bool {
