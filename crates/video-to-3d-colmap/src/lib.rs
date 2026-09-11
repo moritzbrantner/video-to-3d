@@ -289,14 +289,39 @@ fn parse_error<T>(path: &Path, line: usize, message: impl Into<String>) -> Resul
 #[cfg(test)]
 mod tests {
     use std::fs;
-
-    use tempfile::tempdir;
+    use std::path::{Path, PathBuf};
 
     use super::*;
 
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "video-to-3d-colmap-{}-{name}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create test directory");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
     #[test]
     fn reads_sparse_colmap_text_directory() {
-        let directory = tempdir().expect("temp directory");
+        let directory = TestDir::new("reads-sparse");
         fs::write(
             directory.path().join("cameras.txt"),
             "# cameras\n1 PINHOLE 640 480 500 501 320 240\n",
@@ -336,7 +361,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_point_track() {
-        let directory = tempdir().expect("temp directory");
+        let directory = TestDir::new("malformed-track");
         fs::write(
             directory.path().join("cameras.txt"),
             "1 PINHOLE 1 1 1 1 0 0\n",
