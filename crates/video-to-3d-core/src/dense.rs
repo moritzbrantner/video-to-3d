@@ -21,6 +21,8 @@ pub struct DenseStats {
     pub sampled_pixels: usize,
     pub depth_hypotheses: usize,
     pub accepted_points: usize,
+    pub reciprocal_checked_points: usize,
+    pub reciprocal_rejected_points: usize,
     pub median_supporting_views: Option<f32>,
     pub median_photometric_error: Option<f32>,
     pub search_min_depth: Option<f32>,
@@ -173,6 +175,8 @@ pub(super) fn estimate_depth_points(
     let mut errors = Vec::new();
     let mut supports = Vec::new();
     let mut sampled_pixels = 0usize;
+    let mut reciprocal_checked_points = 0usize;
+    let mut reciprocal_rejected_points = 0usize;
 
     for y in (border..height - border).step_by(stride) {
         for x in (border..width - border).step_by(stride) {
@@ -262,6 +266,7 @@ pub(super) fn estimate_depth_points(
             if ambiguity_margin < MIN_AMBIGUITY_MARGIN {
                 continue;
             }
+            reciprocal_checked_points += 1;
             if !has_reciprocal_depth_agreement(
                 best.position,
                 reference,
@@ -270,6 +275,7 @@ pub(super) fn estimate_depth_points(
                 &source_views,
                 focal,
             ) {
+                reciprocal_rejected_points += 1;
                 continue;
             }
 
@@ -306,6 +312,8 @@ pub(super) fn estimate_depth_points(
             sampled_pixels,
             depth_hypotheses: DEPTH_HYPOTHESES,
             accepted_points: points.len(),
+            reciprocal_checked_points,
+            reciprocal_rejected_points,
             median_supporting_views: median_option(&mut supports).map(|value| value as f32),
             median_photometric_error: median_option(&mut errors).map(|value| value as f32),
             search_min_depth: Some(search_min_depth as f32),
@@ -782,6 +790,10 @@ mod tests {
         assert!(result.stats.skip_reason.is_none());
         assert_eq!(result.stats.reference_frame, Some(0));
         assert_eq!(result.stats.source_views, 2);
+        assert_eq!(
+            result.stats.reciprocal_checked_points,
+            result.stats.accepted_points + result.stats.reciprocal_rejected_points
+        );
         assert!(
             result.points.len() >= 12,
             "accepted only {} reciprocal-consistent dense samples",
