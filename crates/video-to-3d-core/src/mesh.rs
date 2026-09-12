@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_GRID_REPROJECTION_OFFSET_STRIDES: f64 = 0.5;
 const MAX_MESH_RELATIVE_DEPTH_JUMP: f64 = 0.15;
+const MAX_BRIDGE_RELATIVE_DEPTH_JUMP: f64 = 0.08;
 const MAX_MESH_EDGE_FOOTPRINT_MULTIPLIER: f64 = 3.0;
 const MIN_MESH_AREA_FOOTPRINT_RATIO: f64 = 0.05;
 const MIN_MESH_PROJECTED_AREA_FOOTPRINT_RATIO: f64 = 0.05;
@@ -187,6 +188,7 @@ pub(super) fn reconstruct_dense_mesh(
     }
 
     let mut triangles = Vec::new();
+    let mut triangle_keys = BTreeSet::new();
     let mut candidate_cells = 0usize;
     let mut candidate_triangles = 0usize;
     let mut rejected_discontinuities = 0usize;
@@ -205,13 +207,62 @@ pub(super) fn reconstruct_dense_mesh(
         }
         candidate_cells += 1;
 
-        let candidates = cell_triangles(corners);
-        candidate_triangles += candidates.len();
-        for [a, b, c] in candidates {
-            match accepted_triangle(a, b, c, stride, focal) {
-                Ok(triangle) => triangles.push(triangle),
-                Err(TriangleRejection::Discontinuity) => rejected_discontinuities += 1,
-                Err(TriangleRejection::Degenerate) => rejected_degenerate += 1,
+        for candidate in cell_triangles(corners) {
+            evaluate_candidate_triangle(
+                candidate,
+                stride,
+                focal,
+                MAX_MESH_RELATIVE_DEPTH_JUMP,
+                &mut triangle_keys,
+                &mut triangles,
+                &mut candidate_triangles,
+                &mut rejected_discontinuities,
+                &mut rejected_degenerate,
+            );
+        }
+    }
+
+    if let (Some(&(minimum_x, minimum_y)), Some(&(maximum_x, maximum_y))) =
+        (grid.keys().next(), grid.keys().next_back())
+    {
+        if maximum_x - minimum_x >= 2 {
+            for gx in minimum_x..=maximum_x - 2 {
+                for gy in minimum_y..=maximum_y {
+                    if let Some(candidate) = horizontal_gap_bridge(&grid, gx, gy) {
+                        candidate_cells += 1;
+                        evaluate_candidate_triangle(
+                            candidate,
+                            stride,
+                            focal,
+                            MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
+                            &mut triangle_keys,
+                            &mut triangles,
+                            &mut candidate_triangles,
+                            &mut rejected_discontinuities,
+                            &mut rejected_degenerate,
+                        );
+                    }
+                }
+            }
+        }
+        if maximum_y - minimum_y >= 2 {
+            for gx in minimum_x..=maximum_x {
+                for gy in minimum_y..=maximum_y - 2 {
+                    if let Some(candidate) = vertical_gap_bridge(&grid, gx, gy) {
+                        candidate_cells += 1;
+                        evaluate_candidate_triangle(
+                            candidate,
+                            stride,
+                            focal,
+                            MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
+                            &mut triangle_keys,
+                            &mut triangles,
+                            &mut candidate_triangles,
+                            &mut rejected_discontinuities,
+                            &mut rejected_degenerate,
+                        );
+                    }
+                }
             }
         }
     }
@@ -230,6 +281,98 @@ pub(super) fn reconstruct_dense_mesh(
             rejected_degenerate,
         },
         triangles,
+    }
+}
+
+fn evaluate_candidate_triangle(
+    candidate: [GridVertex; 3],
+    stride: f64,
+    focal: f64,
+    max_relative_depth_jump: f64,
+    triangle_keys: &mut BTreeSet<(usize, usize, usize)>,
+    triangles: &mut Vec<MeshTriangle>,
+    candidate_triangles: &mut usize,
+    rejected_discontinuities: &mut usize,
+    rejected_degenerate: &mut usize,
+) {
+    let key = triangle_key(candidate);
+    if !triangle_keys.insert(key) {
+        return;
+    }
+    *candidate_triangles += 1;
+    match accepted_triangle(
+        candidate[0],
+        candidate[1],
+        candidate[2],
+        stride,
+        focal,
+        max_relative_depth_jump,
+    ) {
+        Ok(triangle) => triangles.push(triangle),
+        Err(TriangleRejection::Discontinuity) => *rejected_discontinuities += 1,
+        Err(TriangleRejection::Degenerate) => *rejected_degenerate += 1,
+    }
+}
+
+fn triangle_key(vertices: [GridVertex; 3]) -> (usize, usize, usize) {
+    let mut indices = [
+        vertices[0].point_index,
+        vertices[1].point_index,
+        vertices[2].point_index,
+    ];
+    indices.sort_unstable();
+    (indices[0], indices[1], indices[2])
+}
+
+fn horizontal_gap_bridge(
+    grid: &BTreeMap<(i32, i32), GridVertex>,
+    gx: i32,
+    gy: i32,
+) -> Option<[GridVertex; 3]> {
+    let top_left = grid.get(&(gx, gy)).copied();
+    let top_right = grid.get(&(gx + 2, gy)).copied();
+    let bottom_left = grid.get(&(gx, gy + 1)).copied();
+    let bottom_right = grid.get(&(gx + 2, gy + 1)).copied();
+    let top_middle = grid.get(&(gx + 1, gy)).copied();
+    let bottom_middle = grid.get(&(gx + 1, gy + 1)).copied();
+
+    match (
+        top_left,
+        top_right,
+        bottom_left,
+        bottom_right,
+        top_middle,
+        bottom_middle,
+    ) {
+        (Some(tl), Some(tr), _, _, None, Some(middle)) => Some([tl, tr, middle]),
+        (_, _, Some(bl), Some(br), Some(middle), None) => Some([bl, middle, br]),
+        _ => None,
+    }
+}
+
+fn vertical_gap_bridge(
+    grid: &BTreeMap<(i32, i32), GridVertex>,
+    gx: i32,
+    gy: i32,
+) -> Option<[GridVertex; 3]> {
+    let top_left = grid.get(&(gx, gy)).copied();
+    let top_right = grid.get(&(gx + 1, gy)).copied();
+    let bottom_left = grid.get(&(gx, gy + 2)).copied();
+    let bottom_right = grid.get(&(gx + 1, gy + 2)).copied();
+    let left_middle = grid.get(&(gx, gy + 1)).copied();
+    let right_middle = grid.get(&(gx + 1, gy + 1)).copied();
+
+    match (
+        top_left,
+        top_right,
+        bottom_left,
+        bottom_right,
+        left_middle,
+        right_middle,
+    ) {
+        (Some(tl), _, Some(bl), _, None, Some(middle)) => Some([tl, middle, bl]),
+        (_, Some(tr), _, Some(br), Some(middle), None) => Some([tr, br, middle]),
+        _ => None,
     }
 }
 
@@ -294,6 +437,7 @@ fn accepted_triangle(
     c: GridVertex,
     stride: f64,
     focal: f64,
+    max_relative_depth_jump: f64,
 ) -> Result<MeshTriangle, TriangleRejection> {
     let depths = [a.reference_depth, b.reference_depth, c.reference_depth];
     if depths
@@ -307,7 +451,7 @@ fn accepted_triangle(
         .iter()
         .copied()
         .fold(f64::NEG_INFINITY, f64::max);
-    if (maximum_depth - minimum_depth) / maximum_depth > MAX_MESH_RELATIVE_DEPTH_JUMP {
+    if (maximum_depth - minimum_depth) / maximum_depth > max_relative_depth_jump {
         return Err(TriangleRejection::Discontinuity);
     }
 
@@ -496,6 +640,82 @@ mod tests {
             .triangles
             .iter()
             .all(|triangle| triangle.confidence <= 0.8));
+    }
+
+    #[test]
+    fn bridges_one_missing_grid_sample_on_a_smooth_surface() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let sites = vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 11, y: 3 },
+            DenseGridSite { x: 3, y: 7 },
+            DenseGridSite { x: 11, y: 7 },
+            DenseGridSite { x: 7, y: 7 },
+        ];
+        let points = sites
+            .iter()
+            .map(|site| point_at_pixel(site.x as f64, site.y as f64, 4.0, width, height, focal, 0.8))
+            .collect::<Vec<_>>();
+
+        let result = reconstruct_dense_mesh(
+            &points,
+            &sites,
+            &dense_stats(),
+            &[camera()],
+            width,
+            height,
+            focal,
+        );
+
+        assert!(result.stats.attempted);
+        assert_eq!(result.stats.grid_vertices, 5);
+        assert_eq!(result.stats.accepted_triangles, 3);
+        assert!(result.triangles.iter().any(|triangle| {
+            let mut indices = [triangle.a, triangle.b, triangle.c];
+            indices.sort_unstable();
+            indices == [0, 1, 4]
+        }));
+    }
+
+    #[test]
+    fn does_not_bridge_a_missing_sample_across_a_depth_discontinuity() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let sites = vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 11, y: 3 },
+            DenseGridSite { x: 3, y: 7 },
+            DenseGridSite { x: 11, y: 7 },
+            DenseGridSite { x: 7, y: 7 },
+        ];
+        let points = vec![
+            point_at_pixel(3.0, 3.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(11.0, 3.0, 5.0, width, height, focal, 0.8),
+            point_at_pixel(3.0, 7.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(11.0, 7.0, 5.0, width, height, focal, 0.8),
+            point_at_pixel(7.0, 7.0, 4.0, width, height, focal, 0.8),
+        ];
+
+        let result = reconstruct_dense_mesh(
+            &points,
+            &sites,
+            &dense_stats(),
+            &[camera()],
+            width,
+            height,
+            focal,
+        );
+
+        assert!(result.stats.attempted);
+        assert!(result.stats.rejected_discontinuities > 0);
+        assert!(!result.triangles.iter().any(|triangle| {
+            let mut indices = [triangle.a, triangle.b, triangle.c];
+            indices.sort_unstable();
+            indices == [0, 1, 4]
+        }));
     }
 
     #[test]
