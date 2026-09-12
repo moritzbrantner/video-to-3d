@@ -1,0 +1,33 @@
+name: Refresh camera-contract lockfile once
+
+on:
+  push:
+    branches:
+      - fix/camera-state-contract
+    paths:
+      - .github/workflows/refresh-camera-contract-lockfile-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-lockfile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: fix/camera-state-contract
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Refresh lockfile from the existing resolution
+        run: cargo check -p video-to-3d-wasm
+      - name: Commit the lockfile and remove this one-shot workflow
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Cargo.lock
+          git rm .github/workflows/refresh-camera-contract-lockfile-once.yml
+          git diff --cached --check
+          git commit -m "Refresh WASM Cargo lockfile"
+          git push origin HEAD:fix/camera-state-contract
