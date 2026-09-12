@@ -53,6 +53,7 @@ export function SceneCanvas({
 
   useEffect(() => {
     setRenderMode(hasSurfaceModel ? "model" : "evidence");
+    setView((current) => ({ ...current, zoom: 1 }));
   }, [hasSurfaceModel, reconstruction]);
 
   const bounds = useMemo(() => {
@@ -75,7 +76,8 @@ export function SceneCanvas({
     const cameraPositions = reconstruction.cameras.map(
       (camera) => [camera.x, camera.y, camera.z] as const,
     );
-    const positions =
+    const evidencePositions = [...densePositions, ...sparsePositions, ...cameraPositions];
+    const modelPositions =
       surfacePositions.length > 0
         ? surfacePositions
         : densePositions.length > 0
@@ -83,6 +85,10 @@ export function SceneCanvas({
           : sparsePositions.length > 0
             ? sparsePositions
             : cameraPositions;
+    const positions =
+      renderMode === "evidence" && evidencePositions.length > 0
+        ? evidencePositions
+        : modelPositions;
     if (positions.length === 0) {
       return { center: [0, 0, 0] as const, extent: 1 };
     }
@@ -101,7 +107,7 @@ export function SceneCanvas({
     ] as const;
     const extent = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 1);
     return { center, extent };
-  }, [reconstruction]);
+  }, [reconstruction, renderMode]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -318,23 +324,28 @@ export function SceneCanvas({
     return () => observer.disconnect();
   }, [draw]);
 
+  const selectRenderMode = (nextMode: RenderMode) => {
+    setRenderMode(nextMode);
+    setView((current) => ({ ...current, zoom: 1 }));
+  };
+
   const cameraDiagnostic = hasRegisteredGeometry
     ? `Registered geometry: ${reconstruction.cameras.length} accepted camera poses`
     : `Approximate motion track only: ${reconstruction.cameras.length} sampled poses; no calibrated seed pair was accepted`;
 
-  const completedSurfaceDiagnostic =
-    reconstruction.dense.surface_completed_points > 0
-      ? `, including ${reconstruction.dense.surface_completed_points} locally proposed samples that re-passed multi-view verification`
-      : "";
+  const surfaceCompletionDiagnostic =
+    reconstruction.dense.surface_completion_proposals > 0
+      ? `Surface completion: ${reconstruction.dense.surface_completed_points} of ${reconstruction.dense.surface_completion_proposals} coherent proposals accepted; rejected ${reconstruction.dense.surface_completion_rejected_texture} at texture, ${reconstruction.dense.surface_completion_rejected_cross_view} at direct cross-view support, ${reconstruction.dense.surface_completion_rejected_reciprocal} at reciprocal depth, ${reconstruction.dense.surface_completion_rejected_fusion} at fusion, and ${reconstruction.dense.surface_completion_rejected_footprint} at final grid footprint`
+      : "Surface completion: no empty grid site had enough coherent neighboring depth evidence to make a proposal";
   const denseDiagnostic = reconstruction.dense.skip_reason
     ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
     : reconstruction.dense.accepted_points > 0
-      ? `Dense surface evidence: ${reconstruction.dense.accepted_points} accepted scene samples${completedSurfaceDiagnostic}; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates and spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
+      ? `Dense surface evidence: ${reconstruction.dense.accepted_points} accepted scene samples; ${surfaceCompletionDiagnostic}; primary reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} candidates and primary spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
       : reconstruction.dense.reciprocal_consistent_points > 0
-        ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations)`
+        ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations); ${surfaceCompletionDiagnostic}`
         : reconstruction.dense.reciprocal_checked_points > 0
-          ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
-          : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
+          ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates; ${surfaceCompletionDiagnostic}`
+          : `Coarse dense depth ran, but no primary depth hypothesis passed the texture and ambiguity gates; ${surfaceCompletionDiagnostic}`;
 
   const meshGridRejected = reconstruction.mesh.rejected_grid_vertices;
   const meshAdmissionDiagnostic =
@@ -425,7 +436,7 @@ export function SceneCanvas({
         <div
           style={{
             position: "absolute",
-            right: 14,
+            left: 14,
             bottom: 52,
             zIndex: 2,
             display: "flex",
@@ -436,7 +447,7 @@ export function SceneCanvas({
           <button
             type="button"
             aria-pressed={renderMode === "model"}
-            onClick={() => setRenderMode("model")}
+            onClick={() => selectRenderMode("model")}
             style={{
               border: "1px solid rgba(111, 220, 255, 0.45)",
               borderRadius: 999,
@@ -452,7 +463,7 @@ export function SceneCanvas({
           <button
             type="button"
             aria-pressed={renderMode === "evidence"}
-            onClick={() => setRenderMode("evidence")}
+            onClick={() => selectRenderMode("evidence")}
             style={{
               border: "1px solid rgba(111, 220, 255, 0.3)",
               borderRadius: 999,
