@@ -1,0 +1,60 @@
+name: Repair PR 20 v6
+
+on:
+  push:
+    branches:
+      - automation/pr20-repair
+    paths:
+      - .github/workflows/pr20-repair-v6.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repair branch
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: automation/pr20-repair
+          fetch-depth: 0
+
+      - name: Extract core-only patch script
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/pr20-repair-v2.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(workflow) if "python - <<'PY'" in line) + 1
+          end = next(i for i in range(start, len(workflow)) if workflow[i].strip() == 'PY')
+          lines = workflow[start:end]
+          deindented = []
+          for line in lines:
+              if line.startswith('          '):
+                  line = line[10:]
+              deindented.append(line)
+          script = '\n'.join(deindented) + '\n'
+          stop = script.index('mesh_path = Path("crates/video-to-3d-core/src/mesh.rs")')
+          Path('/tmp/pr20-core-repair.py').write_text(script[:stop])
+          PY
+
+      - name: Apply and validate core repair
+        shell: bash
+        run: |
+          git checkout -B feat/dense-mesh-foundation origin/feat/dense-mesh-foundation
+          python /tmp/pr20-core-repair.py
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test -p video-to-3d-core
+          cargo check -p video-to-3d-wasm
+
+      - name: Commit repaired core head
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/video-to-3d-core/src/reconstruction.rs crates/video-to-3d-wasm/src/lib.rs
+          git diff --cached --check
+          git commit -m "Move registration recovery into the Rust core"
+          git push origin HEAD:feat/dense-mesh-foundation
