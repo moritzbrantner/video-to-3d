@@ -32,7 +32,7 @@ jobs:
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
-      - name: Measure Trevi
+      - name: Measure Trevi with raw contract diagnostics
         run: |
           python3 tools/sample_trevi.py trevi.webm target/trevi-frames
           cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames | tee /tmp/trevi-after.txt
