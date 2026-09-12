@@ -73,7 +73,7 @@ fn load_ppm(path: &Path) -> Result<FrameInput, String> {
     }
 
     let mut rgba = Vec::with_capacity(width * height * 4);
-    for pixel in rgb.chunks_exact(3) {
+    for pixel in rgb.as_chunks::<3>().0 {
         rgba.extend_from_slice(pixel);
         rgba.push(255);
     }
