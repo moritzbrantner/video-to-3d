@@ -3,6 +3,7 @@ use nalgebra::Vector3;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+const MAX_GRID_REPROJECTION_OFFSET_STRIDES: f64 = 0.5;
 const MAX_MESH_RELATIVE_DEPTH_JUMP: f64 = 0.15;
 const MAX_MESH_EDGE_FOOTPRINT_MULTIPLIER: f64 = 3.0;
 const MIN_MESH_AREA_FOOTPRINT_RATIO: f64 = 0.05;
@@ -119,9 +120,19 @@ pub(super) fn reconstruct_dense_mesh(
 
     for (point_index, (point, grid_site)) in dense_points.iter().zip(grid_sites).enumerate() {
         let position = Vector3::new(point.x as f64, point.y as f64, point.z as f64);
-        let Some((_, _, depth)) = project(reference_camera, position, width, height, focal) else {
+        let Some((projected_x, projected_y, depth)) =
+            project(reference_camera, position, width, height, focal)
+        else {
             continue;
         };
+        if !within_original_grid_footprint(
+            projected_x,
+            projected_y,
+            *grid_site,
+            dense.grid_stride,
+        ) {
+            continue;
+        }
         let Some(gx) = original_grid_coordinate(grid_site.x, width, dense.grid_border, dense.grid_stride) else {
             continue;
         };
@@ -208,6 +219,20 @@ pub(super) fn reconstruct_dense_mesh(
 fn better_grid_vertex(candidate: GridVertex, current: GridVertex) -> bool {
     candidate.confidence > current.confidence
         || (candidate.confidence == current.confidence && candidate.point_index < current.point_index)
+}
+
+fn within_original_grid_footprint(
+    projected_x: f64,
+    projected_y: f64,
+    grid_site: DenseGridSite,
+    stride: usize,
+) -> bool {
+    if stride == 0 || !projected_x.is_finite() || !projected_y.is_finite() {
+        return false;
+    }
+    let limit = stride as f64 * MAX_GRID_REPROJECTION_OFFSET_STRIDES;
+    (projected_x - grid_site.x as f64).abs() < limit
+        && (projected_y - grid_site.y as f64).abs() < limit
 }
 
 fn original_grid_coordinate(
@@ -447,7 +472,7 @@ mod tests {
         let height = 48;
         let focal = 60.0;
         let points = vec![
-            point_at_pixel(5.4, 3.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(4.8, 3.0, 4.0, width, height, focal, 0.8),
             point_at_pixel(7.0, 3.0, 4.0, width, height, focal, 0.8),
             point_at_pixel(3.0, 7.0, 4.0, width, height, focal, 0.8),
         ];
@@ -470,6 +495,36 @@ mod tests {
         assert!(result.stats.attempted);
         assert_eq!(result.stats.grid_vertices, 3);
         assert_eq!(result.stats.accepted_triangles, 1);
+    }
+
+    #[test]
+    fn rejects_fused_vertex_that_leaves_original_grid_footprint() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let points = vec![
+            point_at_pixel(5.4, 3.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(7.0, 3.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(3.0, 7.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(7.0, 7.0, 4.0, width, height, focal, 0.8),
+        ];
+
+        let result = reconstruct_dense_mesh(
+            &points,
+            &grid_sites(),
+            &dense_stats(),
+            &[camera()],
+            width,
+            height,
+            focal,
+        );
+
+        assert!(result.stats.attempted);
+        assert_eq!(result.stats.grid_vertices, 3);
+        assert_eq!(result.stats.accepted_triangles, 1);
+        assert!(result.triangles.iter().all(|triangle| {
+            triangle.a != 0 && triangle.b != 0 && triangle.c != 0
+        }));
     }
 
     #[test]
