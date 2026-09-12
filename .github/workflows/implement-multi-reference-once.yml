@@ -93,3 +93,5 @@ jobs:
           git diff --cached --check
           git commit -m "Add multi-reference surface coverage"
           git push origin HEAD:feat/trevi-real-footage-gate
+
+# Retry after repairing the transformation's public evidence exports.
