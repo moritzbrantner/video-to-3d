@@ -27,33 +27,17 @@ jobs:
           path = Path('crates/video-to-3d-core/src/reconstruction.rs')
           text = path.read_text()
 
-          old = '''    if dense.attempted {
-              if dense.accepted_points > 0 {
-                  warnings.push(format!(
-                      "Slice 4 coarse depth estimation accepted {} depth samples from reference frame {} using {} registered source views and {} inverse-depth hypotheses. These samples are derived from final accepted sparse camera geometry and are rendered separately from the sparse map; multi-view depth consistency, dense fusion, meshing, and metric scale are not claimed yet.",
-                      dense.accepted_points,
-                      dense.reference_frame.map_or(0, |frame| frame + 1),
-                      dense.source_views,
-                      dense.depth_hypotheses
-                  ));
-              } else {
-                  warnings.push(format!(
-                      "Slice 4 coarse depth estimation ran from reference frame {} with {} registered source views, but no sampled pixel passed the texture, photometric-error, and ambiguity gates. No dense geometry was invented; multi-view consistency and fusion remain future slices.",
-                      dense.reference_frame.map_or(0, |frame| frame + 1),
-                      dense.source_views
-                  ));
-              }
-          }
-          '''
-          new = '''    if let Some(dense_warning) = dense_warning(&dense) {
-              warnings.push(dense_warning);
-          }
-          '''
-          if text.count(old) != 1:
-              raise SystemExit(f'dense warning block marker mismatch: {text.count(old)}')
-          text = text.replace(old, new, 1)
+          start = text.index('    if dense.attempted {')
+          end = text.index('    let recovered_from_revisit =', start)
+          text = (
+              text[:start]
+              + '    if let Some(dense_warning) = dense_warning(&dense) {\n'
+              + '        warnings.push(dense_warning);\n'
+              + '    }\n\n'
+              + text[end:]
+          )
 
-          marker = '''fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {'''
+          marker = 'fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {'
           helper = '''fn dense_warning(dense: &DenseStats) -> Option<String> {
               if !dense.attempted {
                   return None;
@@ -97,13 +81,12 @@ jobs:
               ))
           }
 
-          fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {'''
+          '''
           if text.count(marker) != 1:
-              raise SystemExit('validate_request marker mismatch')
-          text = text.replace(marker, helper, 1)
+              raise SystemExit(f'validate_request marker mismatch: {text.count(marker)}')
+          text = text.replace(marker, helper + marker, 1)
 
-          test_marker = '''    #[test]
-              fn rejects_invalid_focal_length() {'''
+          test_marker = '    #[test]\n    fn rejects_invalid_focal_length() {'
           tests = '''    #[test]
               fn dense_warning_reports_successful_fusion_without_stale_future_claims() {
                   let dense = DenseStats {
@@ -150,7 +133,7 @@ jobs:
               #[test]
               fn rejects_invalid_focal_length() {'''
           if text.count(test_marker) != 1:
-              raise SystemExit('test insertion marker mismatch')
+              raise SystemExit(f'test insertion marker mismatch: {text.count(test_marker)}')
           text = text.replace(test_marker, tests, 1)
           path.write_text(text)
       - name: Validate warning fix
