@@ -67,6 +67,43 @@ enum TriangleRejection {
     Degenerate,
 }
 
+#[derive(Default)]
+struct MeshBuildState {
+    triangle_keys: BTreeSet<(usize, usize, usize)>,
+    triangles: Vec<MeshTriangle>,
+    candidate_triangles: usize,
+    rejected_discontinuities: usize,
+    rejected_degenerate: usize,
+}
+
+impl MeshBuildState {
+    fn evaluate_candidate(
+        &mut self,
+        candidate: [GridVertex; 3],
+        stride: f64,
+        focal: f64,
+        max_relative_depth_jump: f64,
+    ) {
+        let key = triangle_key(candidate);
+        if !self.triangle_keys.insert(key) {
+            return;
+        }
+        self.candidate_triangles += 1;
+        match accepted_triangle(
+            candidate[0],
+            candidate[1],
+            candidate[2],
+            stride,
+            focal,
+            max_relative_depth_jump,
+        ) {
+            Ok(triangle) => self.triangles.push(triangle),
+            Err(TriangleRejection::Discontinuity) => self.rejected_discontinuities += 1,
+            Err(TriangleRejection::Degenerate) => self.rejected_degenerate += 1,
+        }
+    }
+}
+
 pub(super) fn reconstruct_dense_mesh(
     dense_points: &[Point3],
     grid_sites: &[DenseGridSite],
@@ -187,12 +224,8 @@ pub(super) fn reconstruct_dense_mesh(
         }
     }
 
-    let mut triangles = Vec::new();
-    let mut triangle_keys = BTreeSet::new();
+    let mut build = MeshBuildState::default();
     let mut candidate_cells = 0usize;
-    let mut candidate_triangles = 0usize;
-    let mut rejected_discontinuities = 0usize;
-    let mut rejected_degenerate = 0usize;
 
     for (gx, gy) in cell_origins {
         let corners = [
@@ -208,17 +241,7 @@ pub(super) fn reconstruct_dense_mesh(
         candidate_cells += 1;
 
         for candidate in cell_triangles(corners) {
-            evaluate_candidate_triangle(
-                candidate,
-                stride,
-                focal,
-                MAX_MESH_RELATIVE_DEPTH_JUMP,
-                &mut triangle_keys,
-                &mut triangles,
-                &mut candidate_triangles,
-                &mut rejected_discontinuities,
-                &mut rejected_degenerate,
-            );
+            build.evaluate_candidate(candidate, stride, focal, MAX_MESH_RELATIVE_DEPTH_JUMP);
         }
     }
 
@@ -232,16 +255,11 @@ pub(super) fn reconstruct_dense_mesh(
             for gy in minimum_y..=maximum_y {
                 if let Some(candidate) = horizontal_gap_bridge(&grid, gx, gy) {
                     candidate_cells += 1;
-                    evaluate_candidate_triangle(
+                    build.evaluate_candidate(
                         candidate,
                         stride,
                         focal,
                         MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
-                        &mut triangle_keys,
-                        &mut triangles,
-                        &mut candidate_triangles,
-                        &mut rejected_discontinuities,
-                        &mut rejected_degenerate,
                     );
                 }
             }
@@ -252,16 +270,11 @@ pub(super) fn reconstruct_dense_mesh(
             for gy in minimum_y..=maximum_y - 2 {
                 if let Some(candidate) = vertical_gap_bridge(&grid, gx, gy) {
                     candidate_cells += 1;
-                    evaluate_candidate_triangle(
+                    build.evaluate_candidate(
                         candidate,
                         stride,
                         focal,
                         MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
-                        &mut triangle_keys,
-                        &mut triangles,
-                        &mut candidate_triangles,
-                        &mut rejected_discontinuities,
-                        &mut rejected_degenerate,
                     );
                 }
             }
@@ -276,42 +289,12 @@ pub(super) fn reconstruct_dense_mesh(
             grid_vertices: grid.len(),
             rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
             candidate_cells,
-            candidate_triangles,
-            accepted_triangles: triangles.len(),
-            rejected_discontinuities,
-            rejected_degenerate,
+            candidate_triangles: build.candidate_triangles,
+            accepted_triangles: build.triangles.len(),
+            rejected_discontinuities: build.rejected_discontinuities,
+            rejected_degenerate: build.rejected_degenerate,
         },
-        triangles,
-    }
-}
-
-fn evaluate_candidate_triangle(
-    candidate: [GridVertex; 3],
-    stride: f64,
-    focal: f64,
-    max_relative_depth_jump: f64,
-    triangle_keys: &mut BTreeSet<(usize, usize, usize)>,
-    triangles: &mut Vec<MeshTriangle>,
-    candidate_triangles: &mut usize,
-    rejected_discontinuities: &mut usize,
-    rejected_degenerate: &mut usize,
-) {
-    let key = triangle_key(candidate);
-    if !triangle_keys.insert(key) {
-        return;
-    }
-    *candidate_triangles += 1;
-    match accepted_triangle(
-        candidate[0],
-        candidate[1],
-        candidate[2],
-        stride,
-        focal,
-        max_relative_depth_jump,
-    ) {
-        Ok(triangle) => triangles.push(triangle),
-        Err(TriangleRejection::Discontinuity) => *rejected_discontinuities += 1,
-        Err(TriangleRejection::Degenerate) => *rejected_degenerate += 1,
+        triangles: build.triangles,
     }
 }
 
