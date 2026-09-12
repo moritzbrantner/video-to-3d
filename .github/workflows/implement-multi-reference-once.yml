@@ -1,0 +1,92 @@
+name: Implement multi-reference surface once
+
+on:
+  push:
+    branches: [feat/trevi-real-footage-gate]
+    paths:
+      - .github/workflows/implement-multi-reference-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: feat/trevi-real-footage-gate
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Apply bounded multi-reference implementation
+        run: python3 tools/implement_multi_reference_surface_once.py
+      - name: Install workspace dependencies
+        run: |
+          bun install
+          cargo install wasm-bindgen-cli --version 0.2.104 --locked
+      - name: Validate Rust and TypeScript
+        run: |
+          cargo fmt
+          cargo fmt --check
+          bun run typecheck
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+          cargo test -p video-to-3d-core --example golden_fixture
+          python3 -m unittest discover -s tools/tests -p 'test_*.py'
+          bun run wasm:check
+          bun run build
+          bun run test:browser-contract
+      - name: Require Trevi multi-reference field acceptance
+        run: |
+          set -euo pipefail
+          python3 tools/sample_trevi.py trevi.webm target/trevi-frames
+          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames | tee trevi-multi-reference.txt
+          value() { sed -n "s/^$1=//p" trevi-multi-reference.txt | tail -n 1; }
+          accepted="$(value trevi.accepted_cameras)"
+          dense_refs="$(value trevi.dense_reference_frames)"
+          mesh_patches="$(value trevi.mesh_surface_patches)"
+          if [ "$accepted" -lt 5 ]; then
+            echo "Trevi camera registration regressed below 5 accepted cameras (got $accepted)." >&2
+            exit 2
+          fi
+          if [ "$dense_refs" -lt 2 ]; then
+            echo "Trevi did not produce at least two dense reference patches (got $dense_refs)." >&2
+            exit 3
+          fi
+          if [ "$mesh_patches" -lt 2 ]; then
+            echo "Trevi did not produce at least two accepted mesh patches (got $mesh_patches)." >&2
+            exit 4
+          fi
+      - name: Commit validated roadmap slice
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            crates/video-to-3d-core/src/dense.rs \
+            crates/video-to-3d-core/src/mesh.rs \
+            crates/video-to-3d-core/src/browser_contract.rs \
+            crates/video-to-3d-core/examples/trevi_fixture.rs \
+            apps/web/src/reconstruction.ts \
+            apps/web/src/SceneCanvas.tsx \
+            scripts/test-browser-contract.ts \
+            .github/workflows/trevi-real-footage.yml \
+            ROADMAP.md
+          git rm -f --ignore-unmatch tools/implement_multi_reference_surface_once.py
+          git rm -f --ignore-unmatch .github/workflows/implement-multi-reference-once.yml
+          git rm -f --ignore-unmatch .github/workflows/implement-trevi-local-map-v2.yml
+          git rm -f --ignore-unmatch .github/workflows/trevi-diagnostic.yml
+          git diff --cached --check
+          git commit -m "Add multi-reference surface coverage"
+          git push origin HEAD:feat/trevi-real-footage-gate
