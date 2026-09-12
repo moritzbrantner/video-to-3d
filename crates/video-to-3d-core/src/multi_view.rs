@@ -106,6 +106,18 @@ pub(super) struct NewLandmarkAnalysis {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(super) struct LocalMapRegistrationCorrespondence {
+    pub point: Vector3<f64>,
+    pub feature_index: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LocalMapRegistrationCandidate {
+    pub frame_index: usize,
+    pub correspondences: Vec<LocalMapRegistrationCorrespondence>,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(super) enum LandmarkSource {
     Seed(usize),
     New(usize),
@@ -320,6 +332,68 @@ pub(super) fn triangulate_new_landmarks(
     };
 
     NewLandmarkAnalysis { stats, landmarks }
+}
+
+pub(super) fn local_map_registration_candidates(
+    analysis: &MultiViewAnalysis,
+    seed_points: &[Vector3<f64>],
+    new_landmarks: &[NewLandmark],
+    registered_frames: &HashSet<usize>,
+) -> Vec<LocalMapRegistrationCandidate> {
+    let mut map_landmarks: Vec<(usize, Vector3<f64>)> = analysis
+        .seed_tracks
+        .iter()
+        .filter_map(|seed| {
+            seed_points
+                .get(seed.point_index)
+                .copied()
+                .map(|position| (seed.track_index, position))
+        })
+        .collect();
+    map_landmarks.extend(
+        new_landmarks
+            .iter()
+            .map(|landmark| (landmark.track_index, landmark.position)),
+    );
+    map_landmarks.sort_by_key(|landmark| landmark.0);
+    map_landmarks.dedup_by_key(|landmark| landmark.0);
+
+    let mut candidates: Vec<LocalMapRegistrationCandidate> = analysis
+        .stats
+        .keyframes
+        .iter()
+        .copied()
+        .filter(|frame_index| !registered_frames.contains(frame_index))
+        .map(|frame_index| {
+            let correspondences = map_landmarks
+                .iter()
+                .filter_map(|(track_index, position)| {
+                    analysis
+                        .tracks
+                        .get(*track_index)?
+                        .observations
+                        .iter()
+                        .find(|observation| observation.frame_index == frame_index)
+                        .map(|observation| LocalMapRegistrationCorrespondence {
+                            point: *position,
+                            feature_index: observation.feature_index,
+                        })
+                })
+                .collect();
+            LocalMapRegistrationCandidate {
+                frame_index,
+                correspondences,
+            }
+        })
+        .collect();
+    candidates.sort_by(|left, right| {
+        right
+            .correspondences
+            .len()
+            .cmp(&left.correspondences.len())
+            .then_with(|| left.frame_index.cmp(&right.frame_index))
+    });
+    candidates
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1002,4 +1076,51 @@ mod tests {
 
         assert_eq!(select_keyframes(&pairs), vec![0]);
     }
+
+    #[test]
+    fn local_map_correspondences_extend_beyond_seed_track_support() {
+        let matches: Vec<Vec<FeatureMatch>> = (0..3)
+            .map(|_| (0..10).map(|index| feature_match(index, index)).collect())
+            .collect();
+        let mut analysis = analyze(
+            &[
+                pair(0, 0.7, 1.3, false),
+                pair(1, 0.7, 1.3, false),
+                pair(2, 0.7, 1.3, false),
+            ],
+            &matches,
+            Some((0, &seed_landmarks(1))),
+        );
+        analysis.stats.keyframes = vec![3];
+
+        let mut new_landmarks: Vec<NewLandmark> = (1..9)
+            .map(|track_index| NewLandmark {
+                position: Vector3::new(track_index as f64 * 0.1, 0.0, 4.0),
+                source_frame_index: 1,
+                source_feature_index: track_index,
+                supporting_observations: 2,
+                median_reprojection_error_pixels: 0.1,
+                triangulation_angle_degrees: 1.0,
+                track_index,
+            })
+            .collect();
+        new_landmarks.push(new_landmarks[0].clone());
+        let registered_frames: HashSet<usize> = [0, 1, 2].into_iter().collect();
+        let seed_points = [Vector3::new(0.0, 0.0, 4.0)];
+
+        let candidates = local_map_registration_candidates(
+            &analysis,
+            &seed_points,
+            &new_landmarks,
+            &registered_frames,
+        );
+        let frame_three = candidates
+            .iter()
+            .find(|candidate| candidate.frame_index == 3)
+            .expect("frame 3 local-map candidate");
+
+        assert_eq!(frame_three.correspondences.len(), 9);
+        assert_eq!(frame_three.correspondences[0].feature_index, 0);
+    }
+
 }

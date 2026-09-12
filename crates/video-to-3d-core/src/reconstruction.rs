@@ -22,6 +22,7 @@ const PAN_RECOVERY_RATIO_THRESHOLD: f32 = 0.78;
 const REGISTRATION_RECOVERY_RATIO_THRESHOLD: f32 = 0.74;
 const REGISTRATION_RECOVERY_MAX_FEATURES: usize = 640;
 const REGISTRATION_RECOVERY_MIN_FEATURE_DISTANCE: u32 = 5;
+const MAX_INCREMENTAL_REGISTRATION_ROUNDS: usize = 3;
 const MIN_TRACK_MATCHES: usize = 8;
 const MIN_TRACK_OVERLAP: f32 = 0.18;
 const MOTION_GUIDED_COARSE_RATIO_THRESHOLD: f32 = 0.72;
@@ -559,6 +560,113 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     registered_views.sort_by_key(|view| view.frame_index);
     registered_cameras.sort_by_key(|camera| camera.frame_index);
     registered_geometry.sort_by_key(|camera| camera.frame_index);
+
+    if let Some((_, estimate)) = best_two_view.as_ref() {
+        let seed_points: Vec<nalgebra::Vector3<f64>> = estimate
+            .points
+            .iter()
+            .map(|point| point.position)
+            .collect();
+
+        for _ in 0..MAX_INCREMENTAL_REGISTRATION_ROUNDS {
+            let local_map = multi_view::triangulate_new_landmarks(
+                &multi_view_analysis,
+                &registered_geometry,
+                &features,
+                width,
+                height,
+                focal as f64,
+            );
+            if local_map.landmarks.is_empty() {
+                break;
+            }
+
+            let registered_frames: HashSet<usize> = registered_geometry
+                .iter()
+                .map(|camera| camera.frame_index)
+                .collect();
+            let candidates = multi_view::local_map_registration_candidates(
+                &multi_view_analysis,
+                &seed_points,
+                &local_map.landmarks,
+                &registered_frames,
+            );
+            let mut accepted_this_round = 0usize;
+
+            for candidate in candidates {
+                if candidate.correspondences.len() < 8 {
+                    continue;
+                }
+                let pnp_correspondences: Vec<pnp::PnpCorrespondence> = candidate
+                    .correspondences
+                    .iter()
+                    .filter_map(|correspondence| {
+                        let feature = features
+                            .get(candidate.frame_index)?
+                            .get(correspondence.feature_index)?;
+                        Some(pnp::PnpCorrespondence {
+                            point: correspondence.point,
+                            x_pixels: feature.x as f64,
+                            y_pixels: feature.y as f64,
+                        })
+                    })
+                    .collect();
+                if pnp_correspondences.len() != candidate.correspondences.len() {
+                    continue;
+                }
+                let Some(pose) =
+                    pnp::estimate_pose(&pnp_correspondences, width, height, focal as f64)
+                else {
+                    continue;
+                };
+
+                registered_geometry.push(multi_view::RegisteredCamera {
+                    frame_index: candidate.frame_index,
+                    rotation: pose.rotation,
+                    translation: pose.translation,
+                });
+                registered_cameras.push(CameraPose {
+                    frame_index: candidate.frame_index,
+                    x: pose.camera_center.x as f32,
+                    y: pose.camera_center.y as f32,
+                    z: pose.camera_center.z as f32,
+                    matched_features: pose.inliers,
+                });
+                registered_views.push(RegisteredViewStats {
+                    frame_index: candidate.frame_index,
+                    correspondences: pnp_correspondences.len(),
+                    inliers: pose.inliers,
+                    inlier_ratio: pose.inliers as f32 / pnp_correspondences.len() as f32,
+                    median_reprojection_error_pixels: pose.median_reprojection_error_pixels as f32,
+                    rotation: [
+                        pose.rotation[(0, 0)] as f32,
+                        pose.rotation[(0, 1)] as f32,
+                        pose.rotation[(0, 2)] as f32,
+                        pose.rotation[(1, 0)] as f32,
+                        pose.rotation[(1, 1)] as f32,
+                        pose.rotation[(1, 2)] as f32,
+                        pose.rotation[(2, 0)] as f32,
+                        pose.rotation[(2, 1)] as f32,
+                        pose.rotation[(2, 2)] as f32,
+                    ],
+                    translation: [
+                        pose.translation.x as f32,
+                        pose.translation.y as f32,
+                        pose.translation.z as f32,
+                    ],
+                    recovered_from_revisit: false,
+                });
+                accepted_this_round += 1;
+            }
+
+            if accepted_this_round == 0 {
+                break;
+            }
+            registered_views.sort_by_key(|view| view.frame_index);
+            registered_cameras.sort_by_key(|camera| camera.frame_index);
+            registered_geometry.sort_by_key(|camera| camera.frame_index);
+        }
+    }
 
     let new_landmark_analysis = multi_view::triangulate_new_landmarks(
         &multi_view_analysis,
