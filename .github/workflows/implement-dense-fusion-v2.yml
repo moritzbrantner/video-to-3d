@@ -1,0 +1,37 @@
+name: Implement dense point fusion slice v2
+
+on:
+  push:
+    branches:
+      - feat/dense-point-fusion
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dense-point-fusion
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply structural dense fusion patch
+        run: python scripts/implement_dense_fusion.py
+      - name: Format and validate core
+        run: |
+          cargo fmt --all
+          cargo test -p video-to-3d-core
+          cargo clippy -p video-to-3d-core --all-targets -- -D warnings
+      - name: Commit implementation and remove temporary helpers
+        shell: bash
+        run: |
+          rm scripts/implement_dense_fusion.py .github/workflows/implement-dense-fusion-v2.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fuse reciprocal dense depth observations"
+          git push origin HEAD:feat/dense-point-fusion
