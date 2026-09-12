@@ -260,10 +260,7 @@ export function SceneCanvas({
           ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
           : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
 
-  const meshGridRejected = Math.max(
-    0,
-    reconstruction.dense_points.length - reconstruction.mesh.grid_vertices,
-  );
+  const meshGridRejected = reconstruction.mesh.rejected_grid_vertices;
   const meshAdmissionDiagnostic =
     meshGridRejected > 0 ? `${meshGridRejected} fused points were not admitted to the mesh grid; ` : "";
   const meshDiagnostic = reconstruction.mesh.attempted
@@ -271,7 +268,11 @@ export function SceneCanvas({
       ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; ${meshAdmissionDiagnostic}rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
       : `Mesh ran, but no neighboring fused samples formed a continuous triangle; ${meshAdmissionDiagnostic}${reconstruction.mesh.rejected_discontinuities} discontinuity and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation candidates were rejected`
     : reconstruction.mesh.skip_reason
-      ? `Mesh skipped: ${reconstruction.mesh.skip_reason}`
+      ? `Mesh skipped: ${reconstruction.mesh.skip_reason}${
+          meshGridRejected > 0
+            ? `; ${meshGridRejected} fused points were rejected at mesh-grid admission`
+            : ""
+        }`
       : null;
 
   return (
