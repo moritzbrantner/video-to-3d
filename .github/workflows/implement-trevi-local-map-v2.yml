@@ -32,27 +32,18 @@ jobs:
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
-      - name: Measure Trevi with raw contract diagnostics
-        run: |
-          set +e
-          python3 tools/sample_trevi.py trevi.webm target/trevi-frames
-          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames > trevi-local-map-debug.txt 2>&1
-          status=$?
-          cat trevi-local-map-debug.txt
-          echo "TREVI_STATUS=$status" >> "$GITHUB_ENV"
-          exit 0
-      - name: Commit Trevi debug output when measurement fails
-        if: env.TREVI_STATUS != '0'
+      - name: Measure Trevi and require a real registration gain
         run: |
           set -euo pipefail
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add trevi-local-map-debug.txt
-          git commit -m "Capture Trevi local-map contract mismatch"
-          git push origin HEAD:feat/trevi-real-footage-gate
-          exit 1
+          python3 tools/sample_trevi.py trevi.webm target/trevi-frames
+          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames | tee trevi-local-map-result.txt
+          accepted="$(sed -n 's/^trevi.accepted_cameras=//p' trevi-local-map-result.txt | tail -n 1)"
+          test -n "$accepted"
+          if [ "$accepted" -le 4 ]; then
+            echo "Local-map registration did not improve the Trevi baseline of 4 accepted cameras (got $accepted)." >&2
+            exit 2
+          fi
       - name: Commit validated implementation
-        if: env.TREVI_STATUS == '0'
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
