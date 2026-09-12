@@ -222,46 +222,47 @@ pub(super) fn reconstruct_dense_mesh(
         }
     }
 
-    if let (Some(&(minimum_x, minimum_y)), Some(&(maximum_x, maximum_y))) =
-        (grid.keys().next(), grid.keys().next_back())
-    {
-        if maximum_x - minimum_x >= 2 {
-            for gx in minimum_x..=maximum_x - 2 {
-                for gy in minimum_y..=maximum_y {
-                    if let Some(candidate) = horizontal_gap_bridge(&grid, gx, gy) {
-                        candidate_cells += 1;
-                        evaluate_candidate_triangle(
-                            candidate,
-                            stride,
-                            focal,
-                            MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
-                            &mut triangle_keys,
-                            &mut triangles,
-                            &mut candidate_triangles,
-                            &mut rejected_discontinuities,
-                            &mut rejected_degenerate,
-                        );
-                    }
+    let minimum_x = grid.keys().map(|(x, _)| *x).min().expect("non-empty grid");
+    let maximum_x = grid.keys().map(|(x, _)| *x).max().expect("non-empty grid");
+    let minimum_y = grid.keys().map(|(_, y)| *y).min().expect("non-empty grid");
+    let maximum_y = grid.keys().map(|(_, y)| *y).max().expect("non-empty grid");
+
+    if maximum_x - minimum_x >= 2 {
+        for gx in minimum_x..=maximum_x - 2 {
+            for gy in minimum_y..=maximum_y {
+                if let Some(candidate) = horizontal_gap_bridge(&grid, gx, gy) {
+                    candidate_cells += 1;
+                    evaluate_candidate_triangle(
+                        candidate,
+                        stride,
+                        focal,
+                        MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
+                        &mut triangle_keys,
+                        &mut triangles,
+                        &mut candidate_triangles,
+                        &mut rejected_discontinuities,
+                        &mut rejected_degenerate,
+                    );
                 }
             }
         }
-        if maximum_y - minimum_y >= 2 {
-            for gx in minimum_x..=maximum_x {
-                for gy in minimum_y..=maximum_y - 2 {
-                    if let Some(candidate) = vertical_gap_bridge(&grid, gx, gy) {
-                        candidate_cells += 1;
-                        evaluate_candidate_triangle(
-                            candidate,
-                            stride,
-                            focal,
-                            MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
-                            &mut triangle_keys,
-                            &mut triangles,
-                            &mut candidate_triangles,
-                            &mut rejected_discontinuities,
-                            &mut rejected_degenerate,
-                        );
-                    }
+    }
+    if maximum_y - minimum_y >= 2 {
+        for gx in minimum_x..=maximum_x {
+            for gy in minimum_y..=maximum_y - 2 {
+                if let Some(candidate) = vertical_gap_bridge(&grid, gx, gy) {
+                    candidate_cells += 1;
+                    evaluate_candidate_triangle(
+                        candidate,
+                        stride,
+                        focal,
+                        MAX_BRIDGE_RELATIVE_DEPTH_JUMP,
+                        &mut triangle_keys,
+                        &mut triangles,
+                        &mut candidate_triangles,
+                        &mut rejected_discontinuities,
+                        &mut rejected_degenerate,
+                    );
                 }
             }
         }
