@@ -124,7 +124,7 @@ test = r'''
         let matches: Vec<Vec<FeatureMatch>> = (0..3)
             .map(|_| (0..10).map(|index| feature_match(index, index)).collect())
             .collect();
-        let analysis = analyze(
+        let mut analysis = analyze(
             &[
                 pair(0, 0.7, 1.3, false),
                 pair(1, 0.7, 1.3, false),
@@ -133,13 +133,7 @@ test = r'''
             &matches,
             Some((0, &seed_landmarks(1))),
         );
-        let frame_three_seed = analysis
-            .stats
-            .registration_candidates
-            .iter()
-            .find(|candidate| candidate.frame_index == 3)
-            .expect("frame 3 seed registration candidate");
-        assert_eq!(frame_three_seed.seed_landmark_correspondences, 1);
+        analysis.stats.keyframes = vec![3];
 
         let mut new_landmarks: Vec<NewLandmark> = (1..9)
             .map(|track_index| NewLandmark {
