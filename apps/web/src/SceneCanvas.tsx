@@ -45,7 +45,16 @@ export function SceneCanvas({
   const dragRef = useRef<DragState | null>(null);
   const cameraHitTargetsRef = useRef<CameraHitTarget[]>([]);
   const [view, setView] = useState<ViewState>({ yaw: -0.45, pitch: 0.18, zoom: 1 });
-  const hasRegisteredGeometry = reconstruction.calibrated_pair !== null;
+  const cameraState = reconstruction.camera_state;
+  const hasRegisteredGeometry = cameraState.calibrated_seed_cameras.length === 2;
+  const acceptedCameras = useMemo(
+    () => [...cameraState.calibrated_seed_cameras, ...cameraState.registered_cameras],
+    [cameraState],
+  );
+  const displayCameras = useMemo(
+    () => (hasRegisteredGeometry ? acceptedCameras : cameraState.approximate_motion_samples),
+    [acceptedCameras, cameraState, hasRegisteredGeometry],
+  );
   const hasSurfaceModel = reconstruction.mesh_triangles.length > 0;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     hasSurfaceModel ? "model" : "evidence",
@@ -73,7 +82,7 @@ export function SceneCanvas({
     const sparsePositions = reconstruction.points.map(
       (point) => [point.x, point.y, point.z] as const,
     );
-    const cameraPositions = reconstruction.cameras.map(
+    const cameraPositions = displayCameras.map(
       (camera) => [camera.x, camera.y, camera.z] as const,
     );
     const evidencePositions = [...densePositions, ...sparsePositions, ...cameraPositions];
@@ -107,7 +116,7 @@ export function SceneCanvas({
     ] as const;
     const extent = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 1);
     return { center, extent };
-  }, [reconstruction, renderMode]);
+  }, [displayCameras, reconstruction, renderMode]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -242,7 +251,7 @@ export function SceneCanvas({
 
     const showCameras = renderMode === "evidence" || !hasSurfaceModel;
     const projectedCameras = showCameras
-      ? reconstruction.cameras
+      ? displayCameras
           .map((camera) => ({ camera, projected: project(camera.x, camera.y, camera.z) }))
           .filter(({ projected }) => projected.z > 0.05)
       : [];
@@ -266,12 +275,16 @@ export function SceneCanvas({
     for (const { camera, projected } of projectedCameras) {
       const size = Math.max(5 * ratio, Math.min(10 * ratio, projected.scale * 0.032));
       const selected = camera.frame_index === selectedFrameIndex;
+      const frameState = cameraState.frames[camera.frame_index];
+      const isSeed = frameState?.camera_kind === "seed";
       context.lineWidth = (selected ? 3 : 1.5) * ratio;
       context.strokeStyle = selected
         ? "rgba(111, 220, 255, 1)"
-        : hasRegisteredGeometry
-          ? "rgba(240, 247, 255, 0.95)"
-          : "rgba(174, 201, 213, 0.72)";
+        : isSeed
+          ? "rgba(111, 220, 255, 0.95)"
+          : hasRegisteredGeometry
+            ? "rgba(240, 247, 255, 0.95)"
+            : "rgba(174, 201, 213, 0.72)";
       context.fillStyle = selected
         ? "rgba(111, 220, 255, 0.18)"
         : "rgba(111, 220, 255, 0.07)";
@@ -291,6 +304,15 @@ export function SceneCanvas({
           size,
           size,
         );
+        if (isSeed) {
+          context.fillStyle = "rgba(111, 220, 255, 0.7)";
+          context.fillRect(
+            projected.x - 1.5 * ratio,
+            projected.y - 1.5 * ratio,
+            3 * ratio,
+            3 * ratio,
+          );
+        }
       } else {
         const radius = selected ? size * 0.58 : size * 0.34;
         context.beginPath();
@@ -309,6 +331,8 @@ export function SceneCanvas({
     cameraHitTargetsRef.current = hitTargets;
   }, [
     bounds,
+    cameraState,
+    displayCameras,
     hasRegisteredGeometry,
     hasSurfaceModel,
     reconstruction,
@@ -330,8 +354,8 @@ export function SceneCanvas({
   };
 
   const cameraDiagnostic = hasRegisteredGeometry
-    ? `Registered geometry: ${reconstruction.cameras.length} accepted camera poses`
-    : `Approximate motion track only: ${reconstruction.cameras.length} sampled poses; no calibrated seed pair was accepted`;
+    ? `Camera geometry: ${cameraState.calibrated_seed_cameras.length} seed + ${cameraState.registered_cameras.length} additional registered; ${cameraState.dense_eligible_cameras.length} dense-eligible`
+    : `Approximate motion only: ${cameraState.approximate_motion_samples.length} sampled poses; no calibrated seed pair was accepted`;
 
   const surfaceCompletionDiagnostic =
     reconstruction.dense.surface_completion_proposals > 0
@@ -362,9 +386,10 @@ export function SceneCanvas({
         }. The points shown are reconstruction evidence, not the final model.`
       : "Surface model unavailable; the points shown are reconstruction evidence, not the final model.";
 
-  const primaryDiagnostic = hasSurfaceModel && renderMode === "model"
-    ? `${meshDiagnostic} · ${denseDiagnostic}`
-    : `${cameraDiagnostic} · ${denseDiagnostic} · ${meshDiagnostic}`;
+  const primaryDiagnostic =
+    hasSurfaceModel && renderMode === "model"
+      ? `${meshDiagnostic} · ${denseDiagnostic}`
+      : `${cameraDiagnostic} · ${denseDiagnostic} · ${meshDiagnostic}`;
 
   return (
     <>
@@ -452,7 +477,10 @@ export function SceneCanvas({
               border: "1px solid rgba(111, 220, 255, 0.45)",
               borderRadius: 999,
               padding: "5px 10px",
-              background: renderMode === "model" ? "rgba(111, 220, 255, 0.18)" : "rgba(4, 10, 13, 0.76)",
+              background:
+                renderMode === "model"
+                  ? "rgba(111, 220, 255, 0.18)"
+                  : "rgba(4, 10, 13, 0.76)",
               color: "inherit",
               cursor: "pointer",
               fontSize: "0.72rem",
@@ -468,7 +496,10 @@ export function SceneCanvas({
               border: "1px solid rgba(111, 220, 255, 0.3)",
               borderRadius: 999,
               padding: "5px 10px",
-              background: renderMode === "evidence" ? "rgba(111, 220, 255, 0.18)" : "rgba(4, 10, 13, 0.76)",
+              background:
+                renderMode === "evidence"
+                  ? "rgba(111, 220, 255, 0.18)"
+                  : "rgba(4, 10, 13, 0.76)",
               color: "inherit",
               cursor: "pointer",
               fontSize: "0.72rem",
