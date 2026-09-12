@@ -239,7 +239,7 @@ export type ReconstructionResult = {
 
 type WasmModule = {
   default: () => Promise<unknown>;
-  reconstruct_sequence: (request: unknown) => ReconstructionResult;
+  reconstruct_sequence: (request: unknown) => unknown;
 };
 
 const FEWER_THAN_TWO_REGISTERED_CAMERAS =
@@ -262,6 +262,14 @@ async function loadWasm(): Promise<WasmModule> {
   return wasmPromise;
 }
 
+export function normalizeWasmReconstruction(value: unknown): ReconstructionResult {
+  const normalized = value instanceof Map ? Object.fromEntries(value) : value;
+  if (!normalized || typeof normalized !== "object") {
+    throw new Error("camera-state contract mismatch: WASM returned a non-object reconstruction");
+  }
+  return normalized as ReconstructionResult;
+}
+
 function frameIndexSet(cameras: CameraPose[]): Set<number> {
   return new Set(cameras.map((camera) => camera.frame_index));
 }
@@ -275,6 +283,9 @@ export function assertReconstructionContract(
   expectedFrameCount: number,
 ): void {
   const state = result.camera_state;
+  if (!state || !Array.isArray(state.frames)) {
+    throw new Error("camera-state contract mismatch: WASM result has no explicit camera_state");
+  }
   const acceptedCameras = [
     ...state.calibrated_seed_cameras,
     ...state.registered_cameras,
@@ -381,17 +392,19 @@ export function assertReconstructionContract(
 
 export async function reconstructFrames(frames: SampledFrame[]): Promise<ReconstructionResult> {
   const wasm = await loadWasm();
-  const result = wasm.reconstruct_sequence({
-    frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
-    options: {
-      max_features: 320,
-      min_feature_distance: 7,
-      descriptor_radius: 3,
-      match_radius: 42,
-      max_descriptor_distance: 36,
-      ratio_threshold: 0.82,
-    },
-  });
+  const result = normalizeWasmReconstruction(
+    wasm.reconstruct_sequence({
+      frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
+      options: {
+        max_features: 320,
+        min_feature_distance: 7,
+        descriptor_radius: 3,
+        match_radius: 42,
+        max_descriptor_distance: 36,
+        ratio_threshold: 0.82,
+      },
+    }),
+  );
   assertReconstructionContract(result, frames.length);
   return result;
 }
