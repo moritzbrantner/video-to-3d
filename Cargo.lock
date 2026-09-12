@@ -3902,6 +3902,7 @@ dependencies = [
 name = "video-to-3d-wasm"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde-wasm-bindgen",
  "video-to-3d-core",
  "wasm-bindgen",
