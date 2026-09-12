@@ -22,13 +22,21 @@ type CameraHitTarget = {
   radius: number;
 };
 
+type DragState = {
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
+};
+
 export function SceneCanvas({
   reconstruction,
   selectedFrameIndex = null,
   onSelectFrame,
 }: SceneCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const dragRef = useRef<DragState | null>(null);
   const cameraHitTargetsRef = useRef<CameraHitTarget[]>([]);
   const [view, setView] = useState<ViewState>({ yaw: -0.45, pitch: 0.18, zoom: 1 });
 
@@ -195,14 +203,27 @@ export function SceneCanvas({
         className="scene-canvas"
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
-          dragRef.current = { x: event.clientX, y: event.clientY, moved: false };
+          dragRef.current = {
+            x: event.clientX,
+            y: event.clientY,
+            startX: event.clientX,
+            startY: event.clientY,
+            moved: false,
+          };
         }}
         onPointerMove={(event) => {
-          if (!dragRef.current) return;
-          const dx = event.clientX - dragRef.current.x;
-          const dy = event.clientY - dragRef.current.y;
-          const moved = dragRef.current.moved || Math.hypot(dx, dy) > 2;
-          dragRef.current = { x: event.clientX, y: event.clientY, moved };
+          const drag = dragRef.current;
+          if (!drag) return;
+          const totalDistance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+          const moved = drag.moved || totalDistance > 2;
+          const dx = event.clientX - (drag.moved ? drag.x : drag.startX);
+          const dy = event.clientY - (drag.moved ? drag.y : drag.startY);
+          dragRef.current = {
+            ...drag,
+            x: event.clientX,
+            y: event.clientY,
+            moved,
+          };
           if (!moved) return;
           setView((current) => ({
             ...current,
