@@ -1,5 +1,7 @@
 use std::{env, fs, path::Path};
-use video_to_3d_core::{reconstruct_browser, FrameInput, ReconstructionOptions, ReconstructionRequest};
+use video_to_3d_core::{
+    reconstruct, reconstruct_browser, FrameInput, ReconstructionOptions, ReconstructionRequest,
+};
 
 fn next_ppm_token<'a>(bytes: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
     loop {
@@ -106,7 +108,28 @@ fn main() -> Result<(), String> {
         frames,
         options: ReconstructionOptions::default(),
     };
-    let result = reconstruct_browser(&request)?;
+    let result = match reconstruct_browser(&request) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("trevi.browser_contract_error={error}");
+            let raw = reconstruct(&request)?;
+            let camera_frames: Vec<_> = raw.cameras.iter().map(|camera| camera.frame_index).collect();
+            let registered_view_frames: Vec<_> = raw
+                .registered_views
+                .iter()
+                .map(|view| view.frame_index)
+                .collect();
+            let seed_frames = raw
+                .calibrated_pair
+                .as_ref()
+                .map(|pair| vec![pair.from_frame, pair.to_frame])
+                .unwrap_or_default();
+            eprintln!("trevi.raw_camera_frames={camera_frames:?}");
+            eprintln!("trevi.raw_seed_frames={seed_frames:?}");
+            eprintln!("trevi.raw_registered_view_frames={registered_view_frames:?}");
+            return Err(error);
+        }
+    };
     let reconstruction = &result.reconstruction;
     let camera_state = &result.camera_state;
 
