@@ -39,6 +39,7 @@ export function SceneCanvas({
   const dragRef = useRef<DragState | null>(null);
   const cameraHitTargetsRef = useRef<CameraHitTarget[]>([]);
   const [view, setView] = useState<ViewState>({ yaw: -0.45, pitch: 0.18, zoom: 1 });
+  const hasRegisteredGeometry = reconstruction.calibrated_pair !== null;
 
   const bounds = useMemo(() => {
     const positions = [
@@ -177,14 +178,18 @@ export function SceneCanvas({
       .filter(({ projected }) => projected.z > 0.05);
 
     if (projectedCameras.length > 0) {
-      context.lineWidth = 1.5 * ratio;
-      context.strokeStyle = "rgba(111, 220, 255, 0.78)";
+      context.lineWidth = (hasRegisteredGeometry ? 1.5 : 1) * ratio;
+      context.strokeStyle = hasRegisteredGeometry
+        ? "rgba(111, 220, 255, 0.78)"
+        : "rgba(111, 220, 255, 0.38)";
+      context.setLineDash(hasRegisteredGeometry ? [] : [4 * ratio, 4 * ratio]);
       context.beginPath();
       projectedCameras.forEach(({ projected }, index) => {
         if (index === 0) context.moveTo(projected.x, projected.y);
         else context.lineTo(projected.x, projected.y);
       });
       context.stroke();
+      context.setLineDash([]);
     }
 
     const hitTargets: CameraHitTarget[] = [];
@@ -192,22 +197,38 @@ export function SceneCanvas({
       const size = Math.max(5 * ratio, Math.min(10 * ratio, projected.scale * 0.032));
       const selected = camera.frame_index === selectedFrameIndex;
       context.lineWidth = (selected ? 3 : 1.5) * ratio;
-      context.strokeStyle = selected ? "rgba(111, 220, 255, 1)" : "rgba(240, 247, 255, 0.95)";
-      if (selected) {
-        context.fillStyle = "rgba(111, 220, 255, 0.18)";
-        context.fillRect(
-          projected.x - size * 0.7,
-          projected.y - size * 0.7,
-          size * 1.4,
-          size * 1.4,
+      context.strokeStyle = selected
+        ? "rgba(111, 220, 255, 1)"
+        : hasRegisteredGeometry
+          ? "rgba(240, 247, 255, 0.95)"
+          : "rgba(174, 201, 213, 0.72)";
+      context.fillStyle = selected
+        ? "rgba(111, 220, 255, 0.18)"
+        : "rgba(111, 220, 255, 0.07)";
+
+      if (hasRegisteredGeometry) {
+        if (selected) {
+          context.fillRect(
+            projected.x - size * 0.7,
+            projected.y - size * 0.7,
+            size * 1.4,
+            size * 1.4,
+          );
+        }
+        context.strokeRect(
+          projected.x - size * 0.5,
+          projected.y - size * 0.5,
+          size,
+          size,
         );
+      } else {
+        const radius = selected ? size * 0.58 : size * 0.34;
+        context.beginPath();
+        context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
+        if (selected) context.fill();
+        context.stroke();
       }
-      context.strokeRect(
-        projected.x - size * 0.5,
-        projected.y - size * 0.5,
-        size,
-        size,
-      );
+
       hitTargets.push({
         frameIndex: camera.frame_index,
         x: projected.x / ratio,
@@ -216,7 +237,7 @@ export function SceneCanvas({
       });
     }
     cameraHitTargetsRef.current = hitTargets;
-  }, [bounds, reconstruction, selectedFrameIndex, view]);
+  }, [bounds, hasRegisteredGeometry, reconstruction, selectedFrameIndex, view]);
 
   useEffect(() => {
     draw();
@@ -224,6 +245,10 @@ export function SceneCanvas({
     if (canvasRef.current) observer.observe(canvasRef.current);
     return () => observer.disconnect();
   }, [draw]);
+
+  const cameraDiagnostic = hasRegisteredGeometry
+    ? `Registered geometry: ${reconstruction.cameras.length} accepted camera poses`
+    : `Approximate motion track only: ${reconstruction.cameras.length} sampled poses; no calibrated seed pair was accepted`;
 
   const denseDiagnostic = reconstruction.dense.skip_reason
     ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
@@ -235,10 +260,16 @@ export function SceneCanvas({
           ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
           : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
 
+  const meshGridRejected = Math.max(
+    0,
+    reconstruction.dense_points.length - reconstruction.mesh.grid_vertices,
+  );
+  const meshAdmissionDiagnostic =
+    meshGridRejected > 0 ? `${meshGridRejected} fused points were not admitted to the mesh grid; ` : "";
   const meshDiagnostic = reconstruction.mesh.attempted
     ? reconstruction.mesh.accepted_triangles > 0
-      ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
-      : `Mesh ran, but no neighboring fused samples formed a continuous triangle`
+      ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; ${meshAdmissionDiagnostic}rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
+      : `Mesh ran, but no neighboring fused samples formed a continuous triangle; ${meshAdmissionDiagnostic}${reconstruction.mesh.rejected_discontinuities} discontinuity and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation candidates were rejected`
     : reconstruction.mesh.skip_reason
       ? `Mesh skipped: ${reconstruction.mesh.skip_reason}`
       : null;
@@ -307,10 +338,10 @@ export function SceneCanvas({
             zoom: Math.max(0.45, Math.min(3.5, current.zoom * Math.exp(-event.deltaY * 0.001))),
           }));
         }}
-        aria-label="Interactive 3D reconstruction. Drag to orbit, use the mouse wheel to zoom, or click a camera square to select its source frame."
+        aria-label="Interactive 3D reconstruction. Drag to orbit, use the mouse wheel to zoom, or click a camera marker to select its source frame."
       />
       <div className="viewer-diagnostic" aria-live="polite">
-        {denseDiagnostic}{meshDiagnostic ? ` · ${meshDiagnostic}` : ""}
+        {cameraDiagnostic} · {denseDiagnostic}{meshDiagnostic ? ` · ${meshDiagnostic}` : ""}
       </div>
     </>
   );
