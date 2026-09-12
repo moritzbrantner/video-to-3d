@@ -1,0 +1,747 @@
+name: Repair PR 20
+
+on:
+  push:
+    branches:
+      - automation/pr20-repair
+    paths:
+      - .github/workflows/pr20-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: feat/dense-mesh-foundation
+          fetch-depth: 0
+
+      - name: Apply core recovery and mesh accounting fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one match in {path}, found {count}: {old[:80]!r}")
+              file.write_text(text.replace(old, new, 1))
+
+          reconstruction = Path("crates/video-to-3d-core/src/reconstruction.rs")
+          text = reconstruction.read_text()
+
+          marker = "use std::collections::HashSet;\n"
+          constants = """
+
+          const PAN_RECOVERY_WIDTH_FRACTION: f32 = 0.30;
+          const PAN_RECOVERY_MAX_RADIUS: u32 = 112;
+          const PAN_RECOVERY_RATIO_THRESHOLD: f32 = 0.78;
+          const REGISTRATION_RECOVERY_RATIO_THRESHOLD: f32 = 0.74;
+          const REGISTRATION_RECOVERY_MAX_FEATURES: usize = 640;
+          const REGISTRATION_RECOVERY_MIN_FEATURE_DISTANCE: u32 = 5;
+          const MIN_TRACK_MATCHES: usize = 8;
+          const MIN_TRACK_OVERLAP: f32 = 0.18;
+          const MOTION_GUIDED_COARSE_RATIO_THRESHOLD: f32 = 0.72;
+          const MOTION_GUIDED_MIN_SUPPORT: usize = 4;
+          """.rstrip()
+          if text.count(marker) != 1:
+              raise SystemExit("could not place reconstruction constants")
+          text = text.replace(marker, marker + constants + "\n", 1)
+
+          old_entry = """pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
+              validate_request(request)?;
+          """
+          new_entry = """pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
+              let initial = reconstruct_once(request)?;
+              if !needs_registration_recovery(request, &initial) {
+                  return Ok(initial);
+              }
+
+              let Some(first_frame) = request.frames.first() else {
+                  return Ok(initial);
+              };
+              let retry_radius =
+                  pan_recovery_radius(first_frame.width, request.options.match_radius, &initial);
+              let mut best = initial;
+              let mut selected_recovery = None;
+
+              if retry_radius > request.options.match_radius {
+                  let mut pan_request = request.clone();
+                  pan_request.options.match_radius = retry_radius;
+                  pan_request.options.ratio_threshold = pan_request
+                      .options
+                      .ratio_threshold
+                      .min(PAN_RECOVERY_RATIO_THRESHOLD);
+                  let pan_retry = reconstruct_once(&pan_request)?;
+                  if reconstruction_score(&pan_retry) > reconstruction_score(&best) {
+                      best = pan_retry;
+                      selected_recovery = Some("bounded displacement-informed match-radius recovery");
+                  }
+              }
+
+              if needs_registration_recovery(request, &best) {
+                  let mut registration_request = request.clone();
+                  registration_request.options.match_radius = retry_radius;
+                  registration_request.options.max_features = registration_request
+                      .options
+                      .max_features
+                      .max(REGISTRATION_RECOVERY_MAX_FEATURES);
+                  registration_request.options.min_feature_distance = registration_request
+                      .options
+                      .min_feature_distance
+                      .min(REGISTRATION_RECOVERY_MIN_FEATURE_DISTANCE);
+                  registration_request.options.ratio_threshold = registration_request
+                      .options
+                      .ratio_threshold
+                      .min(REGISTRATION_RECOVERY_RATIO_THRESHOLD);
+
+                  let registration_retry = reconstruct_once(&registration_request)?;
+                  if reconstruction_score(&registration_retry) > reconstruction_score(&best) {
+                      best = registration_retry;
+                      selected_recovery = Some(
+                          "bounded registration recovery with denser features and stricter descriptor ambiguity filtering",
+                      );
+                  }
+              }
+
+              if let Some(recovery) = selected_recovery {
+                  best.warnings.push(format!(
+                      "The Rust core selected {recovery} after the ordinary reconstruction lacked sufficient accepted multi-view evidence. Seed-pair, PnP, bundle-adjustment, dense-depth, and mesh acceptance gates remain unchanged."
+                  ));
+              }
+
+              Ok(best)
+          }
+
+          fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
+              validate_request(request)?;
+          """
+          if text.count(old_entry) != 1:
+              raise SystemExit("could not wrap reconstruct entry point")
+          text = text.replace(old_entry, new_entry, 1)
+
+          old_state = """    let mut adjacent_matches = Vec::with_capacity(request.frames.len() - 1);
+              let mut warnings = Vec::new();
+              let mut best_two_view: Option<(usize, two_view::TwoViewEstimate)> = None;
+          """
+          new_state = """    let mut adjacent_matches = Vec::with_capacity(request.frames.len() - 1);
+              let mut warnings = Vec::new();
+              let mut motion_guided_pairs = 0usize;
+              let mut best_two_view: Option<(usize, two_view::TwoViewEstimate)> = None;
+          """
+          if text.count(old_state) != 1:
+              raise SystemExit("could not add motion-guided accounting")
+          text = text.replace(old_state, new_state, 1)
+
+          old_pair = """        let source_features = &features[pair_index];
+                  let target_features = &features[pair_index + 1];
+                  let matches = match_features(source_features, target_features, options);
+                  let overlap_ratio = if source_features.is_empty() || target_features.is_empty() {
+                      0.0
+                  } else {
+                      matches.len() as f32 / source_features.len().min(target_features.len()) as f32
+                  };
+          """
+          new_pair = """        let source_features = &features[pair_index];
+                  let target_features = &features[pair_index + 1];
+                  let ordinary_matches = match_features(source_features, target_features, options);
+                  let ordinary_overlap = if source_features.is_empty() || target_features.is_empty() {
+                      0.0
+                  } else {
+                      ordinary_matches.len() as f32
+                          / source_features.len().min(target_features.len()) as f32
+                  };
+                  let (matches, used_motion_guidance) = if ordinary_matches.len() < MIN_TRACK_MATCHES
+                      || ordinary_overlap < MIN_TRACK_OVERLAP
+                  {
+                      match motion_guided_matches(source_features, target_features, options) {
+                          Some(guided) if guided.len() > ordinary_matches.len() => (guided, true),
+                          _ => (ordinary_matches, false),
+                      }
+                  } else {
+                      (ordinary_matches, false)
+                  };
+                  if used_motion_guidance {
+                      motion_guided_pairs += 1;
+                  }
+                  let overlap_ratio = if source_features.is_empty() || target_features.is_empty() {
+                      0.0
+                  } else {
+                      matches.len() as f32 / source_features.len().min(target_features.len()) as f32
+                  };
+          """
+          if text.count(old_pair) != 1:
+              raise SystemExit("could not install motion-guided pair fallback")
+          text = text.replace(old_pair, new_pair, 1)
+
+          warning_marker = """    let low_pairs = pairs.iter().filter(|pair| pair.low_parallax).count();
+          """
+          warning_insert = """    if motion_guided_pairs > 0 {
+              warnings.push(format!(
+                  "Motion-guided adjacent matching recovered {motion_guided_pairs} sampled frame pair(s) after the ordinary origin-centered local search was starved. A strict global descriptor consensus only predicts the dominant displacement used to center the existing bounded local search; all calibrated geometry still passes the normal epipolar, PnP, bundle-adjustment, dense-depth, and mesh gates."
+              ));
+          }
+
+              let low_pairs = pairs.iter().filter(|pair| pair.low_parallax).count();
+          """
+          if text.count(warning_marker) != 1:
+              raise SystemExit("could not add motion-guided diagnostic")
+          text = text.replace(warning_marker, warning_insert, 1)
+
+          helper_marker = "fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {"
+          recovery_helpers = r'''fn needs_registration_recovery(
+              request: &ReconstructionRequest,
+              result: &ReconstructionResult,
+          ) -> bool {
+              if request.frames.len() < 3 {
+                  return false;
+              }
+
+              let starved_adjacent_pair = result
+                  .pairs
+                  .iter()
+                  .any(|pair| pair.matches < MIN_TRACK_MATCHES || pair.overlap_ratio < MIN_TRACK_OVERLAP);
+              let missing_seed = result.calibrated_pair.is_none();
+              let missing_selected_view = result.calibrated_pair.is_some()
+                  && result.multi_view.registration_candidates.len() > result.registered_views.len();
+              let tracks_end_early = request.frames.len() >= 4 && result.multi_view.longest_track < 4;
+
+              missing_seed || starved_adjacent_pair || missing_selected_view || tracks_end_early
+          }
+
+          fn pan_recovery_radius(
+              width: u32,
+              current_radius: u32,
+              result: &ReconstructionResult,
+          ) -> u32 {
+              if current_radius >= PAN_RECOVERY_MAX_RADIUS {
+                  return current_radius;
+              }
+
+              let width_scaled = (width as f32 * PAN_RECOVERY_WIDTH_FRACTION).round() as u32;
+              let observed_motion = result
+                  .pairs
+                  .iter()
+                  .map(|pair| pair.median_motion)
+                  .filter(|motion| motion.is_finite() && *motion > 0.0)
+                  .fold(0.0f32, f32::max);
+              let motion_scaled = (observed_motion * 2.0 + 16.0).ceil() as u32;
+              width_scaled
+                  .max(motion_scaled)
+                  .clamp(current_radius, PAN_RECOVERY_MAX_RADIUS)
+          }
+
+          fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
+              if result.calibrated_pair.is_some() {
+                  result.cameras.len()
+              } else {
+                  0
+              }
+          }
+
+          fn reconstruction_score(result: &ReconstructionResult) -> [usize; 10] {
+              [
+                  usize::from(result.calibrated_pair.is_some()),
+                  accepted_registered_camera_count(result),
+                  result.registered_views.len(),
+                  usize::from(result.multi_view.bundle_adjustment.accepted),
+                  result.multi_view.tracks_three_plus,
+                  result.multi_view.longest_track,
+                  result.multi_view.linked_pairs,
+                  result.points.len(),
+                  result.dense_points.len(),
+                  result.mesh_triangles.len(),
+              ]
+          }
+
+          '''
+          if text.count(helper_marker) != 1:
+              raise SystemExit("could not place core recovery helpers")
+          text = text.replace(helper_marker, recovery_helpers + helper_marker, 1)
+
+          match_start = text.index("fn match_features(\n")
+          match_end = text.index("\nfn descriptor_distance", match_start)
+          new_matchers = r'''fn match_features(
+              a: &[Feature],
+              b: &[Feature],
+              options: ReconstructionOptions,
+          ) -> Vec<FeatureMatch> {
+              match_features_around_offset(a, b, options, 0.0, 0.0)
+          }
+
+          fn motion_guided_matches(
+              a: &[Feature],
+              b: &[Feature],
+              options: ReconstructionOptions,
+          ) -> Option<Vec<FeatureMatch>> {
+              let coarse = coarse_global_matches(a, b, options);
+              let (offset_x, offset_y) = dominant_displacement(a, b, &coarse, options.match_radius)?;
+              let guided = match_features_around_offset(a, b, options, offset_x, offset_y);
+              (!guided.is_empty()).then_some(guided)
+          }
+
+          fn coarse_global_matches(
+              a: &[Feature],
+              b: &[Feature],
+              options: ReconstructionOptions,
+          ) -> Vec<FeatureMatch> {
+              let ratio_threshold = options
+                  .ratio_threshold
+                  .min(MOTION_GUIDED_COARSE_RATIO_THRESHOLD);
+              let max_descriptor_distance = options.max_descriptor_distance * 0.9;
+              let mut proposals = Vec::new();
+
+              for (a_index, feature_a) in a.iter().enumerate() {
+                  let mut best: Option<(usize, f32)> = None;
+                  let mut second = f32::INFINITY;
+                  for (b_index, feature_b) in b.iter().enumerate() {
+                      let distance = descriptor_distance(&feature_a.descriptor, &feature_b.descriptor);
+                      match best {
+                          None => best = Some((b_index, distance)),
+                          Some((_, best_distance)) if distance < best_distance => {
+                              second = best_distance;
+                              best = Some((b_index, distance));
+                          }
+                          Some(_) if distance < second => second = distance,
+                          _ => {}
+                      }
+                  }
+                  if let Some((b_index, best_distance)) = best {
+                      let ratio_ok = second.is_infinite() || best_distance < second * ratio_threshold;
+                      if ratio_ok && best_distance <= max_descriptor_distance {
+                          proposals.push(FeatureMatch {
+                              a: a_index,
+                              b: b_index,
+                              distance: best_distance,
+                          });
+                      }
+                  }
+              }
+
+              proposals.sort_by(|left, right| {
+                  left.distance
+                      .partial_cmp(&right.distance)
+                      .unwrap_or(Ordering::Equal)
+                      .then_with(|| {
+                          b[right.b]
+                              .score
+                              .partial_cmp(&b[left.b].score)
+                              .unwrap_or(Ordering::Equal)
+                      })
+                      .then_with(|| left.a.cmp(&right.a))
+                      .then_with(|| left.b.cmp(&right.b))
+              });
+              let mut used_b = HashSet::new();
+              proposals
+                  .into_iter()
+                  .filter(|proposal| used_b.insert(proposal.b))
+                  .filter(|proposal| {
+                      let target = &b[proposal.b];
+                      let reverse_best = a
+                          .iter()
+                          .enumerate()
+                          .map(|(a_index, source)| {
+                              (
+                                  a_index,
+                                  descriptor_distance(&source.descriptor, &target.descriptor),
+                              )
+                          })
+                          .min_by(|left, right| {
+                              left.1
+                                  .partial_cmp(&right.1)
+                                  .unwrap_or(Ordering::Equal)
+                                  .then_with(|| left.0.cmp(&right.0))
+                          });
+                      reverse_best.is_some_and(|(a_index, _)| a_index == proposal.a)
+                  })
+                  .collect()
+          }
+
+          fn dominant_displacement(
+              a: &[Feature],
+              b: &[Feature],
+              matches: &[FeatureMatch],
+              local_radius: u32,
+          ) -> Option<(f32, f32)> {
+              if matches.len() < MOTION_GUIDED_MIN_SUPPORT {
+                  return None;
+              }
+
+              let displacements: Vec<(f32, f32)> = matches
+                  .iter()
+                  .map(|feature_match| {
+                      let source = &a[feature_match.a];
+                      let target = &b[feature_match.b];
+                      (
+                          target.x as f32 - source.x as f32,
+                          target.y as f32 - source.y as f32,
+                      )
+                  })
+                  .collect();
+              let tolerance = (local_radius as f32 * 0.35).clamp(4.0, 18.0);
+              let tolerance_sq = tolerance * tolerance;
+              let mut best_index = 0usize;
+              let mut best_support = 0usize;
+              let mut best_residual = f32::INFINITY;
+
+              for (candidate_index, &(candidate_x, candidate_y)) in displacements.iter().enumerate() {
+                  let mut support = 0usize;
+                  let mut residual = 0.0f32;
+                  for &(dx, dy) in &displacements {
+                      let offset_x = dx - candidate_x;
+                      let offset_y = dy - candidate_y;
+                      let residual_sq = offset_x * offset_x + offset_y * offset_y;
+                      if residual_sq <= tolerance_sq {
+                          support += 1;
+                          residual += residual_sq;
+                      }
+                  }
+                  if support > best_support
+                      || (support == best_support && residual < best_residual)
+                      || (support == best_support
+                          && residual == best_residual
+                          && candidate_index < best_index)
+                  {
+                      best_index = candidate_index;
+                      best_support = support;
+                      best_residual = residual;
+                  }
+              }
+
+              if best_support < MOTION_GUIDED_MIN_SUPPORT || best_support * 2 < matches.len() {
+                  return None;
+              }
+
+              let (center_x, center_y) = displacements[best_index];
+              let mut inlier_dx = Vec::with_capacity(best_support);
+              let mut inlier_dy = Vec::with_capacity(best_support);
+              for (dx, dy) in displacements {
+                  let offset_x = dx - center_x;
+                  let offset_y = dy - center_y;
+                  if offset_x * offset_x + offset_y * offset_y <= tolerance_sq {
+                      inlier_dx.push(dx);
+                      inlier_dy.push(dy);
+                  }
+              }
+              Some((median(&mut inlier_dx), median(&mut inlier_dy)))
+          }
+
+          fn match_features_around_offset(
+              a: &[Feature],
+              b: &[Feature],
+              options: ReconstructionOptions,
+              offset_x: f32,
+              offset_y: f32,
+          ) -> Vec<FeatureMatch> {
+              let radius_sq = (options.match_radius * options.match_radius) as f32;
+              let mut proposals = Vec::new();
+
+              for (a_index, feature_a) in a.iter().enumerate() {
+                  let mut best: Option<(usize, f32)> = None;
+                  let mut second = f32::INFINITY;
+
+                  for (b_index, feature_b) in b.iter().enumerate() {
+                      let dx = feature_b.x as f32 - feature_a.x as f32 - offset_x;
+                      let dy = feature_b.y as f32 - feature_a.y as f32 - offset_y;
+                      if dx * dx + dy * dy > radius_sq {
+                          continue;
+                      }
+                      let distance = descriptor_distance(&feature_a.descriptor, &feature_b.descriptor);
+                      match best {
+                          None => best = Some((b_index, distance)),
+                          Some((_, best_distance)) if distance < best_distance => {
+                              second = best_distance;
+                              best = Some((b_index, distance));
+                          }
+                          Some(_) if distance < second => second = distance,
+                          _ => {}
+                      }
+                  }
+
+                  if let Some((b_index, best_distance)) = best {
+                      let ratio_ok =
+                          second.is_infinite() || best_distance < second * options.ratio_threshold;
+                      if ratio_ok && best_distance <= options.max_descriptor_distance {
+                          proposals.push(FeatureMatch {
+                              a: a_index,
+                              b: b_index,
+                              distance: best_distance,
+                          });
+                      }
+                  }
+              }
+
+              proposals.sort_by(|left, right| {
+                  left.distance
+                      .partial_cmp(&right.distance)
+                      .unwrap_or(Ordering::Equal)
+                      .then_with(|| {
+                          b[right.b]
+                              .score
+                              .partial_cmp(&b[left.b].score)
+                              .unwrap_or(Ordering::Equal)
+                      })
+                      .then_with(|| left.a.cmp(&right.a))
+                      .then_with(|| left.b.cmp(&right.b))
+              });
+              let mut used_b = HashSet::new();
+              proposals
+                  .into_iter()
+                  .filter(|proposal| used_b.insert(proposal.b))
+                  .collect()
+          }
+          '''
+          text = text[:match_start] + new_matchers + text[match_end:]
+
+          test_marker = """    #[test]
+              fn dominant_rotation_is_not_counted_as_parallax() {
+          """
+          tests = r'''    #[test]
+              fn motion_guided_matching_recovers_displacement_beyond_local_radius() {
+                  let source: Vec<Feature> = (0..8)
+                      .map(|index| Feature {
+                          x: 10 + index * 8,
+                          y: 16 + (index % 3) * 11,
+                          score: 10.0 - index as f32 * 0.1,
+                          descriptor: vec![index as i16 * 32, index as i16 * 32 + 3],
+                      })
+                      .collect();
+                  let target: Vec<Feature> = source
+                      .iter()
+                      .map(|feature| Feature {
+                          x: feature.x + 48,
+                          y: feature.y + 2,
+                          score: feature.score,
+                          descriptor: feature.descriptor.clone(),
+                      })
+                      .collect();
+                  let options = ReconstructionOptions {
+                      match_radius: 12,
+                      max_descriptor_distance: 6.0,
+                      ratio_threshold: 0.8,
+                      ..ReconstructionOptions::default()
+                  };
+
+                  assert!(match_features(&source, &target, options).is_empty());
+                  let guided = motion_guided_matches(&source, &target, options)
+                      .expect("coarse displacement should center the bounded search");
+                  assert_eq!(guided.len(), source.len());
+                  let mut dx: Vec<f32> = guided
+                      .iter()
+                      .map(|feature_match| {
+                          target[feature_match.b].x as f32 - source[feature_match.a].x as f32
+                      })
+                      .collect();
+                  let mut dy: Vec<f32> = guided
+                      .iter()
+                      .map(|feature_match| {
+                          target[feature_match.b].y as f32 - source[feature_match.a].y as f32
+                      })
+                      .collect();
+                  assert_eq!(median(&mut dx), 48.0);
+                  assert_eq!(median(&mut dy), 2.0);
+              }
+
+              #[test]
+              fn recovery_radius_remains_bounded_and_tracks_observed_motion() {
+                  let request = ReconstructionRequest {
+                      frames: vec![synthetic_frame(96, 80, 0), synthetic_frame(96, 80, 0)],
+                      options: ReconstructionOptions::default(),
+                  };
+                  let mut result = reconstruct_once(&request).expect("fixture should reconstruct");
+                  assert_eq!(pan_recovery_radius(360, 42, &result), 108);
+                  assert_eq!(pan_recovery_radius(180, 42, &result), 54);
+                  assert_eq!(pan_recovery_radius(96, 42, &result), 42);
+                  assert_eq!(pan_recovery_radius(360, 128, &result), 128);
+                  result.pairs[0].median_motion = 44.0;
+                  assert_eq!(pan_recovery_radius(240, 42, &result), 104);
+              }
+
+              #[test]
+              fn dominant_rotation_is_not_counted_as_parallax() {
+          '''
+          if text.count(test_marker) != 1:
+              raise SystemExit("could not add motion-guided tests")
+          text = text.replace(test_marker, tests, 1)
+          reconstruction.write_text(text)
+
+          wasm = Path("crates/video-to-3d-wasm/src/lib.rs")
+          wasm.write_text('''use video_to_3d_core::{reconstruct, ReconstructionRequest};
+          use wasm_bindgen::prelude::*;
+
+          #[wasm_bindgen]
+          pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
+              let request: ReconstructionRequest = serde_wasm_bindgen::from_value(value)
+                  .map_err(|error| JsValue::from_str(&format!("invalid reconstruction request: {error}")))?;
+              let result = reconstruct(&request).map_err(|error| JsValue::from_str(&error))?;
+              serde_wasm_bindgen::to_value(&result)
+                  .map_err(|error| JsValue::from_str(&format!("failed to serialize reconstruction: {error}")))
+          }
+          ''')
+
+          mesh = Path("crates/video-to-3d-core/src/mesh.rs")
+          mesh_text = mesh.read_text()
+          field_old = """    pub grid_vertices: usize;
+              pub candidate_cells: usize;
+          """
+          field_new = """    pub grid_vertices: usize;
+              pub rejected_grid_vertices: usize;
+              pub candidate_cells: usize;
+          """
+          if mesh_text.count(field_old) != 1:
+              raise SystemExit("could not add mesh admission stat")
+          mesh_text = mesh_text.replace(field_old, field_new, 1)
+
+          skip_old = '''    if grid.len() < 3 {
+              return MeshAnalysis::skipped(
+                  Some(reference_frame),
+                  "fewer than three fused dense points align with the reference sampling grid",
+              );
+          }
+          '''
+          skip_new = '''    if grid.len() < 3 {
+              return MeshAnalysis {
+                  stats: MeshStats {
+                      attempted: true,
+                      skip_reason: Some(
+                          "fewer than three fused dense points align with the reference sampling grid"
+                              .into(),
+                      ),
+                      reference_frame: Some(reference_frame),
+                      grid_vertices: grid.len(),
+                      rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
+                      ..MeshStats::default()
+                  },
+                  triangles: Vec::new(),
+              };
+          }
+          '''
+          if mesh_text.count(skip_old) != 1:
+              raise SystemExit("could not preserve mesh admission stats")
+          mesh_text = mesh_text.replace(skip_old, skip_new, 1)
+
+          stats_old = """            grid_vertices: grid.len(),
+                      candidate_cells,
+          """
+          stats_new = """            grid_vertices: grid.len(),
+                      rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
+                      candidate_cells,
+          """
+          if mesh_text.count(stats_old) != 1:
+              raise SystemExit("could not report normal mesh admission stats")
+          mesh_text = mesh_text.replace(stats_old, stats_new, 1)
+
+          mesh_test_marker = """    #[test]
+              fn triangulates_a_smooth_reference_grid_quad() {
+          """
+          mesh_test = r'''    #[test]
+              fn preserves_admission_stats_when_too_few_grid_vertices_survive() {
+                  let width = 68;
+                  let height = 48;
+                  let focal = 60.0;
+                  let points = vec![
+                      point_at_pixel(3.0, 3.0, 4.0, width, height, focal, 0.8),
+                      point_at_pixel(7.0, 3.0, 4.0, width, height, focal, 0.7),
+                      point_at_pixel(6.0, 7.0, 4.0, width, height, focal, 0.9),
+                  ];
+                  let sites = vec![
+                      DenseGridSite { x: 3, y: 3 },
+                      DenseGridSite { x: 7, y: 3 },
+                      DenseGridSite { x: 3, y: 7 },
+                  ];
+
+                  let result = reconstruct_dense_mesh(
+                      &points,
+                      &sites,
+                      &dense_stats(),
+                      &[camera()],
+                      width,
+                      height,
+                      focal,
+                  );
+
+                  assert!(result.stats.attempted);
+                  assert!(result.stats.skip_reason.is_some());
+                  assert_eq!(result.stats.grid_vertices, 2);
+                  assert_eq!(result.stats.rejected_grid_vertices, 1);
+                  assert!(result.triangles.is_empty());
+              }
+
+              #[test]
+              fn triangulates_a_smooth_reference_grid_quad() {
+          '''
+          if mesh_text.count(mesh_test_marker) != 1:
+              raise SystemExit("could not add mesh admission regression")
+          mesh_text = mesh_text.replace(mesh_test_marker, mesh_test, 1)
+          mesh.write_text(mesh_text)
+
+          types = Path("apps/web/src/reconstruction.ts")
+          type_text = types.read_text()
+          old = """  grid_vertices: number;
+            candidate_cells: number;
+          """
+          new = """  grid_vertices: number;
+            rejected_grid_vertices: number;
+            candidate_cells: number;
+          """
+          if type_text.count(old) != 1:
+              raise SystemExit("could not add web mesh stat type")
+          types.write_text(type_text.replace(old, new, 1))
+
+          canvas = Path("apps/web/src/SceneCanvas.tsx")
+          canvas_text = canvas.read_text()
+          old = '''  const meshGridRejected = Math.max(
+              0,
+              reconstruction.dense_points.length - reconstruction.mesh.grid_vertices,
+            );
+          '''
+          new = '''  const meshGridRejected = reconstruction.mesh.rejected_grid_vertices;
+          '''
+          if canvas_text.count(old) != 1:
+              raise SystemExit("could not switch mesh diagnostic to core stat")
+          canvas_text = canvas_text.replace(old, new, 1)
+          old = '''    : reconstruction.mesh.skip_reason
+                ? `Mesh skipped: ${reconstruction.mesh.skip_reason}`
+                : null;
+          '''
+          new = '''    : reconstruction.mesh.skip_reason
+                ? `Mesh skipped: ${reconstruction.mesh.skip_reason}${
+                    meshGridRejected > 0
+                      ? `; ${meshGridRejected} fused points were rejected at mesh-grid admission`
+                      : ""
+                  }`
+                : null;
+          '''
+          if canvas_text.count(old) != 1:
+              raise SystemExit("could not surface skipped mesh admission count")
+          canvas.write_text(canvas_text.replace(old, new, 1))
+
+          roadmap = Path("ROADMAP.md")
+          roadmap_text = roadmap.read_text()
+          old = """- **Browser registration recovery — integrated.** The WASM adapter keeps the ordinary reconstruction as the fast path, but when the result lacks a calibrated seed or sufficient multi-view evidence it can retry with a bounded search radius informed by image width and observed adjacent displacement, followed by a denser-feature retry with stricter descriptor ambiguity filtering. The adapter deterministically retains only the stronger accepted reconstruction; seed-pair, PnP, bundle-adjustment, dense-depth, and mesh acceptance remain owned by the Rust core.
+          """
+          new = """- **Core-owned motion-guided registration recovery — integrated.** `video-to-3d-core::reconstruct` keeps the ordinary local matcher as the fast path. When an adjacent pair is starved, a strict global descriptor consensus estimates only the dominant image displacement and recenters the same bounded local descriptor search around that prediction. If accepted multi-view evidence is still insufficient, the core can retry with a bounded width/displacement-informed radius and then a denser-feature variant with stricter descriptor ambiguity filtering, deterministically retaining only the stronger accepted reconstruction. The WASM crate is serialization/adaptation only; seed-pair, PnP, bundle-adjustment, dense-depth, and mesh acceptance remain unchanged.
+          """
+          if roadmap_text.count(old) != 1:
+              raise SystemExit("could not update recovery roadmap text")
+          roadmap.write_text(roadmap_text.replace(old, new, 1))
+          PY
+
+          cargo fmt --all
+
+      - name: Commit repaired PR head
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/video-to-3d-core/src/reconstruction.rs crates/video-to-3d-core/src/mesh.rs crates/video-to-3d-wasm/src/lib.rs apps/web/src/reconstruction.ts apps/web/src/SceneCanvas.tsx ROADMAP.md
+          git diff --cached --check
+          git commit -m "Move recovery into core and preserve mesh admission evidence"
+          git push origin HEAD:feat/dense-mesh-foundation
