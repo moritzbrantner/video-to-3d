@@ -14,8 +14,8 @@ const MIN_TRACK_OVERLAP: f32 = 0.18;
 pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
     let request: ReconstructionRequest = serde_wasm_bindgen::from_value(value)
         .map_err(|error| JsValue::from_str(&format!("invalid reconstruction request: {error}")))?;
-    let result =
-        reconstruct_with_registration_recovery(&request).map_err(|error| JsValue::from_str(&error))?;
+    let result = reconstruct_with_registration_recovery(&request)
+        .map_err(|error| JsValue::from_str(&error))?;
     serde_wasm_bindgen::to_value(&result)
         .map_err(|error| JsValue::from_str(&format!("failed to serialize reconstruction: {error}")))
 }
@@ -31,11 +31,8 @@ fn reconstruct_with_registration_recovery(
     let Some(first_frame) = request.frames.first() else {
         return Ok(initial);
     };
-    let retry_radius = pan_recovery_radius(
-        first_frame.width,
-        request.options.match_radius,
-        &initial,
-    );
+    let retry_radius =
+        pan_recovery_radius(first_frame.width, request.options.match_radius, &initial);
     let mut best = initial;
     let mut selected_recovery = None;
 
@@ -107,11 +104,7 @@ fn needs_registration_recovery(
     missing_seed || starved_adjacent_pair || missing_selected_view || tracks_end_early
 }
 
-fn pan_recovery_radius(
-    width: u32,
-    current_radius: u32,
-    result: &ReconstructionResult,
-) -> u32 {
+fn pan_recovery_radius(width: u32, current_radius: u32, result: &ReconstructionResult) -> u32 {
     if current_radius >= PAN_RECOVERY_MAX_RADIUS {
         return current_radius;
     }
@@ -172,7 +165,8 @@ mod tests {
             ],
             options: Default::default(),
         };
-        let mut result = reconstruct(&request).expect("blank fixture should reconstruct deterministically");
+        let mut result =
+            reconstruct(&request).expect("blank fixture should reconstruct deterministically");
         if let Some(pair) = result.pairs.first_mut() {
             pair.median_motion = median_motion;
         }
