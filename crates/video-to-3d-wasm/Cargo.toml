@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# Direct Serde access selects the JSON-compatible WASM serializer shape.
 serde = "1"
 serde-wasm-bindgen = "0.6"
 video-to-3d-core = { path = "../video-to-3d-core" }
