@@ -60,10 +60,10 @@ fn verified_surface_completion_adds_expected_plane_geometry() {
     let expected_depth = 4.0;
     let frames = vec![
         plane_frame(width, height, focal, 0.0, expected_depth),
-        plane_frame(width, height, focal, 0.18, expected_depth),
-        plane_frame(width, height, focal, -0.16, expected_depth),
+        plane_frame(width, height, focal, 0.25, expected_depth),
+        plane_frame(width, height, focal, -0.22, expected_depth),
     ];
-    let cameras = vec![camera(0, 0.0), camera(1, 0.18), camera(2, -0.16)];
+    let cameras = vec![camera(0, 0.0), camera(1, 0.25), camera(2, -0.22)];
     let sparse = plane_sparse_points(width, height, focal, expected_depth);
 
     let result = estimate_depth_points(&frames, &cameras, &sparse, focal);
