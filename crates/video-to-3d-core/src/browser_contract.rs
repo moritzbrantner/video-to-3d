@@ -74,7 +74,8 @@ pub fn reconstruct_browser(
     request: &ReconstructionRequest,
 ) -> Result<BrowserReconstructionResult, String> {
     let reconstruction = crate::reconstruct(request)?;
-    let camera_state = CameraPipelineState::from_reconstruction(&reconstruction, request.frames.len());
+    let camera_state =
+        CameraPipelineState::from_reconstruction(&reconstruction, request.frames.len());
     validate_browser_contract(&reconstruction, &camera_state, request.frames.len())?;
     Ok(BrowserReconstructionResult {
         reconstruction,
@@ -308,7 +309,9 @@ fn validate_browser_contract(
     frame_count: usize,
 ) -> Result<(), String> {
     if camera_state.frames.len() != frame_count {
-        return Err("camera-state invariant violated: frame-state count does not match input frames".into());
+        return Err(
+            "camera-state invariant violated: frame-state count does not match input frames".into(),
+        );
     }
 
     let accepted_registered_cameras =
