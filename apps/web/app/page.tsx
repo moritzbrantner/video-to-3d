@@ -143,10 +143,13 @@ export default function Home() {
   const error = activeRun?.error ?? "";
   const selectedFrame =
     selectedFrameIndex === null ? null : (frames[selectedFrameIndex] ?? null);
-  const selectedCamera =
+  const hasRegisteredGeometry = Boolean(reconstruction?.calibrated_pair);
+  const selectedPose =
     selectedFrameIndex === null
       ? null
       : (reconstruction?.cameras.find((camera) => camera.frame_index === selectedFrameIndex) ?? null);
+  const selectedCamera = hasRegisteredGeometry ? selectedPose : null;
+  const selectedMotionSample = hasRegisteredGeometry ? null : selectedPose;
   const selectedIsKeyframe =
     selectedFrameIndex !== null &&
     Boolean(reconstruction?.multi_view.keyframes.includes(selectedFrameIndex));
@@ -284,7 +287,7 @@ export default function Home() {
                 </div>
               ) : null}
               <div className="viewer-caption">
-                Drag to orbit · wheel to zoom · click a camera square to select its source frame
+                Drag to orbit · wheel to zoom · click a camera marker to select its source frame
               </div>
             </>
           ) : (
@@ -292,7 +295,7 @@ export default function Home() {
               <div className="axis-mark" aria-hidden="true">
                 XYZ
               </div>
-              <p>The reconstructed cameras and sparse geometry will appear here.</p>
+              <p>The camera track and reconstructed geometry will appear here.</p>
             </div>
           )}
         </div>
@@ -305,8 +308,9 @@ export default function Home() {
             <li>Register supported cameras, triangulate sparse points, and refine accepted geometry.</li>
           </ol>
           <p className="method-note">
-            Camera squares are interactive. Selecting one highlights the corresponding sampled frame
-            below.
+            Squares are accepted registered cameras. Before a calibrated seed pair exists, the dim
+            circular path is only an approximate adjacent-frame motion trace. Both marker types remain
+            selectable so you can inspect their source frames.
           </p>
         </aside>
       </section>
@@ -343,7 +347,11 @@ export default function Home() {
               Frame {selectedFrameIndex + 1}
               {selectedIsSeed ? " · seed" : ""}
               {selectedIsKeyframe ? " · keyframe" : ""}
-              {selectedCamera ? " · registered camera" : " · no registered camera"}
+              {selectedCamera
+                ? " · registered camera"
+                : selectedMotionSample
+                  ? " · approximate motion sample"
+                  : " · no camera pose"}
             </p>
           ) : null}
         </section>
@@ -368,7 +376,15 @@ export default function Home() {
                   </tr>
                   <tr>
                     <th>Registered cameras</th>
-                    <td>{reconstruction.cameras.length}</td>
+                    <td>{hasRegisteredGeometry ? reconstruction.cameras.length : 0}</td>
+                  </tr>
+                  <tr>
+                    <th>Camera-track display</th>
+                    <td>
+                      {hasRegisteredGeometry
+                        ? "Accepted registered geometry"
+                        : `${reconstruction.cameras.length} approximate motion samples (not registered)`}
+                    </td>
                   </tr>
                   <tr>
                     <th>Feature tracks</th>
@@ -381,6 +397,10 @@ export default function Home() {
                   <tr>
                     <th>Coarse dense points</th>
                     <td>{reconstruction.dense_points.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Mesh triangles</th>
+                    <td>{reconstruction.mesh_triangles.length}</td>
                   </tr>
                   <tr>
                     <th>Seed pair</th>

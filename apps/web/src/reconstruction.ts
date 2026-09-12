@@ -146,6 +146,8 @@ export type DenseStats = {
   sampled_pixels: number;
   depth_hypotheses: number;
   accepted_points: number;
+  grid_stride: number;
+  grid_border: number;
   reciprocal_checked_points: number;
   reciprocal_rejected_points: number;
   reciprocal_consistent_points: number;
@@ -159,11 +161,33 @@ export type DenseStats = {
   search_max_depth: number | null;
 };
 
+export type MeshTriangle = {
+  a: number;
+  b: number;
+  c: number;
+  confidence: number;
+};
+
+export type MeshStats = {
+  attempted: boolean;
+  skip_reason: string | null;
+  reference_frame: number | null;
+  grid_vertices: number;
+  rejected_grid_vertices: number;
+  candidate_cells: number;
+  candidate_triangles: number;
+  accepted_triangles: number;
+  rejected_discontinuities: number;
+  rejected_degenerate: number;
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
   dense_points: Point3[];
   dense: DenseStats;
+  mesh_triangles: MeshTriangle[];
+  mesh: MeshStats;
   pairs: PairStats[];
   calibrated_pair: CalibratedPairStats | null;
   multi_view: MultiViewStats;

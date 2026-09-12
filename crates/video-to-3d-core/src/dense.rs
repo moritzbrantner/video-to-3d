@@ -23,6 +23,8 @@ pub struct DenseStats {
     pub sampled_pixels: usize,
     pub depth_hypotheses: usize,
     pub accepted_points: usize,
+    pub grid_stride: usize,
+    pub grid_border: u32,
     pub reciprocal_checked_points: usize,
     pub reciprocal_rejected_points: usize,
     pub reciprocal_consistent_points: usize,
@@ -36,10 +38,17 @@ pub struct DenseStats {
     pub search_max_depth: Option<f32>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DenseGridSite {
+    pub x: u32,
+    pub y: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct DenseAnalysis {
     pub stats: DenseStats,
     pub points: Vec<Point3>,
+    pub grid_sites: Vec<DenseGridSite>,
 }
 
 impl DenseAnalysis {
@@ -50,6 +59,7 @@ impl DenseAnalysis {
                 ..DenseStats::default()
             },
             points: Vec::new(),
+            grid_sites: Vec::new(),
         }
     }
 }
@@ -181,6 +191,7 @@ pub(super) fn estimate_depth_points(
     let stride = (width.min(height) / 48).clamp(4, 12) as usize;
     let border = (PATCH_RADIUS + 2) as u32;
     let mut points = Vec::new();
+    let mut grid_sites = Vec::new();
     let mut errors = Vec::new();
     let mut supports = Vec::new();
     let mut sampled_pixels = 0usize;
@@ -332,6 +343,7 @@ pub(super) fn estimate_depth_points(
                 g,
                 b,
             });
+            grid_sites.push(DenseGridSite { x, y });
             errors.push(best.error);
             supports.push(best.support as f64);
         }
@@ -346,6 +358,8 @@ pub(super) fn estimate_depth_points(
             sampled_pixels,
             depth_hypotheses: DEPTH_HYPOTHESES,
             accepted_points: points.len(),
+            grid_stride: stride,
+            grid_border: border,
             reciprocal_checked_points,
             reciprocal_rejected_points,
             reciprocal_consistent_points,
@@ -360,6 +374,7 @@ pub(super) fn estimate_depth_points(
             search_max_depth: Some(search_max_depth as f32),
         },
         points,
+        grid_sites,
     }
 }
 
