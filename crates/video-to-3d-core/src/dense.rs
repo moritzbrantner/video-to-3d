@@ -27,7 +27,13 @@ pub struct DenseStats {
     pub sampled_pixels: usize,
     pub depth_hypotheses: usize,
     pub accepted_points: usize,
+    pub surface_completion_proposals: usize,
     pub surface_completed_points: usize,
+    pub surface_completion_rejected_texture: usize,
+    pub surface_completion_rejected_cross_view: usize,
+    pub surface_completion_rejected_reciprocal: usize,
+    pub surface_completion_rejected_fusion: usize,
+    pub surface_completion_rejected_footprint: usize,
     pub grid_stride: usize,
     pub grid_border: u32,
     pub reciprocal_checked_points: usize,
@@ -82,6 +88,31 @@ struct FusedDepthObservation {
     position: Vector3<f64>,
     observations: usize,
     rejected_observations: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SurfaceCompletionStats {
+    proposals: usize,
+    accepted: usize,
+    rejected_texture: usize,
+    rejected_cross_view: usize,
+    rejected_reciprocal: usize,
+    rejected_fusion: usize,
+    rejected_footprint: usize,
+}
+
+impl SurfaceCompletionStats {
+    fn rejected_total(self) -> usize {
+        self.rejected_texture
+            + self.rejected_cross_view
+            + self.rejected_reciprocal
+            + self.rejected_fusion
+            + self.rejected_footprint
+    }
+
+    fn outcomes(self) -> usize {
+        self.accepted + self.rejected_total()
+    }
 }
 
 struct SourceView<'a> {
@@ -354,7 +385,7 @@ pub(super) fn estimate_depth_points(
         }
     }
 
-    let surface_completed_points = complete_surface_samples(
+    let surface_completion = complete_surface_samples(
         reference,
         reference_frame,
         &reference_luma,
@@ -379,7 +410,13 @@ pub(super) fn estimate_depth_points(
             sampled_pixels,
             depth_hypotheses: DEPTH_HYPOTHESES,
             accepted_points: points.len(),
-            surface_completed_points,
+            surface_completion_proposals: surface_completion.proposals,
+            surface_completed_points: surface_completion.accepted,
+            surface_completion_rejected_texture: surface_completion.rejected_texture,
+            surface_completion_rejected_cross_view: surface_completion.rejected_cross_view,
+            surface_completion_rejected_reciprocal: surface_completion.rejected_reciprocal,
+            surface_completion_rejected_fusion: surface_completion.rejected_fusion,
+            surface_completion_rejected_footprint: surface_completion.rejected_footprint,
             grid_stride: stride,
             grid_border: border,
             reciprocal_checked_points,
@@ -415,12 +452,12 @@ fn complete_surface_samples(
     border: u32,
     stride: usize,
     focal: f64,
-) -> usize {
+) -> SurfaceCompletionStats {
     if stride == 0 || source_views.is_empty() {
-        return 0;
+        return SurfaceCompletionStats::default();
     }
 
-    let mut completed = 0usize;
+    let mut stats = SurfaceCompletionStats::default();
     let stride_i64 = stride as i64;
     for _ in 0..SURFACE_COMPLETION_PASSES {
         let occupied: BTreeMap<(u32, u32), usize> = grid_sites
@@ -474,9 +511,11 @@ fn complete_surface_samples(
                 let Some(predicted_depth) = surface_depth_prediction(&mut neighbor_depths) else {
                     continue;
                 };
+                stats.proposals += 1;
                 if patch_contrast(reference_luma, width, height, x as f64, y as f64)
                     < MIN_REFERENCE_CONTRAST
                 {
+                    stats.rejected_texture += 1;
                     continue;
                 }
 
@@ -512,6 +551,7 @@ fn complete_surface_samples(
                     }
                 }
                 if direct_errors.is_empty() {
+                    stats.rejected_cross_view += 1;
                     continue;
                 }
                 direct_errors
@@ -527,6 +567,7 @@ fn complete_surface_samples(
                     focal,
                 );
                 if reciprocal_positions.is_empty() {
+                    stats.rejected_reciprocal += 1;
                     continue;
                 }
                 let fused = fuse_depth_observations(
@@ -535,17 +576,20 @@ fn complete_surface_samples(
                     predicted_depth,
                 );
                 if fused.observations < MIN_FUSION_OBSERVATIONS {
+                    stats.rejected_fusion += 1;
                     continue;
                 }
                 let Some((projected_x, projected_y, _)) =
                     project(reference, fused.position, width, height, focal)
                 else {
+                    stats.rejected_footprint += 1;
                     continue;
                 };
                 let grid_limit = stride as f64 * 0.5;
                 if (projected_x - x as f64).abs() >= grid_limit
                     || (projected_y - y as f64).abs() >= grid_limit
                 {
+                    stats.rejected_footprint += 1;
                     continue;
                 }
 
@@ -582,7 +626,7 @@ fn complete_surface_samples(
         if additions.is_empty() {
             break;
         }
-        completed += additions.len();
+        stats.accepted += additions.len();
         for (point, site, error, support) in additions {
             points.push(point);
             grid_sites.push(site);
@@ -590,7 +634,8 @@ fn complete_surface_samples(
             supports.push(support);
         }
     }
-    completed
+    debug_assert_eq!(stats.proposals, stats.outcomes());
+    stats
 }
 
 fn surface_depth_prediction(depths: &mut [f64]) -> Option<f64> {
@@ -1094,6 +1139,27 @@ mod tests {
         points
     }
 
+    fn point_at_pixel(
+        camera: &RegisteredCamera,
+        x: f64,
+        y: f64,
+        depth: f64,
+        width: u32,
+        height: u32,
+        focal: f64,
+    ) -> Point3 {
+        let position = unproject(camera, x, y, depth, width, height, focal);
+        Point3 {
+            x: position.x as f32,
+            y: position.y as f32,
+            z: position.z as f32,
+            confidence: 0.8,
+            r: 120,
+            g: 120,
+            b: 120,
+        }
+    }
+
     #[test]
     fn estimates_coarse_depth_on_textured_plane() {
         let width = 68;
@@ -1122,6 +1188,15 @@ mod tests {
             result.stats.reciprocal_consistent_points + result.stats.surface_completed_points,
             result.stats.accepted_points + result.stats.fusion_rejected_points
         );
+        assert_eq!(
+            result.stats.surface_completion_proposals,
+            result.stats.surface_completed_points
+                + result.stats.surface_completion_rejected_texture
+                + result.stats.surface_completion_rejected_cross_view
+                + result.stats.surface_completion_rejected_reciprocal
+                + result.stats.surface_completion_rejected_fusion
+                + result.stats.surface_completion_rejected_footprint
+        );
         assert!(
             result.stats.fusion_input_observations
                 >= result.stats.reciprocal_consistent_points * MIN_FUSION_OBSERVATIONS
@@ -1144,6 +1219,60 @@ mod tests {
             (median_depth - depth).abs() < 0.55,
             "median dense depth was {median_depth}"
         );
+    }
+
+    #[test]
+    fn surface_completion_reports_texture_rejections() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let frame = FrameInput {
+            width,
+            height,
+            rgba: vec![120; width as usize * height as usize * 4],
+        };
+        let cameras = [camera(0, 0.0), camera(1, 0.2)];
+        let reference_luma = to_luma(&frame);
+        let source_views = [SourceView {
+            camera: &cameras[1],
+            frame: &frame,
+            luma: reference_luma.clone(),
+            search_min_depth: 3.2,
+            search_max_depth: 5.0,
+        }];
+        let mut points = vec![
+            point_at_pixel(&cameras[0], 3.0, 3.0, 4.0, width, height, focal),
+            point_at_pixel(&cameras[0], 7.0, 3.0, 4.0, width, height, focal),
+            point_at_pixel(&cameras[0], 3.0, 7.0, 4.0, width, height, focal),
+        ];
+        let mut grid_sites = vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 7, y: 3 },
+            DenseGridSite { x: 3, y: 7 },
+        ];
+        let mut errors = Vec::new();
+        let mut supports = Vec::new();
+
+        let stats = complete_surface_samples(
+            &cameras[0],
+            &frame,
+            &reference_luma,
+            &source_views,
+            &mut points,
+            &mut grid_sites,
+            &mut errors,
+            &mut supports,
+            width,
+            height,
+            3,
+            4,
+            focal,
+        );
+
+        assert!(stats.proposals > 0);
+        assert_eq!(stats.accepted, 0);
+        assert_eq!(stats.rejected_texture, stats.proposals);
+        assert_eq!(stats.proposals, stats.outcomes());
     }
 
     #[test]
@@ -1244,6 +1373,7 @@ mod tests {
         assert!(result.points.is_empty());
         assert_eq!(result.stats.accepted_points, 0);
         assert_eq!(result.stats.surface_completed_points, 0);
+        assert_eq!(result.stats.surface_completion_proposals, 0);
     }
 
     #[test]
