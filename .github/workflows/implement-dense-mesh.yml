@@ -1,0 +1,345 @@
+name: Implement bounded dense mesh slice
+
+on:
+  push:
+    branches:
+      - feat/dense-mesh-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: feat/dense-mesh-foundation
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Wire Rust mesh contract and browser visualization
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path_str, old, new, label):
+              path = Path(path_str)
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match in {path_str}, found {count}")
+              path.write_text(text.replace(old, new, 1))
+
+          # Dense analysis exposes its deterministic sampling-grid contract so mesh topology
+          # does not duplicate hidden stride/border semantics.
+          replace_once(
+              'crates/video-to-3d-core/src/dense.rs',
+              '    pub accepted_points: usize,\n    pub reciprocal_checked_points: usize,\n',
+              '    pub accepted_points: usize,\n    pub grid_stride: usize,\n    pub grid_border: u32,\n    pub reciprocal_checked_points: usize,\n',
+              'dense grid stats fields',
+          )
+          replace_once(
+              'crates/video-to-3d-core/src/dense.rs',
+              '            accepted_points: points.len(),\n            reciprocal_checked_points,\n',
+              '            accepted_points: points.len(),\n            grid_stride: stride,\n            grid_border: border,\n            reciprocal_checked_points,\n',
+              'dense grid stats output',
+          )
+
+          # Core result contract and reconstruction orchestration.
+          replace_once(
+              'crates/video-to-3d-core/src/reconstruction.rs',
+              'mod dense;\nmod multi_view;\n',
+              'mod dense;\nmod mesh;\nmod multi_view;\n',
+              'mesh module declaration',
+          )
+          replace_once(
+              'crates/video-to-3d-core/src/reconstruction.rs',
+              'pub use dense::DenseStats;\npub use multi_view::{\n',
+              'pub use dense::DenseStats;\npub use mesh::{MeshStats, MeshTriangle};\npub use multi_view::{\n',
+              'mesh public contract export',
+          )
+          replace_once(
+              'crates/video-to-3d-core/src/reconstruction.rs',
+              '    pub dense_points: Vec<Point3>,\n    pub dense: DenseStats,\n    pub pairs: Vec<PairStats>,\n',
+              '    pub dense_points: Vec<Point3>,\n    pub dense: DenseStats,\n    pub mesh_triangles: Vec<MeshTriangle>,\n    pub mesh: MeshStats,\n    pub pairs: Vec<PairStats>,\n',
+              'result mesh fields',
+          )
+          replace_once(
+              'crates/video-to-3d-core/src/reconstruction.rs',
+              '    let dense = dense_analysis.stats;\n    let dense_points = dense_analysis.points;\n    let multi_view = multi_view_analysis.stats;\n',
+              '''    let mesh_analysis = mesh::reconstruct_dense_mesh(
+              &dense_analysis.points,
+              &dense_analysis.stats,
+              &registered_geometry,
+              width,
+              height,
+              focal as f64,
+          );
+          let mesh = mesh_analysis.stats;
+          let mesh_triangles = mesh_analysis.triangles;
+          let dense = dense_analysis.stats;
+          let dense_points = dense_analysis.points;
+          let multi_view = multi_view_analysis.stats;
+          ''',
+              'mesh reconstruction call',
+          )
+          replace_once(
+              'crates/video-to-3d-core/src/reconstruction.rs',
+              '    if let Some(dense_warning) = dense_warning(&dense) {\n        warnings.push(dense_warning);\n    }\n',
+              '''    if let Some(dense_warning) = dense_warning(&dense) {
+              warnings.push(dense_warning);
+          }
+          if let Some(mesh_warning) = mesh_warning(&mesh) {
+              warnings.push(mesh_warning);
+          }
+          ''',
+              'mesh diagnostic warning call',
+          )
+          replace_once(
+              'crates/video-to-3d-core/src/reconstruction.rs',
+              '        dense_points,\n        dense,\n        pairs,\n',
+              '        dense_points,\n        dense,\n        mesh_triangles,\n        mesh,\n        pairs,\n',
+              'result mesh output',
+          )
+
+          path = Path('crates/video-to-3d-core/src/reconstruction.rs')
+          text = path.read_text()
+          marker = 'fn dense_warning(dense: &DenseStats) -> Option<String> {'
+          if text.count(marker) != 1:
+              raise SystemExit('dense_warning marker mismatch')
+          mesh_warning = '''fn mesh_warning(mesh: &MeshStats) -> Option<String> {
+              if !mesh.attempted {
+                  return None;
+              }
+
+              if mesh.accepted_triangles > 0 {
+                  return Some(format!(
+                      "Slice 4 bounded mesh reconstruction accepted {} triangles from {} candidate triangles across {} reference-grid cells. It rejected {} triangles at depth/spatial discontinuities and {} degenerate triangles. This is a reference-grid-local, non-watertight surface preview; texture projection, arbitrary multi-reference surface fusion, and metric scale are not claimed yet.",
+                      mesh.accepted_triangles,
+                      mesh.candidate_triangles,
+                      mesh.candidate_cells,
+                      mesh.rejected_discontinuities,
+                      mesh.rejected_degenerate
+                  ));
+              }
+
+              Some(format!(
+                  "Slice 4 bounded mesh reconstruction evaluated {} candidate triangles across {} reference-grid cells, but no triangle survived the continuity and non-degeneracy gates. No surface geometry was invented.",
+                  mesh.candidate_triangles, mesh.candidate_cells
+              ))
+          }
+
+          fn dense_warning(dense: &DenseStats) -> Option<String> {'''
+          path.write_text(text.replace(marker, mesh_warning, 1))
+
+          # Browser/WASM shape mirrors Rust-owned geometry without recomputation.
+          replace_once(
+              'apps/web/src/reconstruction.ts',
+              '  accepted_points: number;\n  reciprocal_checked_points: number;\n',
+              '  accepted_points: number;\n  grid_stride: number;\n  grid_border: number;\n  reciprocal_checked_points: number;\n',
+              'typescript dense grid fields',
+          )
+          path = Path('apps/web/src/reconstruction.ts')
+          text = path.read_text()
+          marker = 'export type ReconstructionResult = {'
+          if text.count(marker) != 1:
+              raise SystemExit('ReconstructionResult TypeScript marker mismatch')
+          mesh_types = '''export type MeshTriangle = {
+              a: number;
+              b: number;
+              c: number;
+              confidence: number;
+          };
+
+          export type MeshStats = {
+              attempted: boolean;
+              skip_reason: string | null;
+              reference_frame: number | null;
+              grid_vertices: number;
+              candidate_cells: number;
+              candidate_triangles: number;
+              accepted_triangles: number;
+              rejected_discontinuities: number;
+              rejected_degenerate: number;
+          };
+
+          export type ReconstructionResult = {'''
+          path.write_text(text.replace(marker, mesh_types, 1))
+          replace_once(
+              'apps/web/src/reconstruction.ts',
+              '  dense_points: Point3[];\n  dense: DenseStats;\n  pairs: PairStats[];\n',
+              '  dense_points: Point3[];\n  dense: DenseStats;\n  mesh_triangles: MeshTriangle[];\n  mesh: MeshStats;\n  pairs: PairStats[];\n',
+              'typescript result mesh fields',
+          )
+
+          # Draw Rust-owned topology behind dense/sparse point overlays.
+          path = Path('apps/web/src/SceneCanvas.tsx')
+          text = path.read_text()
+          marker = '    const projectedDensePoints = reconstruction.dense_points\n'
+          if text.count(marker) != 1:
+              raise SystemExit('projected dense points marker mismatch')
+          mesh_render = '''    const projectedMeshTriangles = reconstruction.mesh_triangles
+              .flatMap((triangle) => {
+                  const a = reconstruction.dense_points[triangle.a];
+                  const b = reconstruction.dense_points[triangle.b];
+                  const c = reconstruction.dense_points[triangle.c];
+                  if (!a || !b || !c) return [];
+                  const projectedA = project(a.x, a.y, a.z);
+                  const projectedB = project(b.x, b.y, b.z);
+                  const projectedC = project(c.x, c.y, c.z);
+                  if (projectedA.z <= 0.05 || projectedB.z <= 0.05 || projectedC.z <= 0.05) {
+                      return [];
+                  }
+                  return [
+                      {
+                          triangle,
+                          projected: [projectedA, projectedB, projectedC] as const,
+                          depth: (projectedA.z + projectedB.z + projectedC.z) / 3,
+                          r: Math.round((a.r + b.r + c.r) / 3),
+                          g: Math.round((a.g + b.g + c.g) / 3),
+                          b: Math.round((a.b + b.b + c.b) / 3),
+                      },
+                  ];
+              })
+              .sort((left, right) => right.depth - left.depth);
+
+          for (const item of projectedMeshTriangles) {
+              const [a, b, c] = item.projected;
+              context.beginPath();
+              context.moveTo(a.x, a.y);
+              context.lineTo(b.x, b.y);
+              context.lineTo(c.x, c.y);
+              context.closePath();
+              context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.05 + item.triangle.confidence * 0.18})`;
+              context.fill();
+              context.lineWidth = 0.45 * ratio;
+              context.strokeStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.06 + item.triangle.confidence * 0.1})`;
+              context.stroke();
+          }
+
+              const projectedDensePoints = reconstruction.dense_points
+          '''
+          path.write_text(text.replace(marker, mesh_render, 1))
+
+          path = Path('apps/web/src/SceneCanvas.tsx')
+          text = path.read_text()
+          marker = '\n\n  return (\n'
+          if text.count(marker) != 1:
+              raise SystemExit(f'SceneCanvas component return marker mismatch: {text.count(marker)}')
+          mesh_diagnostic = '''
+
+          const meshDiagnostic = reconstruction.mesh.attempted
+              ? reconstruction.mesh.accepted_triangles > 0
+                  ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate candidates`
+                  : `Mesh ran, but no neighboring fused samples formed a continuous triangle`
+              : reconstruction.mesh.skip_reason
+                ? `Mesh skipped: ${reconstruction.mesh.skip_reason}`
+                : null;
+
+          return (
+          '''
+          path.write_text(text.replace(marker, mesh_diagnostic, 1))
+          replace_once(
+              'apps/web/src/SceneCanvas.tsx',
+              '        {denseDiagnostic}\n',
+              '        {denseDiagnostic}{meshDiagnostic ? ` · ${meshDiagnostic}` : ""}\n',
+              'viewer mesh diagnostic',
+          )
+
+          # Surface count in the compact technical evidence table.
+          replace_once(
+              'apps/web/app/page.tsx',
+              '''                  <tr>
+                                  <th>Coarse dense points</th>
+                                  <td>{reconstruction.dense_points.length}</td>
+                                </tr>
+          ''',
+              '''                  <tr>
+                                  <th>Coarse dense points</th>
+                                  <td>{reconstruction.dense_points.length}</td>
+                                </tr>
+                                <tr>
+                                  <th>Mesh triangles</th>
+                                  <td>{reconstruction.mesh_triangles.length}</td>
+                                </tr>
+          ''',
+              'mesh technical evidence row',
+          )
+
+          # Roadmap: point fusion is integrated; topology is the new current slice.
+          replace_once(
+              'ROADMAP.md',
+              '- **Dense point fusion — current slice.**',
+              '- **Dense point fusion — integrated.**',
+              'roadmap fusion status',
+          )
+          replace_once(
+              'ROADMAP.md',
+              '- Optional mesh reconstruction and texture projection.\n',
+              '- **Bounded reference-grid mesh reconstruction — current slice.** Reproject accepted fused dense points into the selected dense reference grid, connect only neighboring samples, and retain triangles only when relative depth, 3D edge length, and non-degenerate area remain inside explicit fail-closed gates. The output is a local surface preview, not a watertight model.\n- Texture projection over accepted bounded mesh topology.\n',
+              'roadmap mesh slice',
+          )
+          replace_once(
+              'ROADMAP.md',
+              'Current boundary: Rust now turns reciprocal-consistent source depth estimates into explicit world-space observations, applies a bounded spatial-consistency gate, and fuses accepted observations with the primary hypothesis into one dense scene point. Confidence is reduced when only a subset of eligible source views survives the reciprocal and fusion gates. The primary search still starts from one selected reference; fused surfaces, meshing, metric scale, full-resolution depth maps, and general multi-reference aggregation remain outside the implemented boundary.\n',
+              'Current boundary: Rust now turns reciprocal-consistent source depth estimates into explicit world-space observations, applies a bounded spatial-consistency gate, fuses accepted observations with the primary hypothesis, and derives a bounded reference-grid triangle surface only across neighboring fused samples that pass continuity and non-degeneracy gates. The primary search and mesh topology are still anchored to one selected reference. Watertight surface completion, texture projection, metric scale, full-resolution depth maps, and general multi-reference surface aggregation remain outside the implemented boundary.\n',
+              'roadmap mesh boundary',
+          )
+          replace_once(
+              'ROADMAP.md',
+              'Next implementation slice: add optional mesh reconstruction and texture projection over accepted fused geometry, keeping point fusion authoritative and fail-closed.\n',
+              'Next implementation slice: project image appearance onto accepted bounded mesh topology while keeping Rust-owned geometry authoritative, preserving visibility/continuity gates, and making missing texture evidence explicit rather than filling it heuristically.\n',
+              'roadmap next slice',
+          )
+
+          # README boundary and current pipeline description.
+          replace_once(
+              'README.md',
+              'Reciprocal source depths are converted back to world-space observations, spatial outliers are rejected, and the surviving multi-view observations are fused into one dense scene point. Fused dense points remain separate from the sparse map. If evidence is weak, the dense pass emits no invented geometry.',
+              'Reciprocal source depths are converted back to world-space observations, spatial outliers are rejected, and the surviving multi-view observations are fused into one dense scene point. Accepted fused points can then be connected into a bounded reference-grid triangle surface only when neighboring samples pass explicit depth-continuity, 3D edge-length, and non-degenerate-area gates. Dense points and mesh topology remain separate from the sparse map. If evidence is weak, neither dense points nor surface triangles are invented.',
+              'readme mesh summary',
+          )
+          replace_once(
+              'README.md',
+              '29. Fused dense points are returned and rendered separately from sparse landmarks. This remains a coarse fused point cloud, not a mesh or full multi-reference depth reconstruction.\n',
+              '29. Fused dense points are returned and rendered separately from sparse landmarks.\n30. Rust reprojects accepted fused points into the selected dense reference grid and considers only neighboring grid cells with at least three accepted vertices.\n31. Candidate surface triangles are retained only when their reference-depth spread, 3D edge footprint, and area pass explicit continuity and non-degeneracy gates; gaps remain gaps instead of being bridged.\n32. The browser renders Rust-owned triangle indices as a lightweight surface preview behind the point clouds. This mesh is reference-grid-local and non-watertight; texture projection and general multi-reference surface fusion are not claimed yet.\n',
+              'readme mesh steps',
+          )
+          replace_once(
+              'README.md',
+              'The dense path is likewise deliberately incomplete: reciprocal source-view observations are now fused into bounded scene points, but general multi-reference aggregation, mesh reconstruction, and metric-scale recovery are not implemented yet.',
+              'The dense path is likewise deliberately incomplete: reciprocal source-view observations are fused into bounded scene points and can form a conservative reference-grid-local triangle surface, but watertight completion, texture projection, general multi-reference surface aggregation, and metric-scale recovery are not implemented yet.',
+              'readme mesh boundary',
+          )
+          replace_once(
+              'README.md',
+              '- `apps/web`: Next.js static export used both by GitHub Pages and Tauri. It owns local decode/sampling and visualization, including rendering Rust-owned dense samples and reciprocal-rejection diagnostics without recomputing geometry.\n',
+              '- `apps/web`: Next.js static export used both by GitHub Pages and Tauri. It owns local decode/sampling and visualization, including rendering Rust-owned dense samples, mesh topology, and reconstruction diagnostics without recomputing geometry.\n',
+              'readme web ownership',
+          )
+          replace_once(
+              'README.md',
+              'reciprocal source-view depth consistency, and bounded dense point fusion.\n',
+              'reciprocal source-view depth consistency, bounded dense point fusion, and conservative reference-grid mesh topology.\n',
+              'readme core ownership',
+          )
+
+      - name: Validate mesh slice
+        run: |
+          cargo fmt --all
+          cargo test -p video-to-3d-core
+          cargo clippy -p video-to-3d-core --all-targets -- -D warnings
+          bun install
+          bun run typecheck
+      - name: Commit implementation and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/implement-dense-mesh.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add bounded reference-grid mesh reconstruction"
+          git push origin HEAD:feat/dense-mesh-foundation
