@@ -1,0 +1,25 @@
+name: Debug PR 20 mesh checkout
+
+on:
+  push:
+    branches:
+      - automation/pr20-repair
+    paths:
+      - .github/workflows/pr20-mesh-debug.yml
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: feat/dense-mesh-foundation
+          fetch-depth: 0
+      - shell: bash
+        run: |
+          git rev-parse HEAD
+          git ls-tree HEAD crates/video-to-3d-core/src/mesh.rs
+          wc -c crates/video-to-3d-core/src/mesh.rs
+          sha1sum crates/video-to-3d-core/src/mesh.rs
+          sed -n '1,45p' crates/video-to-3d-core/src/mesh.rs
+          grep -n 'grid_vertices' crates/video-to-3d-core/src/mesh.rs || true
