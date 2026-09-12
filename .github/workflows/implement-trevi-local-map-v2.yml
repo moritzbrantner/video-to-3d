@@ -34,9 +34,25 @@ jobs:
           cargo test --workspace
       - name: Measure Trevi with raw contract diagnostics
         run: |
+          set +e
           python3 tools/sample_trevi.py trevi.webm target/trevi-frames
-          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames | tee /tmp/trevi-after.txt
+          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames > trevi-local-map-debug.txt 2>&1
+          status=$?
+          cat trevi-local-map-debug.txt
+          echo "TREVI_STATUS=$status" >> "$GITHUB_ENV"
+          exit 0
+      - name: Commit Trevi debug output when measurement fails
+        if: env.TREVI_STATUS != '0'
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add trevi-local-map-debug.txt
+          git commit -m "Capture Trevi local-map contract mismatch"
+          git push origin HEAD:feat/trevi-real-footage-gate
+          exit 1
       - name: Commit validated implementation
+        if: env.TREVI_STATUS == '0'
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
