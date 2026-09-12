@@ -1,0 +1,473 @@
+name: Implement dense point fusion slice
+
+on:
+  push:
+    branches:
+      - feat/dense-point-fusion
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dense-point-fusion
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Implement fusion in Rust-owned dense pipeline
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/video-to-3d-core/src/dense.rs')
+          text = path.read_text()
+
+          def replace_once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              'const MAX_RECIPROCAL_RELATIVE_DEPTH_ERROR: f64 = 0.08;\n',
+              'const MAX_RECIPROCAL_RELATIVE_DEPTH_ERROR: f64 = 0.08;\nconst MAX_FUSION_RELATIVE_POSITION_ERROR: f64 = 0.08;\nconst MIN_FUSION_OBSERVATIONS: usize = 2;\n',
+              'fusion constants',
+          )
+
+          replace_once(
+              '''    pub reciprocal_checked_points: usize,
+              pub reciprocal_rejected_points: usize,
+              pub median_supporting_views: Option<f32>,''',
+              '''    pub reciprocal_checked_points: usize,
+              pub reciprocal_rejected_points: usize,
+              pub reciprocal_consistent_points: usize,
+              pub fusion_input_observations: usize,
+              pub fusion_rejected_observations: usize,
+              pub fusion_rejected_points: usize,
+              pub median_fusion_observations: Option<f32>,
+              pub median_supporting_views: Option<f32>,''',
+              'dense stats',
+          )
+
+          replace_once(
+              '''#[derive(Clone, Copy)]
+              struct Candidate {
+                  depth: f64,
+                  position: Vector3<f64>,
+                  support: usize,
+                  error: f64,
+              }
+
+              struct SourceView<'a> {''',
+              '''#[derive(Clone, Copy)]
+              struct Candidate {
+                  depth: f64,
+                  position: Vector3<f64>,
+                  support: usize,
+                  error: f64,
+              }
+
+              #[derive(Clone, Copy, Debug)]
+              struct FusedDepthObservation {
+                  position: Vector3<f64>,
+                  observations: usize,
+                  rejected_observations: usize,
+              }
+
+              struct SourceView<'a> {''',
+              'fused observation struct',
+          )
+
+          replace_once(
+              '''    let mut reciprocal_checked_points = 0usize;
+              let mut reciprocal_rejected_points = 0usize;
+
+              for y in''',
+              '''    let mut reciprocal_checked_points = 0usize;
+              let mut reciprocal_rejected_points = 0usize;
+              let mut reciprocal_consistent_points = 0usize;
+              let mut fusion_input_observations = 0usize;
+              let mut fusion_rejected_observations = 0usize;
+              let mut fusion_rejected_points = 0usize;
+              let mut fusion_observation_counts = Vec::new();
+
+              for y in''',
+              'fusion counters',
+          )
+
+          replace_once(
+              '''            reciprocal_checked_points += 1;
+                          if !has_reciprocal_depth_agreement(
+                              best.position,
+                              reference,
+                              reference_frame,
+                              &reference_luma,
+                              &source_views,
+                              focal,
+                          ) {
+                              reciprocal_rejected_points += 1;
+                              continue;
+                          }
+
+                          let support_confidence = best.support as f64 / source_views.len() as f64;
+                          let error_confidence = 1.0 / (1.0 + best.error / 8.0);
+                          let margin_confidence = if ambiguity_margin.is_finite() {
+                              (ambiguity_margin / 6.0).clamp(0.2, 1.0)
+                          } else {
+                              1.0
+                          };
+                          let confidence =
+                              (support_confidence * error_confidence * margin_confidence).clamp(0.05, 1.0) as f32;
+                          let (r, g, b) = sample_rgb(reference_frame, x, y);
+                          points.push(Point3 {
+                              x: best.position.x as f32,
+                              y: best.position.y as f32,
+                              z: best.position.z as f32,
+                              confidence,
+                              r,
+                              g,
+                              b,
+                          });
+                          errors.push(best.error);
+                          supports.push(best.support as f64);''',
+              '''            reciprocal_checked_points += 1;
+                          let reciprocal_positions = reciprocal_depth_observations(
+                              best.position,
+                              reference,
+                              reference_frame,
+                              &reference_luma,
+                              &source_views,
+                              focal,
+                          );
+                          if reciprocal_positions.is_empty() {
+                              reciprocal_rejected_points += 1;
+                              continue;
+                          }
+                          reciprocal_consistent_points += 1;
+                          fusion_input_observations += 1 + reciprocal_positions.len();
+
+                          let fused = fuse_depth_observations(
+                              best.position,
+                              &reciprocal_positions,
+                              best.depth,
+                          );
+                          fusion_rejected_observations += fused.rejected_observations;
+                          if fused.observations < MIN_FUSION_OBSERVATIONS {
+                              fusion_rejected_points += 1;
+                              continue;
+                          }
+                          fusion_observation_counts.push(fused.observations as f64);
+
+                          let support_confidence = best.support as f64 / source_views.len() as f64;
+                          let reciprocal_confidence =
+                              ((fused.observations - 1) as f64 / source_views.len() as f64).clamp(0.0, 1.0);
+                          let error_confidence = 1.0 / (1.0 + best.error / 8.0);
+                          let margin_confidence = if ambiguity_margin.is_finite() {
+                              (ambiguity_margin / 6.0).clamp(0.2, 1.0)
+                          } else {
+                              1.0
+                          };
+                          let confidence = (support_confidence
+                              * reciprocal_confidence
+                              * error_confidence
+                              * margin_confidence)
+                              .clamp(0.05, 1.0) as f32;
+                          let (r, g, b) = sample_rgb(reference_frame, x, y);
+                          points.push(Point3 {
+                              x: fused.position.x as f32,
+                              y: fused.position.y as f32,
+                              z: fused.position.z as f32,
+                              confidence,
+                              r,
+                              g,
+                              b,
+                          });
+                          errors.push(best.error);
+                          supports.push(best.support as f64);''',
+              'reciprocal fusion block',
+          )
+
+          replace_once(
+              '''            reciprocal_checked_points,
+                          reciprocal_rejected_points,
+                          median_supporting_views: median_option(&mut supports).map(|value| value as f32),''',
+              '''            reciprocal_checked_points,
+                          reciprocal_rejected_points,
+                          reciprocal_consistent_points,
+                          fusion_input_observations,
+                          fusion_rejected_observations,
+                          fusion_rejected_points,
+                          median_fusion_observations: median_option(&mut fusion_observation_counts)
+                              .map(|value| value as f32),
+                          median_supporting_views: median_option(&mut supports).map(|value| value as f32),''',
+              'stats output',
+          )
+
+          start = text.index('fn has_reciprocal_depth_agreement(')
+          end = text.index('\n#[allow(clippy::too_many_arguments)]\nfn estimate_single_view_depth(', start)
+          replacement = '''fn reciprocal_depth_observations(
+              position: Vector3<f64>,
+              reference_camera: &RegisteredCamera,
+              reference_frame: &FrameInput,
+              reference_luma: &[u8],
+              sources: &[SourceView<'_>],
+              focal: f64,
+          ) -> Vec<Vector3<f64>> {
+              let Some((reference_x, reference_y, reference_depth)) = project(
+                  reference_camera,
+                  position,
+                  reference_frame.width,
+                  reference_frame.height,
+                  focal,
+              ) else {
+                  return Vec::new();
+              };
+
+              sources
+                  .iter()
+                  .filter_map(|source| {
+                      let direct_error = patch_error(
+                          reference_camera,
+                          source.camera,
+                          reference_luma,
+                          &source.luma,
+                          reference_frame.width,
+                          reference_frame.height,
+                          source.frame.width,
+                          source.frame.height,
+                          reference_x,
+                          reference_y,
+                          reference_depth,
+                          focal,
+                      )?;
+                      if direct_error > MAX_PHOTOMETRIC_ERROR {
+                          return None;
+                      }
+
+                      let (source_x, source_y, expected_source_depth) = project(
+                          source.camera,
+                          position,
+                          source.frame.width,
+                          source.frame.height,
+                          focal,
+                      )?;
+                      let reciprocal_depth = estimate_single_view_depth(
+                          source.camera,
+                          reference_camera,
+                          &source.luma,
+                          reference_luma,
+                          source.frame.width,
+                          source.frame.height,
+                          reference_frame.width,
+                          reference_frame.height,
+                          source_x,
+                          source_y,
+                          source.search_min_depth,
+                          source.search_max_depth,
+                          focal,
+                      )?;
+                      if !reciprocal_depth_agrees(expected_source_depth, reciprocal_depth) {
+                          return None;
+                      }
+
+                      let reciprocal_position = unproject(
+                          source.camera,
+                          source_x,
+                          source_y,
+                          reciprocal_depth,
+                          source.frame.width,
+                          source.frame.height,
+                          focal,
+                      );
+                      reciprocal_position
+                          .iter()
+                          .all(|value| value.is_finite())
+                          .then_some(reciprocal_position)
+                  })
+                  .collect()
+          }
+
+          fn fuse_depth_observations(
+              primary: Vector3<f64>,
+              reciprocal: &[Vector3<f64>],
+              reference_depth: f64,
+          ) -> FusedDepthObservation {
+              let radius = (reference_depth.abs() * MAX_FUSION_RELATIVE_POSITION_ERROR).max(1.0e-4);
+              let mut sum = primary;
+              let mut observations = 1usize;
+              let mut rejected_observations = 0usize;
+
+              for position in reciprocal {
+                  if !position.iter().all(|value| value.is_finite())
+                      || (*position - primary).norm() > radius
+                  {
+                      rejected_observations += 1;
+                      continue;
+                  }
+                  sum += position;
+                  observations += 1;
+              }
+
+              FusedDepthObservation {
+                  position: sum / observations as f64,
+                  observations,
+                  rejected_observations,
+              }
+          }
+          '''
+          text = text[:start] + replacement + text[end:]
+
+          replace_once(
+              '''        assert_eq!(
+                          result.stats.reciprocal_checked_points,
+                          result.stats.accepted_points + result.stats.reciprocal_rejected_points
+                      );''',
+              '''        assert_eq!(
+                          result.stats.reciprocal_checked_points,
+                          result.stats.reciprocal_consistent_points
+                              + result.stats.reciprocal_rejected_points
+                      );
+                      assert_eq!(
+                          result.stats.reciprocal_consistent_points,
+                          result.stats.accepted_points + result.stats.fusion_rejected_points
+                      );
+                      assert!(
+                          result.stats.fusion_input_observations
+                              >= result.stats.reciprocal_consistent_points * MIN_FUSION_OBSERVATIONS
+                      );
+                      assert!(
+                          result
+                              .stats
+                              .median_fusion_observations
+                              .is_some_and(|observations| observations >= MIN_FUSION_OBSERVATIONS as f32)
+                      );''',
+              'plane fusion assertions',
+          )
+
+          test_marker = '''    #[test]
+              fn reciprocal_consistency_rejects_wrong_depth() {'''
+          test = '''    #[test]
+              fn fusion_rejects_spatially_inconsistent_reciprocal_observations() {
+                  let primary = Vector3::new(0.0, 0.0, 4.0);
+                  let reciprocal = [
+                      Vector3::new(0.02, -0.01, 4.04),
+                      Vector3::new(0.9, 0.0, 4.0),
+                  ];
+
+                  let fused = fuse_depth_observations(primary, &reciprocal, 4.0);
+
+                  assert_eq!(fused.observations, 2);
+                  assert_eq!(fused.rejected_observations, 1);
+                  assert!((fused.position.z - 4.02).abs() < 1.0e-9);
+                  assert!(fused.position.x.abs() < 0.02);
+              }
+
+              #[test]
+              fn reciprocal_consistency_rejects_wrong_depth() {'''
+          replace_once(test_marker, test, 'fusion regression test')
+
+          path.write_text(text)
+      - name: Update web contract and diagnostics
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('apps/web/src/reconstruction.ts')
+          text = path.read_text()
+          old = '''  reciprocal_checked_points: number;
+            reciprocal_rejected_points: number;
+            median_supporting_views: number | null;'''
+          new = '''  reciprocal_checked_points: number;
+            reciprocal_rejected_points: number;
+            reciprocal_consistent_points: number;
+            fusion_input_observations: number;
+            fusion_rejected_observations: number;
+            fusion_rejected_points: number;
+            median_fusion_observations: number | null;
+            median_supporting_views: number | null;'''
+          if text.count(old) != 1:
+              raise SystemExit('DenseStats TypeScript marker mismatch')
+          path.write_text(text.replace(old, new, 1))
+
+          path = Path('apps/web/src/SceneCanvas.tsx')
+          text = path.read_text()
+          old = '''  const denseDiagnostic = reconstruction.dense.skip_reason
+              ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
+              : reconstruction.dense.accepted_points > 0
+                ? `Coarse dense depth: ${reconstruction.dense.accepted_points} reciprocal-consistent samples from ${reconstruction.dense.source_views} source view${reconstruction.dense.source_views === 1 ? "" : "s"}; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates`
+                : reconstruction.dense.reciprocal_checked_points > 0
+                  ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
+                  : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";'''
+          new = '''  const denseDiagnostic = reconstruction.dense.skip_reason
+              ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
+              : reconstruction.dense.accepted_points > 0
+                ? `Fused dense depth: ${reconstruction.dense.accepted_points} scene points from ${reconstruction.dense.fusion_input_observations} reciprocal-consistent multi-view observations; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates and spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
+                : reconstruction.dense.reciprocal_consistent_points > 0
+                  ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations)`
+                  : reconstruction.dense.reciprocal_checked_points > 0
+                    ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
+                    : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";'''
+          if text.count(old) != 1:
+              raise SystemExit('SceneCanvas diagnostic marker mismatch')
+          path.write_text(text.replace(old, new, 1))
+      - name: Update roadmap and boundary documentation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('ROADMAP.md')
+          text = path.read_text()
+          text = text.replace(
+              '- **Reciprocal depth consistency — current slice.** Give each eligible source view its own sparse-landmark-derived depth-search envelope. A primary reference-view hypothesis that already passed texture, photometric-support, and ambiguity gates is retained only when at least one directly supporting source view independently selects a reverse-search depth within an 8% relative-depth envelope of the projected candidate. Surface how many primary candidates reached this veto and how many it rejected.\n- Dense point fusion. Merge consistent depth observations while preserving support/confidence and rejecting duplicates/outliers.',
+              '- **Reciprocal depth consistency — integrated.** Give each eligible source view its own sparse-landmark-derived depth-search envelope. A primary reference-view hypothesis that already passed texture, photometric-support, and ambiguity gates is retained only when at least one directly supporting source view independently selects a reverse-search depth within an 8% relative-depth envelope of the projected candidate. Surface how many primary candidates reached this veto and how many it rejected.\n- **Dense point fusion — current slice.** Convert each accepted reciprocal source depth back into Rust-owned world geometry, reject reverse observations that are spatially inconsistent with the primary hypothesis, and fuse the remaining multi-view observations into one confidence-weighted scene sample without duplicating geometry.',
+              1,
+          )
+          old = 'Current boundary: Rust now applies a bounded reciprocal source-view consistency veto to coarse depth hypotheses after the original reference-view acceptance gates. The surviving points are still separate coarse samples from one selected reference, not fused scene evidence. Dense point fusion, fused surfaces, meshing, metric scale, full-resolution depth maps, and general multi-reference aggregation remain outside the implemented boundary.\n\nNext implementation slice: fuse reciprocal-consistent depth observations without creating duplicate or weakly supported geometry, while preserving the current confidence and fail-closed semantics.'
+          new = 'Current boundary: Rust now turns reciprocal-consistent source depth estimates into explicit world-space observations, applies a bounded spatial-consistency gate, and fuses the accepted observations with the primary hypothesis into one dense scene point. Confidence is reduced when only a subset of eligible source views survives the reciprocal and fusion gates. The primary search still starts from one selected reference; fused surfaces, meshing, metric scale, full-resolution depth maps, and general multi-reference aggregation remain outside the implemented boundary.\n\nNext implementation slice: add optional mesh reconstruction and texture projection over accepted fused geometry, keeping point fusion authoritative and fail-closed.'
+          if old not in text:
+              raise SystemExit('roadmap boundary marker mismatch')
+          path.write_text(text.replace(old, new, 1))
+
+          path = Path('README.md')
+          text = path.read_text()
+          text = text.replace(
+              'A primary depth hypothesis is retained only after the existing photometric and ambiguity gates and a reciprocal source-view depth check derived from that source camera\'s own visible sparse-landmark envelope. Accepted dense samples remain separate from the sparse map.',
+              'A primary depth hypothesis is retained only after the existing photometric and ambiguity gates and a reciprocal source-view depth check derived from that source camera\'s own visible sparse-landmark envelope. Reciprocal source depths are converted back to world-space observations, spatial outliers are rejected, and the surviving multi-view observations are fused into one dense scene point. Fused dense points remain separate from the sparse map.',
+              1,
+          )
+          text = text.replace(
+              '27. Surviving dense samples are returned and rendered separately from sparse landmarks. This remains a coarse depth result rather than fused dense scene geometry.',
+              '27. Each reciprocal source depth is unprojected into the shared sparse-SfM coordinate frame. Reverse observations farther than 8% of the primary reference depth from the primary hypothesis are rejected as spatially inconsistent.\n28. A primary hypothesis plus at least one spatially consistent reciprocal observation is averaged into one dense scene point. Confidence includes the fraction of eligible source views that survived reciprocal fusion; the browser reports fusion input/rejection evidence.\n29. Fused dense points are returned and rendered separately from sparse landmarks. This remains a coarse fused point cloud, not a mesh or full multi-reference depth reconstruction.',
+              1,
+          )
+          text = text.replace(
+              'The dense path is likewise deliberately incomplete: reciprocal source-view agreement is now enforced, but dense point fusion, general multi-reference aggregation, mesh reconstruction, and metric-scale recovery are not implemented yet.',
+              'The dense path is likewise deliberately incomplete: reciprocal source-view observations are now fused into bounded scene points, but general multi-reference aggregation, mesh reconstruction, and metric-scale recovery are not implemented yet.',
+              1,
+          )
+          text = text.replace(
+              'conservative coarse registered-view depth estimation, and reciprocal source-view depth consistency.',
+              'conservative coarse registered-view depth estimation, reciprocal source-view depth consistency, and bounded dense point fusion.',
+              1,
+          )
+          path.write_text(text)
+      - name: Format and test core
+        run: |
+          cargo fmt --all
+          cargo test -p video-to-3d-core
+          cargo clippy -p video-to-3d-core --all-targets -- -D warnings
+      - name: Commit implementation and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/implement-dense-fusion.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fuse reciprocal dense depth observations"
+          git push origin HEAD:feat/dense-point-fusion
