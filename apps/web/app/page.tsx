@@ -20,7 +20,14 @@ type VideoRun = {
   frames: PreviewFrame[];
   reconstruction: ReconstructionResult | null;
   error: string;
+  samplingFps: number;
+  frameCap: number;
 };
+
+const MIN_SAMPLING_FPS = 0.25;
+const MAX_SAMPLING_FPS = 8;
+const MIN_FRAME_CAP = 4;
+const MAX_FRAME_CAP = 60;
 
 function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
   return frames.map((frame) => ({
@@ -29,6 +36,16 @@ function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
     thumbnail: frame.thumbnail,
     time: frame.time,
   }));
+}
+
+function normalizedSamplingFps(value: number): number {
+  if (!Number.isFinite(value)) return 1.25;
+  return Math.min(MAX_SAMPLING_FPS, Math.max(MIN_SAMPLING_FPS, value));
+}
+
+function normalizedFrameCap(value: number): number {
+  if (!Number.isFinite(value)) return 18;
+  return Math.min(MAX_FRAME_CAP, Math.max(MIN_FRAME_CAP, Math.floor(value)));
 }
 
 function phaseLabel(phase: RunPhase): string {
@@ -46,14 +63,13 @@ function phaseLabel(phase: RunPhase): string {
   }
 }
 
-function errorValue(value: number | null): string {
-  return value === null ? "—" : `${value.toFixed(2)} px`;
-}
-
 export default function Home() {
   const [runs, setRuns] = useState<VideoRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
   const [batchRunning, setBatchRunning] = useState(false);
+  const [samplingFps, setSamplingFps] = useState(1.25);
+  const [frameCap, setFrameCap] = useState(18);
+  const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
 
   function updateRun(id: string, update: Partial<VideoRun>) {
     setRuns((current) =>
@@ -66,6 +82,11 @@ export default function Home() {
     event.target.value = "";
     if (files.length === 0 || batchRunning) return;
 
+    const runSamplingFps = normalizedSamplingFps(samplingFps);
+    const runFrameCap = normalizedFrameCap(frameCap);
+    setSamplingFps(runSamplingFps);
+    setFrameCap(runFrameCap);
+
     const nextRuns: VideoRun[] = files.map((file, index) => ({
       id: `${file.name}:${file.size}:${file.lastModified}:${index}`,
       fileName: file.name,
@@ -73,25 +94,31 @@ export default function Home() {
       frames: [],
       reconstruction: null,
       error: "",
+      samplingFps: runSamplingFps,
+      frameCap: runFrameCap,
     }));
 
     setRuns(nextRuns);
     setActiveRunId(nextRuns[0].id);
+    setSelectedFrameIndex(null);
     setBatchRunning(true);
 
     for (const [index, file] of files.entries()) {
-      const runId = nextRuns[index].id;
+      const run = nextRuns[index];
       try {
-        updateRun(runId, { phase: "sampling", error: "" });
-        const sampled = await sampleVideo(file);
-        updateRun(runId, {
+        updateRun(run.id, { phase: "sampling", error: "" });
+        const sampled = await sampleVideo(file, {
+          framesPerSecond: run.samplingFps,
+          maxFrames: run.frameCap,
+        });
+        updateRun(run.id, {
           phase: "reconstructing",
           frames: previewFrames(sampled),
         });
         const result = await reconstructFrames(sampled);
-        updateRun(runId, { phase: "done", reconstruction: result });
+        updateRun(run.id, { phase: "done", reconstruction: result });
       } catch (caught) {
-        updateRun(runId, {
+        updateRun(run.id, {
           phase: "error",
           error: caught instanceof Error ? caught.message : String(caught),
         });
@@ -114,6 +141,23 @@ export default function Home() {
   const frames = activeRun?.frames ?? [];
   const reconstruction = activeRun?.reconstruction ?? null;
   const error = activeRun?.error ?? "";
+  const selectedFrame =
+    selectedFrameIndex === null ? null : (frames[selectedFrameIndex] ?? null);
+  const selectedCamera =
+    selectedFrameIndex === null
+      ? null
+      : (reconstruction?.cameras.find((camera) => camera.frame_index === selectedFrameIndex) ?? null);
+  const selectedIsKeyframe =
+    selectedFrameIndex !== null &&
+    Boolean(reconstruction?.multi_view.keyframes.includes(selectedFrameIndex));
+  const selectedIsSeed =
+    selectedFrameIndex !== null &&
+    Boolean(
+      reconstruction?.calibrated_pair &&
+        (reconstruction.calibrated_pair.from_frame === selectedFrameIndex ||
+          reconstruction.calibrated_pair.to_frame === selectedFrameIndex),
+    );
+
   const status = processingRun
     ? processingRun.phase === "sampling"
       ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
@@ -121,40 +165,73 @@ export default function Home() {
     : runs.length > 0
       ? failedCount > 0
         ? `${readyCount} ready · ${failedCount} failed`
-        : runs.length === 1 && reconstruction?.calibrated_pair
-          ? reconstruction.multi_view.bundle_adjustment.accepted
-            ? "Bundle-adjusted multi-view sparse geometry ready"
-            : "Calibrated multi-view sparse geometry ready"
-          : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
+        : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
       : "Choose one or more videos to begin";
 
   return (
     <main>
       <header className="hero">
         <div>
-          <p className="eyebrow">Next.js static export · Rust · WebAssembly · Tauri</p>
+          <p className="eyebrow">Local browser reconstruction</p>
           <h1>Video to 3D</h1>
           <p className="lede">
-            Turn moving-camera video into an inspectable sparse 3D reconstruction without uploading
-            the footage. Rust/WASM chains adjacent matches into multi-frame tracks, screens keyframes,
-            registers additional cameras with deterministic robust PnP, checks bounded non-adjacent
-            keyframe revisits to recover failed registrations or close bounded registered-pose drift,
-            triangulates supported non-seed tracks, and jointly refines accepted camera poses and
-            sparse landmarks with deterministic bundle adjustment. The calibrated seed-pair cameras
-            stay fixed so the arbitrary monocular gauge cannot drift.
+            Sample a moving-camera video, reconstruct sparse geometry in Rust/WASM, and inspect which
+            source frames became registered cameras.
           </p>
         </div>
-        <label className="upload-button">
-          <input
-            type="file"
-            accept="video/*"
-            multiple
-            onChange={handleVideos}
-            disabled={batchRunning}
-          />
-          Select video files
-        </label>
+        <div className="run-controls">
+          <div className="sampling-controls" aria-label="Sampling controls">
+            <label>
+              <span>Sample FPS</span>
+              <input
+                type="number"
+                min={MIN_SAMPLING_FPS}
+                max={MAX_SAMPLING_FPS}
+                step="0.25"
+                value={samplingFps}
+                disabled={batchRunning}
+                onChange={(event) => {
+                  if (Number.isFinite(event.currentTarget.valueAsNumber)) {
+                    setSamplingFps(event.currentTarget.valueAsNumber);
+                  }
+                }}
+              />
+            </label>
+            <label>
+              <span>Frame cap</span>
+              <input
+                type="number"
+                min={MIN_FRAME_CAP}
+                max={MAX_FRAME_CAP}
+                step="1"
+                value={frameCap}
+                disabled={batchRunning}
+                onChange={(event) => {
+                  if (Number.isFinite(event.currentTarget.valueAsNumber)) {
+                    setFrameCap(event.currentTarget.valueAsNumber);
+                  }
+                }}
+              />
+            </label>
+          </div>
+          <label className="upload-button">
+            <input
+              type="file"
+              accept="video/*"
+              multiple
+              onChange={handleVideos}
+              disabled={batchRunning}
+            />
+            Select video files
+          </label>
+          <small>Sampling settings apply to newly selected videos.</small>
+        </div>
       </header>
+
+      <section className="scene-status">
+        <strong>Scene detection:</strong> not active yet. The Pages demo currently treats each file as
+        one sequence; it does not call scenedetect-rs.
+      </section>
 
       <section className="status-line" aria-live="polite">
         <span className={`status-dot status-${statusPhase}`} />
@@ -172,7 +249,10 @@ export default function Home() {
               type="button"
               className={`video-run${run.id === activeRun?.id ? " video-run-active" : ""}`}
               aria-pressed={run.id === activeRun?.id}
-              onClick={() => setActiveRunId(run.id)}
+              onClick={() => {
+                setActiveRunId(run.id);
+                setSelectedFrameIndex(null);
+              }}
             >
               <span>{run.fileName}</span>
               <small>{phaseLabel(run.phase)}</small>
@@ -187,13 +267,24 @@ export default function Home() {
         <div className="viewer-panel">
           {reconstruction ? (
             <>
-              <SceneCanvas reconstruction={reconstruction} />
+              <SceneCanvas
+                reconstruction={reconstruction}
+                selectedFrameIndex={selectedFrameIndex}
+                onSelectFrame={setSelectedFrameIndex}
+              />
+              {selectedFrame ? (
+                <div className="selected-frame-preview">
+                  <img
+                    src={selectedFrame.thumbnail}
+                    alt={`Selected sampled frame ${selectedFrameIndex! + 1}`}
+                  />
+                  <span>
+                    Frame {selectedFrameIndex! + 1} · {selectedFrame.time.toFixed(2)}s
+                  </span>
+                </div>
+              ) : null}
               <div className="viewer-caption">
-                {reconstruction.calibrated_pair
-                  ? reconstruction.multi_view.bundle_adjustment.accepted
-                    ? "Drag to orbit · wheel to zoom · cameras and sparse points include accepted bundle-adjustment refinement"
-                    : "Drag to orbit · wheel to zoom · squares are accepted registered camera positions"
-                  : "Drag to orbit · wheel to zoom · squares are conservative fallback camera estimates"}
+                Drag to orbit · wheel to zoom · click a camera square to select its source frame
               </div>
             </>
           ) : (
@@ -201,46 +292,21 @@ export default function Home() {
               <div className="axis-mark" aria-hidden="true">
                 XYZ
               </div>
-              <p>The reconstructed cameras and sparse colored geometry will appear here.</p>
-              <p>Best first test: slowly move sideways around a textured static object.</p>
+              <p>The reconstructed cameras and sparse geometry will appear here.</p>
             </div>
           )}
         </div>
 
         <aside className="method-panel">
-          <h2>Slice 3 multi-view sparse geometry</h2>
+          <h2>What happens</h2>
           <ol>
-            <li>Decode and sample up to 18 reduced-resolution frames per video in the browser.</li>
-            <li>Detect and match local image features in Rust/WASM.</li>
-            <li>Chain one-to-one adjacent matches into deterministic multi-frame feature tracks.</li>
-            <li>Select keyframe candidates from track overlap and accumulated residual parallax.</li>
-            <li>Link calibrated seed landmarks through those tracks into other selected keyframes.</li>
-            <li>Run bounded deterministic robust PnP and accept only geometrically supported poses.</li>
-            <li>
-              Screen non-adjacent selected keyframes with mutual descriptor matches. Direct seed-frame
-              revisit evidence may recover a failed registration or propose a bounded correction for an
-              already registered camera.
-            </li>
-            <li>
-              Triangulate non-seed tracks from accepted registered views and reject weak new geometry.
-            </li>
-            <li>
-              Jointly refine supported landmarks and non-seed camera poses with bounded robust bundle
-              adjustment. A revisit correction is retained only when this downstream pass also accepts
-              it and does not move the endpoint away from its closure evidence.
-            </li>
+            <li>Sample the video locally at your requested rate, bounded by the frame cap.</li>
+            <li>Match local features and build multi-frame tracks in Rust/WASM.</li>
+            <li>Register supported cameras, triangulate sparse points, and refine accepted geometry.</li>
           </ol>
           <p className="method-note">
-            A selected frame needs at least eight triangulated seed landmarks before initial PnP is
-            attempted, then must pass inlier-ratio and reprojection-error gates. Revisit evidence is
-            deliberately bounded: only strong mutual non-adjacent matches to the calibrated seed frame
-            can create recovery or closure PnP evidence, and an existing pose is corrected only for a
-            meaningful but limited disagreement. New landmarks require genuine support from an accepted
-            additional view. Bundle adjustment uses only supported observations, Huber-weighted
-            reprojection residuals, bounded Gauss–Newton updates, and a no-regression acceptance
-            boundary. Both seed cameras remain fixed, preserving the arbitrary monocular coordinate
-            frame. Arbitrary non-seed pose-graph constraints and cross-video tracks remain outside this
-            slice.
+            Camera squares are interactive. Selecting one highlights the corresponding sampled frame
+            below.
           </p>
         </aside>
       </section>
@@ -253,92 +319,45 @@ export default function Home() {
               <h2>Sampled frames</h2>
             </div>
             <p>
-              {frames.length} local frame samples at {frames[0].width} × {frames[0].height}
+              {frames.length} frames · {activeRun?.samplingFps.toFixed(2)} target FPS · cap{" "}
+              {activeRun?.frameCap}
             </p>
           </div>
           <div className="frame-strip">
             {frames.map((frame, index) => (
-              <figure key={`${frame.time}-${index}`}>
+              <button
+                key={`${frame.time}-${index}`}
+                type="button"
+                className={`frame-card${selectedFrameIndex === index ? " frame-card-selected" : ""}`}
+                aria-pressed={selectedFrameIndex === index}
+                onClick={() => setSelectedFrameIndex(index)}
+              >
                 <img src={frame.thumbnail} alt={`Sampled frame ${index + 1}`} />
-                <figcaption>{frame.time.toFixed(2)}s</figcaption>
-              </figure>
+                <span>Frame {index + 1}</span>
+                <small>{frame.time.toFixed(2)}s</small>
+              </button>
             ))}
           </div>
+          {selectedFrameIndex !== null ? (
+            <p className="selection-summary">
+              Frame {selectedFrameIndex + 1}
+              {selectedIsSeed ? " · seed" : ""}
+              {selectedIsKeyframe ? " · keyframe" : ""}
+              {selectedCamera ? " · registered camera" : " · no registered camera"}
+            </p>
+          ) : null}
         </section>
       ) : null}
 
       {reconstruction ? (
-        <>
-          {reconstruction.calibrated_pair ? (
-            <section className="section-block">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Calibrated geometry evidence</p>
-                  <h2>Selected two-view seed pair</h2>
-                </div>
-                <p>
-                  Frame {reconstruction.calibrated_pair.from_frame + 1} →{" "}
-                  {reconstruction.calibrated_pair.to_frame + 1}
-                </p>
-              </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Inliers</th>
-                      <th>Inlier ratio</th>
-                      <th>Focal estimate</th>
-                      <th>Sampson error</th>
-                      <th>Reprojection error</th>
-                      <th>Triangulation angle</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>
-                        {reconstruction.calibrated_pair.inliers} /{" "}
-                        {reconstruction.calibrated_pair.matches}
-                      </td>
-                      <td>{(reconstruction.calibrated_pair.inlier_ratio * 100).toFixed(0)}%</td>
-                      <td>{reconstruction.calibrated_pair.focal_pixels.toFixed(1)} px</td>
-                      <td>
-                        {reconstruction.calibrated_pair.median_sampson_error_pixels.toFixed(2)} px
-                      </td>
-                      <td>
-                        {reconstruction.calibrated_pair.median_reprojection_error_pixels.toFixed(2)} px
-                      </td>
-                      <td>
-                        {reconstruction.calibrated_pair.median_triangulation_angle_degrees.toFixed(2)}°
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ) : null}
-
-          <section className="section-block">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Multi-view evidence</p>
-                <h2>Feature-track graph and keyframes</h2>
-              </div>
-              <p>Rust-owned tracking and keyframe diagnostics</p>
-            </div>
+        <details className="section-block diagnostics">
+          <summary>Technical reconstruction evidence</summary>
+          <div className="diagnostics-body">
             <div className="table-wrap">
               <table>
-                <thead>
-                  <tr>
-                    <th>Selected keyframes</th>
-                    <th>Feature tracks</th>
-                    <th>Tracks across 3+ frames</th>
-                    <th>Longest track</th>
-                    <th>Track observations</th>
-                    <th>Linked adjacent pairs</th>
-                  </tr>
-                </thead>
                 <tbody>
                   <tr>
+                    <th>Selected keyframes</th>
                     <td>
                       {reconstruction.multi_view.keyframes.length > 0
                         ? reconstruction.multi_view.keyframes
@@ -346,377 +365,56 @@ export default function Home() {
                             .join(", ")
                         : "None"}
                     </td>
+                  </tr>
+                  <tr>
+                    <th>Registered cameras</th>
+                    <td>{reconstruction.cameras.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Feature tracks</th>
                     <td>{reconstruction.multi_view.track_count}</td>
-                    <td>{reconstruction.multi_view.tracks_three_plus}</td>
-                    <td>{reconstruction.multi_view.longest_track} frames</td>
-                    <td>{reconstruction.multi_view.observations}</td>
+                  </tr>
+                  <tr>
+                    <th>Sparse points</th>
+                    <td>{reconstruction.points.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Coarse dense points</th>
+                    <td>{reconstruction.dense_points.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Seed pair</th>
                     <td>
-                      {reconstruction.multi_view.linked_pairs} / {reconstruction.pairs.length}
+                      {reconstruction.calibrated_pair
+                        ? `Frame ${reconstruction.calibrated_pair.from_frame + 1} → Frame ${reconstruction.calibrated_pair.to_frame + 1}`
+                        : "No calibrated seed pair"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Bundle adjustment</th>
+                    <td>
+                      {reconstruction.multi_view.bundle_adjustment.accepted
+                        ? "Accepted"
+                        : reconstruction.multi_view.bundle_adjustment.attempted
+                          ? "Rejected; previous geometry retained"
+                          : "Not run"}
                     </td>
                   </tr>
                 </tbody>
               </table>
             </div>
-          </section>
-
-          {reconstruction.multi_view.registration_candidates.length > 0 ? (
-            <section className="section-block">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Registration evidence</p>
-                  <h2>Seed-landmark PnP acceptance</h2>
-                </div>
-                <p>
-                  Initial adjacent-track evidence stays visible even when bounded revisit recovery
-                  later supplies a stronger direct seed-frame registration.
-                </p>
-              </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Keyframe</th>
-                      <th>Initial tracked seed landmarks</th>
-                      <th>PnP inliers</th>
-                      <th>Median reprojection error</th>
-                      <th>Registration</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {reconstruction.multi_view.registration_candidates.map((candidate) => {
-                      const registered = reconstruction.registered_views.find(
-                        (view) => view.frame_index === candidate.frame_index,
-                      );
-                      return (
-                        <tr key={candidate.frame_index}>
-                          <td>Frame {candidate.frame_index + 1}</td>
-                          <td>{candidate.seed_landmark_correspondences}</td>
-                          <td>
-                            {registered
-                              ? `${registered.inliers} / ${registered.correspondences} (${(
-                                  registered.inlier_ratio * 100
-                                ).toFixed(0)}%)`
-                              : "—"}
-                          </td>
-                          <td>
-                            {registered
-                              ? `${registered.median_reprojection_error_pixels.toFixed(2)} px`
-                              : "—"}
-                          </td>
-                          <td>
-                            {registered
-                              ? registered.recovered_from_revisit
-                                ? "Registered via revisit recovery"
-                                : "Registered from adjacent tracks"
-                              : candidate.pnp_ready
-                                ? "Rejected by robust PnP gates"
-                                : "Needs at least 8 initial tracked seed landmarks"}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ) : null}
-
-          {reconstruction.revisits.candidates.length > 0 ||
-          reconstruction.revisits.recoveries.length > 0 ||
-          reconstruction.revisits.closures.length > 0 ? (
-            <section className="section-block">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Revisit evidence</p>
-                  <h2>Non-adjacent screening, recovery, and bounded closure</h2>
-                </div>
-                <p>
-                  Mutual descriptor evidence can trigger strict seed-frame PnP; geometry changes only
-                  after the downstream acceptance gates also hold.
-                </p>
-              </div>
-              {reconstruction.revisits.candidates.length > 0 ? (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Non-adjacent pair</th>
-                        <th>Mutual matches</th>
-                        <th>Overlap</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reconstruction.revisits.candidates.map((candidate) => (
-                        <tr key={`${candidate.from_frame}-${candidate.to_frame}`}>
-                          <td>
-                            Frame {candidate.from_frame + 1} → Frame {candidate.to_frame + 1}
-                          </td>
-                          <td>{candidate.matches}</td>
-                          <td>{(candidate.overlap_ratio * 100).toFixed(0)}%</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
-              {reconstruction.revisits.recoveries.length > 0 ? (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Recovery target</th>
-                        <th>Seed revisit matches</th>
-                        <th>3D ↔ 2D correspondences</th>
-                        <th>PnP inliers</th>
-                        <th>Median reprojection error</th>
-                        <th>Decision</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reconstruction.revisits.recoveries.map((recovery) => (
-                        <tr key={recovery.frame_index}>
-                          <td>
-                            Frame {recovery.frame_index + 1} from Frame {recovery.source_frame_index + 1}
-                          </td>
-                          <td>{recovery.matches}</td>
-                          <td>{recovery.correspondences}</td>
-                          <td>{recovery.accepted ? recovery.inliers : "—"}</td>
-                          <td>{errorValue(recovery.median_reprojection_error_pixels)}</td>
-                          <td>{recovery.accepted ? "Recovered" : "Rejected by robust PnP gates"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
-              {reconstruction.revisits.closures.length > 0 ? (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Closure target</th>
-                        <th>Seed revisit matches</th>
-                        <th>3D ↔ 2D correspondences</th>
-                        <th>PnP inliers</th>
-                        <th>Median reprojection error</th>
-                        <th>Center disagreement</th>
-                        <th>Rotation disagreement</th>
-                        <th>Decision</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reconstruction.revisits.closures.map((closure) => (
-                        <tr key={closure.frame_index}>
-                          <td>
-                            Frame {closure.frame_index + 1} from Frame {closure.source_frame_index + 1}
-                          </td>
-                          <td>{closure.matches}</td>
-                          <td>{closure.correspondences}</td>
-                          <td>{closure.inliers || "—"}</td>
-                          <td>{errorValue(closure.median_reprojection_error_pixels)}</td>
-                          <td>
-                            {closure.camera_center_delta_seed_baselines === null
-                              ? "—"
-                              : `${closure.camera_center_delta_seed_baselines.toFixed(3)} seed baselines`}
-                          </td>
-                          <td>
-                            {closure.rotation_delta_degrees === null
-                              ? "—"
-                              : `${closure.rotation_delta_degrees.toFixed(2)}°`}
-                          </td>
-                          <td>
-                            {closure.accepted
-                              ? "Integrated through bundle adjustment"
-                              : "Rejected or rolled back"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
-            </section>
-          ) : null}
-
-          {reconstruction.calibrated_pair ? (
-            <section className="section-block">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Triangulation evidence</p>
-                  <h2>New-landmark acceptance</h2>
-                </div>
-                <p>Only non-seed tracks observed by an accepted additional view are eligible</p>
-              </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Candidate tracks</th>
-                      <th>Accepted new landmarks</th>
-                      <th>Supporting observations</th>
-                      <th>Median reprojection error</th>
-                      <th>Median triangulation angle</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>{reconstruction.multi_view.new_landmarks.candidate_tracks}</td>
-                      <td>{reconstruction.multi_view.new_landmarks.accepted_landmarks}</td>
-                      <td>{reconstruction.multi_view.new_landmarks.supporting_observations}</td>
-                      <td>
-                        {reconstruction.multi_view.new_landmarks.median_reprojection_error_pixels ===
-                        null
-                          ? "—"
-                          : `${reconstruction.multi_view.new_landmarks.median_reprojection_error_pixels.toFixed(2)} px`}
-                      </td>
-                      <td>
-                        {reconstruction.multi_view.new_landmarks
-                          .median_triangulation_angle_degrees === null
-                          ? "—"
-                          : `${reconstruction.multi_view.new_landmarks.median_triangulation_angle_degrees.toFixed(2)}°`}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ) : null}
-
-          {reconstruction.calibrated_pair ? (
-            <section className="section-block">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Joint optimization evidence</p>
-                  <h2>Bundle adjustment</h2>
-                </div>
-                <p>The two seed cameras are fixed; candidate geometry is adopted only if it improves.</p>
-              </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Status</th>
-                      <th>Iterations</th>
-                      <th>Supported observations</th>
-                      <th>Optimized cameras</th>
-                      <th>Optimized landmarks</th>
-                      <th>Median reprojection</th>
-                      <th>RMSE reprojection</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>
-                        {reconstruction.multi_view.bundle_adjustment.accepted
-                          ? "Accepted"
-                          : reconstruction.multi_view.bundle_adjustment.attempted
-                            ? "Rejected; pre-BA geometry retained"
-                            : "Not run"}
-                      </td>
-                      <td>{reconstruction.multi_view.bundle_adjustment.iterations}</td>
-                      <td>{reconstruction.multi_view.bundle_adjustment.observations}</td>
-                      <td>{reconstruction.multi_view.bundle_adjustment.optimized_cameras}</td>
-                      <td>{reconstruction.multi_view.bundle_adjustment.optimized_landmarks}</td>
-                      <td>
-                        {errorValue(
-                          reconstruction.multi_view.bundle_adjustment
-                            .initial_median_reprojection_error_pixels,
-                        )}{" "}
-                        →{" "}
-                        {errorValue(
-                          reconstruction.multi_view.bundle_adjustment
-                            .final_median_reprojection_error_pixels,
-                        )}
-                      </td>
-                      <td>
-                        {errorValue(
-                          reconstruction.multi_view.bundle_adjustment
-                            .initial_rmse_reprojection_error_pixels,
-                        )}{" "}
-                        →{" "}
-                        {errorValue(
-                          reconstruction.multi_view.bundle_adjustment
-                            .final_rmse_reprojection_error_pixels,
-                        )}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ) : null}
-
-          {reconstruction.warnings.length > 0 ? (
-            <section className="section-block">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Interpretation</p>
-                  <h2>Reconstruction notes</h2>
-                </div>
-              </div>
+            {reconstruction.warnings.length > 0 ? (
               <ul className="warnings">
                 {reconstruction.warnings.map((warning) => (
                   <li key={warning}>{warning}</li>
                 ))}
               </ul>
-            </section>
-          ) : null}
-
-          <section className="section-block">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Matching evidence</p>
-                <h2>Adjacent-frame screening</h2>
-              </div>
-              <p>
-                {reconstruction.calibrated_pair
-                  ? `${reconstruction.points.length} accepted sparse points · ${reconstruction.cameras.length} accepted cameras`
-                  : `${reconstruction.points.length} fallback sparse points · ${reconstruction.cameras.length} conservative camera estimates`}
-              </p>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Pair</th>
-                    <th>Features</th>
-                    <th>Matches</th>
-                    <th>Overlap</th>
-                    <th>Median motion</th>
-                    <th>Parallax residual</th>
-                    <th>Keyframe</th>
-                    <th>Screening</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reconstruction.pairs.map((pair) => (
-                    <tr key={pair.from_frame}>
-                      <td>
-                        {pair.from_frame + 1} → {pair.to_frame + 1}
-                      </td>
-                      <td>
-                        {pair.features_from} / {pair.features_to}
-                      </td>
-                      <td>{pair.matches}</td>
-                      <td>{(pair.overlap_ratio * 100).toFixed(0)}%</td>
-                      <td>{pair.median_motion.toFixed(2)} px</td>
-                      <td>{pair.median_parallax_residual.toFixed(2)} px</td>
-                      <td>
-                        {reconstruction.multi_view.keyframes.includes(pair.to_frame)
-                          ? "Selected"
-                          : "Skipped"}
-                      </td>
-                      <td>{pair.low_parallax ? "Weak adjacent baseline" : "RANSAC candidate"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </>
+            ) : null}
+          </div>
+        </details>
       ) : null}
 
-      <footer>All video processing is local. The static GitHub Pages demo has no upload endpoint.</footer>
+      <footer>All video processing is local. The GitHub Pages demo has no upload endpoint.</footer>
     </main>
   );
 }

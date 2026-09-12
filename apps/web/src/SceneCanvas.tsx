@@ -5,6 +5,8 @@ import type { ReconstructionResult } from "./reconstruction";
 
 type SceneCanvasProps = {
   reconstruction: ReconstructionResult;
+  selectedFrameIndex?: number | null;
+  onSelectFrame?: (frameIndex: number) => void;
 };
 
 type ViewState = {
@@ -13,9 +15,29 @@ type ViewState = {
   zoom: number;
 };
 
-export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
+type CameraHitTarget = {
+  frameIndex: number;
+  x: number;
+  y: number;
+  radius: number;
+};
+
+type DragState = {
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
+};
+
+export function SceneCanvas({
+  reconstruction,
+  selectedFrameIndex = null,
+  onSelectFrame,
+}: SceneCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const dragRef = useRef<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const cameraHitTargetsRef = useRef<CameraHitTarget[]>([]);
   const [view, setView] = useState<ViewState>({ yaw: -0.45, pitch: 0.18, zoom: 1 });
 
   const bounds = useMemo(() => {
@@ -104,38 +126,58 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
       .sort((a, b) => b.projected.z - a.projected.z);
 
     for (const { point, projected } of projectedPoints) {
-      const radius = Math.max(
-        0.7 * ratio,
-        Math.min(2.6 * ratio, projected.scale * 0.012),
-      );
+      const radius = Math.max(0.7 * ratio, Math.min(2.6 * ratio, projected.scale * 0.012));
       context.beginPath();
       context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
       context.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${0.35 + point.confidence * 0.65})`;
       context.fill();
     }
 
-    context.lineWidth = 1.5 * ratio;
-    context.strokeStyle = "rgba(111, 220, 255, 0.9)";
-    context.beginPath();
-    reconstruction.cameras.forEach((camera, index) => {
-      const projected = project(camera.x, camera.y, camera.z);
-      if (index === 0) context.moveTo(projected.x, projected.y);
-      else context.lineTo(projected.x, projected.y);
-    });
-    context.stroke();
+    const projectedCameras = reconstruction.cameras
+      .map((camera) => ({ camera, projected: project(camera.x, camera.y, camera.z) }))
+      .filter(({ projected }) => projected.z > 0.05);
 
-    for (const camera of reconstruction.cameras) {
-      const projected = project(camera.x, camera.y, camera.z);
-      const size = Math.max(3 * ratio, Math.min(7 * ratio, projected.scale * 0.025));
-      context.strokeStyle = "rgba(240, 247, 255, 0.95)";
+    if (projectedCameras.length > 0) {
+      context.lineWidth = 1.5 * ratio;
+      context.strokeStyle = "rgba(111, 220, 255, 0.78)";
+      context.beginPath();
+      projectedCameras.forEach(({ projected }, index) => {
+        if (index === 0) context.moveTo(projected.x, projected.y);
+        else context.lineTo(projected.x, projected.y);
+      });
+      context.stroke();
+    }
+
+    const hitTargets: CameraHitTarget[] = [];
+    for (const { camera, projected } of projectedCameras) {
+      const size = Math.max(5 * ratio, Math.min(10 * ratio, projected.scale * 0.032));
+      const selected = camera.frame_index === selectedFrameIndex;
+      context.lineWidth = (selected ? 3 : 1.5) * ratio;
+      context.strokeStyle = selected ? "rgba(111, 220, 255, 1)" : "rgba(240, 247, 255, 0.95)";
+      if (selected) {
+        context.fillStyle = "rgba(111, 220, 255, 0.18)";
+        context.fillRect(
+          projected.x - size * 0.7,
+          projected.y - size * 0.7,
+          size * 1.4,
+          size * 1.4,
+        );
+      }
       context.strokeRect(
         projected.x - size * 0.5,
         projected.y - size * 0.5,
         size,
         size,
       );
+      hitTargets.push({
+        frameIndex: camera.frame_index,
+        x: projected.x / ratio,
+        y: projected.y / ratio,
+        radius: Math.max(12, size / ratio + 7),
+      });
     }
-  }, [bounds, reconstruction, view]);
+    cameraHitTargetsRef.current = hitTargets;
+  }, [bounds, reconstruction, selectedFrameIndex, view]);
 
   useEffect(() => {
     draw();
@@ -161,21 +203,52 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
         className="scene-canvas"
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
-          dragRef.current = { x: event.clientX, y: event.clientY };
+          dragRef.current = {
+            x: event.clientX,
+            y: event.clientY,
+            startX: event.clientX,
+            startY: event.clientY,
+            moved: false,
+          };
         }}
         onPointerMove={(event) => {
-          if (!dragRef.current) return;
-          const dx = event.clientX - dragRef.current.x;
-          const dy = event.clientY - dragRef.current.y;
-          dragRef.current = { x: event.clientX, y: event.clientY };
+          const drag = dragRef.current;
+          if (!drag) return;
+          const totalDistance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+          const moved = drag.moved || totalDistance > 2;
+          const dx = event.clientX - (drag.moved ? drag.x : drag.startX);
+          const dy = event.clientY - (drag.moved ? drag.y : drag.startY);
+          dragRef.current = {
+            ...drag,
+            x: event.clientX,
+            y: event.clientY,
+            moved,
+          };
+          if (!moved) return;
           setView((current) => ({
             ...current,
             yaw: current.yaw + dx * 0.008,
             pitch: Math.max(-1.2, Math.min(1.2, current.pitch + dy * 0.008)),
           }));
         }}
-        onPointerUp={() => {
+        onPointerUp={(event) => {
+          const drag = dragRef.current;
           dragRef.current = null;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          if (!drag || drag.moved || !onSelectFrame) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          const x = event.clientX - rect.left;
+          const y = event.clientY - rect.top;
+          const selected = cameraHitTargetsRef.current
+            .map((target) => ({
+              target,
+              distance: Math.hypot(target.x - x, target.y - y),
+            }))
+            .filter(({ target, distance }) => distance <= target.radius)
+            .sort((a, b) => a.distance - b.distance)[0];
+          if (selected) onSelectFrame(selected.target.frameIndex);
         }}
         onPointerCancel={() => {
           dragRef.current = null;
@@ -184,27 +257,12 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
           event.preventDefault();
           setView((current) => ({
             ...current,
-            zoom: Math.max(
-              0.45,
-              Math.min(3.5, current.zoom * Math.exp(-event.deltaY * 0.001)),
-            ),
+            zoom: Math.max(0.45, Math.min(3.5, current.zoom * Math.exp(-event.deltaY * 0.001))),
           }));
         }}
-        aria-label="Interactive 3D reconstruction with sparse landmarks, accepted coarse dense depth samples, and registered cameras. Drag to orbit and use the mouse wheel to zoom."
+        aria-label="Interactive 3D reconstruction. Drag to orbit, use the mouse wheel to zoom, or click a camera square to select its source frame."
       />
-      <div
-        aria-live="polite"
-        style={{
-          position: "absolute",
-          top: 14,
-          left: 16,
-          right: 16,
-          color: "var(--muted)",
-          fontSize: "0.76rem",
-          lineHeight: 1.4,
-          pointerEvents: "none",
-        }}
-      >
+      <div className="viewer-diagnostic" aria-live="polite">
         {denseDiagnostic}
       </div>
     </>
