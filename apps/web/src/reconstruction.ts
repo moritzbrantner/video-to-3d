@@ -194,29 +194,17 @@ async function loadWasm(): Promise<WasmModule> {
   return wasmPromise;
 }
 
-function reconstructionOptions(frames: SampledFrame[]) {
-  const sampledWidth = frames[0]?.width ?? 0;
-  // A fixed 42 px search window only covers about 12% of the 360 px analysis frame.
-  // Ordinary handheld pans can move farther than that between 1.25 FPS samples, which
-  // breaks adjacent tracks before Rust can register later cameras. Keep the search
-  // bounded, but scale it with the sampled frame width and tighten the descriptor
-  // ratio so the larger window does not accept repeated facade texture too eagerly.
-  const matchRadius = Math.min(112, Math.max(42, Math.round(sampledWidth * 0.28)));
-
-  return {
-    max_features: 320,
-    min_feature_distance: 7,
-    descriptor_radius: 3,
-    match_radius: matchRadius,
-    max_descriptor_distance: 36,
-    ratio_threshold: matchRadius > 42 ? 0.78 : 0.82,
-  };
-}
-
 export async function reconstructFrames(frames: SampledFrame[]): Promise<ReconstructionResult> {
   const wasm = await loadWasm();
   return wasm.reconstruct_sequence({
     frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
-    options: reconstructionOptions(frames),
+    options: {
+      max_features: 320,
+      min_feature_distance: 7,
+      descriptor_radius: 3,
+      match_radius: 42,
+      max_descriptor_distance: 36,
+      ratio_threshold: 0.82,
+    },
   });
 }
