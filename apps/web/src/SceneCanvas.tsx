@@ -322,10 +322,14 @@ export function SceneCanvas({
     ? `Registered geometry: ${reconstruction.cameras.length} accepted camera poses`
     : `Approximate motion track only: ${reconstruction.cameras.length} sampled poses; no calibrated seed pair was accepted`;
 
+  const completedSurfaceDiagnostic =
+    reconstruction.dense.surface_completed_points > 0
+      ? `, including ${reconstruction.dense.surface_completed_points} locally proposed samples that re-passed multi-view verification`
+      : "";
   const denseDiagnostic = reconstruction.dense.skip_reason
     ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
     : reconstruction.dense.accepted_points > 0
-      ? `Fused dense depth: ${reconstruction.dense.accepted_points} scene points from ${reconstruction.dense.fusion_input_observations} reciprocal-consistent multi-view observations; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates and spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
+      ? `Dense surface evidence: ${reconstruction.dense.accepted_points} accepted scene samples${completedSurfaceDiagnostic}; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates and spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
       : reconstruction.dense.reciprocal_consistent_points > 0
         ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations)`
         : reconstruction.dense.reciprocal_checked_points > 0
@@ -348,7 +352,7 @@ export function SceneCanvas({
       : "Surface model unavailable; the points shown are reconstruction evidence, not the final model.";
 
   const primaryDiagnostic = hasSurfaceModel && renderMode === "model"
-    ? meshDiagnostic
+    ? `${meshDiagnostic} · ${denseDiagnostic}`
     : `${cameraDiagnostic} · ${denseDiagnostic} · ${meshDiagnostic}`;
 
   return (
@@ -421,8 +425,8 @@ export function SceneCanvas({
         <div
           style={{
             position: "absolute",
-            top: 14,
             right: 14,
+            bottom: 52,
             zIndex: 2,
             display: "flex",
             gap: 6,
