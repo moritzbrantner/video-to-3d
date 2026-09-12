@@ -3,7 +3,7 @@ import init, {
 } from "../apps/web/public/wasm/video_to_3d_wasm.js";
 import {
   assertReconstructionContract,
-  type ReconstructionResult,
+  normalizeWasmReconstruction,
 } from "../apps/web/src/reconstruction";
 
 const width = 48;
@@ -20,20 +20,22 @@ const wasmPath = new URL(
 const wasmBytes = await Bun.file(wasmPath).arrayBuffer();
 await init({ module_or_path: wasmBytes });
 
-const result = reconstruct_sequence({
-  frames: [
-    { width, height, rgba },
-    { width, height, rgba },
-  ],
-  options: {
-    max_features: 320,
-    min_feature_distance: 7,
-    descriptor_radius: 3,
-    match_radius: 42,
-    max_descriptor_distance: 36,
-    ratio_threshold: 0.82,
-  },
-}) as ReconstructionResult;
+const result = normalizeWasmReconstruction(
+  reconstruct_sequence({
+    frames: [
+      { width, height, rgba },
+      { width, height, rgba },
+    ],
+    options: {
+      max_features: 320,
+      min_feature_distance: 7,
+      descriptor_radius: 3,
+      match_radius: 42,
+      max_descriptor_distance: 36,
+      ratio_threshold: 0.82,
+    },
+  }),
+);
 
 assertReconstructionContract(result, 2);
 
