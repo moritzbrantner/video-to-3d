@@ -24,6 +24,7 @@ pub struct DenseStats {
     pub skip_reason: Option<String>,
     pub reference_frame: Option<usize>,
     pub source_views: usize,
+    pub source_frames: Vec<usize>,
     pub sampled_pixels: usize,
     pub depth_hypotheses: usize,
     pub accepted_points: usize,
@@ -223,6 +224,10 @@ pub(super) fn estimate_depth_points(
             },
         )
         .collect();
+    let source_frames = source_views
+        .iter()
+        .map(|source| source.camera.frame_index)
+        .collect();
 
     let stride = (width.min(height) / 48).clamp(4, 12) as usize;
     let border = (PATCH_RADIUS + 2) as u32;
@@ -407,6 +412,7 @@ pub(super) fn estimate_depth_points(
             skip_reason: None,
             reference_frame: Some(reference.frame_index),
             source_views: source_views.len(),
+            source_frames,
             sampled_pixels,
             depth_hypotheses: DEPTH_HYPOTHESES,
             accepted_points: points.len(),
@@ -1180,6 +1186,7 @@ mod tests {
         assert!(result.stats.skip_reason.is_none());
         assert_eq!(result.stats.reference_frame, Some(0));
         assert_eq!(result.stats.source_views, 2);
+        assert_eq!(result.stats.source_frames, vec![1, 2]);
         assert_eq!(
             result.stats.reciprocal_checked_points,
             result.stats.reciprocal_consistent_points + result.stats.reciprocal_rejected_points

@@ -3,6 +3,7 @@
 import { type ChangeEvent, useState } from "react";
 import {
   reconstructFrames,
+  type FrameCameraState,
   type ReconstructionResult,
   type SampledFrame,
 } from "../src/reconstruction";
@@ -61,6 +62,51 @@ function phaseLabel(phase: RunPhase): string {
     case "error":
       return "Failed";
   }
+}
+
+function registrationStatusLabel(state: FrameCameraState | null): string {
+  if (!state) return "awaiting reconstruction";
+  switch (state.registration_status) {
+    case "seed":
+      return "seed camera";
+    case "registered":
+      return state.recovered_from_revisit ? "registered · revisit" : "registered";
+    case "insufficient_correspondences":
+      return `insufficient correspondences · ${state.correspondences}/8`;
+    case "pnp_rejected":
+      return `PnP rejected · ${state.correspondences} correspondences`;
+    case "low_parallax":
+      return "low parallax";
+    case "not_selected":
+      return state.camera_kind === "approximate_motion" ? "approximate motion" : "not selected";
+  }
+}
+
+function selectedFrameEvidence(state: FrameCameraState | null): string[] {
+  if (!state) return [];
+  const details = [registrationStatusLabel(state)];
+  if (state.correspondences > 0) {
+    details.push(`${state.correspondences} correspondences`);
+  }
+  if (state.inliers > 0) {
+    details.push(`${state.inliers} inliers`);
+  }
+  if (state.median_reprojection_error_pixels !== null) {
+    details.push(`${state.median_reprojection_error_pixels.toFixed(2)} px median reprojection`);
+  }
+  if (state.camera_kind === "seed" || state.camera_kind === "registered") {
+    if (state.bundle_adjustment === "accepted") {
+      details.push("bundle adjustment accepted");
+    } else if (state.bundle_adjustment === "rejected") {
+      details.push("bundle adjustment rejected; previous geometry retained");
+    }
+  }
+  if (state.dense_role) {
+    details.push(`dense ${state.dense_role}`);
+  } else if (state.dense_ineligibility_reason) {
+    details.push(`dense-ineligible: ${state.dense_ineligibility_reason}`);
+  }
+  return details;
 }
 
 export default function Home() {
@@ -143,23 +189,16 @@ export default function Home() {
   const error = activeRun?.error ?? "";
   const selectedFrame =
     selectedFrameIndex === null ? null : (frames[selectedFrameIndex] ?? null);
-  const hasRegisteredGeometry = Boolean(reconstruction?.calibrated_pair);
-  const selectedPose =
+  const selectedFrameState =
     selectedFrameIndex === null
       ? null
-      : (reconstruction?.cameras.find((camera) => camera.frame_index === selectedFrameIndex) ?? null);
-  const selectedCamera = hasRegisteredGeometry ? selectedPose : null;
-  const selectedMotionSample = hasRegisteredGeometry ? null : selectedPose;
+      : (reconstruction?.camera_state.frames[selectedFrameIndex] ?? null);
+  const hasRegisteredGeometry =
+    reconstruction?.camera_state.calibrated_seed_cameras.length === 2;
   const selectedIsKeyframe =
     selectedFrameIndex !== null &&
     Boolean(reconstruction?.multi_view.keyframes.includes(selectedFrameIndex));
-  const selectedIsSeed =
-    selectedFrameIndex !== null &&
-    Boolean(
-      reconstruction?.calibrated_pair &&
-        (reconstruction.calibrated_pair.from_frame === selectedFrameIndex ||
-          reconstruction.calibrated_pair.to_frame === selectedFrameIndex),
-    );
+  const selectedEvidence = selectedFrameEvidence(selectedFrameState);
 
   const status = processingRun
     ? processingRun.phase === "sampling"
@@ -178,8 +217,8 @@ export default function Home() {
           <p className="eyebrow">Local browser reconstruction</p>
           <h1>Video to 3D</h1>
           <p className="lede">
-            Sample a moving-camera video, reconstruct sparse geometry in Rust/WASM, and inspect which
-            source frames became registered cameras.
+            Sample a moving-camera video, reconstruct geometry in Rust/WASM, and inspect why each
+            source frame did or did not become an accepted camera.
           </p>
         </div>
         <div className="run-controls">
@@ -308,9 +347,10 @@ export default function Home() {
             <li>Register supported cameras, triangulate sparse points, and refine accepted geometry.</li>
           </ol>
           <p className="method-note">
-            Squares are accepted registered cameras. Before a calibrated seed pair exists, the dim
-            circular path is only an approximate adjacent-frame motion trace. Both marker types remain
-            selectable so you can inspect their source frames.
+            Squares are accepted camera geometry: blue-center squares are the calibrated seed pair and
+            plain squares are additional PnP or revisit registrations. Before calibration, dim circles
+            are only approximate motion samples. Dense-eligible cameras are tracked as a separate
+            subset and never inferred from the display path.
           </p>
         </aside>
       </section>
@@ -328,31 +368,34 @@ export default function Home() {
             </p>
           </div>
           <div className="frame-strip">
-            {frames.map((frame, index) => (
-              <button
-                key={`${frame.time}-${index}`}
-                type="button"
-                className={`frame-card${selectedFrameIndex === index ? " frame-card-selected" : ""}`}
-                aria-pressed={selectedFrameIndex === index}
-                onClick={() => setSelectedFrameIndex(index)}
-              >
-                <img src={frame.thumbnail} alt={`Sampled frame ${index + 1}`} />
-                <span>Frame {index + 1}</span>
-                <small>{frame.time.toFixed(2)}s</small>
-              </button>
-            ))}
+            {frames.map((frame, index) => {
+              const frameState = reconstruction?.camera_state.frames[index] ?? null;
+              const frameStatus = registrationStatusLabel(frameState);
+              return (
+                <button
+                  key={`${frame.time}-${index}`}
+                  type="button"
+                  className={`frame-card${selectedFrameIndex === index ? " frame-card-selected" : ""}`}
+                  aria-pressed={selectedFrameIndex === index}
+                  aria-label={`Frame ${index + 1}, ${frame.time.toFixed(2)} seconds, ${frameStatus}`}
+                  onClick={() => setSelectedFrameIndex(index)}
+                >
+                  <img src={frame.thumbnail} alt={`Sampled frame ${index + 1}`} />
+                  <span>Frame {index + 1}</span>
+                  <small>{frame.time.toFixed(2)}s</small>
+                  <small className="frame-card-status">{frameStatus}</small>
+                </button>
+              );
+            })}
           </div>
           {selectedFrameIndex !== null ? (
-            <p className="selection-summary">
-              Frame {selectedFrameIndex + 1}
-              {selectedIsSeed ? " · seed" : ""}
-              {selectedIsKeyframe ? " · keyframe" : ""}
-              {selectedCamera
-                ? " · registered camera"
-                : selectedMotionSample
-                  ? " · approximate motion sample"
-                  : " · no camera pose"}
-            </p>
+            <div className="selection-summary">
+              <strong>
+                Frame {selectedFrameIndex + 1}
+                {selectedIsKeyframe ? " · keyframe" : ""}
+              </strong>
+              {selectedEvidence.length > 0 ? <span>{selectedEvidence.join(" · ")}</span> : null}
+            </div>
           ) : null}
         </section>
       ) : null}
@@ -375,15 +418,27 @@ export default function Home() {
                     </td>
                   </tr>
                   <tr>
-                    <th>Registered cameras</th>
-                    <td>{hasRegisteredGeometry ? reconstruction.cameras.length : 0}</td>
+                    <th>Approximate motion samples</th>
+                    <td>{reconstruction.camera_state.approximate_motion_samples.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Calibrated seed cameras</th>
+                    <td>{reconstruction.camera_state.calibrated_seed_cameras.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Additional registered cameras</th>
+                    <td>{reconstruction.camera_state.registered_cameras.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Dense-eligible cameras</th>
+                    <td>{reconstruction.camera_state.dense_eligible_cameras.length}</td>
                   </tr>
                   <tr>
                     <th>Camera-track display</th>
                     <td>
                       {hasRegisteredGeometry
-                        ? "Accepted registered geometry"
-                        : `${reconstruction.cameras.length} approximate motion samples (not registered)`}
+                        ? "Accepted seed and registered camera geometry"
+                        : `${reconstruction.camera_state.approximate_motion_samples.length} approximate motion samples (not registered)`}
                     </td>
                   </tr>
                   <tr>
@@ -408,6 +463,20 @@ export default function Home() {
                       {reconstruction.calibrated_pair
                         ? `Frame ${reconstruction.calibrated_pair.from_frame + 1} → Frame ${reconstruction.calibrated_pair.to_frame + 1}`
                         : "No calibrated seed pair"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Dense camera set</th>
+                    <td>
+                      {reconstruction.dense.attempted && reconstruction.dense.reference_frame !== null
+                        ? `Reference frame ${reconstruction.dense.reference_frame + 1}; source frames ${
+                            reconstruction.dense.source_frames.length > 0
+                              ? reconstruction.dense.source_frames
+                                  .map((frameIndex) => frameIndex + 1)
+                                  .join(", ")
+                              : "none"
+                          }`
+                        : reconstruction.dense.skip_reason ?? "Not run"}
                     </td>
                   </tr>
                   <tr>

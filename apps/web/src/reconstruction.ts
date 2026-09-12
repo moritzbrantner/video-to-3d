@@ -143,6 +143,7 @@ export type DenseStats = {
   skip_reason: string | null;
   reference_frame: number | null;
   source_views: number;
+  source_frames: number[];
   sampled_pixels: number;
   depth_hypotheses: number;
   accepted_points: number;
@@ -188,6 +189,38 @@ export type MeshStats = {
   rejected_degenerate: number;
 };
 
+export type CameraKind = "none" | "approximate_motion" | "seed" | "registered";
+export type RegistrationStatus =
+  | "seed"
+  | "registered"
+  | "insufficient_correspondences"
+  | "pnp_rejected"
+  | "low_parallax"
+  | "not_selected";
+export type BundleAdjustmentStatus = "not_run" | "accepted" | "rejected";
+export type DenseCameraRole = "reference" | "source";
+
+export type FrameCameraState = {
+  frame_index: number;
+  camera_kind: CameraKind;
+  registration_status: RegistrationStatus;
+  correspondences: number;
+  inliers: number;
+  median_reprojection_error_pixels: number | null;
+  recovered_from_revisit: boolean;
+  bundle_adjustment: BundleAdjustmentStatus;
+  dense_role: DenseCameraRole | null;
+  dense_ineligibility_reason: string | null;
+};
+
+export type CameraPipelineState = {
+  approximate_motion_samples: CameraPose[];
+  calibrated_seed_cameras: CameraPose[];
+  registered_cameras: CameraPose[];
+  dense_eligible_cameras: CameraPose[];
+  frames: FrameCameraState[];
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
@@ -201,12 +234,16 @@ export type ReconstructionResult = {
   revisits: RevisitStats;
   registered_views: RegisteredViewStats[];
   warnings: string[];
+  camera_state: CameraPipelineState;
 };
 
 type WasmModule = {
   default: () => Promise<unknown>;
-  reconstruct_sequence: (request: unknown) => ReconstructionResult;
+  reconstruct_sequence: (request: unknown) => unknown;
 };
+
+const FEWER_THAN_TWO_REGISTERED_CAMERAS =
+  "fewer than two accepted registered cameras are available";
 
 let wasmPromise: Promise<WasmModule> | null = null;
 
@@ -225,17 +262,149 @@ async function loadWasm(): Promise<WasmModule> {
   return wasmPromise;
 }
 
+export function normalizeWasmReconstruction(value: unknown): ReconstructionResult {
+  const normalized = value instanceof Map ? Object.fromEntries(value) : value;
+  if (!normalized || typeof normalized !== "object") {
+    throw new Error("camera-state contract mismatch: WASM returned a non-object reconstruction");
+  }
+  return normalized as ReconstructionResult;
+}
+
+function frameIndexSet(cameras: CameraPose[]): Set<number> {
+  return new Set(cameras.map((camera) => camera.frame_index));
+}
+
+function sameFrameSet(left: Set<number>, right: Set<number>): boolean {
+  return left.size === right.size && [...left].every((frameIndex) => right.has(frameIndex));
+}
+
+export function assertReconstructionContract(
+  result: ReconstructionResult,
+  expectedFrameCount: number,
+): void {
+  const state = result.camera_state;
+  if (!state || !Array.isArray(state.frames)) {
+    throw new Error("camera-state contract mismatch: WASM result has no explicit camera_state");
+  }
+  const acceptedCameras = [
+    ...state.calibrated_seed_cameras,
+    ...state.registered_cameras,
+  ];
+  const acceptedFrames = frameIndexSet(acceptedCameras);
+
+  if (state.frames.length !== expectedFrameCount) {
+    throw new Error(
+      `camera-state contract mismatch: expected ${expectedFrameCount} frame states, got ${state.frames.length}`,
+    );
+  }
+  if (state.frames.some((frame, index) => frame.frame_index !== index)) {
+    throw new Error("camera-state contract mismatch: frame states are not index-aligned");
+  }
+
+  if (result.calibrated_pair) {
+    if (state.calibrated_seed_cameras.length !== 2) {
+      throw new Error(
+        `camera-state contract mismatch: calibrated geometry exposed ${state.calibrated_seed_cameras.length} seed cameras instead of 2`,
+      );
+    }
+    if (state.approximate_motion_samples.length !== 0) {
+      throw new Error(
+        "camera-state contract mismatch: approximate motion samples were exposed as calibrated camera geometry",
+      );
+    }
+    if (acceptedCameras.length !== result.cameras.length) {
+      throw new Error(
+        "camera-state contract mismatch: explicit accepted-camera partition differs from the Rust reconstruction camera list",
+      );
+    }
+    if (state.registered_cameras.length !== result.registered_views.length) {
+      throw new Error(
+        "camera-state contract mismatch: registered camera poses differ from registered-view evidence",
+      );
+    }
+  } else {
+    if (
+      state.calibrated_seed_cameras.length !== 0 ||
+      state.registered_cameras.length !== 0 ||
+      state.dense_eligible_cameras.length !== 0
+    ) {
+      throw new Error(
+        "camera-state contract mismatch: uncalibrated reconstruction exposed accepted camera geometry",
+      );
+    }
+    if (state.approximate_motion_samples.length !== result.cameras.length) {
+      throw new Error(
+        "camera-state contract mismatch: approximate motion samples differ from the fallback motion track",
+      );
+    }
+  }
+
+  if (result.dense.source_frames.length !== result.dense.source_views) {
+    throw new Error(
+      `camera-state contract mismatch: dense reports ${result.dense.source_views} source views but ${result.dense.source_frames.length} source frame ids`,
+    );
+  }
+  if (new Set(result.dense.source_frames).size !== result.dense.source_frames.length) {
+    throw new Error("camera-state contract mismatch: dense source frame ids are not unique");
+  }
+
+  if (
+    result.dense.skip_reason?.includes(FEWER_THAN_TWO_REGISTERED_CAMERAS) &&
+    acceptedCameras.length >= 2
+  ) {
+    throw new Error(
+      `camera-state contract mismatch: dense reports fewer than two accepted registered cameras while ${acceptedCameras.length} accepted cameras are exposed`,
+    );
+  }
+
+  if (result.dense.attempted) {
+    if (result.dense.reference_frame === null) {
+      throw new Error(
+        "camera-state contract mismatch: attempted dense reconstruction has no reference frame",
+      );
+    }
+    if (acceptedCameras.length < 2) {
+      throw new Error(
+        `camera-state contract mismatch: dense reconstruction ran with only ${acceptedCameras.length} accepted cameras`,
+      );
+    }
+    const expectedDenseFrames = new Set([
+      result.dense.reference_frame,
+      ...result.dense.source_frames,
+    ]);
+    const actualDenseFrames = frameIndexSet(state.dense_eligible_cameras);
+    if (!sameFrameSet(expectedDenseFrames, actualDenseFrames)) {
+      throw new Error(
+        "camera-state contract mismatch: dense reference/source frames differ from dense-eligible camera state",
+      );
+    }
+    if ([...actualDenseFrames].some((frameIndex) => !acceptedFrames.has(frameIndex))) {
+      throw new Error(
+        "camera-state contract mismatch: dense-eligible camera is not part of accepted camera geometry",
+      );
+    }
+  } else if (state.dense_eligible_cameras.length !== 0) {
+    throw new Error(
+      "camera-state contract mismatch: skipped dense reconstruction exposed dense-eligible cameras",
+    );
+  }
+}
+
 export async function reconstructFrames(frames: SampledFrame[]): Promise<ReconstructionResult> {
   const wasm = await loadWasm();
-  return wasm.reconstruct_sequence({
-    frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
-    options: {
-      max_features: 320,
-      min_feature_distance: 7,
-      descriptor_radius: 3,
-      match_radius: 42,
-      max_descriptor_distance: 36,
-      ratio_threshold: 0.82,
-    },
-  });
+  const result = normalizeWasmReconstruction(
+    wasm.reconstruct_sequence({
+      frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
+      options: {
+        max_features: 320,
+        min_feature_distance: 7,
+        descriptor_radius: 3,
+        match_radius: 42,
+        max_descriptor_distance: 36,
+        ratio_threshold: 0.82,
+      },
+    }),
+  );
+  assertReconstructionContract(result, frames.length);
+  return result;
 }
