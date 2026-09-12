@@ -147,10 +147,12 @@ export function SceneCanvas({ reconstruction }: SceneCanvasProps) {
   const denseDiagnostic = reconstruction.dense.skip_reason
     ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
     : reconstruction.dense.accepted_points > 0
-      ? `Coarse dense depth: ${reconstruction.dense.accepted_points} reciprocal-consistent samples from ${reconstruction.dense.source_views} source view${reconstruction.dense.source_views === 1 ? "" : "s"}; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates`
-      : reconstruction.dense.reciprocal_checked_points > 0
-        ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
-        : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
+      ? `Fused dense depth: ${reconstruction.dense.accepted_points} scene points from ${reconstruction.dense.fusion_input_observations} reciprocal-consistent multi-view observations; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates and spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
+      : reconstruction.dense.reciprocal_consistent_points > 0
+        ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations)`
+        : reconstruction.dense.reciprocal_checked_points > 0
+          ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
+          : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
 
   return (
     <>

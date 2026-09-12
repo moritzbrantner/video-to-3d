@@ -11,6 +11,8 @@ const MIN_REFERENCE_CONTRAST: f64 = 14.0;
 const MAX_PHOTOMETRIC_ERROR: f64 = 18.0;
 const MIN_AMBIGUITY_MARGIN: f64 = 1.0;
 const MAX_RECIPROCAL_RELATIVE_DEPTH_ERROR: f64 = 0.08;
+const MAX_FUSION_RELATIVE_POSITION_ERROR: f64 = 0.08;
+const MIN_FUSION_OBSERVATIONS: usize = 2;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DenseStats {
@@ -23,6 +25,11 @@ pub struct DenseStats {
     pub accepted_points: usize,
     pub reciprocal_checked_points: usize,
     pub reciprocal_rejected_points: usize,
+    pub reciprocal_consistent_points: usize,
+    pub fusion_input_observations: usize,
+    pub fusion_rejected_observations: usize,
+    pub fusion_rejected_points: usize,
+    pub median_fusion_observations: Option<f32>,
     pub median_supporting_views: Option<f32>,
     pub median_photometric_error: Option<f32>,
     pub search_min_depth: Option<f32>,
@@ -53,6 +60,13 @@ struct Candidate {
     position: Vector3<f64>,
     support: usize,
     error: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FusedDepthObservation {
+    position: Vector3<f64>,
+    observations: usize,
+    rejected_observations: usize,
 }
 
 struct SourceView<'a> {
@@ -172,6 +186,11 @@ pub(super) fn estimate_depth_points(
     let mut sampled_pixels = 0usize;
     let mut reciprocal_checked_points = 0usize;
     let mut reciprocal_rejected_points = 0usize;
+    let mut reciprocal_consistent_points = 0usize;
+    let mut fusion_input_observations = 0usize;
+    let mut fusion_rejected_observations = 0usize;
+    let mut fusion_rejected_points = 0usize;
+    let mut fusion_observation_counts = Vec::new();
 
     for y in (border..height - border).step_by(stride) {
         for x in (border..width - border).step_by(stride) {
@@ -262,32 +281,52 @@ pub(super) fn estimate_depth_points(
                 continue;
             }
             reciprocal_checked_points += 1;
-            if !has_reciprocal_depth_agreement(
+            let reciprocal_positions = reciprocal_depth_observations(
                 best.position,
                 reference,
                 reference_frame,
                 &reference_luma,
                 &source_views,
                 focal,
-            ) {
+            );
+            if reciprocal_positions.is_empty() {
                 reciprocal_rejected_points += 1;
                 continue;
             }
+            reciprocal_consistent_points += 1;
+            fusion_input_observations += 1 + reciprocal_positions.len();
+
+            let fused = fuse_depth_observations(
+                best.position,
+                &reciprocal_positions,
+                best.depth,
+            );
+            fusion_rejected_observations += fused.rejected_observations;
+            if fused.observations < MIN_FUSION_OBSERVATIONS {
+                fusion_rejected_points += 1;
+                continue;
+            }
+            fusion_observation_counts.push(fused.observations as f64);
 
             let support_confidence = best.support as f64 / source_views.len() as f64;
+            let reciprocal_confidence =
+                ((fused.observations - 1) as f64 / source_views.len() as f64).clamp(0.0, 1.0);
             let error_confidence = 1.0 / (1.0 + best.error / 8.0);
             let margin_confidence = if ambiguity_margin.is_finite() {
                 (ambiguity_margin / 6.0).clamp(0.2, 1.0)
             } else {
                 1.0
             };
-            let confidence =
-                (support_confidence * error_confidence * margin_confidence).clamp(0.05, 1.0) as f32;
+            let confidence = (support_confidence
+                * reciprocal_confidence
+                * error_confidence
+                * margin_confidence)
+                .clamp(0.05, 1.0) as f32;
             let (r, g, b) = sample_rgb(reference_frame, x, y);
             points.push(Point3 {
-                x: best.position.x as f32,
-                y: best.position.y as f32,
-                z: best.position.z as f32,
+                x: fused.position.x as f32,
+                y: fused.position.y as f32,
+                z: fused.position.z as f32,
                 confidence,
                 r,
                 g,
@@ -309,6 +348,12 @@ pub(super) fn estimate_depth_points(
             accepted_points: points.len(),
             reciprocal_checked_points,
             reciprocal_rejected_points,
+            reciprocal_consistent_points,
+            fusion_input_observations,
+            fusion_rejected_observations,
+            fusion_rejected_points,
+            median_fusion_observations: median_option(&mut fusion_observation_counts)
+                .map(|value| value as f32),
             median_supporting_views: median_option(&mut supports).map(|value| value as f32),
             median_photometric_error: median_option(&mut errors).map(|value| value as f32),
             search_min_depth: Some(search_min_depth as f32),
@@ -340,14 +385,14 @@ fn depth_search_bounds(
     Some((minimum, maximum))
 }
 
-fn has_reciprocal_depth_agreement(
+fn reciprocal_depth_observations(
     position: Vector3<f64>,
     reference_camera: &RegisteredCamera,
     reference_frame: &FrameInput,
     reference_luma: &[u8],
     sources: &[SourceView<'_>],
     focal: f64,
-) -> bool {
+) -> Vec<Vector3<f64>> {
     let Some((reference_x, reference_y, reference_depth)) = project(
         reference_camera,
         position,
@@ -355,59 +400,98 @@ fn has_reciprocal_depth_agreement(
         reference_frame.height,
         focal,
     ) else {
-        return false;
+        return Vec::new();
     };
 
-    sources.iter().any(|source| {
-        let Some(direct_error) = patch_error(
-            reference_camera,
-            source.camera,
-            reference_luma,
-            &source.luma,
-            reference_frame.width,
-            reference_frame.height,
-            source.frame.width,
-            source.frame.height,
-            reference_x,
-            reference_y,
-            reference_depth,
-            focal,
-        ) else {
-            return false;
-        };
-        if direct_error > MAX_PHOTOMETRIC_ERROR {
-            return false;
+    sources
+        .iter()
+        .filter_map(|source| {
+            let direct_error = patch_error(
+                reference_camera,
+                source.camera,
+                reference_luma,
+                &source.luma,
+                reference_frame.width,
+                reference_frame.height,
+                source.frame.width,
+                source.frame.height,
+                reference_x,
+                reference_y,
+                reference_depth,
+                focal,
+            )?;
+            if direct_error > MAX_PHOTOMETRIC_ERROR {
+                return None;
+            }
+
+            let (source_x, source_y, expected_source_depth) = project(
+                source.camera,
+                position,
+                source.frame.width,
+                source.frame.height,
+                focal,
+            )?;
+            let reciprocal_depth = estimate_single_view_depth(
+                source.camera,
+                reference_camera,
+                &source.luma,
+                reference_luma,
+                source.frame.width,
+                source.frame.height,
+                reference_frame.width,
+                reference_frame.height,
+                source_x,
+                source_y,
+                source.search_min_depth,
+                source.search_max_depth,
+                focal,
+            )?;
+            if !reciprocal_depth_agrees(expected_source_depth, reciprocal_depth) {
+                return None;
+            }
+
+            let reciprocal_position = unproject(
+                source.camera,
+                source_x,
+                source_y,
+                reciprocal_depth,
+                source.frame.width,
+                source.frame.height,
+                focal,
+            );
+            reciprocal_position
+                .iter()
+                .all(|value| value.is_finite())
+                .then_some(reciprocal_position)
+        })
+        .collect()
+}
+
+fn fuse_depth_observations(
+    primary: Vector3<f64>,
+    reciprocal: &[Vector3<f64>],
+    reference_depth: f64,
+) -> FusedDepthObservation {
+    let radius = (reference_depth.abs() * MAX_FUSION_RELATIVE_POSITION_ERROR).max(1.0e-4);
+    let mut sum = primary;
+    let mut observations = 1usize;
+    let mut rejected_observations = 0usize;
+
+    for position in reciprocal {
+        if !position.iter().all(|value| value.is_finite()) || (*position - primary).norm() > radius
+        {
+            rejected_observations += 1;
+            continue;
         }
+        sum += position;
+        observations += 1;
+    }
 
-        let Some((source_x, source_y, expected_source_depth)) = project(
-            source.camera,
-            position,
-            source.frame.width,
-            source.frame.height,
-            focal,
-        ) else {
-            return false;
-        };
-        let Some(reciprocal_depth) = estimate_single_view_depth(
-            source.camera,
-            reference_camera,
-            &source.luma,
-            reference_luma,
-            source.frame.width,
-            source.frame.height,
-            reference_frame.width,
-            reference_frame.height,
-            source_x,
-            source_y,
-            source.search_min_depth,
-            source.search_max_depth,
-            focal,
-        ) else {
-            return false;
-        };
-
-        reciprocal_depth_agrees(expected_source_depth, reciprocal_depth)
-    })
+    FusedDepthObservation {
+        position: sum / observations as f64,
+        observations,
+        rejected_observations,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,7 +870,21 @@ mod tests {
         assert_eq!(result.stats.source_views, 2);
         assert_eq!(
             result.stats.reciprocal_checked_points,
-            result.stats.accepted_points + result.stats.reciprocal_rejected_points
+            result.stats.reciprocal_consistent_points + result.stats.reciprocal_rejected_points
+        );
+        assert_eq!(
+            result.stats.reciprocal_consistent_points,
+            result.stats.accepted_points + result.stats.fusion_rejected_points
+        );
+        assert!(
+            result.stats.fusion_input_observations
+                >= result.stats.reciprocal_consistent_points * MIN_FUSION_OBSERVATIONS
+        );
+        assert!(
+            result
+                .stats
+                .median_fusion_observations
+                .is_some_and(|observations| observations >= MIN_FUSION_OBSERVATIONS as f32)
         );
         assert!(
             result.points.len() >= 12,
@@ -843,6 +941,22 @@ mod tests {
             reciprocal_depth_agrees(expected_depth, estimated_depth),
             "expected source depth {expected_depth}, got {estimated_depth}"
         );
+    }
+
+    #[test]
+    fn fusion_rejects_spatially_inconsistent_reciprocal_observations() {
+        let primary = Vector3::new(0.0, 0.0, 4.0);
+        let reciprocal = [
+            Vector3::new(0.02, -0.01, 4.04),
+            Vector3::new(0.9, 0.0, 4.0),
+        ];
+
+        let fused = fuse_depth_observations(primary, &reciprocal, 4.0);
+
+        assert_eq!(fused.observations, 2);
+        assert_eq!(fused.rejected_observations, 1);
+        assert!((fused.position.z - 4.02).abs() < 1.0e-9);
+        assert!(fused.position.x.abs() < 0.02);
     }
 
     #[test]
