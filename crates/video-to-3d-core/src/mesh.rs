@@ -23,6 +23,7 @@ pub struct MeshStats {
     pub skip_reason: Option<String>,
     pub reference_frame: Option<usize>,
     pub grid_vertices: usize,
+    pub rejected_grid_vertices: usize,
     pub candidate_cells: usize,
     pub candidate_triangles: usize,
     pub accepted_triangles: usize,
@@ -160,10 +161,20 @@ pub(super) fn reconstruct_dense_mesh(
     }
 
     if grid.len() < 3 {
-        return MeshAnalysis::skipped(
-            Some(reference_frame),
-            "fewer than three fused dense points align with the reference sampling grid",
-        );
+        return MeshAnalysis {
+            stats: MeshStats {
+                attempted: true,
+                skip_reason: Some(
+                    "fewer than three fused dense points align with the reference sampling grid"
+                        .into(),
+                ),
+                reference_frame: Some(reference_frame),
+                grid_vertices: grid.len(),
+                rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
+                ..MeshStats::default()
+            },
+            triangles: Vec::new(),
+        };
     }
 
     let mut cell_origins = BTreeSet::new();
@@ -211,6 +222,7 @@ pub(super) fn reconstruct_dense_mesh(
             skip_reason: None,
             reference_frame: Some(reference_frame),
             grid_vertices: grid.len(),
+            rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
             candidate_cells,
             candidate_triangles,
             accepted_triangles: triangles.len(),
@@ -411,6 +423,39 @@ mod tests {
             grid_border: 3,
             ..DenseStats::default()
         }
+    }
+
+    #[test]
+    fn preserves_admission_stats_when_too_few_grid_vertices_survive() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let points = vec![
+            point_at_pixel(3.0, 3.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(7.0, 3.0, 4.0, width, height, focal, 0.7),
+            point_at_pixel(6.0, 7.0, 4.0, width, height, focal, 0.9),
+        ];
+        let sites = vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 7, y: 3 },
+            DenseGridSite { x: 3, y: 7 },
+        ];
+
+        let result = reconstruct_dense_mesh(
+            &points,
+            &sites,
+            &dense_stats(),
+            &[camera()],
+            width,
+            height,
+            focal,
+        );
+
+        assert!(result.stats.attempted);
+        assert!(result.stats.skip_reason.is_some());
+        assert_eq!(result.stats.grid_vertices, 2);
+        assert_eq!(result.stats.rejected_grid_vertices, 1);
+        assert!(result.triangles.is_empty());
     }
 
     #[test]
