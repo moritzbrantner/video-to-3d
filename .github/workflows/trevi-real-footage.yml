@@ -1,0 +1,54 @@
+name: Trevi real-footage acceptance
+
+on:
+  push:
+    branches: [main, feat/trevi-real-footage-gate]
+    paths:
+      - trevi.webm
+      - tools/sample_trevi.py
+      - crates/video-to-3d-core/**
+      - .github/workflows/trevi-real-footage.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - trevi.webm
+      - tools/sample_trevi.py
+      - crates/video-to-3d-core/**
+      - .github/workflows/trevi-real-footage.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trevi:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Sample committed Trevi fixture
+        run: python3 tools/sample_trevi.py trevi.webm target/trevi-frames
+      - name: Run browser-contract reconstruction
+        run: |
+          set -euo pipefail
+          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames | tee trevi-result.txt
+      - name: Enforce recorded-footage acceptance
+        run: |
+          set -euo pipefail
+          value() { sed -n "s/^$1=//p" trevi-result.txt | tail -n 1; }
+          seed="$(value trevi.seed_cameras)"
+          accepted="$(value trevi.accepted_cameras)"
+          dense="$(value trevi.dense_points)"
+          mesh="$(value trevi.mesh_triangles)"
+          test "$seed" -eq 2
+          if [ "$accepted" -lt 5 ]; then
+            echo "Trevi registration regressed below the accepted post-local-map baseline: $accepted cameras" >&2
+            exit 2
+          fi
+          test "$dense" -gt 0
+          test "$mesh" -gt 0
+          echo "Trevi accepted: seed=$seed cameras=$accepted dense_points=$dense mesh_triangles=$mesh"
