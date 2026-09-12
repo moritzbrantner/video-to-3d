@@ -146,6 +146,7 @@ export type DenseStats = {
   sampled_pixels: number;
   depth_hypotheses: number;
   accepted_points: number;
+  surface_completed_points: number;
   grid_stride: number;
   grid_border: number;
   reciprocal_checked_points: number;
