@@ -24,6 +24,11 @@ type VideoRun = {
   frameCap: number;
 };
 
+const MIN_SAMPLING_FPS = 0.25;
+const MAX_SAMPLING_FPS = 8;
+const MIN_FRAME_CAP = 4;
+const MAX_FRAME_CAP = 60;
+
 function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
   return frames.map((frame) => ({
     width: frame.width,
@@ -31,6 +36,16 @@ function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
     thumbnail: frame.thumbnail,
     time: frame.time,
   }));
+}
+
+function normalizedSamplingFps(value: number): number {
+  if (!Number.isFinite(value)) return 1.25;
+  return Math.min(MAX_SAMPLING_FPS, Math.max(MIN_SAMPLING_FPS, value));
+}
+
+function normalizedFrameCap(value: number): number {
+  if (!Number.isFinite(value)) return 18;
+  return Math.min(MAX_FRAME_CAP, Math.max(MIN_FRAME_CAP, Math.floor(value)));
 }
 
 function phaseLabel(phase: RunPhase): string {
@@ -67,6 +82,11 @@ export default function Home() {
     event.target.value = "";
     if (files.length === 0 || batchRunning) return;
 
+    const runSamplingFps = normalizedSamplingFps(samplingFps);
+    const runFrameCap = normalizedFrameCap(frameCap);
+    setSamplingFps(runSamplingFps);
+    setFrameCap(runFrameCap);
+
     const nextRuns: VideoRun[] = files.map((file, index) => ({
       id: `${file.name}:${file.size}:${file.lastModified}:${index}`,
       fileName: file.name,
@@ -74,8 +94,8 @@ export default function Home() {
       frames: [],
       reconstruction: null,
       error: "",
-      samplingFps,
-      frameCap,
+      samplingFps: runSamplingFps,
+      frameCap: runFrameCap,
     }));
 
     setRuns(nextRuns);
@@ -165,8 +185,8 @@ export default function Home() {
               <span>Sample FPS</span>
               <input
                 type="number"
-                min="0.25"
-                max="8"
+                min={MIN_SAMPLING_FPS}
+                max={MAX_SAMPLING_FPS}
                 step="0.25"
                 value={samplingFps}
                 disabled={batchRunning}
@@ -181,8 +201,8 @@ export default function Home() {
               <span>Frame cap</span>
               <input
                 type="number"
-                min="4"
-                max="60"
+                min={MIN_FRAME_CAP}
+                max={MAX_FRAME_CAP}
                 step="1"
                 value={frameCap}
                 disabled={batchRunning}
