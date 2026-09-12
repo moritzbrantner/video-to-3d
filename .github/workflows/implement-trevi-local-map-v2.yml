@@ -1,0 +1,48 @@
+name: Implement Trevi local-map registration v2
+
+on:
+  push:
+    branches: [feat/trevi-real-footage-gate]
+    paths:
+      - .github/workflows/implement-trevi-local-map-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: feat/trevi-real-footage-gate
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Apply bounded incremental local-map registration
+        run: python3 tools/implement_trevi_local_map_once.py
+      - name: Format and validate
+        run: |
+          cargo fmt
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+      - name: Measure Trevi
+        run: |
+          python3 tools/sample_trevi.py trevi.webm target/trevi-frames
+          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames | tee /tmp/trevi-after.txt
+      - name: Commit validated implementation
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/video-to-3d-core/src/multi_view.rs crates/video-to-3d-core/src/reconstruction.rs
+          git rm tools/implement_trevi_local_map_once.py
+          git diff --cached --check
+          git commit -m "Extend registration from the local landmark map"
+          git push origin HEAD:feat/trevi-real-footage-gate
