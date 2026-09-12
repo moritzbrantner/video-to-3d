@@ -1,0 +1,42 @@
+name: Implement bounded dense mesh slice v2
+
+on:
+  push:
+    branches:
+      - feat/dense-mesh-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: feat/dense-mesh-foundation
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply structural mesh slice patch
+        run: python scripts/mesh_slice_patch.py
+      - name: Validate mesh slice
+        run: |
+          cargo fmt --all
+          cargo test -p video-to-3d-core
+          cargo clippy -p video-to-3d-core --all-targets -- -D warnings
+          bun install
+          bun run typecheck
+      - name: Commit implementation and remove temporary helpers
+        shell: bash
+        run: |
+          rm .github/workflows/implement-dense-mesh.yml
+          rm .github/workflows/implement-dense-mesh-v2.yml
+          rm scripts/mesh_slice_patch.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add bounded reference-grid mesh reconstruction"
+          git push origin HEAD:feat/dense-mesh-foundation
