@@ -1,0 +1,45 @@
+name: Repair PR 20 mesh final
+
+on:
+  push:
+    branches:
+      - automation/pr20-repair
+    paths:
+      - .github/workflows/pr20-mesh-final.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repair branch
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: automation/pr20-repair
+          fetch-depth: 0
+
+      - name: Preserve helper outside branch switch
+        shell: bash
+        run: cp tools/pr20_mesh_patch.py /tmp/pr20_mesh_patch.py
+
+      - name: Patch PR branch
+        shell: bash
+        run: |
+          git checkout -B feat/dense-mesh-foundation origin/feat/dense-mesh-foundation
+          python /tmp/pr20_mesh_patch.py
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test -p video-to-3d-core
+          cargo check -p video-to-3d-wasm
+
+      - name: Commit to PR branch
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/video-to-3d-core/src/mesh.rs apps/web/src/reconstruction.ts apps/web/src/SceneCanvas.tsx ROADMAP.md
+          git diff --cached --check
+          git commit -m "Preserve mesh admission evidence"
+          git push origin HEAD:feat/dense-mesh-foundation
