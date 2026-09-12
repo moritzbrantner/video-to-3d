@@ -1,1 +1,0 @@
-Camera state is now Rust-owned and serialized explicitly. The browser distinguishes approximate motion samples, the calibrated seed pair, additional accepted registrations, and the dense-eligible subset. Per-frame registration and dense eligibility evidence is shown in the sampled-frame inspector. This temporary marker is intentionally removed before integration.
