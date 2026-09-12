@@ -148,6 +148,11 @@ export type DenseStats = {
   accepted_points: number;
   reciprocal_checked_points: number;
   reciprocal_rejected_points: number;
+  reciprocal_consistent_points: number;
+  fusion_input_observations: number;
+  fusion_rejected_observations: number;
+  fusion_rejected_points: number;
+  median_fusion_observations: number | null;
   median_supporting_views: number | null;
   median_photometric_error: number | null;
   search_min_depth: number | null;

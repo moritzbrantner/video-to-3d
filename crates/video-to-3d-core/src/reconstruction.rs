@@ -745,22 +745,8 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         );
     }
 
-    if dense.attempted {
-        if dense.accepted_points > 0 {
-            warnings.push(format!(
-                "Slice 4 coarse depth estimation accepted {} depth samples from reference frame {} using {} registered source views and {} inverse-depth hypotheses. These samples are derived from final accepted sparse camera geometry and are rendered separately from the sparse map; multi-view depth consistency, dense fusion, meshing, and metric scale are not claimed yet.",
-                dense.accepted_points,
-                dense.reference_frame.map_or(0, |frame| frame + 1),
-                dense.source_views,
-                dense.depth_hypotheses
-            ));
-        } else {
-            warnings.push(format!(
-                "Slice 4 coarse depth estimation ran from reference frame {} with {} registered source views, but no sampled pixel passed the texture, photometric-error, and ambiguity gates. No dense geometry was invented; multi-view consistency and fusion remain future slices.",
-                dense.reference_frame.map_or(0, |frame| frame + 1),
-                dense.source_views
-            ));
-        }
+    if let Some(dense_warning) = dense_warning(&dense) {
+        warnings.push(dense_warning);
     }
 
     let recovered_from_revisit = revisits
@@ -854,6 +840,49 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         registered_views,
         warnings,
     })
+}
+
+fn dense_warning(dense: &DenseStats) -> Option<String> {
+    if !dense.attempted {
+        return None;
+    }
+
+    let reference_frame = dense.reference_frame.map_or(0, |frame| frame + 1);
+    if dense.accepted_points > 0 {
+        return Some(format!(
+            "Slice 4 dense point fusion accepted {} fused scene points from reference frame {} using {} registered source views and {} inverse-depth hypotheses. {} primary candidates passed reciprocal depth consistency; spatial fusion rejected {} reverse observations. Fused points remain separate from the sparse map; meshing, general multi-reference depth aggregation, and metric scale are not claimed yet.",
+            dense.accepted_points,
+            reference_frame,
+            dense.source_views,
+            dense.depth_hypotheses,
+            dense.reciprocal_consistent_points,
+            dense.fusion_rejected_observations
+        ));
+    }
+
+    if dense.reciprocal_consistent_points > 0 {
+        return Some(format!(
+            "Slice 4 dense point fusion ran from reference frame {} with {} registered source views. {} primary candidates passed reciprocal depth consistency, but no fused point survived the spatial-consistency and minimum-observation gates; {} reverse observations were rejected as spatially inconsistent. No dense geometry was invented.",
+            reference_frame,
+            dense.source_views,
+            dense.reciprocal_consistent_points,
+            dense.fusion_rejected_observations
+        ));
+    }
+
+    if dense.reciprocal_checked_points > 0 {
+        return Some(format!(
+            "Slice 4 coarse depth estimation ran from reference frame {} with {} registered source views. {} primary candidates passed the texture, photometric-error, and ambiguity gates, but reciprocal depth consistency rejected all of them. No dense geometry was invented.",
+            reference_frame,
+            dense.source_views,
+            dense.reciprocal_checked_points
+        ));
+    }
+
+    Some(format!(
+        "Slice 4 coarse depth estimation ran from reference frame {} with {} registered source views, but no sampled pixel passed the texture, photometric-error, and ambiguity gates. No dense geometry was invented.",
+        reference_frame, dense.source_views
+    ))
 }
 
 fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
@@ -1325,6 +1354,49 @@ mod tests {
         let (_, _, mut residuals) = compensate_global_motion(&source, &target, &matches, 96, 80);
         let residual = median(&mut residuals);
         assert!(residual < 0.55, "rotation residual was {residual}");
+    }
+
+    #[test]
+    fn dense_warning_reports_successful_fusion_without_stale_future_claims() {
+        let dense = DenseStats {
+            attempted: true,
+            reference_frame: Some(1),
+            source_views: 3,
+            depth_hypotheses: 24,
+            accepted_points: 17,
+            reciprocal_consistent_points: 19,
+            fusion_rejected_observations: 4,
+            ..DenseStats::default()
+        };
+
+        let warning = dense_warning(&dense).expect("dense warning");
+        assert!(warning.contains("17 fused scene points"));
+        assert!(warning.contains("19 primary candidates passed reciprocal depth consistency"));
+        assert!(warning.contains("spatial fusion rejected 4 reverse observations"));
+        assert!(!warning.contains("fusion remain future"));
+        assert!(!warning.contains("multi-view depth consistency"));
+    }
+
+    #[test]
+    fn dense_warning_distinguishes_fusion_rejection_from_earlier_gates() {
+        let dense = DenseStats {
+            attempted: true,
+            reference_frame: Some(0),
+            source_views: 2,
+            reciprocal_checked_points: 9,
+            reciprocal_rejected_points: 3,
+            reciprocal_consistent_points: 6,
+            fusion_input_observations: 14,
+            fusion_rejected_observations: 8,
+            fusion_rejected_points: 6,
+            ..DenseStats::default()
+        };
+
+        let warning = dense_warning(&dense).expect("dense warning");
+        assert!(warning.contains("6 primary candidates passed reciprocal depth consistency"));
+        assert!(warning.contains("no fused point survived"));
+        assert!(warning.contains("8 reverse observations were rejected"));
+        assert!(!warning.contains("no sampled pixel passed"));
     }
 
     #[test]
