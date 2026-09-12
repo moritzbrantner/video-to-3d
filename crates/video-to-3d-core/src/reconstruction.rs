@@ -620,6 +620,7 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     );
     let mesh_analysis = mesh::reconstruct_dense_mesh(
         &dense_analysis.points,
+        &dense_analysis.grid_sites,
         &dense_analysis.stats,
         &registered_geometry,
         width,
@@ -891,7 +892,7 @@ fn dense_warning(dense: &DenseStats) -> Option<String> {
     let reference_frame = dense.reference_frame.map_or(0, |frame| frame + 1);
     if dense.accepted_points > 0 {
         return Some(format!(
-            "Slice 4 dense point fusion accepted {} fused scene points from reference frame {} using {} registered source views and {} inverse-depth hypotheses. {} primary candidates passed reciprocal depth consistency; spatial fusion rejected {} reverse observations. Fused points remain separate from the sparse map; meshing, general multi-reference depth aggregation, and metric scale are not claimed yet.",
+            "Slice 4 dense point fusion accepted {} fused scene points from reference frame {} using {} registered source views and {} inverse-depth hypotheses. {} primary candidates passed reciprocal depth consistency; spatial fusion rejected {} reverse observations. Fused points remain separate from the sparse map; general multi-reference depth aggregation and metric scale are not claimed yet.",
             dense.accepted_points,
             reference_frame,
             dense.source_views,
@@ -1416,6 +1417,7 @@ mod tests {
         assert!(warning.contains("spatial fusion rejected 4 reverse observations"));
         assert!(!warning.contains("fusion remain future"));
         assert!(!warning.contains("multi-view depth consistency"));
+        assert!(!warning.contains("meshing"));
     }
 
     #[test]

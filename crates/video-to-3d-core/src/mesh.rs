@@ -1,9 +1,8 @@
-use crate::{dense::DenseStats, multi_view::RegisteredCamera, Point3};
+use crate::{dense::{DenseGridSite, DenseStats}, multi_view::RegisteredCamera, Point3};
 use nalgebra::Vector3;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_GRID_REPROJECTION_OFFSET_STRIDES: f64 = 0.75;
 const MAX_MESH_RELATIVE_DEPTH_JUMP: f64 = 0.15;
 const MAX_MESH_EDGE_FOOTPRINT_MULTIPLIER: f64 = 3.0;
 const MIN_MESH_AREA_FOOTPRINT_RATIO: f64 = 0.05;
@@ -64,6 +63,7 @@ enum TriangleRejection {
 
 pub(super) fn reconstruct_dense_mesh(
     dense_points: &[Point3],
+    grid_sites: &[DenseGridSite],
     dense: &DenseStats,
     cameras: &[RegisteredCamera],
     width: u32,
@@ -80,6 +80,12 @@ pub(super) fn reconstruct_dense_mesh(
         return MeshAnalysis::skipped(
             dense.reference_frame,
             "fewer than three accepted fused dense points are available",
+        );
+    }
+    if dense_points.len() != grid_sites.len() {
+        return MeshAnalysis::skipped(
+            dense.reference_frame,
+            "dense point and reference-grid evidence counts disagree",
         );
     }
     if dense.grid_stride == 0 {
@@ -109,18 +115,17 @@ pub(super) fn reconstruct_dense_mesh(
     };
 
     let stride = dense.grid_stride as f64;
-    let border = dense.grid_border as f64;
     let mut grid = BTreeMap::<(i32, i32), GridVertex>::new();
 
-    for (point_index, point) in dense_points.iter().enumerate() {
+    for (point_index, (point, grid_site)) in dense_points.iter().zip(grid_sites).enumerate() {
         let position = Vector3::new(point.x as f64, point.y as f64, point.z as f64);
-        let Some((x, y, depth)) = project(reference_camera, position, width, height, focal) else {
+        let Some((_, _, depth)) = project(reference_camera, position, width, height, focal) else {
             continue;
         };
-        let Some(gx) = nearest_grid_coordinate(x, width, border, stride) else {
+        let Some(gx) = original_grid_coordinate(grid_site.x, width, dense.grid_border, dense.grid_stride) else {
             continue;
         };
-        let Some(gy) = nearest_grid_coordinate(y, height, border, stride) else {
+        let Some(gy) = original_grid_coordinate(grid_site.y, height, dense.grid_border, dense.grid_stride) else {
             continue;
         };
         let vertex = GridVertex {
@@ -205,27 +210,20 @@ fn better_grid_vertex(candidate: GridVertex, current: GridVertex) -> bool {
         || (candidate.confidence == current.confidence && candidate.point_index < current.point_index)
 }
 
-fn nearest_grid_coordinate(
-    value: f64,
+fn original_grid_coordinate(
+    value: u32,
     limit: u32,
-    border: f64,
-    stride: f64,
+    border: u32,
+    stride: usize,
 ) -> Option<i32> {
-    if !value.is_finite() || !border.is_finite() || !stride.is_finite() || stride <= 0.0 {
+    if stride == 0 || value < border || value >= limit.saturating_sub(border) {
         return None;
     }
-    let grid_coordinate = ((value - border) / stride).round();
-    if !grid_coordinate.is_finite() {
+    let offset = (value - border) as usize;
+    if !offset.is_multiple_of(stride) {
         return None;
     }
-    let site = border + grid_coordinate * stride;
-    if site < border || site >= limit as f64 - border {
-        return None;
-    }
-    if (value - site).abs() > stride * MAX_GRID_REPROJECTION_OFFSET_STRIDES {
-        return None;
-    }
-    Some(grid_coordinate as i32)
+    i32::try_from(offset / stride).ok()
 }
 
 fn cell_triangles(corners: [Option<GridVertex>; 4]) -> Vec<[GridVertex; 3]> {
@@ -355,6 +353,15 @@ mod tests {
         }
     }
 
+    fn grid_sites() -> Vec<DenseGridSite> {
+        vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 7, y: 3 },
+            DenseGridSite { x: 3, y: 7 },
+            DenseGridSite { x: 7, y: 7 },
+        ]
+    }
+
     fn dense_stats() -> DenseStats {
         DenseStats {
             attempted: true,
@@ -379,6 +386,7 @@ mod tests {
 
         let result = reconstruct_dense_mesh(
             &points,
+            &grid_sites(),
             &dense_stats(),
             &[camera()],
             width,
@@ -418,6 +426,7 @@ mod tests {
 
         let result = reconstruct_dense_mesh(
             &points,
+            &grid_sites(),
             &dense_stats(),
             &[camera()],
             width,
@@ -433,6 +442,37 @@ mod tests {
     }
 
     #[test]
+    fn preserves_original_grid_site_after_fusion_shifts_reprojection() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let points = vec![
+            point_at_pixel(5.4, 3.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(7.0, 3.0, 4.0, width, height, focal, 0.8),
+            point_at_pixel(3.0, 7.0, 4.0, width, height, focal, 0.8),
+        ];
+        let sites = vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 7, y: 3 },
+            DenseGridSite { x: 3, y: 7 },
+        ];
+
+        let result = reconstruct_dense_mesh(
+            &points,
+            &sites,
+            &dense_stats(),
+            &[camera()],
+            width,
+            height,
+            focal,
+        );
+
+        assert!(result.stats.attempted);
+        assert_eq!(result.stats.grid_vertices, 3);
+        assert_eq!(result.stats.accepted_triangles, 1);
+    }
+
+    #[test]
     fn does_not_attempt_mesh_without_enough_dense_points() {
         let width = 68;
         let height = 48;
@@ -444,6 +484,7 @@ mod tests {
 
         let result = reconstruct_dense_mesh(
             &points,
+            &grid_sites(),
             &dense_stats(),
             &[camera()],
             width,
