@@ -1,0 +1,41 @@
+name: Repair Trevi implementation workflow once
+
+on:
+  push:
+    branches: [feat/trevi-real-footage-gate]
+    paths:
+      - .github/workflows/repair-trevi-implement-workflow-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: feat/trevi-real-footage-gate
+          fetch-depth: 0
+      - name: Add the normal desktop Linux dependencies
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/implement-trevi-local-map-once.yml')
+          text = path.read_text()
+          old = '      - name: Install ffmpeg\n        run: |\n          sudo apt-get update\n          sudo apt-get install -y ffmpeg\n'
+          new = '      - name: Install Linux dependencies\n        run: |\n          sudo apt-get update\n          sudo apt-get install -y ffmpeg libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf\n'
+          if text.count(old) != 1:
+              raise SystemExit('expected one ffmpeg install block')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit repair and remove helper
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/implement-trevi-local-map-once.yml
+          git rm .github/workflows/repair-trevi-implement-workflow-once.yml
+          git diff --cached --check
+          git commit -m "Repair Trevi implementation CI environment"
+          git push origin HEAD:feat/trevi-real-footage-gate
