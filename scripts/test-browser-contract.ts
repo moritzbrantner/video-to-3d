@@ -53,4 +53,56 @@ if (
   throw new Error("uncalibrated WASM result exposed accepted camera geometry");
 }
 
+const [firstSeed, secondSeed] = result.camera_state.approximate_motion_samples;
+const contradictory = structuredClone(result);
+contradictory.calibrated_pair = {
+  from_frame: 0,
+  to_frame: 1,
+  matches: 8,
+  inliers: 8,
+  inlier_ratio: 1,
+  focal_pixels: width,
+  median_sampson_error_pixels: 0,
+  median_reprojection_error_pixels: 0,
+  median_triangulation_angle_degrees: 1,
+  relative_rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+  translation_direction: [1, 0, 0],
+};
+contradictory.cameras = [firstSeed, secondSeed];
+contradictory.camera_state = {
+  approximate_motion_samples: [],
+  calibrated_seed_cameras: [firstSeed, secondSeed],
+  registered_cameras: [],
+  dense_eligible_cameras: [],
+  frames: contradictory.camera_state.frames.map((frame) => ({
+    ...frame,
+    camera_kind: "seed",
+    registration_status: "seed",
+  })),
+};
+contradictory.dense = {
+  ...contradictory.dense,
+  attempted: false,
+  reference_frame: null,
+  source_views: 0,
+  source_frames: [],
+  skip_reason: "fewer than two accepted registered cameras are available",
+};
+
+let contradictionRejected = false;
+try {
+  assertReconstructionContract(contradictory, 2);
+} catch (error) {
+  if (String(error).includes("fewer than two accepted registered cameras")) {
+    contradictionRejected = true;
+  } else {
+    throw error;
+  }
+}
+if (!contradictionRejected) {
+  throw new Error(
+    "TypeScript accepted contradictory dense camera evidence after Rust/WASM serialization",
+  );
+}
+
 console.log("Rust -> WASM -> TypeScript camera-state contract passed");
