@@ -237,7 +237,7 @@ export function SceneCanvas({
 
   const meshDiagnostic = reconstruction.mesh.attempted
     ? reconstruction.mesh.accepted_triangles > 0
-      ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate candidates`
+      ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
       : `Mesh ran, but no neighboring fused samples formed a continuous triangle`
     : reconstruction.mesh.skip_reason
       ? `Mesh skipped: ${reconstruction.mesh.skip_reason}`

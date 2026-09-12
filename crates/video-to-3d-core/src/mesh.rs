@@ -7,6 +7,7 @@ const MAX_GRID_REPROJECTION_OFFSET_STRIDES: f64 = 0.5;
 const MAX_MESH_RELATIVE_DEPTH_JUMP: f64 = 0.15;
 const MAX_MESH_EDGE_FOOTPRINT_MULTIPLIER: f64 = 3.0;
 const MIN_MESH_AREA_FOOTPRINT_RATIO: f64 = 0.05;
+const MIN_MESH_PROJECTED_AREA_FOOTPRINT_RATIO: f64 = 0.05;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct MeshTriangle {
@@ -52,6 +53,8 @@ impl MeshAnalysis {
 struct GridVertex {
     point_index: usize,
     position: Vector3<f64>,
+    projected_x: f64,
+    projected_y: f64,
     reference_depth: f64,
     confidence: f32,
 }
@@ -142,6 +145,8 @@ pub(super) fn reconstruct_dense_mesh(
         let vertex = GridVertex {
             point_index,
             position,
+            projected_x,
+            projected_y,
             reference_depth: depth,
             confidence: point.confidence,
         };
@@ -292,6 +297,17 @@ fn accepted_triangle(
         .fold(f64::NEG_INFINITY, f64::max);
     if (maximum_depth - minimum_depth) / maximum_depth > MAX_MESH_RELATIVE_DEPTH_JUMP {
         return Err(TriangleRejection::Discontinuity);
+    }
+
+    let signed_projected_double_area =
+        (b.projected_x - a.projected_x) * (c.projected_y - a.projected_y)
+            - (b.projected_y - a.projected_y) * (c.projected_x - a.projected_x);
+    let minimum_projected_double_area =
+        stride * stride * MIN_MESH_PROJECTED_AREA_FOOTPRINT_RATIO;
+    if !signed_projected_double_area.is_finite()
+        || signed_projected_double_area <= minimum_projected_double_area
+    {
+        return Err(TriangleRejection::Degenerate);
     }
 
     let mean_depth = depths.iter().sum::<f64>() / 3.0;
@@ -525,6 +541,39 @@ mod tests {
         assert!(result.triangles.iter().all(|triangle| {
             triangle.a != 0 && triangle.b != 0 && triangle.c != 0
         }));
+    }
+
+    #[test]
+    fn rejects_triangle_that_flips_reference_projection_winding() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let points = vec![
+            point_at_pixel(4.9, 1.1, 4.0, width, height, focal, 0.8),
+            point_at_pixel(5.1, 4.9, 4.0, width, height, focal, 0.8),
+            point_at_pixel(8.9, 5.1, 4.0, width, height, focal, 0.8),
+        ];
+        let sites = vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 7, y: 3 },
+            DenseGridSite { x: 7, y: 7 },
+        ];
+
+        let result = reconstruct_dense_mesh(
+            &points,
+            &sites,
+            &dense_stats(),
+            &[camera()],
+            width,
+            height,
+            focal,
+        );
+
+        assert!(result.stats.attempted);
+        assert_eq!(result.stats.grid_vertices, 3);
+        assert_eq!(result.stats.candidate_triangles, 1);
+        assert_eq!(result.stats.accepted_triangles, 0);
+        assert_eq!(result.stats.rejected_degenerate, 1);
     }
 
     #[test]

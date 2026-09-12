@@ -869,7 +869,7 @@ fn mesh_warning(mesh: &MeshStats) -> Option<String> {
 
     if mesh.accepted_triangles > 0 {
         return Some(format!(
-            "Slice 4 bounded mesh reconstruction accepted {} triangles from {} candidate triangles across {} reference-grid cells. It rejected {} triangles at depth/spatial discontinuities and {} degenerate triangles. This is a reference-grid-local, non-watertight surface preview; texture projection, arbitrary multi-reference surface fusion, and metric scale are not claimed yet.",
+            "Slice 4 bounded mesh reconstruction accepted {} triangles from {} candidate triangles across {} reference-grid cells. It rejected {} triangles at depth/spatial discontinuities and {} degenerate or orientation-flipped triangles. This is a reference-grid-local, non-watertight surface preview; texture projection, arbitrary multi-reference surface fusion, and metric scale are not claimed yet.",
             mesh.accepted_triangles,
             mesh.candidate_triangles,
             mesh.candidate_cells,
