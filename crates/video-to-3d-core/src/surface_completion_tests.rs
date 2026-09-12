@@ -71,11 +71,11 @@ fn verified_surface_completion_adds_expected_plane_geometry() {
     assert!(result.stats.attempted);
     assert!(
         result.stats.surface_completion_proposals > 0,
-        "fixture must create at least one coherent surface proposal"
+        "fixture must create at least one coherent surface proposal",
     );
     assert!(
         result.stats.surface_completed_points > 0,
-        "fixture must exercise successful verified surface completion"
+        "fixture must exercise successful verified surface completion",
     );
     assert_eq!(
         result.stats.surface_completion_proposals,
@@ -84,7 +84,7 @@ fn verified_surface_completion_adds_expected_plane_geometry() {
             + result.stats.surface_completion_rejected_cross_view
             + result.stats.surface_completion_rejected_reciprocal
             + result.stats.surface_completion_rejected_fusion
-            + result.stats.surface_completion_rejected_footprint
+            + result.stats.surface_completion_rejected_footprint,
     );
 
     let primary_points = result
@@ -103,7 +103,7 @@ fn verified_surface_completion_adds_expected_plane_geometry() {
             "completed site ({}, {}) has unexpected depth {}",
             site.x,
             site.y,
-            point.z
+            point.z,
         );
         assert!(point.confidence >= 0.05 && point.confidence <= 0.9);
     }
