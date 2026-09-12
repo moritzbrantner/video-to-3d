@@ -130,6 +130,17 @@ replace_once(
 )
 replace_once(
     "crates/video-to-3d-core/src/mesh.rs",
+    """    let stride = dense.grid_stride as f64;
+    let border = dense.grid_border as f64;
+    let mut grid = BTreeMap::<(i32, i32), GridVertex>::new();
+""",
+    """    let stride = dense.grid_stride as f64;
+    let mut grid = BTreeMap::<(i32, i32), GridVertex>::new();
+""",
+    "remove obsolete reprojected-grid border",
+)
+replace_once(
+    "crates/video-to-3d-core/src/mesh.rs",
     """    for (point_index, point) in dense_points.iter().enumerate() {
         let position = Vector3::new(point.x as f64, point.y as f64, point.z as f64);
         let Some((x, y, depth)) = project(reference_camera, position, width, height, focal) else {
@@ -170,7 +181,7 @@ replacement = """fn original_grid_coordinate(
         return None;
     }
     let offset = (value - border) as usize;
-    if offset % stride != 0 {
+    if !offset.is_multiple_of(stride) {
         return None;
     }
     i32::try_from(offset / stride).ok()
