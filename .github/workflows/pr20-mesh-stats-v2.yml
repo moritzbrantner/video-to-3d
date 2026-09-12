@@ -1,0 +1,122 @@
+name: Repair PR 20 mesh stats v2
+
+on:
+  push:
+    branches:
+      - automation/pr20-repair
+    paths:
+      - .github/workflows/pr20-mesh-stats-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          ref: feat/dense-mesh-foundation
+          fetch-depth: 0
+
+      - name: Preserve mesh admission evidence
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('crates/video-to-3d-core/src/mesh.rs')
+          text = path.read_text()
+
+          field = '    pub grid_vertices: usize;\n'
+          if text.count(field) != 1:
+              raise SystemExit(f'grid field count={text.count(field)}')
+          text = text.replace(field, field + '    pub rejected_grid_vertices: usize;\n', 1)
+
+          old_skip = '''    if grid.len() < 3 {
+              return MeshAnalysis::skipped(
+                  Some(reference_frame),
+                  "fewer than three fused dense points align with the reference sampling grid",
+              );
+          }
+          '''
+          new_skip = '''    if grid.len() < 3 {
+              return MeshAnalysis {
+                  stats: MeshStats {
+                      attempted: true,
+                      skip_reason: Some(
+                          "fewer than three fused dense points align with the reference sampling grid"
+                              .into(),
+                      ),
+                      reference_frame: Some(reference_frame),
+                      grid_vertices: grid.len(),
+                      rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
+                      ..MeshStats::default()
+                  },
+                  triangles: Vec::new(),
+              };
+          }
+          '''
+          if text.count(old_skip) != 1:
+              raise SystemExit(f'skip block count={text.count(old_skip)}')
+          text = text.replace(old_skip, new_skip, 1)
+
+          stats = '            grid_vertices: grid.len(),\n            candidate_cells,\n'
+          if text.count(stats) != 1:
+              raise SystemExit(f'stats block count={text.count(stats)}')
+          text = text.replace(
+              stats,
+              '            grid_vertices: grid.len(),\n'
+              '            rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),\n'
+              '            candidate_cells,\n',
+              1,
+          )
+
+          anchor = '    #[test]\n    fn triangulates_a_smooth_reference_grid_quad() {\n'
+          if text.count(anchor) != 1:
+              raise SystemExit(f'test anchor count={text.count(anchor)}')
+          test = '''    #[test]
+              fn preserves_admission_stats_when_too_few_grid_vertices_survive() {
+                  let width = 68;
+                  let height = 48;
+                  let focal = 60.0;
+                  let points = vec![
+                      point_at_pixel(3.0, 3.0, 4.0, width, height, focal, 0.8),
+                      point_at_pixel(7.0, 3.0, 4.0, width, height, focal, 0.7),
+                      point_at_pixel(6.0, 7.0, 4.0, width, height, focal, 0.9),
+                  ];
+                  let sites = vec![
+                      DenseGridSite { x: 3, y: 3 },
+                      DenseGridSite { x: 7, y: 3 },
+                      DenseGridSite { x: 3, y: 7 },
+                  ];
+                  let result = reconstruct_dense_mesh(
+                      &points,
+                      &sites,
+                      &dense_stats(),
+                      &[camera()],
+                      width,
+                      height,
+                      focal,
+                  );
+                  assert!(result.stats.attempted);
+                  assert!(result.stats.skip_reason.is_some());
+                  assert_eq!(result.stats.grid_vertices, 2);
+                  assert_eq!(result.stats.rejected_grid_vertices, 1);
+                  assert!(result.triangles.is_empty());
+              }
+
+          '''
+          path.write_text(text.replace(anchor, test + anchor, 1))
+          PY
+          cargo fmt --all
+          cargo test -p video-to-3d-core
+
+      - name: Commit to PR branch
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/video-to-3d-core/src/mesh.rs
+          git diff --cached --check
+          git commit -m "Preserve mesh grid admission evidence"
+          git push origin HEAD:feat/dense-mesh-foundation
