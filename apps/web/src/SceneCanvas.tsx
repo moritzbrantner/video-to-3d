@@ -62,10 +62,10 @@ export function SceneCanvas({
       surfacePointIndices.add(triangle.b);
       surfacePointIndices.add(triangle.c);
     }
-    const surfacePositions = [...surfacePointIndices]
-      .map((index) => reconstruction.dense_points[index])
-      .filter((point) => Boolean(point))
-      .map((point) => [point.x, point.y, point.z] as const);
+    const surfacePositions = [...surfacePointIndices].flatMap((index) => {
+      const point = reconstruction.dense_points[index];
+      return point ? [[point.x, point.y, point.z] as const] : [];
+    });
     const densePositions = reconstruction.dense_points.map(
       (point) => [point.x, point.y, point.z] as const,
     );
