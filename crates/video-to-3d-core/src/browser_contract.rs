@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 const FEWER_THAN_TWO_REGISTERED_CAMERAS: &str =
     "fewer than two accepted registered cameras are available";
+const MIN_REGISTRATION_CORRESPONDENCES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,19 +173,15 @@ impl CameraPipelineState {
                     CameraKind::None
                 };
 
-                let registration_status = if is_seed {
-                    RegistrationStatus::Seed
-                } else if registered_view.is_some() {
-                    RegistrationStatus::Registered
-                } else if candidate.is_some_and(|candidate| !candidate.pnp_ready) {
-                    RegistrationStatus::InsufficientCorrespondences
-                } else if candidate.is_some_and(|candidate| candidate.pnp_ready) {
-                    RegistrationStatus::PnpRejected
-                } else if frame_is_low_parallax(reconstruction, frame_index) {
-                    RegistrationStatus::LowParallax
-                } else {
-                    RegistrationStatus::NotSelected
-                };
+                let registration_status = classify_registration_status(
+                    is_seed,
+                    registered_view.is_some(),
+                    revisit_attempt
+                        .filter(|attempt| !attempt.accepted)
+                        .map(|attempt| attempt.correspondences),
+                    candidate.map(|candidate| candidate.pnp_ready),
+                    frame_is_low_parallax(reconstruction, frame_index),
+                );
 
                 let correspondences = registered_view
                     .map(|view| view.correspondences)
@@ -269,6 +266,34 @@ impl CameraPipelineState {
             dense_eligible_cameras,
             frames,
         }
+    }
+}
+
+fn classify_registration_status(
+    is_seed: bool,
+    is_registered: bool,
+    rejected_revisit_correspondences: Option<usize>,
+    candidate_pnp_ready: Option<bool>,
+    low_parallax: bool,
+) -> RegistrationStatus {
+    if is_seed {
+        RegistrationStatus::Seed
+    } else if is_registered {
+        RegistrationStatus::Registered
+    } else if let Some(correspondences) = rejected_revisit_correspondences {
+        if correspondences < MIN_REGISTRATION_CORRESPONDENCES {
+            RegistrationStatus::InsufficientCorrespondences
+        } else {
+            RegistrationStatus::PnpRejected
+        }
+    } else if candidate_pnp_ready == Some(false) {
+        RegistrationStatus::InsufficientCorrespondences
+    } else if candidate_pnp_ready == Some(true) {
+        RegistrationStatus::PnpRejected
+    } else if low_parallax {
+        RegistrationStatus::LowParallax
+    } else {
+        RegistrationStatus::NotSelected
     }
 }
 
@@ -431,6 +456,18 @@ mod tests {
             .frames
             .iter()
             .all(|frame| frame.camera_kind == CameraKind::ApproximateMotion));
+    }
+
+    #[test]
+    fn rejected_revisit_evidence_takes_precedence_over_weaker_candidate_status() {
+        assert_eq!(
+            classify_registration_status(false, false, Some(12), Some(false), false),
+            RegistrationStatus::PnpRejected
+        );
+        assert_eq!(
+            classify_registration_status(false, false, Some(7), Some(true), false),
+            RegistrationStatus::InsufficientCorrespondences
+        );
     }
 
     #[test]
