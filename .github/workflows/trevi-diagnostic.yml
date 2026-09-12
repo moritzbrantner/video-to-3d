@@ -1,0 +1,68 @@
+name: Trevi real-footage diagnostic
+
+on:
+  push:
+    branches: [feat/trevi-real-footage-gate]
+  pull_request:
+    branches: [main]
+    paths:
+      - trevi.webm
+      - tools/sample_trevi.py
+      - crates/video-to-3d-core/**
+      - .github/workflows/trevi-diagnostic.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  trevi:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and ffmpeg
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -n 1
+
+      - name: Sample Trevi like the browser
+        run: python3 tools/sample_trevi.py trevi.webm target/trevi-frames | tee "$RUNNER_TEMP/trevi-sampling.json"
+
+      - name: Run Trevi reconstruction diagnostic
+        run: |
+          set -euo pipefail
+          cargo run --locked -p video-to-3d-core --example trevi_fixture -- target/trevi-frames \
+            | tee "$RUNNER_TEMP/trevi-diagnostic.txt"
+
+      - name: Publish diagnostic summary
+        if: always()
+        run: |
+          {
+            echo '### Trevi sampling'
+            echo '```json'
+            cat "$RUNNER_TEMP/trevi-sampling.json" 2>/dev/null || true
+            echo '```'
+            echo '### Trevi reconstruction'
+            echo '```text'
+            cat "$RUNNER_TEMP/trevi-diagnostic.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Trevi evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: trevi-diagnostic-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/trevi-sampling.json
+            ${{ runner.temp }}/trevi-diagnostic.txt
+            target/trevi-frames/sampling.json
