@@ -95,7 +95,10 @@ fn verified_surface_completion_adds_expected_plane_geometry() {
     let completed_points = &result.points[primary_points..];
     let completed_sites = &result.grid_sites[primary_points..];
     assert_eq!(completed_points.len(), completed_sites.len());
-    assert_eq!(completed_points.len(), result.stats.surface_completed_points);
+    assert_eq!(
+        completed_points.len(),
+        result.stats.surface_completed_points
+    );
 
     for (point, site) in completed_points.iter().zip(completed_sites) {
         assert!(
