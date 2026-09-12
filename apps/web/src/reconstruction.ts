@@ -173,6 +173,7 @@ export type MeshStats = {
   skip_reason: string | null;
   reference_frame: number | null;
   grid_vertices: number;
+  rejected_grid_vertices: number;
   candidate_cells: number;
   candidate_triangles: number;
   accepted_triangles: number;
