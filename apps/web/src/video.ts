@@ -1,5 +1,10 @@
 import type { SampledFrame } from "./reconstruction";
 
+export type VideoSamplingOptions = {
+  framesPerSecond?: number;
+  maxFrames?: number;
+};
+
 function waitFor(target: EventTarget, event: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const onEvent = () => {
@@ -19,7 +24,14 @@ function waitFor(target: EventTarget, event: string): Promise<void> {
   });
 }
 
-export async function sampleVideo(file: File): Promise<SampledFrame[]> {
+function positiveFinite(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export async function sampleVideo(
+  file: File,
+  options: VideoSamplingOptions = {},
+): Promise<SampledFrame[]> {
   const url = URL.createObjectURL(file);
   const video = document.createElement("video");
   video.muted = true;
@@ -33,7 +45,13 @@ export async function sampleVideo(file: File): Promise<SampledFrame[]> {
       throw new Error("the selected video does not expose a usable duration");
     }
 
-    const sampleCount = Math.min(18, Math.max(4, Math.ceil(video.duration * 1.25)));
+    const framesPerSecond = Math.min(8, positiveFinite(options.framesPerSecond, 1.25));
+    const maxFrames = Math.min(
+      120,
+      Math.max(4, Math.floor(positiveFinite(options.maxFrames, 18))),
+    );
+    const targetCount = Math.max(4, Math.ceil(video.duration * framesPerSecond));
+    const sampleCount = Math.min(maxFrames, targetCount);
     const analysisWidth = Math.min(360, video.videoWidth);
     const analysisHeight = Math.max(
       1,
@@ -49,12 +67,8 @@ export async function sampleVideo(file: File): Promise<SampledFrame[]> {
 
     const frames: SampledFrame[] = [];
     for (let index = 0; index < sampleCount; index += 1) {
-      const fraction =
-        sampleCount === 1 ? 0.5 : 0.05 + (0.9 * index) / (sampleCount - 1);
-      const time = Math.min(
-        video.duration - 0.001,
-        Math.max(0, video.duration * fraction),
-      );
+      const fraction = sampleCount === 1 ? 0.5 : 0.05 + (0.9 * index) / (sampleCount - 1);
+      const time = Math.min(video.duration - 0.001, Math.max(0, video.duration * fraction));
       if (Math.abs(video.currentTime - time) > 0.001) {
         video.currentTime = time;
         await waitFor(video, "seeked");
