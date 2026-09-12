@@ -105,6 +105,45 @@ export function SceneCanvas({
       };
     };
 
+    const projectedMeshTriangles = reconstruction.mesh_triangles
+      .flatMap((triangle) => {
+        const a = reconstruction.dense_points[triangle.a];
+        const b = reconstruction.dense_points[triangle.b];
+        const c = reconstruction.dense_points[triangle.c];
+        if (!a || !b || !c) return [];
+        const projectedA = project(a.x, a.y, a.z);
+        const projectedB = project(b.x, b.y, b.z);
+        const projectedC = project(c.x, c.y, c.z);
+        if (projectedA.z <= 0.05 || projectedB.z <= 0.05 || projectedC.z <= 0.05) {
+          return [];
+        }
+        return [
+          {
+            triangle,
+            projected: [projectedA, projectedB, projectedC] as const,
+            depth: (projectedA.z + projectedB.z + projectedC.z) / 3,
+            r: Math.round((a.r + b.r + c.r) / 3),
+            g: Math.round((a.g + b.g + c.g) / 3),
+            b: Math.round((a.b + b.b + c.b) / 3),
+          },
+        ];
+      })
+      .sort((left, right) => right.depth - left.depth);
+
+    for (const item of projectedMeshTriangles) {
+      const [a, b, c] = item.projected;
+      context.beginPath();
+      context.moveTo(a.x, a.y);
+      context.lineTo(b.x, b.y);
+      context.lineTo(c.x, c.y);
+      context.closePath();
+      context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.05 + item.triangle.confidence * 0.18})`;
+      context.fill();
+      context.lineWidth = 0.45 * ratio;
+      context.strokeStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.06 + item.triangle.confidence * 0.1})`;
+      context.stroke();
+    }
+
     const projectedDensePoints = reconstruction.dense_points
       .filter((point) => point.confidence > 0.05)
       .map((point) => ({ point, projected: project(point.x, point.y, point.z) }))
@@ -196,6 +235,14 @@ export function SceneCanvas({
           ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
           : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
 
+  const meshDiagnostic = reconstruction.mesh.attempted
+    ? reconstruction.mesh.accepted_triangles > 0
+      ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate candidates`
+      : `Mesh ran, but no neighboring fused samples formed a continuous triangle`
+    : reconstruction.mesh.skip_reason
+      ? `Mesh skipped: ${reconstruction.mesh.skip_reason}`
+      : null;
+
   return (
     <>
       <canvas
@@ -263,7 +310,7 @@ export function SceneCanvas({
         aria-label="Interactive 3D reconstruction. Drag to orbit, use the mouse wheel to zoom, or click a camera square to select its source frame."
       />
       <div className="viewer-diagnostic" aria-live="polite">
-        {denseDiagnostic}
+        {denseDiagnostic}{meshDiagnostic ? ` · ${meshDiagnostic}` : ""}
       </div>
     </>
   );

@@ -383,6 +383,10 @@ export default function Home() {
                     <td>{reconstruction.dense_points.length}</td>
                   </tr>
                   <tr>
+                    <th>Mesh triangles</th>
+                    <td>{reconstruction.mesh_triangles.length}</td>
+                  </tr>
+                  <tr>
                     <th>Seed pair</th>
                     <td>
                       {reconstruction.calibrated_pair

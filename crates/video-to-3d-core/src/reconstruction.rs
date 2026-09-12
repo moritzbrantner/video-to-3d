@@ -1,10 +1,12 @@
 mod dense;
+mod mesh;
 mod multi_view;
 mod pnp;
 mod revisit;
 mod two_view;
 
 pub use dense::DenseStats;
+pub use mesh::{MeshStats, MeshTriangle};
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
 };
@@ -122,6 +124,8 @@ pub struct ReconstructionResult {
     pub points: Vec<Point3>,
     pub dense_points: Vec<Point3>,
     pub dense: DenseStats,
+    pub mesh_triangles: Vec<MeshTriangle>,
+    pub mesh: MeshStats,
     pub pairs: Vec<PairStats>,
     pub calibrated_pair: Option<CalibratedPairStats>,
     pub multi_view: MultiViewStats,
@@ -614,6 +618,16 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         &dense_sparse_points,
         focal as f64,
     );
+    let mesh_analysis = mesh::reconstruct_dense_mesh(
+        &dense_analysis.points,
+        &dense_analysis.stats,
+        &registered_geometry,
+        width,
+        height,
+        focal as f64,
+    );
+    let mesh = mesh_analysis.stats;
+    let mesh_triangles = mesh_analysis.triangles;
     let dense = dense_analysis.stats;
     let dense_points = dense_analysis.points;
     let multi_view = multi_view_analysis.stats;
@@ -748,6 +762,9 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     if let Some(dense_warning) = dense_warning(&dense) {
         warnings.push(dense_warning);
     }
+    if let Some(mesh_warning) = mesh_warning(&mesh) {
+        warnings.push(mesh_warning);
+    }
 
     let recovered_from_revisit = revisits
         .recoveries
@@ -833,6 +850,8 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         points,
         dense_points,
         dense,
+        mesh_triangles,
+        mesh,
         pairs,
         calibrated_pair,
         multi_view,
@@ -840,6 +859,28 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         registered_views,
         warnings,
     })
+}
+
+fn mesh_warning(mesh: &MeshStats) -> Option<String> {
+    if !mesh.attempted {
+        return None;
+    }
+
+    if mesh.accepted_triangles > 0 {
+        return Some(format!(
+            "Slice 4 bounded mesh reconstruction accepted {} triangles from {} candidate triangles across {} reference-grid cells. It rejected {} triangles at depth/spatial discontinuities and {} degenerate triangles. This is a reference-grid-local, non-watertight surface preview; texture projection, arbitrary multi-reference surface fusion, and metric scale are not claimed yet.",
+            mesh.accepted_triangles,
+            mesh.candidate_triangles,
+            mesh.candidate_cells,
+            mesh.rejected_discontinuities,
+            mesh.rejected_degenerate
+        ));
+    }
+
+    Some(format!(
+        "Slice 4 bounded mesh reconstruction evaluated {} candidate triangles across {} reference-grid cells, but no triangle survived the continuity and non-degeneracy gates. No surface geometry was invented.",
+        mesh.candidate_triangles, mesh.candidate_cells
+    ))
 }
 
 fn dense_warning(dense: &DenseStats) -> Option<String> {
