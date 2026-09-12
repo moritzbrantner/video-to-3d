@@ -1,7 +1,7 @@
 use crate::{multi_view::RegisteredCamera, FrameInput, Point3};
 use nalgebra::Vector3;
 use serde::Serialize;
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 const MAX_SOURCE_VIEWS: usize = 4;
 const DEPTH_HYPOTHESES: usize = 24;
@@ -13,6 +13,10 @@ const MIN_AMBIGUITY_MARGIN: f64 = 1.0;
 const MAX_RECIPROCAL_RELATIVE_DEPTH_ERROR: f64 = 0.08;
 const MAX_FUSION_RELATIVE_POSITION_ERROR: f64 = 0.08;
 const MIN_FUSION_OBSERVATIONS: usize = 2;
+const SURFACE_COMPLETION_PASSES: usize = 2;
+const MIN_SURFACE_NEIGHBORS: usize = 3;
+const MAX_SURFACE_NEIGHBOR_RELATIVE_DEPTH_SPREAD: f64 = 0.06;
+const SURFACE_COMPLETION_CONFIDENCE_SCALE: f64 = 0.85;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DenseStats {
@@ -23,6 +27,13 @@ pub struct DenseStats {
     pub sampled_pixels: usize,
     pub depth_hypotheses: usize,
     pub accepted_points: usize,
+    pub surface_completion_proposals: usize,
+    pub surface_completed_points: usize,
+    pub surface_completion_rejected_texture: usize,
+    pub surface_completion_rejected_cross_view: usize,
+    pub surface_completion_rejected_reciprocal: usize,
+    pub surface_completion_rejected_fusion: usize,
+    pub surface_completion_rejected_footprint: usize,
     pub grid_stride: usize,
     pub grid_border: u32,
     pub reciprocal_checked_points: usize,
@@ -77,6 +88,31 @@ struct FusedDepthObservation {
     position: Vector3<f64>,
     observations: usize,
     rejected_observations: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SurfaceCompletionStats {
+    proposals: usize,
+    accepted: usize,
+    rejected_texture: usize,
+    rejected_cross_view: usize,
+    rejected_reciprocal: usize,
+    rejected_fusion: usize,
+    rejected_footprint: usize,
+}
+
+impl SurfaceCompletionStats {
+    fn rejected_total(self) -> usize {
+        self.rejected_texture
+            + self.rejected_cross_view
+            + self.rejected_reciprocal
+            + self.rejected_fusion
+            + self.rejected_footprint
+    }
+
+    fn outcomes(self) -> usize {
+        self.accepted + self.rejected_total()
+    }
 }
 
 struct SourceView<'a> {
@@ -349,6 +385,22 @@ pub(super) fn estimate_depth_points(
         }
     }
 
+    let surface_completion = complete_surface_samples(
+        reference,
+        reference_frame,
+        &reference_luma,
+        &source_views,
+        &mut points,
+        &mut grid_sites,
+        &mut errors,
+        &mut supports,
+        width,
+        height,
+        border,
+        stride,
+        focal,
+    );
+
     DenseAnalysis {
         stats: DenseStats {
             attempted: true,
@@ -358,6 +410,13 @@ pub(super) fn estimate_depth_points(
             sampled_pixels,
             depth_hypotheses: DEPTH_HYPOTHESES,
             accepted_points: points.len(),
+            surface_completion_proposals: surface_completion.proposals,
+            surface_completed_points: surface_completion.accepted,
+            surface_completion_rejected_texture: surface_completion.rejected_texture,
+            surface_completion_rejected_cross_view: surface_completion.rejected_cross_view,
+            surface_completion_rejected_reciprocal: surface_completion.rejected_reciprocal,
+            surface_completion_rejected_fusion: surface_completion.rejected_fusion,
+            surface_completion_rejected_footprint: surface_completion.rejected_footprint,
             grid_stride: stride,
             grid_border: border,
             reciprocal_checked_points,
@@ -376,6 +435,223 @@ pub(super) fn estimate_depth_points(
         points,
         grid_sites,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_surface_samples(
+    reference: &RegisteredCamera,
+    reference_frame: &FrameInput,
+    reference_luma: &[u8],
+    source_views: &[SourceView<'_>],
+    points: &mut Vec<Point3>,
+    grid_sites: &mut Vec<DenseGridSite>,
+    errors: &mut Vec<f64>,
+    supports: &mut Vec<f64>,
+    width: u32,
+    height: u32,
+    border: u32,
+    stride: usize,
+    focal: f64,
+) -> SurfaceCompletionStats {
+    if stride == 0 || source_views.is_empty() {
+        return SurfaceCompletionStats::default();
+    }
+
+    let mut stats = SurfaceCompletionStats::default();
+    let stride_i64 = stride as i64;
+    for _ in 0..SURFACE_COMPLETION_PASSES {
+        let occupied: BTreeMap<(u32, u32), usize> = grid_sites
+            .iter()
+            .enumerate()
+            .map(|(index, site)| ((site.x, site.y), index))
+            .collect();
+        let mut additions = Vec::new();
+
+        for y in (border..height - border).step_by(stride) {
+            for x in (border..width - border).step_by(stride) {
+                if occupied.contains_key(&(x, y)) {
+                    continue;
+                }
+
+                let mut neighbor_depths = Vec::with_capacity(8);
+                let mut neighbor_confidences = Vec::with_capacity(8);
+                for offset_y in -1i64..=1 {
+                    for offset_x in -1i64..=1 {
+                        if offset_x == 0 && offset_y == 0 {
+                            continue;
+                        }
+                        let neighbor_x = i64::from(x) + offset_x * stride_i64;
+                        let neighbor_y = i64::from(y) + offset_y * stride_i64;
+                        if neighbor_x < 0 || neighbor_y < 0 {
+                            continue;
+                        }
+                        let Ok(neighbor_x) = u32::try_from(neighbor_x) else {
+                            continue;
+                        };
+                        let Ok(neighbor_y) = u32::try_from(neighbor_y) else {
+                            continue;
+                        };
+                        let Some(&point_index) = occupied.get(&(neighbor_x, neighbor_y)) else {
+                            continue;
+                        };
+                        let Some(point) = points.get(point_index) else {
+                            continue;
+                        };
+                        let position = Vector3::new(point.x as f64, point.y as f64, point.z as f64);
+                        let Some((_, _, depth)) =
+                            project(reference, position, width, height, focal)
+                        else {
+                            continue;
+                        };
+                        neighbor_depths.push(depth);
+                        neighbor_confidences.push(point.confidence as f64);
+                    }
+                }
+
+                let Some(predicted_depth) = surface_depth_prediction(&mut neighbor_depths) else {
+                    continue;
+                };
+                stats.proposals += 1;
+                if patch_contrast(reference_luma, width, height, x as f64, y as f64)
+                    < MIN_REFERENCE_CONTRAST
+                {
+                    stats.rejected_texture += 1;
+                    continue;
+                }
+
+                let predicted_position = unproject(
+                    reference,
+                    x as f64,
+                    y as f64,
+                    predicted_depth,
+                    width,
+                    height,
+                    focal,
+                );
+                let mut direct_errors = Vec::new();
+                for source in source_views {
+                    let Some(error) = patch_error(
+                        reference,
+                        source.camera,
+                        reference_luma,
+                        &source.luma,
+                        width,
+                        height,
+                        source.frame.width,
+                        source.frame.height,
+                        x as f64,
+                        y as f64,
+                        predicted_depth,
+                        focal,
+                    ) else {
+                        continue;
+                    };
+                    if error <= MAX_PHOTOMETRIC_ERROR {
+                        direct_errors.push(error);
+                    }
+                }
+                if direct_errors.is_empty() {
+                    stats.rejected_cross_view += 1;
+                    continue;
+                }
+                direct_errors
+                    .sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+                let direct_error = quantile(&direct_errors, 0.50);
+
+                let reciprocal_positions = reciprocal_depth_observations(
+                    predicted_position,
+                    reference,
+                    reference_frame,
+                    reference_luma,
+                    source_views,
+                    focal,
+                );
+                if reciprocal_positions.is_empty() {
+                    stats.rejected_reciprocal += 1;
+                    continue;
+                }
+                let fused = fuse_depth_observations(
+                    predicted_position,
+                    &reciprocal_positions,
+                    predicted_depth,
+                );
+                if fused.observations < MIN_FUSION_OBSERVATIONS {
+                    stats.rejected_fusion += 1;
+                    continue;
+                }
+                let Some((projected_x, projected_y, _)) =
+                    project(reference, fused.position, width, height, focal)
+                else {
+                    stats.rejected_footprint += 1;
+                    continue;
+                };
+                let grid_limit = stride as f64 * 0.5;
+                if (projected_x - x as f64).abs() >= grid_limit
+                    || (projected_y - y as f64).abs() >= grid_limit
+                {
+                    stats.rejected_footprint += 1;
+                    continue;
+                }
+
+                let neighbor_confidence = neighbor_confidences.iter().sum::<f64>()
+                    / neighbor_confidences.len() as f64;
+                let support_confidence = direct_errors.len() as f64 / source_views.len() as f64;
+                let reciprocal_confidence =
+                    ((fused.observations - 1) as f64 / source_views.len() as f64).clamp(0.0, 1.0);
+                let error_confidence = 1.0 / (1.0 + direct_error / 8.0);
+                let confidence = (neighbor_confidence
+                    * support_confidence
+                    * reciprocal_confidence
+                    * error_confidence
+                    * SURFACE_COMPLETION_CONFIDENCE_SCALE)
+                    .clamp(0.05, 0.9) as f32;
+                let (r, g, b) = sample_rgb(reference_frame, x, y);
+                additions.push((
+                    Point3 {
+                        x: fused.position.x as f32,
+                        y: fused.position.y as f32,
+                        z: fused.position.z as f32,
+                        confidence,
+                        r,
+                        g,
+                        b,
+                    },
+                    DenseGridSite { x, y },
+                    direct_error,
+                    direct_errors.len() as f64,
+                ));
+            }
+        }
+
+        if additions.is_empty() {
+            break;
+        }
+        stats.accepted += additions.len();
+        for (point, site, error, support) in additions {
+            points.push(point);
+            grid_sites.push(site);
+            errors.push(error);
+            supports.push(support);
+        }
+    }
+    debug_assert_eq!(stats.proposals, stats.outcomes());
+    stats
+}
+
+fn surface_depth_prediction(depths: &mut [f64]) -> Option<f64> {
+    if depths.len() < MIN_SURFACE_NEIGHBORS {
+        return None;
+    }
+    depths.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    let minimum = depths[0];
+    let maximum = depths[depths.len() - 1];
+    if !minimum.is_finite() || !maximum.is_finite() || minimum <= 0.0 || maximum <= 0.0 {
+        return None;
+    }
+    if (maximum - minimum) / maximum > MAX_SURFACE_NEIGHBOR_RELATIVE_DEPTH_SPREAD {
+        return None;
+    }
+    Some(quantile(depths, 0.50))
 }
 
 fn depth_search_bounds(
@@ -863,6 +1139,27 @@ mod tests {
         points
     }
 
+    fn point_at_pixel(
+        camera: &RegisteredCamera,
+        x: f64,
+        y: f64,
+        depth: f64,
+        width: u32,
+        height: u32,
+        focal: f64,
+    ) -> Point3 {
+        let position = unproject(camera, x, y, depth, width, height, focal);
+        Point3 {
+            x: position.x as f32,
+            y: position.y as f32,
+            z: position.z as f32,
+            confidence: 0.8,
+            r: 120,
+            g: 120,
+            b: 120,
+        }
+    }
+
     #[test]
     fn estimates_coarse_depth_on_textured_plane() {
         let width = 68;
@@ -888,8 +1185,17 @@ mod tests {
             result.stats.reciprocal_consistent_points + result.stats.reciprocal_rejected_points
         );
         assert_eq!(
-            result.stats.reciprocal_consistent_points,
+            result.stats.reciprocal_consistent_points + result.stats.surface_completed_points,
             result.stats.accepted_points + result.stats.fusion_rejected_points
+        );
+        assert_eq!(
+            result.stats.surface_completion_proposals,
+            result.stats.surface_completed_points
+                + result.stats.surface_completion_rejected_texture
+                + result.stats.surface_completion_rejected_cross_view
+                + result.stats.surface_completion_rejected_reciprocal
+                + result.stats.surface_completion_rejected_fusion
+                + result.stats.surface_completion_rejected_footprint
         );
         assert!(
             result.stats.fusion_input_observations
@@ -913,6 +1219,73 @@ mod tests {
             (median_depth - depth).abs() < 0.55,
             "median dense depth was {median_depth}"
         );
+    }
+
+    #[test]
+    fn surface_completion_reports_texture_rejections() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let frame = FrameInput {
+            width,
+            height,
+            rgba: vec![120; width as usize * height as usize * 4],
+        };
+        let cameras = [camera(0, 0.0), camera(1, 0.2)];
+        let reference_luma = to_luma(&frame);
+        let source_views = [SourceView {
+            camera: &cameras[1],
+            frame: &frame,
+            luma: reference_luma.clone(),
+            search_min_depth: 3.2,
+            search_max_depth: 5.0,
+        }];
+        let mut points = vec![
+            point_at_pixel(&cameras[0], 3.0, 3.0, 4.0, width, height, focal),
+            point_at_pixel(&cameras[0], 7.0, 3.0, 4.0, width, height, focal),
+            point_at_pixel(&cameras[0], 3.0, 7.0, 4.0, width, height, focal),
+        ];
+        let mut grid_sites = vec![
+            DenseGridSite { x: 3, y: 3 },
+            DenseGridSite { x: 7, y: 3 },
+            DenseGridSite { x: 3, y: 7 },
+        ];
+        let mut errors = Vec::new();
+        let mut supports = Vec::new();
+
+        let stats = complete_surface_samples(
+            &cameras[0],
+            &frame,
+            &reference_luma,
+            &source_views,
+            &mut points,
+            &mut grid_sites,
+            &mut errors,
+            &mut supports,
+            width,
+            height,
+            3,
+            4,
+            focal,
+        );
+
+        assert!(stats.proposals > 0);
+        assert_eq!(stats.accepted, 0);
+        assert_eq!(stats.rejected_texture, stats.proposals);
+        assert_eq!(stats.proposals, stats.outcomes());
+    }
+
+    #[test]
+    fn surface_depth_prediction_requires_consistent_neighbors() {
+        let mut smooth = [4.0, 4.03, 3.98, 4.01];
+        let predicted = surface_depth_prediction(&mut smooth).expect("smooth surface prediction");
+        assert!((predicted - 4.01).abs() < 0.05);
+
+        let mut discontinuous = [4.0, 4.02, 5.2];
+        assert!(surface_depth_prediction(&mut discontinuous).is_none());
+
+        let mut underconstrained = [4.0, 4.01];
+        assert!(surface_depth_prediction(&mut underconstrained).is_none());
     }
 
     #[test]
@@ -999,6 +1372,8 @@ mod tests {
         assert!(result.stats.skip_reason.is_none());
         assert!(result.points.is_empty());
         assert_eq!(result.stats.accepted_points, 0);
+        assert_eq!(result.stats.surface_completed_points, 0);
+        assert_eq!(result.stats.surface_completion_proposals, 0);
     }
 
     #[test]

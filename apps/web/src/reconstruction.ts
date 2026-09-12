@@ -146,6 +146,13 @@ export type DenseStats = {
   sampled_pixels: number;
   depth_hypotheses: number;
   accepted_points: number;
+  surface_completion_proposals: number;
+  surface_completed_points: number;
+  surface_completion_rejected_texture: number;
+  surface_completion_rejected_cross_view: number;
+  surface_completion_rejected_reciprocal: number;
+  surface_completion_rejected_fusion: number;
+  surface_completion_rejected_footprint: number;
   grid_stride: number;
   grid_border: number;
   reciprocal_checked_points: number;

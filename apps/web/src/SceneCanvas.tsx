@@ -15,6 +15,8 @@ type ViewState = {
   zoom: number;
 };
 
+type RenderMode = "model" | "evidence";
+
 type CameraHitTarget = {
   frameIndex: number;
   x: number;
@@ -30,6 +32,10 @@ type DragState = {
   moved: boolean;
 };
 
+function clampedChannel(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
 export function SceneCanvas({
   reconstruction,
   selectedFrameIndex = null,
@@ -40,13 +46,49 @@ export function SceneCanvas({
   const cameraHitTargetsRef = useRef<CameraHitTarget[]>([]);
   const [view, setView] = useState<ViewState>({ yaw: -0.45, pitch: 0.18, zoom: 1 });
   const hasRegisteredGeometry = reconstruction.calibrated_pair !== null;
+  const hasSurfaceModel = reconstruction.mesh_triangles.length > 0;
+  const [renderMode, setRenderMode] = useState<RenderMode>(
+    hasSurfaceModel ? "model" : "evidence",
+  );
+
+  useEffect(() => {
+    setRenderMode(hasSurfaceModel ? "model" : "evidence");
+    setView((current) => ({ ...current, zoom: 1 }));
+  }, [hasSurfaceModel, reconstruction]);
 
   const bounds = useMemo(() => {
-    const positions = [
-      ...reconstruction.points.map((point) => [point.x, point.y, point.z] as const),
-      ...reconstruction.dense_points.map((point) => [point.x, point.y, point.z] as const),
-      ...reconstruction.cameras.map((camera) => [camera.x, camera.y, camera.z] as const),
-    ];
+    const surfacePointIndices = new Set<number>();
+    for (const triangle of reconstruction.mesh_triangles) {
+      surfacePointIndices.add(triangle.a);
+      surfacePointIndices.add(triangle.b);
+      surfacePointIndices.add(triangle.c);
+    }
+    const surfacePositions = [...surfacePointIndices].flatMap((index) => {
+      const point = reconstruction.dense_points[index];
+      return point ? [[point.x, point.y, point.z] as const] : [];
+    });
+    const densePositions = reconstruction.dense_points.map(
+      (point) => [point.x, point.y, point.z] as const,
+    );
+    const sparsePositions = reconstruction.points.map(
+      (point) => [point.x, point.y, point.z] as const,
+    );
+    const cameraPositions = reconstruction.cameras.map(
+      (camera) => [camera.x, camera.y, camera.z] as const,
+    );
+    const evidencePositions = [...densePositions, ...sparsePositions, ...cameraPositions];
+    const modelPositions =
+      surfacePositions.length > 0
+        ? surfacePositions
+        : densePositions.length > 0
+          ? densePositions
+          : sparsePositions.length > 0
+            ? sparsePositions
+            : cameraPositions;
+    const positions =
+      renderMode === "evidence" && evidencePositions.length > 0
+        ? evidencePositions
+        : modelPositions;
     if (positions.length === 0) {
       return { center: [0, 0, 0] as const, extent: 1 };
     }
@@ -65,7 +107,7 @@ export function SceneCanvas({
     ] as const;
     const extent = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 1);
     return { center, extent };
-  }, [reconstruction]);
+  }, [reconstruction, renderMode]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -95,14 +137,18 @@ export function SceneCanvas({
       const yawX = cx * cosYaw - cz * sinYaw;
       const yawZ = cx * sinYaw + cz * cosYaw;
       const pitchY = cy * cosPitch - yawZ * sinPitch;
-      const pitchZ = cy * sinPitch + yawZ * cosPitch + distance;
+      const viewZ = cy * sinPitch + yawZ * cosPitch;
+      const depth = viewZ + distance;
       const focal = Math.min(width, height) * 0.9;
-      const scale = focal / Math.max(0.08, pitchZ);
+      const scale = focal / Math.max(0.08, depth);
       return {
         x: width * 0.5 + yawX * scale,
         y: height * 0.5 - pitchY * scale,
-        z: pitchZ,
+        z: depth,
         scale,
+        viewX: yawX,
+        viewY: pitchY,
+        viewZ,
       };
     };
 
@@ -118,14 +164,32 @@ export function SceneCanvas({
         if (projectedA.z <= 0.05 || projectedB.z <= 0.05 || projectedC.z <= 0.05) {
           return [];
         }
+        const ab = {
+          x: projectedB.viewX - projectedA.viewX,
+          y: projectedB.viewY - projectedA.viewY,
+          z: projectedB.viewZ - projectedA.viewZ,
+        };
+        const ac = {
+          x: projectedC.viewX - projectedA.viewX,
+          y: projectedC.viewY - projectedA.viewY,
+          z: projectedC.viewZ - projectedA.viewZ,
+        };
+        const normal = {
+          x: ab.y * ac.z - ab.z * ac.y,
+          y: ab.z * ac.x - ab.x * ac.z,
+          z: ab.x * ac.y - ab.y * ac.x,
+        };
+        const normalLength = Math.hypot(normal.x, normal.y, normal.z);
+        const facing = normalLength > 1e-9 ? Math.abs(normal.z) / normalLength : 0;
+        const light = 0.48 + facing * 0.52;
         return [
           {
             triangle,
             projected: [projectedA, projectedB, projectedC] as const,
             depth: (projectedA.z + projectedB.z + projectedC.z) / 3,
-            r: Math.round((a.r + b.r + c.r) / 3),
-            g: Math.round((a.g + b.g + c.g) / 3),
-            b: Math.round((a.b + b.b + c.b) / 3),
+            r: clampedChannel(((a.r + b.r + c.r) / 3) * light),
+            g: clampedChannel(((a.g + b.g + c.g) / 3) * light),
+            b: clampedChannel(((a.b + b.b + c.b) / 3) * light),
           },
         ];
       })
@@ -138,44 +202,50 @@ export function SceneCanvas({
       context.lineTo(b.x, b.y);
       context.lineTo(c.x, c.y);
       context.closePath();
-      context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.05 + item.triangle.confidence * 0.18})`;
+      context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.76 + item.triangle.confidence * 0.24})`;
       context.fill();
-      context.lineWidth = 0.45 * ratio;
-      context.strokeStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.06 + item.triangle.confidence * 0.1})`;
+      context.lineWidth = 0.42 * ratio;
+      context.strokeStyle = "rgba(4, 10, 13, 0.22)";
       context.stroke();
     }
 
-    const projectedDensePoints = reconstruction.dense_points
-      .filter((point) => point.confidence > 0.05)
-      .map((point) => ({ point, projected: project(point.x, point.y, point.z) }))
-      .filter(({ projected }) => projected.z > 0.05)
-      .sort((a, b) => b.projected.z - a.projected.z);
+    const showEvidence = renderMode === "evidence" || !hasSurfaceModel;
+    if (showEvidence) {
+      const projectedDensePoints = reconstruction.dense_points
+        .filter((point) => point.confidence > 0.05)
+        .map((point) => ({ point, projected: project(point.x, point.y, point.z) }))
+        .filter(({ projected }) => projected.z > 0.05)
+        .sort((a, b) => b.projected.z - a.projected.z);
 
-    for (const { point, projected } of projectedDensePoints) {
-      const radius = Math.max(0.55 * ratio, Math.min(1.8 * ratio, projected.scale * 0.009));
-      context.beginPath();
-      context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
-      context.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${0.18 + point.confidence * 0.48})`;
-      context.fill();
+      for (const { point, projected } of projectedDensePoints) {
+        const radius = Math.max(0.55 * ratio, Math.min(1.8 * ratio, projected.scale * 0.009));
+        context.beginPath();
+        context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
+        context.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${0.14 + point.confidence * 0.38})`;
+        context.fill();
+      }
+
+      const projectedPoints = reconstruction.points
+        .filter((point) => point.confidence > 0.08)
+        .map((point) => ({ point, projected: project(point.x, point.y, point.z) }))
+        .filter(({ projected }) => projected.z > 0.05)
+        .sort((a, b) => b.projected.z - a.projected.z);
+
+      for (const { point, projected } of projectedPoints) {
+        const radius = Math.max(0.7 * ratio, Math.min(2.6 * ratio, projected.scale * 0.012));
+        context.beginPath();
+        context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
+        context.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${0.3 + point.confidence * 0.55})`;
+        context.fill();
+      }
     }
 
-    const projectedPoints = reconstruction.points
-      .filter((point) => point.confidence > 0.08)
-      .map((point) => ({ point, projected: project(point.x, point.y, point.z) }))
-      .filter(({ projected }) => projected.z > 0.05)
-      .sort((a, b) => b.projected.z - a.projected.z);
-
-    for (const { point, projected } of projectedPoints) {
-      const radius = Math.max(0.7 * ratio, Math.min(2.6 * ratio, projected.scale * 0.012));
-      context.beginPath();
-      context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
-      context.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${0.35 + point.confidence * 0.65})`;
-      context.fill();
-    }
-
-    const projectedCameras = reconstruction.cameras
-      .map((camera) => ({ camera, projected: project(camera.x, camera.y, camera.z) }))
-      .filter(({ projected }) => projected.z > 0.05);
+    const showCameras = renderMode === "evidence" || !hasSurfaceModel;
+    const projectedCameras = showCameras
+      ? reconstruction.cameras
+          .map((camera) => ({ camera, projected: project(camera.x, camera.y, camera.z) }))
+          .filter(({ projected }) => projected.z > 0.05)
+      : [];
 
     if (projectedCameras.length > 0) {
       context.lineWidth = (hasRegisteredGeometry ? 1.5 : 1) * ratio;
@@ -237,7 +307,15 @@ export function SceneCanvas({
       });
     }
     cameraHitTargetsRef.current = hitTargets;
-  }, [bounds, hasRegisteredGeometry, reconstruction, selectedFrameIndex, view]);
+  }, [
+    bounds,
+    hasRegisteredGeometry,
+    hasSurfaceModel,
+    reconstruction,
+    renderMode,
+    selectedFrameIndex,
+    view,
+  ]);
 
   useEffect(() => {
     draw();
@@ -246,34 +324,47 @@ export function SceneCanvas({
     return () => observer.disconnect();
   }, [draw]);
 
+  const selectRenderMode = (nextMode: RenderMode) => {
+    setRenderMode(nextMode);
+    setView((current) => ({ ...current, zoom: 1 }));
+  };
+
   const cameraDiagnostic = hasRegisteredGeometry
     ? `Registered geometry: ${reconstruction.cameras.length} accepted camera poses`
     : `Approximate motion track only: ${reconstruction.cameras.length} sampled poses; no calibrated seed pair was accepted`;
 
+  const surfaceCompletionDiagnostic =
+    reconstruction.dense.surface_completion_proposals > 0
+      ? `Surface completion: ${reconstruction.dense.surface_completed_points} of ${reconstruction.dense.surface_completion_proposals} coherent proposals accepted; rejected ${reconstruction.dense.surface_completion_rejected_texture} at texture, ${reconstruction.dense.surface_completion_rejected_cross_view} at direct cross-view support, ${reconstruction.dense.surface_completion_rejected_reciprocal} at reciprocal depth, ${reconstruction.dense.surface_completion_rejected_fusion} at fusion, and ${reconstruction.dense.surface_completion_rejected_footprint} at final grid footprint`
+      : "Surface completion: no empty grid site had enough coherent neighboring depth evidence to make a proposal";
   const denseDiagnostic = reconstruction.dense.skip_reason
     ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
     : reconstruction.dense.accepted_points > 0
-      ? `Fused dense depth: ${reconstruction.dense.accepted_points} scene points from ${reconstruction.dense.fusion_input_observations} reciprocal-consistent multi-view observations; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates and spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
+      ? `Dense surface evidence: ${reconstruction.dense.accepted_points} accepted scene samples; ${surfaceCompletionDiagnostic}; primary reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} candidates and primary spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
       : reconstruction.dense.reciprocal_consistent_points > 0
-        ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations)`
+        ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations); ${surfaceCompletionDiagnostic}`
         : reconstruction.dense.reciprocal_checked_points > 0
-          ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates`
-          : "Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates";
+          ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates; ${surfaceCompletionDiagnostic}`
+          : `Coarse dense depth ran, but no primary depth hypothesis passed the texture and ambiguity gates; ${surfaceCompletionDiagnostic}`;
 
   const meshGridRejected = reconstruction.mesh.rejected_grid_vertices;
   const meshAdmissionDiagnostic =
     meshGridRejected > 0 ? `${meshGridRejected} fused points were not admitted to the mesh grid; ` : "";
   const meshDiagnostic = reconstruction.mesh.attempted
     ? reconstruction.mesh.accepted_triangles > 0
-      ? `Mesh: ${reconstruction.mesh.accepted_triangles} triangles; ${meshAdmissionDiagnostic}rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
-      : `Mesh ran, but no neighboring fused samples formed a continuous triangle; ${meshAdmissionDiagnostic}${reconstruction.mesh.rejected_discontinuities} discontinuity and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation candidates were rejected`
+      ? `Surface model: ${reconstruction.mesh.accepted_triangles} accepted triangles; ${meshAdmissionDiagnostic}rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
+      : `No surface model passed the mesh gates; ${meshAdmissionDiagnostic}${reconstruction.mesh.rejected_discontinuities} discontinuity and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation candidates were rejected. The points shown are reconstruction evidence, not the final model.`
     : reconstruction.mesh.skip_reason
-      ? `Mesh skipped: ${reconstruction.mesh.skip_reason}${
+      ? `Surface model unavailable: ${reconstruction.mesh.skip_reason}${
           meshGridRejected > 0
             ? `; ${meshGridRejected} fused points were rejected at mesh-grid admission`
             : ""
-        }`
-      : null;
+        }. The points shown are reconstruction evidence, not the final model.`
+      : "Surface model unavailable; the points shown are reconstruction evidence, not the final model.";
+
+  const primaryDiagnostic = hasSurfaceModel && renderMode === "model"
+    ? `${meshDiagnostic} · ${denseDiagnostic}`
+    : `${cameraDiagnostic} · ${denseDiagnostic} · ${meshDiagnostic}`;
 
   return (
     <>
@@ -316,7 +407,7 @@ export function SceneCanvas({
           if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
           }
-          if (!drag || drag.moved || !onSelectFrame) return;
+          if (!drag || drag.moved || !onSelectFrame || renderMode !== "evidence") return;
           const rect = event.currentTarget.getBoundingClientRect();
           const x = event.clientX - rect.left;
           const y = event.clientY - rect.top;
@@ -339,10 +430,56 @@ export function SceneCanvas({
             zoom: Math.max(0.45, Math.min(3.5, current.zoom * Math.exp(-event.deltaY * 0.001))),
           }));
         }}
-        aria-label="Interactive 3D reconstruction. Drag to orbit, use the mouse wheel to zoom, or click a camera marker to select its source frame."
+        aria-label="Interactive 3D reconstruction. Drag to orbit and use the mouse wheel to zoom. Switch to evidence mode to inspect camera markers and point evidence."
       />
+      {hasSurfaceModel ? (
+        <div
+          style={{
+            position: "absolute",
+            left: 14,
+            bottom: 52,
+            zIndex: 2,
+            display: "flex",
+            gap: 6,
+          }}
+          aria-label="Reconstruction display mode"
+        >
+          <button
+            type="button"
+            aria-pressed={renderMode === "model"}
+            onClick={() => selectRenderMode("model")}
+            style={{
+              border: "1px solid rgba(111, 220, 255, 0.45)",
+              borderRadius: 999,
+              padding: "5px 10px",
+              background: renderMode === "model" ? "rgba(111, 220, 255, 0.18)" : "rgba(4, 10, 13, 0.76)",
+              color: "inherit",
+              cursor: "pointer",
+              fontSize: "0.72rem",
+            }}
+          >
+            Model
+          </button>
+          <button
+            type="button"
+            aria-pressed={renderMode === "evidence"}
+            onClick={() => selectRenderMode("evidence")}
+            style={{
+              border: "1px solid rgba(111, 220, 255, 0.3)",
+              borderRadius: 999,
+              padding: "5px 10px",
+              background: renderMode === "evidence" ? "rgba(111, 220, 255, 0.18)" : "rgba(4, 10, 13, 0.76)",
+              color: "inherit",
+              cursor: "pointer",
+              fontSize: "0.72rem",
+            }}
+          >
+            Evidence
+          </button>
+        </div>
+      ) : null}
       <div className="viewer-diagnostic" aria-live="polite">
-        {cameraDiagnostic} · {denseDiagnostic}{meshDiagnostic ? ` · ${meshDiagnostic}` : ""}
+        {primaryDiagnostic}
       </div>
     </>
   );
