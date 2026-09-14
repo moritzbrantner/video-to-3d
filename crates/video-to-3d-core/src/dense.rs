@@ -177,7 +177,8 @@ pub(super) fn estimate_depth_points(
             sparse_points,
             focal,
         ));
-        fallback.stats.reference_attempts = attempts;
+        let fallback_attempts = std::mem::take(&mut fallback.stats.reference_attempts);
+        fallback.stats.reference_attempts = merge_fallback_attempts(attempts, fallback_attempts);
         return fallback;
     }
 
@@ -342,6 +343,25 @@ fn reference_attempt_stats(
         surface_completion_rejected_fusion: stats.surface_completion_rejected_fusion,
         surface_completion_rejected_footprint: stats.surface_completion_rejected_footprint,
     }
+}
+
+fn merge_fallback_attempts(
+    mut attempts: Vec<DenseReferenceAttemptStats>,
+    fallback_attempts: Vec<DenseReferenceAttemptStats>,
+) -> Vec<DenseReferenceAttemptStats> {
+    for fallback_attempt in fallback_attempts {
+        if let Some(existing) = attempts
+            .iter_mut()
+            .find(|attempt| attempt.reference_frame == fallback_attempt.reference_frame)
+        {
+            if fallback_attempt.accepted && !existing.accepted {
+                *existing = fallback_attempt;
+            }
+        } else {
+            attempts.push(fallback_attempt);
+        }
+    }
+    attempts
 }
 
 fn convert_grid_sites(sites: Vec<legacy::DenseGridSite>) -> Vec<DenseGridSite> {
@@ -748,5 +768,49 @@ mod multi_reference_tests {
             .skip_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("at least 3")));
+    }
+
+    #[test]
+    fn successful_fallback_evidence_replaces_rejected_attempt_for_same_reference() {
+        let rejected = DenseReferenceAttemptStats {
+            reference_frame: 3,
+            attempted: true,
+            accepted: false,
+            skip_reason: Some("remapped reference rejected".into()),
+            accepted_points: 1,
+            ..DenseReferenceAttemptStats::default()
+        };
+        let other_rejected = DenseReferenceAttemptStats {
+            reference_frame: 5,
+            attempted: true,
+            accepted: false,
+            skip_reason: Some("another reference rejected".into()),
+            ..DenseReferenceAttemptStats::default()
+        };
+        let fallback_accepted = DenseReferenceAttemptStats {
+            reference_frame: 3,
+            attempted: true,
+            accepted: true,
+            skip_reason: None,
+            accepted_points: 9,
+            ..DenseReferenceAttemptStats::default()
+        };
+
+        let merged = merge_fallback_attempts(
+            vec![rejected, other_rejected],
+            vec![fallback_accepted],
+        );
+
+        assert_eq!(merged.len(), 2);
+        let accepted = merged
+            .iter()
+            .find(|attempt| attempt.reference_frame == 3)
+            .expect("fallback reference evidence");
+        assert!(accepted.accepted);
+        assert_eq!(accepted.accepted_points, 9);
+        assert!(accepted.skip_reason.is_none());
+        assert!(merged
+            .iter()
+            .any(|attempt| attempt.reference_frame == 5 && !attempt.accepted));
     }
 }
