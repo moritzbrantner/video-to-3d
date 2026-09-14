@@ -1,0 +1,101 @@
+{
+  "schema_version": "video-to-3d/real-video-corpus/v1",
+  "sampling": {
+    "frames_per_second": 1.25,
+    "max_frames": 18
+  },
+  "cases": [
+    {
+      "id": "tanks-temples-ignatius",
+      "title": "Tanks and Temples — Ignatius",
+      "tier": "quantitative",
+      "asset": {
+        "mode": "provider",
+        "provider": "tanks-and-temples",
+        "scene": "Ignatius",
+        "expected_file": "tanks-and-temples/videos/Ignatius.mp4",
+        "source_url": "https://www.tanksandtemples.org/download/",
+        "license_url": "https://www.tanksandtemples.org/license/",
+        "integrity": "provider-md5",
+        "redistribute": false
+      },
+      "evaluation": {
+        "mode": "ground-truth-evidence",
+        "ground_truth": "laser-scan",
+        "reference_reconstruction": "COLMAP",
+        "camera_reference": true,
+        "gate": "evidence-only-until-baseline"
+      },
+      "automation": {
+        "scheduled": true
+      }
+    },
+    {
+      "id": "tanks-temples-church",
+      "title": "Tanks and Temples — Church",
+      "tier": "quantitative",
+      "asset": {
+        "mode": "provider",
+        "provider": "tanks-and-temples",
+        "scene": "Church",
+        "expected_file": "tanks-and-temples/videos/Church.mp4",
+        "source_url": "https://www.tanksandtemples.org/download/",
+        "license_url": "https://www.tanksandtemples.org/license/",
+        "integrity": "provider-md5",
+        "redistribute": false
+      },
+      "evaluation": {
+        "mode": "ground-truth-evidence",
+        "ground_truth": "laser-scan",
+        "reference_reconstruction": "COLMAP",
+        "camera_reference": true,
+        "gate": "evidence-only-until-baseline"
+      },
+      "automation": {
+        "scheduled": true
+      }
+    },
+    {
+      "id": "youtube-statue-of-liberty",
+      "title": "Statue of Liberty orbit footage",
+      "tier": "field-canary",
+      "asset": {
+        "mode": "manual",
+        "expected_file": "field-canaries/statue-of-liberty.mp4",
+        "source_url": "https://www.youtube.com/watch?v=28sqS5SEt-o",
+        "reference_url": "https://sketchfab.com/3d-models/statue-of-liberty-a66ff5ea231f42e8839d68116dbfec8c",
+        "source_video_id": "28sqS5SEt-o",
+        "redistribute": false
+      },
+      "evaluation": {
+        "mode": "observational",
+        "reference_reconstruction": "published-photogrammetry-model",
+        "gate": "manual-field-canary"
+      },
+      "automation": {
+        "scheduled": false
+      }
+    },
+    {
+      "id": "youtube-colosseum",
+      "title": "Roman Colosseum orbit footage",
+      "tier": "field-canary",
+      "asset": {
+        "mode": "manual",
+        "expected_file": "field-canaries/colosseum.mp4",
+        "source_url": "https://www.youtube.com/watch?v=P86HTnVfYBo",
+        "reference_url": "https://www.youtube.com/watch?v=9fAtJc9XyyE",
+        "source_video_id": "P86HTnVfYBo",
+        "redistribute": false
+      },
+      "evaluation": {
+        "mode": "observational",
+        "reference_reconstruction": "published-realitycapture-result",
+        "gate": "manual-field-canary"
+      },
+      "automation": {
+        "scheduled": false
+      }
+    }
+  ]
+}

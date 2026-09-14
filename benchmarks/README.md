@@ -40,10 +40,55 @@ ETH3D provides laser-scanner ground truth across varied indoor/outdoor multi-vie
 
 - Source: https://www.eth3d.net/datasets
 
+## Real-video corpus
+
+`real-video-corpus.json` is the machine-readable authority for recorded-footage acceptance. Large source videos are never committed to this repository. The manifest records provenance, the expected local path, acquisition policy, evaluation role, and whether a case may run unattended.
+
+The first quantitative cases are Tanks and Temples `Ignatius` and `Church`. They provide raw high-resolution video, laser-scanner ground truth, published camera/reference reconstruction evidence, and provider MD5 checks. The repository fetcher only supports these explicitly listed scenes and verifies the official checksum before the file can be used.
+
+The first field canaries are the Statue of Liberty and Roman Colosseum orbit videos. They are deliberately manual: the manifest records the original video and a published reconstruction made from that footage, but CI does not download YouTube content and does not redistribute any source video.
+
+### Sampling contract
+
+The benchmark runner imports the same pure sampling-plan function used by the browser. The shared contract owns timestamp selection, frame count, and the 360-pixel analysis resolution. Browser DOM APIs still own normal in-product decoding; the benchmark uses FFmpeg only as an external test decoder so real footage can be exercised headlessly without creating a second reconstruction implementation.
+
+Default field settings remain 1.25 sampled frames per second with an 18-frame cap, distributed over the 5%–95% interior of the clip. The benchmark manifest is validated in ordinary CI so provenance or scheduling policy cannot drift silently.
+
+### Running a quantitative case
+
+Review the current Tanks and Temples dataset terms before downloading data. Then:
+
+```bash
+python3 -m pip install gdown==5.2.0
+python3 tools/fetch_tanks_and_temples.py --scene Ignatius
+bun tools/run_real_video_case.ts --case tanks-temples-ignatius
+```
+
+Outputs are written under `target/real-video/<case-id>/`:
+
+- `sampling.json`: exact source metadata and selected timestamps.
+- `metrics.json`: reconstruction counts and quality evidence from the Rust core.
+- `sparse.ply` and `dense.ply`: accepted reconstruction geometry for external comparison/alignment.
+- `cameras.csv`: accepted camera centers when calibrated geometry exists.
+
+The scheduled `Real Video Evidence` workflow is opt-in because dataset terms must be reviewed outside the code. Set repository variable `TANKS_AND_TEMPLES_TERMS_ACCEPTED=true` only after accepting the current terms. Manual workflow runs require the same acknowledgement per run. Raw videos and sampled frames are never uploaded as workflow artifacts.
+
+### Running a field canary
+
+Acquire the source video yourself under terms that allow your use, place it at the manifest's `expected_file` under `.benchmark-data/`, then run the same runner. For example:
+
+```bash
+bun tools/run_real_video_case.ts --case youtube-statue-of-liberty
+```
+
+Field canaries are observational evidence, not merge gates. Their published third-party reconstruction demonstrates that the source footage is reconstructable, but it is not geometry authority for `video-to-3d`.
+
 ## Gate policy
 
 - Pull requests must keep the deterministic golden matrix green.
+- The real-video corpus manifest and shared sampling contract are ordinary pull-request gates; downloading large external videos is not.
 - Runtime ratios remain evidence until repeated measurements establish stable envelopes per scene.
 - A reference implementation may veto a clear quality regression, but representation-specific counts do not need to match exactly.
-- Real-image datasets should be pinned to an immutable or checksum-verified source before becoming required gates.
+- Quantitative real-video cases remain evidence-only until repeated runs establish repository-owned baselines for registration, camera error, geometry accuracy/completeness, and dense coverage.
+- Real-image and real-video datasets should be pinned to an immutable or checksum-verified source before becoming required gates.
 - Larger public datasets belong in slower scheduled/manual lanes unless their cost is small enough to justify every pull request.
