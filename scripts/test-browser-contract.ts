@@ -8,7 +8,8 @@ import {
 
 const width = 48;
 const height = 32;
-const rgba = new Array<number>(width * height * 4).fill(120);
+const rgba = new Uint8Array(width * height * 4);
+rgba.fill(120);
 for (let index = 3; index < rgba.length; index += 4) {
   rgba[index] = 255;
 }
