@@ -32,22 +32,6 @@ type DragState = {
   moved: boolean;
 };
 
-type DenseReferenceAttemptDiagnostic = {
-  reference_frame: number;
-  attempted: boolean;
-  accepted: boolean;
-  skip_reason: string | null;
-  sampled_pixels: number;
-  accepted_points: number;
-  reciprocal_checked_points: number;
-  reciprocal_rejected_points: number;
-  reciprocal_consistent_points: number;
-};
-
-type DenseStatsWithReferenceAttempts = ReconstructionResult["dense"] & {
-  reference_attempts?: DenseReferenceAttemptDiagnostic[];
-};
-
 function clampedChannel(value: number): number {
   return Math.max(0, Math.min(255, Math.round(value)));
 }
@@ -373,8 +357,7 @@ export function SceneCanvas({
     ? `Camera geometry: ${cameraState.calibrated_seed_cameras.length} seed + ${cameraState.registered_cameras.length} additional registered; ${cameraState.dense_eligible_cameras.length} dense-eligible`
     : `Approximate motion only: ${cameraState.approximate_motion_samples.length} sampled poses; no calibrated seed pair was accepted`;
 
-  const denseReferenceAttempts =
-    (reconstruction.dense as DenseStatsWithReferenceAttempts).reference_attempts ?? [];
+  const denseReferenceAttempts = reconstruction.dense.reference_attempts;
   const acceptedReferenceAttempts = denseReferenceAttempts.filter((attempt) => attempt.accepted);
   const rejectedReferenceAttempts = denseReferenceAttempts.filter((attempt) => !attempt.accepted);
   const rejectedReferenceDetails = rejectedReferenceAttempts
@@ -407,20 +390,46 @@ export function SceneCanvas({
           ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} candidates after the texture and ambiguity gates; ${referenceCoverageDiagnostic}; ${surfaceCompletionDiagnostic}`
           : `Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates; ${referenceCoverageDiagnostic}; ${surfaceCompletionDiagnostic}`;
 
+  const meshReferencePatches = reconstruction.mesh.reference_patches;
+  const acceptedMeshReferencePatches = meshReferencePatches.filter(
+    (patch) => patch.accepted_triangles > 0,
+  );
+  const rejectedMeshReferencePatches = meshReferencePatches.filter(
+    (patch) => patch.accepted_triangles === 0,
+  );
+  const rejectedMeshReferenceDetails = rejectedMeshReferencePatches
+    .map((patch) => {
+      const reason = patch.skip_reason
+        ? patch.skip_reason
+        : patch.attempted
+          ? `${patch.candidate_triangles} triangle candidates; rejected ${patch.rejected_discontinuities} at discontinuities and ${patch.rejected_degenerate} as degenerate/orientation-flipped`
+          : "mesh reconstruction was not attempted";
+      return `frame ${patch.reference_frame}: ${reason}`;
+    })
+    .join("; ");
+  const meshCoverageDiagnostic =
+    meshReferencePatches.length > 0
+      ? `Mesh coverage: ${acceptedMeshReferencePatches.length} of ${meshReferencePatches.length} accepted dense patches produced surface triangles${
+          rejectedMeshReferenceDetails.length > 0
+            ? `; rejected ${rejectedMeshReferenceDetails}`
+            : ""
+        }`
+      : "Mesh coverage: no per-reference mesh evidence was reported";
+
   const meshGridRejected = reconstruction.mesh.rejected_grid_vertices;
   const meshAdmissionDiagnostic =
     meshGridRejected > 0 ? `${meshGridRejected} fused points were not admitted to the mesh grid; ` : "";
   const meshDiagnostic = reconstruction.mesh.attempted
     ? reconstruction.mesh.accepted_triangles > 0
-      ? `Surface model: ${reconstruction.mesh.accepted_triangles} accepted triangles; ${meshAdmissionDiagnostic}rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
-      : `No surface model passed the mesh gates; ${meshAdmissionDiagnostic}${reconstruction.mesh.rejected_discontinuities} discontinuity and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation candidates were rejected. The points shown are reconstruction evidence, not the final model.`
+      ? `Surface model: ${reconstruction.mesh.accepted_triangles} accepted triangles; ${meshCoverageDiagnostic}; ${meshAdmissionDiagnostic}rejected ${reconstruction.mesh.rejected_discontinuities} discontinuity bridges and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation-flipped candidates`
+      : `No surface model passed the mesh gates; ${meshCoverageDiagnostic}; ${meshAdmissionDiagnostic}${reconstruction.mesh.rejected_discontinuities} discontinuity and ${reconstruction.mesh.rejected_degenerate} degenerate/orientation candidates were rejected. The points shown are reconstruction evidence, not the final model.`
     : reconstruction.mesh.skip_reason
-      ? `Surface model unavailable: ${reconstruction.mesh.skip_reason}${
+      ? `Surface model unavailable: ${reconstruction.mesh.skip_reason}; ${meshCoverageDiagnostic}${
           meshGridRejected > 0
             ? `; ${meshGridRejected} fused points were rejected at mesh-grid admission`
             : ""
         }. The points shown are reconstruction evidence, not the final model.`
-      : "Surface model unavailable; the points shown are reconstruction evidence, not the final model.";
+      : `Surface model unavailable; ${meshCoverageDiagnostic}. The points shown are reconstruction evidence, not the final model.`;
 
   const primaryDiagnostic =
     hasSurfaceModel && renderMode === "model"
