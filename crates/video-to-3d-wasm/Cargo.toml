@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+js-sys = "=0.3.81"
 # Direct Serde access selects the JSON-compatible WASM serializer shape and
 # derives the WASM-local transport request without leaking it into the core.
 serde = { version = "1", features = ["derive"] }
