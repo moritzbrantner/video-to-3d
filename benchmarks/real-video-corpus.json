@@ -16,6 +16,8 @@
         "expected_file": "tanks-and-temples/videos/Ignatius.mp4",
         "source_url": "https://www.tanksandtemples.org/download/",
         "license_url": "https://www.tanksandtemples.org/license/",
+        "provider_file_id": "0B-ePgl6HF260T19oUTIyUTRwTE0",
+        "checksum_file_id": "0B-ePgl6HF260M2h5Q3o1bGdpc1U",
         "integrity": "provider-md5",
         "redistribute": false
       },
@@ -24,6 +26,17 @@
         "ground_truth": "laser-scan",
         "reference_reconstruction": "COLMAP",
         "camera_reference": true,
+        "data_source_url": "https://drive.google.com/file/d/1UoKPiUUsKa0AVHFOrnMRhc5hFngjkE-t/view",
+        "provider_bundle_id": "1UoKPiUUsKa0AVHFOrnMRhc5hFngjkE-t",
+        "expected_files": [
+          "Ignatius.ply",
+          "Ignatius_COLMAP_SfM.log",
+          "Ignatius_trans.txt",
+          "Ignatius_mapping_reference.txt",
+          "Ignatius.json"
+        ],
+        "distance_tau": 0.003,
+        "scoring": "camera-aligned-uncropped-nearest-neighbor",
         "gate": "evidence-only-until-baseline"
       },
       "automation": {
@@ -41,6 +54,8 @@
         "expected_file": "tanks-and-temples/videos/Church.mp4",
         "source_url": "https://www.tanksandtemples.org/download/",
         "license_url": "https://www.tanksandtemples.org/license/",
+        "provider_file_id": "0B-ePgl6HF260dnlGMkFkNlpibG8",
+        "checksum_file_id": "0B-ePgl6HF260M2h5Q3o1bGdpc1U",
         "integrity": "provider-md5",
         "redistribute": false
       },
@@ -49,6 +64,17 @@
         "ground_truth": "laser-scan",
         "reference_reconstruction": "COLMAP",
         "camera_reference": true,
+        "data_source_url": "https://drive.google.com/file/d/1UoKPiUUsKa0AVHFOrnMRhc5hFngjkE-t/view",
+        "provider_bundle_id": "1UoKPiUUsKa0AVHFOrnMRhc5hFngjkE-t",
+        "expected_files": [
+          "Church.ply",
+          "Church_COLMAP_SfM.log",
+          "Church_trans.txt",
+          "Church_mapping_reference.txt",
+          "Church.json"
+        ],
+        "distance_tau": 0.025,
+        "scoring": "camera-aligned-uncropped-nearest-neighbor",
         "gate": "evidence-only-until-baseline"
       },
       "automation": {

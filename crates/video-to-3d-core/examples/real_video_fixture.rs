@@ -120,19 +120,6 @@ fn write_ply(path: &Path, points: &[Point3]) -> Result<(), String> {
     Ok(())
 }
 
-fn median(values: &mut [f32]) -> Option<f32> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(|left, right| left.total_cmp(right));
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        Some((values[middle - 1] + values[middle]) * 0.5)
-    } else {
-        Some(values[middle])
-    }
-}
-
 fn json_number(value: Option<f32>) -> String {
     value
         .filter(|number| number.is_finite())
@@ -190,15 +177,17 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let mut registered_reprojection = result
-        .registered_views
-        .iter()
-        .map(|view| view.median_reprojection_error_pixels)
-        .collect::<Vec<_>>();
-    let median_registered_reprojection = median(&mut registered_reprojection);
     let calibrated_seed_cameras = usize::from(result.calibrated_pair.is_some()) * 2;
     let accepted_cameras = calibrated_seed_cameras + result.registered_views.len();
     let bundle = &result.multi_view.bundle_adjustment;
+    let median_reprojection = bundle
+        .final_median_reprojection_error_pixels
+        .or_else(|| {
+            result
+                .calibrated_pair
+                .as_ref()
+                .map(|pair| pair.median_reprojection_error_pixels)
+        });
 
     let metrics = format!(
         concat!(
@@ -218,7 +207,7 @@ fn run() -> Result<(), String> {
             "  \"mesh_triangles\": {},\n",
             "  \"bundle_adjustment_attempted\": {},\n",
             "  \"bundle_adjustment_accepted\": {},\n",
-            "  \"median_registered_reprojection_error_pixels\": {},\n",
+            "  \"median_reprojection_error_pixels\": {},\n",
             "  \"warnings\": {}\n",
             "}}\n"
         ),
@@ -236,7 +225,7 @@ fn run() -> Result<(), String> {
         result.mesh_triangles.len(),
         bundle.attempted,
         bundle.accepted,
-        json_number(median_registered_reprojection),
+        json_number(median_reprojection),
         result.warnings.len(),
     );
     fs::write(output_directory.join("metrics.json"), metrics).map_err(|error| error.to_string())?;

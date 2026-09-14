@@ -20,6 +20,15 @@ class RealVideoManifestTests(unittest.TestCase):
     def test_repository_manifest_is_valid(self) -> None:
         self.assertEqual(module.validate_manifest(self.manifest), [])
 
+    def test_scheduled_cases_are_derived_from_manifest(self) -> None:
+        self.assertEqual(
+            module.scheduled_case_ids(self.manifest),
+            ["tanks-temples-ignatius", "tanks-temples-church"],
+        )
+        manifest = copy.deepcopy(self.manifest)
+        manifest["cases"][1]["automation"]["scheduled"] = False
+        self.assertEqual(module.scheduled_case_ids(manifest), ["tanks-temples-ignatius"])
+
     def test_duplicate_case_ids_are_rejected(self) -> None:
         manifest = copy.deepcopy(self.manifest)
         manifest["cases"][1]["id"] = manifest["cases"][0]["id"]
@@ -45,6 +54,20 @@ class RealVideoManifestTests(unittest.TestCase):
         manifest = copy.deepcopy(self.manifest)
         manifest["cases"][0]["asset"]["source_url"] = "http://example.invalid/video.mp4"
         self.assertTrue(any("source_url must be https" in error for error in module.validate_manifest(manifest)))
+
+    def test_quantitative_cases_require_ground_truth_bundle_contract(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["cases"][0]["evaluation"]["expected_files"] = ["Ignatius.ply"]
+        self.assertTrue(
+            any("expected_files" in error for error in module.validate_manifest(manifest))
+        )
+
+    def test_quantitative_cases_require_positive_distance_threshold(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["cases"][0]["evaluation"]["distance_tau"] = 0
+        self.assertTrue(
+            any("distance_tau must be positive" in error for error in module.validate_manifest(manifest))
+        )
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ type CorpusManifest = {
 };
 
 type ProbeResult = {
-  streams?: Array<{ width?: number; height?: number }>;
+  streams?: Array<{ width?: number; height?: number; avg_frame_rate?: string }>;
   format?: { duration?: string };
 };
 
@@ -40,6 +40,14 @@ function run(program: string, args: string[], capture = false): string {
     throw new Error(`${program} exited with status ${result.status}${detail}`);
   }
   return capture ? result.stdout : "";
+}
+
+function parseFrameRate(value: string | undefined): number {
+  if (!value) return Number.NaN;
+  const [numeratorText, denominatorText = "1"] = value.split("/");
+  const numerator = Number(numeratorText);
+  const denominator = Number(denominatorText);
+  return denominator > 0 ? numerator / denominator : Number.NaN;
 }
 
 const caseId = argument("--case");
@@ -66,7 +74,7 @@ const probe = JSON.parse(
       "-select_streams",
       "v:0",
       "-show_entries",
-      "stream=width,height:format=duration",
+      "stream=width,height,avg_frame_rate:format=duration",
       "-of",
       "json",
       videoPath,
@@ -78,6 +86,10 @@ const stream = probe.streams?.[0];
 const duration = Number(probe.format?.duration);
 const width = Number(stream?.width);
 const height = Number(stream?.height);
+const frameRate = parseFrameRate(stream?.avg_frame_rate);
+if (!Number.isFinite(frameRate) || frameRate <= 0) {
+  throw new Error("the selected video does not expose a usable frame rate");
+}
 const plan = buildVideoSamplingPlan(
   { duration, videoWidth: width, videoHeight: height },
   {
@@ -119,7 +131,7 @@ writeFileSync(
       schema_version: "video-to-3d/real-video-sampling/v1",
       case_id: caseId,
       source: benchmarkCase.asset.expected_file,
-      source_metadata: { duration, width, height },
+      source_metadata: { duration, width, height, frame_rate: frameRate },
       plan,
     },
     null,

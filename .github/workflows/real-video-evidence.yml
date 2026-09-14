@@ -4,13 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       case_id:
-        description: Quantitative real-video case to run
+        description: Quantitative real-video case id from benchmarks/real-video-corpus.json
         required: true
-        type: choice
+        type: string
         default: tanks-temples-ignatius
-        options:
-          - tanks-temples-ignatius
-          - tanks-temples-church
       accept_tanks_and_temples_terms:
         description: I have reviewed and accept the current Tanks and Temples dataset terms for this run
         required: true
@@ -44,33 +41,44 @@ jobs:
           bun-version: 1.4.0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install benchmark acquisition and decode tools
+      - name: Install benchmark acquisition, decode, and scoring tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg python3-venv
           python3 -m venv .benchmark-venv
-          .benchmark-venv/bin/python -m pip install --disable-pip-version-check gdown==5.2.0
+          .benchmark-venv/bin/python -m pip install --disable-pip-version-check \
+            gdown==5.2.0 \
+            numpy==2.5.3 \
+            scipy==1.18.1 \
+            plyfile==1.1.5
       - name: Run checksum-verified real-video evidence
         env:
           MANUAL_CASE: ${{ inputs.case_id }}
         run: |
           set -euo pipefail
+          mkdir -p target
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            cases=(tanks-temples-ignatius tanks-temples-church)
+            python3 tools/check_real_video_manifest.py --scheduled-cases > target/scheduled-real-video-cases.txt
+            mapfile -t cases < target/scheduled-real-video-cases.txt
           else
             cases=("${MANUAL_CASE:-tanks-temples-ignatius}")
           fi
 
+          if [[ ${#cases[@]} -eq 0 ]]; then
+            echo "No real-video cases are scheduled in the validated manifest."
+            exit 0
+          fi
+
           for case_id in "${cases[@]}"; do
-            case "$case_id" in
-              tanks-temples-ignatius) scene=Ignatius ;;
-              tanks-temples-church) scene=Church ;;
-              *) echo "unsupported scheduled case: $case_id" >&2; exit 1 ;;
-            esac
             .benchmark-venv/bin/python tools/fetch_tanks_and_temples.py \
-              --scene "$scene" \
-              --asset-root .benchmark-data/tanks-and-temples
+              --case "$case_id" \
+              --asset-root .benchmark-data/tanks-and-temples \
+              --with-evaluation
             bun tools/run_real_video_case.ts \
+              --case "$case_id" \
+              --asset-root .benchmark-data \
+              --output-root target/real-video
+            .benchmark-venv/bin/python tools/score_tanks_and_temples.py \
               --case "$case_id" \
               --asset-root .benchmark-data \
               --output-root target/real-video
@@ -84,6 +92,7 @@ jobs:
           path: |
             target/real-video/*/sampling.json
             target/real-video/*/metrics.json
+            target/real-video/*/ground-truth-score.json
             target/real-video/*/sparse.ply
             target/real-video/*/dense.ply
             target/real-video/*/cameras.csv
