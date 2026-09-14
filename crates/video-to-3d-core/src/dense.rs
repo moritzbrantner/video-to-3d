@@ -8,8 +8,6 @@ const MAX_REFERENCE_ATTEMPTS: usize = 6;
 const MIN_REFERENCE_PATCH_POINTS: usize = 3;
 
 mod legacy {
-    include!("dense_legacy.rs");
-
     pub(super) fn minimum_visible_sparse_points() -> usize {
         MIN_VISIBLE_SPARSE_POINTS
     }
@@ -30,12 +28,34 @@ mod legacy {
             })
             .collect()
     }
+
+    include!("dense_legacy.rs");
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DenseGridSite {
     pub x: u32,
     pub y: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DenseReferenceAttemptStats {
+    pub reference_frame: usize,
+    pub attempted: bool,
+    pub accepted: bool,
+    pub skip_reason: Option<String>,
+    pub sampled_pixels: usize,
+    pub accepted_points: usize,
+    pub reciprocal_checked_points: usize,
+    pub reciprocal_rejected_points: usize,
+    pub reciprocal_consistent_points: usize,
+    pub surface_completion_proposals: usize,
+    pub surface_completed_points: usize,
+    pub surface_completion_rejected_texture: usize,
+    pub surface_completion_rejected_cross_view: usize,
+    pub surface_completion_rejected_reciprocal: usize,
+    pub surface_completion_rejected_fusion: usize,
+    pub surface_completion_rejected_footprint: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -86,6 +106,7 @@ pub struct DenseStats {
     pub search_min_depth: Option<f32>,
     pub search_max_depth: Option<f32>,
     pub reference_frames: Vec<usize>,
+    pub reference_attempts: Vec<DenseReferenceAttemptStats>,
     pub reference_patches: Vec<DenseReferencePatchStats>,
 }
 
@@ -122,17 +143,27 @@ pub(super) fn estimate_depth_points(
     }
 
     let mut patches = Vec::new();
+    let mut attempts = Vec::new();
     for camera_index in reference_order.into_iter().take(MAX_REFERENCE_ATTEMPTS) {
         let Some(analysis) =
             reconstruct_reference_patch(frames, cameras, sparse_points, focal, camera_index)
         else {
             continue;
         };
-        if !analysis.stats.attempted || analysis.points.len() < MIN_REFERENCE_PATCH_POINTS {
+
+        let reference_frame = cameras[camera_index].frame_index;
+        let accepted = analysis.stats.attempted
+            && analysis.points.len() >= MIN_REFERENCE_PATCH_POINTS;
+        attempts.push(reference_attempt_stats(
+            reference_frame,
+            &analysis.stats,
+            analysis.points.len(),
+            accepted,
+        ));
+        if !accepted {
             continue;
         }
 
-        let reference_frame = cameras[camera_index].frame_index;
         patches.push(split_patch(reference_frame, analysis));
         if patches.len() >= MAX_REFERENCE_VIEWS {
             break;
@@ -140,15 +171,17 @@ pub(super) fn estimate_depth_points(
     }
 
     if patches.is_empty() {
-        return from_legacy(legacy::estimate_depth_points(
+        let mut fallback = from_legacy(legacy::estimate_depth_points(
             frames,
             cameras,
             sparse_points,
             focal,
         ));
+        fallback.stats.reference_attempts = attempts;
+        return fallback;
     }
 
-    combine_patches(patches)
+    combine_patches(patches, attempts)
 }
 
 fn reference_candidate_order(
@@ -273,6 +306,44 @@ fn reconstruct_reference_patch(
     Some(analysis)
 }
 
+fn reference_attempt_stats(
+    reference_frame: usize,
+    stats: &legacy::DenseStats,
+    accepted_points: usize,
+    accepted: bool,
+) -> DenseReferenceAttemptStats {
+    let skip_reason = if accepted {
+        None
+    } else if let Some(reason) = &stats.skip_reason {
+        Some(reason.clone())
+    } else if !stats.attempted {
+        Some("dense estimation did not run for this reference".into())
+    } else {
+        Some(format!(
+            "reference produced {accepted_points} accepted dense points; at least {MIN_REFERENCE_PATCH_POINTS} are required for a surface patch"
+        ))
+    };
+
+    DenseReferenceAttemptStats {
+        reference_frame,
+        attempted: stats.attempted,
+        accepted,
+        skip_reason,
+        sampled_pixels: stats.sampled_pixels,
+        accepted_points,
+        reciprocal_checked_points: stats.reciprocal_checked_points,
+        reciprocal_rejected_points: stats.reciprocal_rejected_points,
+        reciprocal_consistent_points: stats.reciprocal_consistent_points,
+        surface_completion_proposals: stats.surface_completion_proposals,
+        surface_completed_points: stats.surface_completed_points,
+        surface_completion_rejected_texture: stats.surface_completion_rejected_texture,
+        surface_completion_rejected_cross_view: stats.surface_completion_rejected_cross_view,
+        surface_completion_rejected_reciprocal: stats.surface_completion_rejected_reciprocal,
+        surface_completion_rejected_fusion: stats.surface_completion_rejected_fusion,
+        surface_completion_rejected_footprint: stats.surface_completion_rejected_footprint,
+    }
+}
+
 fn convert_grid_sites(sites: Vec<legacy::DenseGridSite>) -> Vec<DenseGridSite> {
     sites
         .into_iter()
@@ -305,7 +376,10 @@ fn split_patch(reference_frame: usize, analysis: legacy::DenseAnalysis) -> Accep
     }
 }
 
-fn combine_patches(patches: Vec<AcceptedPatch>) -> DenseAnalysis {
+fn combine_patches(
+    patches: Vec<AcceptedPatch>,
+    reference_attempts: Vec<DenseReferenceAttemptStats>,
+) -> DenseAnalysis {
     let total_primary = patches
         .iter()
         .map(|patch| patch.primary_points.len())
@@ -441,6 +515,7 @@ fn combine_patches(patches: Vec<AcceptedPatch>) -> DenseAnalysis {
             search_min_depth: single_reference.then_some(first.search_min_depth).flatten(),
             search_max_depth: single_reference.then_some(first.search_max_depth).flatten(),
             reference_frames,
+            reference_attempts,
             reference_patches,
         },
         points,
@@ -457,6 +532,17 @@ fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
     let completion_count = stats.surface_completed_points.min(points.len());
     let primary_count = points.len() - completion_count;
     let reference_frames = stats.reference_frame.into_iter().collect::<Vec<_>>();
+    let reference_attempts = stats
+        .reference_frame
+        .map(|reference_frame| {
+            vec![reference_attempt_stats(
+                reference_frame,
+                &stats,
+                points.len(),
+                stats.attempted && points.len() >= MIN_REFERENCE_PATCH_POINTS,
+            )]
+        })
+        .unwrap_or_default();
     let reference_patches = stats
         .reference_frame
         .filter(|_| stats.attempted)
@@ -510,6 +596,7 @@ fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
             search_min_depth: stats.search_min_depth,
             search_max_depth: stats.search_max_depth,
             reference_frames,
+            reference_attempts,
             reference_patches,
         },
         points,
@@ -595,6 +682,20 @@ mod multi_reference_tests {
             result.stats.reference_frames.len(),
             result.stats.reference_patches.len()
         );
+        assert_eq!(
+            result.stats.reference_patches.len(),
+            result
+                .stats
+                .reference_attempts
+                .iter()
+                .filter(|attempt| attempt.accepted)
+                .count()
+        );
+        assert!(result
+            .stats
+            .reference_attempts
+            .iter()
+            .all(|attempt| attempt.accepted || attempt.skip_reason.is_some()));
         assert_eq!(result.points.len(), result.grid_sites.len());
         assert_eq!(result.points.len(), result.stats.accepted_points);
         assert_eq!(
@@ -614,5 +715,36 @@ mod multi_reference_tests {
             .stats
             .source_frames
             .contains(&result.stats.reference_frame.expect("primary reference")));
+    }
+
+    #[test]
+    fn rejected_reference_attempt_keeps_its_diagnostics() {
+        let mut stats = legacy::DenseStats::default();
+        stats.attempted = true;
+        stats.sampled_pixels = 41;
+        stats.reciprocal_checked_points = 2;
+        stats.reciprocal_rejected_points = 1;
+        stats.reciprocal_consistent_points = 1;
+        stats.surface_completion_proposals = 3;
+        stats.surface_completed_points = 1;
+        stats.surface_completion_rejected_cross_view = 2;
+
+        let attempt = reference_attempt_stats(7, &stats, 2, false);
+
+        assert!(attempt.attempted);
+        assert!(!attempt.accepted);
+        assert_eq!(attempt.reference_frame, 7);
+        assert_eq!(attempt.sampled_pixels, 41);
+        assert_eq!(attempt.accepted_points, 2);
+        assert_eq!(attempt.reciprocal_checked_points, 2);
+        assert_eq!(attempt.reciprocal_rejected_points, 1);
+        assert_eq!(attempt.reciprocal_consistent_points, 1);
+        assert_eq!(attempt.surface_completion_proposals, 3);
+        assert_eq!(attempt.surface_completed_points, 1);
+        assert_eq!(attempt.surface_completion_rejected_cross_view, 2);
+        assert!(attempt
+            .skip_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("at least 3")));
     }
 }
