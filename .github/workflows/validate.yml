@@ -38,5 +38,7 @@ jobs:
       - run: bun run build
       - name: Test Rust to WASM to TypeScript camera-state contract
         run: bun run test:browser-contract
+      - name: Benchmark TypeScript to WASM reconstruction boundary
+        run: bun run benchmark:wasm-boundary
       - name: Test browser and benchmark video-sampling contract
         run: bun run test:video-sampling-contract
