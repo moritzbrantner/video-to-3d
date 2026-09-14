@@ -3,7 +3,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use video_to_3d_core::{reconstruct, FrameInput, Point3, ReconstructionOptions, ReconstructionRequest};
+use video_to_3d_core::{
+    reconstruct, FrameInput, Point3, ReconstructionOptions, ReconstructionRequest,
+};
 
 fn next_header_token(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
     loop {
@@ -68,7 +70,11 @@ fn read_ppm(path: &Path) -> Result<FrameInput, String> {
     for rgb in bytes[cursor..].chunks_exact(3) {
         rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
     }
-    Ok(FrameInput { width, height, rgba })
+    Ok(FrameInput {
+        width,
+        height,
+        rgba,
+    })
 }
 
 fn ppm_paths(directory: &Path) -> Result<Vec<PathBuf>, String> {
@@ -90,7 +96,8 @@ fn ppm_paths(directory: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 fn write_ply(path: &Path, points: &[Point3]) -> Result<(), String> {
-    let mut file = fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut file =
+        fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
     writeln!(file, "ply").map_err(|error| error.to_string())?;
     writeln!(file, "format ascii 1.0").map_err(|error| error.to_string())?;
     writeln!(file, "element vertex {}", points.len()).map_err(|error| error.to_string())?;
@@ -135,14 +142,12 @@ fn json_number(value: Option<f32>) -> String {
 
 fn run() -> Result<(), String> {
     let mut arguments = env::args().skip(1);
-    let frames_directory = arguments
-        .next()
-        .map(PathBuf::from)
-        .ok_or_else(|| "usage: real_video_fixture <frames-directory> <output-directory>".to_string())?;
-    let output_directory = arguments
-        .next()
-        .map(PathBuf::from)
-        .ok_or_else(|| "usage: real_video_fixture <frames-directory> <output-directory>".to_string())?;
+    let frames_directory = arguments.next().map(PathBuf::from).ok_or_else(|| {
+        "usage: real_video_fixture <frames-directory> <output-directory>".to_string()
+    })?;
+    let output_directory = arguments.next().map(PathBuf::from).ok_or_else(|| {
+        "usage: real_video_fixture <frames-directory> <output-directory>".to_string()
+    })?;
     if arguments.next().is_some() {
         return Err("usage: real_video_fixture <frames-directory> <output-directory>".to_string());
     }
@@ -234,8 +239,7 @@ fn run() -> Result<(), String> {
         json_number(median_registered_reprojection),
         result.warnings.len(),
     );
-    fs::write(output_directory.join("metrics.json"), metrics)
-        .map_err(|error| error.to_string())?;
+    fs::write(output_directory.join("metrics.json"), metrics).map_err(|error| error.to_string())?;
 
     println!(
         "real-video-reconstruction frames={} accepted-cameras={} sparse={} dense={} triangles={}",
