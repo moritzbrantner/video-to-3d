@@ -719,15 +719,17 @@ mod multi_reference_tests {
 
     #[test]
     fn rejected_reference_attempt_keeps_its_diagnostics() {
-        let mut stats = legacy::DenseStats::default();
-        stats.attempted = true;
-        stats.sampled_pixels = 41;
-        stats.reciprocal_checked_points = 2;
-        stats.reciprocal_rejected_points = 1;
-        stats.reciprocal_consistent_points = 1;
-        stats.surface_completion_proposals = 3;
-        stats.surface_completed_points = 1;
-        stats.surface_completion_rejected_cross_view = 2;
+        let stats = legacy::DenseStats {
+            attempted: true,
+            sampled_pixels: 41,
+            reciprocal_checked_points: 2,
+            reciprocal_rejected_points: 1,
+            reciprocal_consistent_points: 1,
+            surface_completion_proposals: 3,
+            surface_completed_points: 1,
+            surface_completion_rejected_cross_view: 2,
+            ..legacy::DenseStats::default()
+        };
 
         let attempt = reference_attempt_stats(7, &stats, 2, false);
 
