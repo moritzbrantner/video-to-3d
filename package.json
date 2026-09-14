@@ -4,6 +4,7 @@
   "packageManager": "bun@1.4.0",
   "workspaces": ["apps/*"],
   "scripts": {
+    "benchmark:wasm-boundary": "bun scripts/benchmark-wasm-boundary.ts",
     "build": "bun run wasm:build && bun --cwd apps/web build",
     "build:pages": "GITHUB_PAGES=true bun run build",
     "cargo:check": "cargo check --workspace",
