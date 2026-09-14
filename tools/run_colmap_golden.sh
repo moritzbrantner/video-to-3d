@@ -16,11 +16,13 @@ colmap feature_extractor \
   --ImageReader.camera_model PINHOLE \
   --ImageReader.single_camera 1 \
   --ImageReader.camera_params 520,520,320,240 \
+  --SiftExtraction.num_threads 1 \
   --SiftExtraction.use_gpu 0 \
   >/dev/null
 
 colmap exhaustive_matcher \
   --database_path "$database" \
+  --SiftMatching.num_threads 1 \
   --SiftMatching.use_gpu 0 \
   >/dev/null
 
