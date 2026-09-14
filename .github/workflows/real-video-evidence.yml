@@ -47,17 +47,18 @@ jobs:
       - name: Install benchmark acquisition and decode tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          python3 -m pip install --disable-pip-version-check gdown==5.2.0
+          sudo apt-get install -y ffmpeg python3-venv
+          python3 -m venv .benchmark-venv
+          .benchmark-venv/bin/python -m pip install --disable-pip-version-check gdown==5.2.0
       - name: Run checksum-verified real-video evidence
         env:
-          MANUAL_CASE: ${{ inputs.case_id || 'tanks-temples-ignatius' }}
+          MANUAL_CASE: ${{ inputs.case_id }}
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             cases=(tanks-temples-ignatius tanks-temples-church)
           else
-            cases=("$MANUAL_CASE")
+            cases=("${MANUAL_CASE:-tanks-temples-ignatius}")
           fi
 
           for case_id in "${cases[@]}"; do
@@ -66,7 +67,7 @@ jobs:
               tanks-temples-church) scene=Church ;;
               *) echo "unsupported scheduled case: $case_id" >&2; exit 1 ;;
             esac
-            python3 tools/fetch_tanks_and_temples.py \
+            .benchmark-venv/bin/python tools/fetch_tanks_and_temples.py \
               --scene "$scene" \
               --asset-root .benchmark-data/tanks-and-temples
             bun tools/run_real_video_case.ts \
