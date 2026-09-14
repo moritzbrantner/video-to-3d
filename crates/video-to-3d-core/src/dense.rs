@@ -32,7 +32,11 @@ mod legacy {
     }
 }
 
-pub(super) use legacy::DenseGridSite;
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DenseGridSite {
+    pub x: u32,
+    pub y: u32,
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DenseReferencePatchStats {
@@ -119,13 +123,9 @@ pub(super) fn estimate_depth_points(
 
     let mut patches = Vec::new();
     for camera_index in reference_order.into_iter().take(MAX_REFERENCE_ATTEMPTS) {
-        let Some(analysis) = reconstruct_reference_patch(
-            frames,
-            cameras,
-            sparse_points,
-            focal,
-            camera_index,
-        ) else {
+        let Some(analysis) =
+            reconstruct_reference_patch(frames, cameras, sparse_points, focal, camera_index)
+        else {
             continue;
         };
         if !analysis.stats.attempted || analysis.points.len() < MIN_REFERENCE_PATCH_POINTS {
@@ -273,20 +273,33 @@ fn reconstruct_reference_patch(
     Some(analysis)
 }
 
-fn split_patch(reference_frame: usize, mut analysis: legacy::DenseAnalysis) -> AcceptedPatch {
-    let completion_count = analysis
-        .stats
-        .surface_completed_points
-        .min(analysis.points.len());
-    let primary_count = analysis.points.len() - completion_count;
-    let completion_points = analysis.points.split_off(primary_count);
-    let completion_sites = analysis.grid_sites.split_off(primary_count);
+fn convert_grid_sites(sites: Vec<legacy::DenseGridSite>) -> Vec<DenseGridSite> {
+    sites
+        .into_iter()
+        .map(|site| DenseGridSite {
+            x: site.x,
+            y: site.y,
+        })
+        .collect()
+}
+
+fn split_patch(reference_frame: usize, analysis: legacy::DenseAnalysis) -> AcceptedPatch {
+    let legacy::DenseAnalysis {
+        stats,
+        mut points,
+        grid_sites,
+    } = analysis;
+    let mut grid_sites = convert_grid_sites(grid_sites);
+    let completion_count = stats.surface_completed_points.min(points.len());
+    let primary_count = points.len() - completion_count;
+    let completion_points = points.split_off(primary_count);
+    let completion_sites = grid_sites.split_off(primary_count);
 
     AcceptedPatch {
         reference_frame,
-        stats: analysis.stats,
-        primary_points: analysis.points,
-        primary_sites: analysis.grid_sites,
+        stats,
+        primary_points: points,
+        primary_sites: grid_sites,
         completion_points,
         completion_sites,
     }
@@ -316,15 +329,18 @@ fn combine_patches(patches: Vec<AcceptedPatch>) -> DenseAnalysis {
         grid_sites.extend_from_slice(&patch.completion_sites);
     }
 
-    let mut source_frames = BTreeSet::new();
     let reference_frames = patches
         .iter()
         .map(|patch| patch.reference_frame)
         .collect::<Vec<_>>();
+    let primary_reference = reference_frames[0];
+    let mut dense_participating_frames = BTreeSet::new();
     for patch in &patches {
-        source_frames.extend(patch.stats.source_frames.iter().copied());
+        dense_participating_frames.insert(patch.reference_frame);
+        dense_participating_frames.extend(patch.stats.source_frames.iter().copied());
     }
-    let source_frames = source_frames.into_iter().collect::<Vec<_>>();
+    dense_participating_frames.remove(&primary_reference);
+    let source_frames = dense_participating_frames.into_iter().collect::<Vec<_>>();
 
     let reference_patches = patches
         .iter()
@@ -352,7 +368,7 @@ fn combine_patches(patches: Vec<AcceptedPatch>) -> DenseAnalysis {
         stats: DenseStats {
             attempted: true,
             skip_reason: None,
-            reference_frame: reference_frames.first().copied(),
+            reference_frame: Some(primary_reference),
             source_views: source_frames.len(),
             source_frames,
             sampled_pixels: patches.iter().map(|patch| patch.stats.sampled_pixels).sum(),
@@ -433,9 +449,13 @@ fn combine_patches(patches: Vec<AcceptedPatch>) -> DenseAnalysis {
 }
 
 fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
-    let stats = analysis.stats;
-    let completion_count = stats.surface_completed_points.min(analysis.points.len());
-    let primary_count = analysis.points.len() - completion_count;
+    let legacy::DenseAnalysis {
+        stats,
+        points,
+        grid_sites,
+    } = analysis;
+    let completion_count = stats.surface_completed_points.min(points.len());
+    let primary_count = points.len() - completion_count;
     let reference_frames = stats.reference_frame.into_iter().collect::<Vec<_>>();
     let reference_patches = stats
         .reference_frame
@@ -449,7 +469,7 @@ fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
                 completion_start: primary_count,
                 completed_points: completion_count,
                 sampled_pixels: stats.sampled_pixels,
-                accepted_points: analysis.points.len(),
+                accepted_points: points.len(),
                 reciprocal_consistent_points: stats.reciprocal_consistent_points,
                 grid_stride: stats.grid_stride,
                 grid_border: stats.grid_border,
@@ -492,8 +512,8 @@ fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
             reference_frames,
             reference_patches,
         },
-        points: analysis.points,
-        grid_sites: analysis.grid_sites,
+        points,
+        grid_sites: convert_grid_sites(grid_sites),
     }
 }
 
@@ -586,5 +606,13 @@ mod multi_reference_tests {
                 + result.stats.surface_completion_rejected_fusion
                 + result.stats.surface_completion_rejected_footprint
         );
+        assert_eq!(
+            result.stats.source_frames.len(),
+            result.stats.source_views
+        );
+        assert!(!result
+            .stats
+            .source_frames
+            .contains(&result.stats.reference_frame.expect("primary reference")));
     }
 }
