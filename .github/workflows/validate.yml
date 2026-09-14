@@ -30,9 +30,13 @@ jobs:
       - run: cargo test --workspace
       - name: Test golden pose alignment
         run: cargo test -p video-to-3d-core --example golden_fixture
-      - name: Test COLMAP golden gate
-        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
+      - name: Test benchmark and COLMAP tooling
+        run: |
+          python3 -m unittest discover -s tools/tests -p 'test_*.py'
+          python3 -m py_compile tools/fetch_tanks_and_temples.py tools/score_tanks_and_temples.py
       - run: bun run wasm:check
       - run: bun run build
       - name: Test Rust to WASM to TypeScript camera-state contract
         run: bun run test:browser-contract
+      - name: Test browser and benchmark video-sampling contract
+        run: bun run test:video-sampling-contract

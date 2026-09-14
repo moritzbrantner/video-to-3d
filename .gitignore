@@ -3,5 +3,6 @@
 out/
 node_modules/
 target/
+.benchmark-data/
 apps/web/public/wasm/
 apps/desktop/src-tauri/gen/
