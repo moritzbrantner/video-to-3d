@@ -180,14 +180,12 @@ fn run() -> Result<(), String> {
     let calibrated_seed_cameras = usize::from(result.calibrated_pair.is_some()) * 2;
     let accepted_cameras = calibrated_seed_cameras + result.registered_views.len();
     let bundle = &result.multi_view.bundle_adjustment;
-    let median_reprojection = bundle
-        .final_median_reprojection_error_pixels
-        .or_else(|| {
-            result
-                .calibrated_pair
-                .as_ref()
-                .map(|pair| pair.median_reprojection_error_pixels)
-        });
+    let median_reprojection = bundle.final_median_reprojection_error_pixels.or_else(|| {
+        result
+            .calibrated_pair
+            .as_ref()
+            .map(|pair| pair.median_reprojection_error_pixels)
+    });
 
     let metrics = format!(
         concat!(
