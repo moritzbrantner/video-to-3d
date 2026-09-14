@@ -32,6 +32,22 @@ type DragState = {
   moved: boolean;
 };
 
+type DenseReferenceAttemptDiagnostic = {
+  reference_frame: number;
+  attempted: boolean;
+  accepted: boolean;
+  skip_reason: string | null;
+  sampled_pixels: number;
+  accepted_points: number;
+  reciprocal_checked_points: number;
+  reciprocal_rejected_points: number;
+  reciprocal_consistent_points: number;
+};
+
+type DenseStatsWithReferenceAttempts = ReconstructionResult["dense"] & {
+  reference_attempts?: DenseReferenceAttemptDiagnostic[];
+};
+
 function clampedChannel(value: number): number {
   return Math.max(0, Math.min(255, Math.round(value)));
 }
@@ -357,19 +373,39 @@ export function SceneCanvas({
     ? `Camera geometry: ${cameraState.calibrated_seed_cameras.length} seed + ${cameraState.registered_cameras.length} additional registered; ${cameraState.dense_eligible_cameras.length} dense-eligible`
     : `Approximate motion only: ${cameraState.approximate_motion_samples.length} sampled poses; no calibrated seed pair was accepted`;
 
+  const denseReferenceAttempts =
+    (reconstruction.dense as DenseStatsWithReferenceAttempts).reference_attempts ?? [];
+  const acceptedReferenceAttempts = denseReferenceAttempts.filter((attempt) => attempt.accepted);
+  const rejectedReferenceAttempts = denseReferenceAttempts.filter((attempt) => !attempt.accepted);
+  const rejectedReferenceDetails = rejectedReferenceAttempts
+    .map(
+      (attempt) =>
+        `frame ${attempt.reference_frame}: ${
+          attempt.skip_reason ??
+          `${attempt.accepted_points} points after ${attempt.sampled_pixels} sampled pixels; reciprocal depth rejected ${attempt.reciprocal_rejected_points} of ${attempt.reciprocal_checked_points}`
+        }`,
+    )
+    .join("; ");
+  const referenceCoverageDiagnostic =
+    denseReferenceAttempts.length > 0
+      ? `Reference coverage: ${acceptedReferenceAttempts.length} of ${denseReferenceAttempts.length} attempted views produced accepted surface patches${
+          rejectedReferenceDetails.length > 0 ? `; rejected ${rejectedReferenceDetails}` : ""
+        }`
+      : "Reference coverage: no multi-reference dense attempt evidence was reported";
+
   const surfaceCompletionDiagnostic =
     reconstruction.dense.surface_completion_proposals > 0
       ? `Surface completion: ${reconstruction.dense.surface_completed_points} of ${reconstruction.dense.surface_completion_proposals} coherent proposals accepted; rejected ${reconstruction.dense.surface_completion_rejected_texture} at texture, ${reconstruction.dense.surface_completion_rejected_cross_view} at direct cross-view support, ${reconstruction.dense.surface_completion_rejected_reciprocal} at reciprocal depth, ${reconstruction.dense.surface_completion_rejected_fusion} at fusion, and ${reconstruction.dense.surface_completion_rejected_footprint} at final grid footprint`
       : "Surface completion: no empty grid site had enough coherent neighboring depth evidence to make a proposal";
   const denseDiagnostic = reconstruction.dense.skip_reason
-    ? `Dense depth skipped: ${reconstruction.dense.skip_reason}`
+    ? `Dense depth skipped: ${reconstruction.dense.skip_reason} · ${referenceCoverageDiagnostic}`
     : reconstruction.dense.accepted_points > 0
-      ? `Dense surface evidence: ${reconstruction.dense.accepted_points} accepted scene samples; ${surfaceCompletionDiagnostic}; primary reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} candidates and primary spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
+      ? `Dense surface evidence: ${reconstruction.dense.accepted_points} accepted scene samples; ${referenceCoverageDiagnostic}; ${surfaceCompletionDiagnostic}; reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} candidates and spatial fusion rejected ${reconstruction.dense.fusion_rejected_observations} reverse observations`
       : reconstruction.dense.reciprocal_consistent_points > 0
-        ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent primary candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations); ${surfaceCompletionDiagnostic}`
+        ? `Dense depth found ${reconstruction.dense.reciprocal_consistent_points} reciprocal-consistent candidates, but fusion rejected all remaining geometry (${reconstruction.dense.fusion_rejected_observations} inconsistent reverse observations); ${referenceCoverageDiagnostic}; ${surfaceCompletionDiagnostic}`
         : reconstruction.dense.reciprocal_checked_points > 0
-          ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} primary candidates after the texture and ambiguity gates; ${surfaceCompletionDiagnostic}`
-          : `Coarse dense depth ran, but no primary depth hypothesis passed the texture and ambiguity gates; ${surfaceCompletionDiagnostic}`;
+          ? `Coarse dense depth ran, but reciprocal depth rejected ${reconstruction.dense.reciprocal_rejected_points} of ${reconstruction.dense.reciprocal_checked_points} candidates after the texture and ambiguity gates; ${referenceCoverageDiagnostic}; ${surfaceCompletionDiagnostic}`
+          : `Coarse dense depth ran, but no depth hypothesis passed the texture and ambiguity gates; ${referenceCoverageDiagnostic}; ${surfaceCompletionDiagnostic}`;
 
   const meshGridRejected = reconstruction.mesh.rejected_grid_vertices;
   const meshAdmissionDiagnostic =
