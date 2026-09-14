@@ -138,6 +138,41 @@ export type MultiViewStats = {
   bundle_adjustment: BundleAdjustmentStats;
 };
 
+export type DenseReferenceAttemptStats = {
+  reference_frame: number;
+  attempted: boolean;
+  accepted: boolean;
+  skip_reason: string | null;
+  sampled_pixels: number;
+  accepted_points: number;
+  reciprocal_checked_points: number;
+  reciprocal_rejected_points: number;
+  reciprocal_consistent_points: number;
+  surface_completion_proposals: number;
+  surface_completed_points: number;
+  surface_completion_rejected_texture: number;
+  surface_completion_rejected_cross_view: number;
+  surface_completion_rejected_reciprocal: number;
+  surface_completion_rejected_fusion: number;
+  surface_completion_rejected_footprint: number;
+};
+
+export type DenseReferencePatchStats = {
+  reference_frame: number;
+  source_frames: number[];
+  primary_start: number;
+  primary_points: number;
+  completion_start: number;
+  completed_points: number;
+  sampled_pixels: number;
+  accepted_points: number;
+  reciprocal_consistent_points: number;
+  grid_stride: number;
+  grid_border: number;
+  search_min_depth: number | null;
+  search_max_depth: number | null;
+};
+
 export type DenseStats = {
   attempted: boolean;
   skip_reason: string | null;
@@ -167,6 +202,9 @@ export type DenseStats = {
   median_photometric_error: number | null;
   search_min_depth: number | null;
   search_max_depth: number | null;
+  reference_frames: number[];
+  reference_attempts: DenseReferenceAttemptStats[];
+  reference_patches: DenseReferencePatchStats[];
 };
 
 export type MeshTriangle = {
@@ -174,6 +212,20 @@ export type MeshTriangle = {
   b: number;
   c: number;
   confidence: number;
+};
+
+export type MeshReferencePatchStats = {
+  reference_frame: number;
+  point_count: number;
+  attempted: boolean;
+  skip_reason: string | null;
+  grid_vertices: number;
+  rejected_grid_vertices: number;
+  candidate_cells: number;
+  candidate_triangles: number;
+  accepted_triangles: number;
+  rejected_discontinuities: number;
+  rejected_degenerate: number;
 };
 
 export type MeshStats = {
@@ -187,6 +239,8 @@ export type MeshStats = {
   accepted_triangles: number;
   rejected_discontinuities: number;
   rejected_degenerate: number;
+  reference_frames: number[];
+  reference_patches: MeshReferencePatchStats[];
 };
 
 export type CameraKind = "none" | "approximate_motion" | "seed" | "registered";
@@ -285,6 +339,26 @@ export function assertReconstructionContract(
   const state = result.camera_state;
   if (!state || !Array.isArray(state.frames)) {
     throw new Error("camera-state contract mismatch: WASM result has no explicit camera_state");
+  }
+  if (
+    !Array.isArray(result.dense.reference_frames) ||
+    !Array.isArray(result.dense.reference_attempts) ||
+    !Array.isArray(result.dense.reference_patches) ||
+    !Array.isArray(result.mesh.reference_frames) ||
+    !Array.isArray(result.mesh.reference_patches)
+  ) {
+    throw new Error(
+      "camera-state contract mismatch: WASM result has no explicit multi-reference reconstruction evidence",
+    );
+  }
+  if (
+    result.dense.reference_attempts.some(
+      (attempt) => !attempt.accepted && attempt.skip_reason === null,
+    )
+  ) {
+    throw new Error(
+      "camera-state contract mismatch: rejected dense reference attempt has no diagnostic reason",
+    );
   }
   const acceptedCameras = [
     ...state.calibrated_seed_cameras,
