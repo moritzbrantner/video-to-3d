@@ -144,9 +144,9 @@ pub fn benchmark_object_geometry_result(
             .collect(),
     };
     let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-    payload
-        .serialize(&serializer)
-        .map_err(|error| JsValue::from_str(&format!("failed to serialize geometry benchmark: {error}")))
+    payload.serialize(&serializer).map_err(|error| {
+        JsValue::from_str(&format!("failed to serialize geometry benchmark: {error}"))
+    })
 }
 
 #[wasm_bindgen]
@@ -181,8 +181,7 @@ pub fn benchmark_packed_geometry_result(
     let point_f32: JsValue = Float32Array::from(point_f32.as_slice()).into();
     let point_rgb: JsValue = Uint8Array::from(point_rgb.as_slice()).into();
     let triangle_indices: JsValue = Uint32Array::from(triangle_indices.as_slice()).into();
-    let triangle_confidence: JsValue =
-        Float32Array::from(triangle_confidence.as_slice()).into();
+    let triangle_confidence: JsValue = Float32Array::from(triangle_confidence.as_slice()).into();
     set_object_property(&object, "point_f32", &point_f32)?;
     set_object_property(&object, "point_rgb", &point_rgb)?;
     set_object_property(&object, "triangle_indices", &triangle_indices)?;
