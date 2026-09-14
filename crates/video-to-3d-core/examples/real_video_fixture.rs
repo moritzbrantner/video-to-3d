@@ -67,7 +67,7 @@ fn read_ppm(path: &Path) -> Result<FrameInput, String> {
     }
 
     let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for rgb in bytes[cursor..].chunks_exact(3) {
+    for rgb in bytes[cursor..].as_chunks::<3>().0 {
         rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
     }
     Ok(FrameInput {
@@ -126,7 +126,7 @@ fn median(values: &mut [f32]) -> Option<f32> {
     }
     values.sort_by(|left, right| left.total_cmp(right));
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         Some((values[middle - 1] + values[middle]) * 0.5)
     } else {
         Some(values[middle])
