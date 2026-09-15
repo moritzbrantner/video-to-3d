@@ -35,6 +35,14 @@ jobs:
           cargo test --manifest-path crates/video-to-3d-features/Cargo.toml
           cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml
           cargo check --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --target wasm32-unknown-unknown
+      - name: Capture formatted feature sources
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: formatted-feature-sources
+          path: |
+            crates/video-to-3d-features/src/lib.rs
+            crates/video-to-3d-feature-wasm/src/lib.rs
+          if-no-files-found: error
       - name: Test golden pose alignment
         run: cargo test -p video-to-3d-core --example golden_fixture
       - name: Test benchmark and COLMAP tooling
