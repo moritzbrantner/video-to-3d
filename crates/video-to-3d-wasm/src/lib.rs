@@ -5,8 +5,8 @@ use serde::{
 use std::fmt;
 use video_to_3d_core::{
     reconstruct_browser, CalibratedPairStats, CameraPipelineState, CameraPose, DenseStats,
-    FrameInput, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
-    ReconstructionOptions, ReconstructionRequest, RegisteredViewStats, RevisitStats,
+    FrameInput, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionOptions,
+    ReconstructionRequest, RegisteredViewStats, RevisitStats,
 };
 use wasm_bindgen::prelude::*;
 
@@ -264,7 +264,9 @@ pub fn benchmark_packed_geometry_result(
     };
     let serializer = browser_serializer();
     payload.serialize(&serializer).map_err(|error| {
-        JsValue::from_str(&format!("failed to serialize packed geometry benchmark: {error}"))
+        JsValue::from_str(&format!(
+            "failed to serialize packed geometry benchmark: {error}"
+        ))
     })
 }
 
@@ -294,7 +296,7 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         camera_state: &result.camera_state,
     };
     let serializer = browser_serializer();
-    payload.serialize(&serializer).map_err(|error| {
-        JsValue::from_str(&format!("failed to serialize reconstruction: {error}"))
-    })
+    payload
+        .serialize(&serializer)
+        .map_err(|error| JsValue::from_str(&format!("failed to serialize reconstruction: {error}")))
 }
