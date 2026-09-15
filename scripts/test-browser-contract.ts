@@ -8,7 +8,8 @@ import {
 
 const width = 48;
 const height = 32;
-const rgba = new Array<number>(width * height * 4).fill(120);
+const rgba = new Uint8Array(width * height * 4);
+rgba.fill(120);
 for (let index = 3; index < rgba.length; index += 4) {
   rgba[index] = 255;
 }
@@ -38,6 +39,18 @@ const result = normalizeWasmReconstruction(
 );
 
 assertReconstructionContract(result, 2);
+
+if (
+  !(result.dense_points.values instanceof Float32Array) ||
+  !(result.dense_points.rgb instanceof Uint8Array) ||
+  !(result.mesh_triangles.indices instanceof Uint32Array) ||
+  !(result.mesh_triangles.confidence instanceof Float32Array)
+) {
+  throw new Error("WASM reconstruction did not expose packed typed geometry buffers");
+}
+if (result.dense_points.length !== 0 || result.mesh_triangles.length !== 0) {
+  throw new Error("flat browser-contract fixture unexpectedly exposed reconstructed geometry");
+}
 
 if (result.calibrated_pair !== null) {
   throw new Error("flat browser-contract fixture unexpectedly calibrated a seed pair");

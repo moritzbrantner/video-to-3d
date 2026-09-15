@@ -65,7 +65,11 @@ export async function sampleVideo(
       frames.push({
         width: plan.analysisWidth,
         height: plan.analysisHeight,
-        rgba: Array.from(image.data),
+        rgba: new Uint8Array(
+          image.data.buffer,
+          image.data.byteOffset,
+          image.data.byteLength,
+        ),
         thumbnail: canvas.toDataURL("image/jpeg", 0.68),
         time,
       });
