@@ -1,0 +1,16 @@
+[package]
+name = "video-to-3d-feature-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+video-to-3d-features = { path = "../video-to-3d-features" }
+wasm-bindgen = "0.2.104"
+
+[workspace]
