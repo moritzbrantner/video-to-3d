@@ -5,9 +5,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -33,25 +30,11 @@ jobs:
       - run: cargo test --workspace
       - name: Validate feature-pipeline experiment
         run: |
-          cargo fmt --manifest-path crates/video-to-3d-features/Cargo.toml
+          cargo fmt --manifest-path crates/video-to-3d-features/Cargo.toml --check
           cargo clippy --manifest-path crates/video-to-3d-features/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/video-to-3d-features/Cargo.toml
-          cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml
+          cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --check
           cargo check --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --target wasm32-unknown-unknown
-      - name: Commit rustfmt output once
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          if ! git diff --quiet -- crates/video-to-3d-features/src/lib.rs crates/video-to-3d-feature-wasm/src/lib.rs; then
-            git diff -- crates/video-to-3d-features/src/lib.rs crates/video-to-3d-feature-wasm/src/lib.rs > /tmp/rustfmt.patch
-            git fetch origin "${{ github.head_ref }}"
-            git reset --hard FETCH_HEAD
-            git apply /tmp/rustfmt.patch
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add crates/video-to-3d-features/src/lib.rs crates/video-to-3d-feature-wasm/src/lib.rs
-            git commit -m "Format feature pipeline sources"
-            git push origin HEAD:${{ github.head_ref }}
-          fi
       - name: Test golden pose alignment
         run: cargo test -p video-to-3d-core --example golden_fixture
       - name: Test benchmark and COLMAP tooling
