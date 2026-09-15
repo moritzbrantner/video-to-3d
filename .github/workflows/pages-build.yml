@@ -31,10 +31,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: bun install
       - run: cargo install wasm-bindgen-cli --version 0.2.104 --locked
-      - name: Compile Rust reconstruction to WebAssembly
+      - name: Compile Rust reconstruction and feature lab to WebAssembly
         run: bun run wasm:build
       - name: Build static Next.js export
         run: GITHUB_PAGES=true bun --cwd apps/web build
+      - name: Verify interactive feature lab export
+        run: |
+          test -f apps/web/out/feature-lab/index.html
+          test -f apps/web/out/feature-wasm/video_to_3d_feature_wasm.js
+          test -f apps/web/out/feature-wasm/video_to_3d_feature_wasm_bg.wasm
+          grep -R -q "Feature matching lab" apps/web/out/feature-lab
       - name: Upload pull-request static export
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
