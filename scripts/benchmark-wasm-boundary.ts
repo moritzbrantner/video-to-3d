@@ -51,9 +51,7 @@ function median(values: number[]): number {
 
 function reconstruct(frames: unknown[]): { elapsedMs: number; result: unknown } {
   const started = performance.now();
-  const result = normalizeWasmReconstruction(
-    reconstruct_sequence({ frames, options }),
-  );
+  const result = normalizeWasmReconstruction(reconstruct_sequence({ frames, options }));
   return { elapsedMs: performance.now() - started, result };
 }
 
@@ -129,10 +127,16 @@ type ObjectGeometryPayload = {
 };
 
 type PackedGeometryPayload = {
-  point_f32: Float32Array;
-  point_rgb: Uint8Array;
-  triangle_indices: Uint32Array;
-  triangle_confidence: Float32Array;
+  dense_points: {
+    values_f32_le: Uint8Array;
+    rgb: Uint8Array;
+    length: number;
+  };
+  mesh_triangles: {
+    indices_u32_le: Uint8Array;
+    confidence_f32_le: Uint8Array;
+    length: number;
+  };
 };
 
 function objectGeometry(pointCount: number, triangleCount: number) {
@@ -153,6 +157,10 @@ function packedGeometry(pointCount: number, triangleCount: number) {
   return { elapsedMs: performance.now() - started, result };
 }
 
+function dataView(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
 function assertEquivalentGeometry(
   object: ObjectGeometryPayload,
   packed: PackedGeometryPayload,
@@ -161,25 +169,30 @@ function assertEquivalentGeometry(
 ): void {
   assert.equal(object.dense_points.length, pointCount);
   assert.equal(object.mesh_triangles.length, triangleCount);
-  assert.equal(packed.point_f32.length, pointCount * 4);
-  assert.equal(packed.point_rgb.length, pointCount * 3);
-  assert.equal(packed.triangle_indices.length, triangleCount * 3);
-  assert.equal(packed.triangle_confidence.length, triangleCount);
+  assert.equal(packed.dense_points.length, pointCount);
+  assert.equal(packed.mesh_triangles.length, triangleCount);
+  assert.equal(packed.dense_points.values_f32_le.byteLength, pointCount * 16);
+  assert.equal(packed.dense_points.rgb.byteLength, pointCount * 3);
+  assert.equal(packed.mesh_triangles.indices_u32_le.byteLength, triangleCount * 12);
+  assert.equal(packed.mesh_triangles.confidence_f32_le.byteLength, triangleCount * 4);
 
   const point = object.dense_points[0];
   const triangle = object.mesh_triangles[0];
   assert.ok(point && triangle);
-  assert.equal(packed.point_f32[0], point.x);
-  assert.equal(packed.point_f32[1], point.y);
-  assert.equal(packed.point_f32[2], point.z);
-  assert.equal(packed.point_f32[3], point.confidence);
-  assert.equal(packed.point_rgb[0], point.r);
-  assert.equal(packed.point_rgb[1], point.g);
-  assert.equal(packed.point_rgb[2], point.b);
-  assert.equal(packed.triangle_indices[0], triangle.a);
-  assert.equal(packed.triangle_indices[1], triangle.b);
-  assert.equal(packed.triangle_indices[2], triangle.c);
-  assert.equal(packed.triangle_confidence[0], triangle.confidence);
+  const pointValues = dataView(packed.dense_points.values_f32_le);
+  const triangleIndices = dataView(packed.mesh_triangles.indices_u32_le);
+  const triangleConfidence = dataView(packed.mesh_triangles.confidence_f32_le);
+  assert.equal(pointValues.getFloat32(0, true), point.x);
+  assert.equal(pointValues.getFloat32(4, true), point.y);
+  assert.equal(pointValues.getFloat32(8, true), point.z);
+  assert.equal(pointValues.getFloat32(12, true), point.confidence);
+  assert.equal(packed.dense_points.rgb[0], point.r);
+  assert.equal(packed.dense_points.rgb[1], point.g);
+  assert.equal(packed.dense_points.rgb[2], point.b);
+  assert.equal(triangleIndices.getUint32(0, true), triangle.a);
+  assert.equal(triangleIndices.getUint32(4, true), triangle.b);
+  assert.equal(triangleIndices.getUint32(8, true), triangle.c);
+  assert.equal(triangleConfidence.getFloat32(0, true), triangle.confidence);
 }
 
 // Warm the result-boundary helpers independently from reconstruction.
@@ -215,12 +228,7 @@ const outputCases = resultBoundaryCases.map(({ pointCount, triangleCount }) => {
   }
 
   assert.ok(objectResult && packedResult);
-  assertEquivalentGeometry(
-    objectResult,
-    packedResult,
-    pointCount,
-    triangleCount,
-  );
+  assertEquivalentGeometry(objectResult, packedResult, pointCount, triangleCount);
 
   const objectMedianMs = median(objectRuns);
   const packedMedianMs = median(packedRuns);
@@ -229,7 +237,7 @@ const outputCases = resultBoundaryCases.map(({ pointCount, triangleCount }) => {
     triangle_count: triangleCount,
     packed_payload_bytes: pointCount * 19 + triangleCount * 16,
     object_graph_median_ms: objectMedianMs,
-    packed_typed_arrays_median_ms: packedMedianMs,
+    packed_byte_buffers_median_ms: packedMedianMs,
     packed_speedup: objectMedianMs / packedMedianMs,
   };
 });

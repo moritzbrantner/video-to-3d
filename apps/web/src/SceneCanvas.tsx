@@ -46,6 +46,8 @@ export function SceneCanvas({
   const cameraHitTargetsRef = useRef<CameraHitTarget[]>([]);
   const [view, setView] = useState<ViewState>({ yaw: -0.45, pitch: 0.18, zoom: 1 });
   const cameraState = reconstruction.camera_state;
+  const densePoints = reconstruction.dense_points;
+  const meshTriangles = reconstruction.mesh_triangles;
   const hasRegisteredGeometry = cameraState.calibrated_seed_cameras.length === 2;
   const acceptedCameras = useMemo(
     () => [...cameraState.calibrated_seed_cameras, ...cameraState.registered_cameras],
@@ -55,7 +57,7 @@ export function SceneCanvas({
     () => (hasRegisteredGeometry ? acceptedCameras : cameraState.approximate_motion_samples),
     [acceptedCameras, cameraState, hasRegisteredGeometry],
   );
-  const hasSurfaceModel = reconstruction.mesh_triangles.length > 0;
+  const hasSurfaceModel = meshTriangles.length > 0;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     hasSurfaceModel ? "model" : "evidence",
   );
@@ -66,48 +68,62 @@ export function SceneCanvas({
   }, [hasSurfaceModel, reconstruction]);
 
   const bounds = useMemo(() => {
-    const surfacePointIndices = new Set<number>();
-    for (const triangle of reconstruction.mesh_triangles) {
-      surfacePointIndices.add(triangle.a);
-      surfacePointIndices.add(triangle.b);
-      surfacePointIndices.add(triangle.c);
-    }
-    const surfacePositions = [...surfacePointIndices].flatMap((index) => {
-      const point = reconstruction.dense_points[index];
-      return point ? [[point.x, point.y, point.z] as const] : [];
-    });
-    const densePositions = reconstruction.dense_points.map(
-      (point) => [point.x, point.y, point.z] as const,
-    );
-    const sparsePositions = reconstruction.points.map(
-      (point) => [point.x, point.y, point.z] as const,
-    );
-    const cameraPositions = displayCameras.map(
-      (camera) => [camera.x, camera.y, camera.z] as const,
-    );
-    const evidencePositions = [...densePositions, ...sparsePositions, ...cameraPositions];
-    const modelPositions =
-      surfacePositions.length > 0
-        ? surfacePositions
-        : densePositions.length > 0
-          ? densePositions
-          : sparsePositions.length > 0
-            ? sparsePositions
-            : cameraPositions;
-    const positions =
-      renderMode === "evidence" && evidencePositions.length > 0
-        ? evidencePositions
-        : modelPositions;
-    if (positions.length === 0) {
-      return { center: [0, 0, 0] as const, extent: 1 };
-    }
     const min = [Infinity, Infinity, Infinity];
     const max = [-Infinity, -Infinity, -Infinity];
-    for (const position of positions) {
-      for (let axis = 0; axis < 3; axis += 1) {
-        min[axis] = Math.min(min[axis], position[axis]);
-        max[axis] = Math.max(max[axis], position[axis]);
+    let positionCount = 0;
+
+    const includePosition = (x: number, y: number, z: number) => {
+      min[0] = Math.min(min[0], x);
+      min[1] = Math.min(min[1], y);
+      min[2] = Math.min(min[2], z);
+      max[0] = Math.max(max[0], x);
+      max[1] = Math.max(max[1], y);
+      max[2] = Math.max(max[2], z);
+      positionCount += 1;
+    };
+    const includeDensePoint = (index: number) => {
+      if (index < 0 || index >= densePoints.length) return;
+      const base = index * 4;
+      includePosition(
+        densePoints.values[base],
+        densePoints.values[base + 1],
+        densePoints.values[base + 2],
+      );
+    };
+
+    if (renderMode === "evidence") {
+      for (let index = 0; index < densePoints.length; index += 1) {
+        includeDensePoint(index);
       }
+      for (const point of reconstruction.points) {
+        includePosition(point.x, point.y, point.z);
+      }
+      for (const camera of displayCameras) {
+        includePosition(camera.x, camera.y, camera.z);
+      }
+    } else if (meshTriangles.length > 0) {
+      for (let triangleIndex = 0; triangleIndex < meshTriangles.length; triangleIndex += 1) {
+        const base = triangleIndex * 3;
+        includeDensePoint(meshTriangles.indices[base]);
+        includeDensePoint(meshTriangles.indices[base + 1]);
+        includeDensePoint(meshTriangles.indices[base + 2]);
+      }
+    } else if (densePoints.length > 0) {
+      for (let index = 0; index < densePoints.length; index += 1) {
+        includeDensePoint(index);
+      }
+    } else if (reconstruction.points.length > 0) {
+      for (const point of reconstruction.points) {
+        includePosition(point.x, point.y, point.z);
+      }
+    } else {
+      for (const camera of displayCameras) {
+        includePosition(camera.x, camera.y, camera.z);
+      }
+    }
+
+    if (positionCount === 0) {
+      return { center: [0, 0, 0] as const, extent: 1 };
     }
     const center = [
       (min[0] + max[0]) * 0.5,
@@ -116,7 +132,7 @@ export function SceneCanvas({
     ] as const;
     const extent = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 1);
     return { center, extent };
-  }, [displayCameras, reconstruction, renderMode]);
+  }, [densePoints, displayCameras, meshTriangles, reconstruction.points, renderMode]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -161,48 +177,94 @@ export function SceneCanvas({
       };
     };
 
-    const projectedMeshTriangles = reconstruction.mesh_triangles
-      .flatMap((triangle) => {
-        const a = reconstruction.dense_points[triangle.a];
-        const b = reconstruction.dense_points[triangle.b];
-        const c = reconstruction.dense_points[triangle.c];
-        if (!a || !b || !c) return [];
-        const projectedA = project(a.x, a.y, a.z);
-        const projectedB = project(b.x, b.y, b.z);
-        const projectedC = project(c.x, c.y, c.z);
-        if (projectedA.z <= 0.05 || projectedB.z <= 0.05 || projectedC.z <= 0.05) {
-          return [];
-        }
-        const ab = {
-          x: projectedB.viewX - projectedA.viewX,
-          y: projectedB.viewY - projectedA.viewY,
-          z: projectedB.viewZ - projectedA.viewZ,
-        };
-        const ac = {
-          x: projectedC.viewX - projectedA.viewX,
-          y: projectedC.viewY - projectedA.viewY,
-          z: projectedC.viewZ - projectedA.viewZ,
-        };
-        const normal = {
-          x: ab.y * ac.z - ab.z * ac.y,
-          y: ab.z * ac.x - ab.x * ac.z,
-          z: ab.x * ac.y - ab.y * ac.x,
-        };
-        const normalLength = Math.hypot(normal.x, normal.y, normal.z);
-        const facing = normalLength > 1e-9 ? Math.abs(normal.z) / normalLength : 0;
-        const light = 0.48 + facing * 0.52;
-        return [
-          {
-            triangle,
-            projected: [projectedA, projectedB, projectedC] as const,
-            depth: (projectedA.z + projectedB.z + projectedC.z) / 3,
-            r: clampedChannel(((a.r + b.r + c.r) / 3) * light),
-            g: clampedChannel(((a.g + b.g + c.g) / 3) * light),
-            b: clampedChannel(((a.b + b.b + c.b) / 3) * light),
-          },
-        ];
-      })
-      .sort((left, right) => right.depth - left.depth);
+    type Projected = ReturnType<typeof project>;
+    const projectedMeshTriangles: Array<{
+      triangleIndex: number;
+      projected: [Projected, Projected, Projected];
+      depth: number;
+      r: number;
+      g: number;
+      b: number;
+    }> = [];
+
+    for (let triangleIndex = 0; triangleIndex < meshTriangles.length; triangleIndex += 1) {
+      const triangleBase = triangleIndex * 3;
+      const aIndex = meshTriangles.indices[triangleBase];
+      const bIndex = meshTriangles.indices[triangleBase + 1];
+      const cIndex = meshTriangles.indices[triangleBase + 2];
+      if (
+        aIndex >= densePoints.length ||
+        bIndex >= densePoints.length ||
+        cIndex >= densePoints.length
+      ) {
+        continue;
+      }
+      const aBase = aIndex * 4;
+      const bBase = bIndex * 4;
+      const cBase = cIndex * 4;
+      const projectedA = project(
+        densePoints.values[aBase],
+        densePoints.values[aBase + 1],
+        densePoints.values[aBase + 2],
+      );
+      const projectedB = project(
+        densePoints.values[bBase],
+        densePoints.values[bBase + 1],
+        densePoints.values[bBase + 2],
+      );
+      const projectedC = project(
+        densePoints.values[cBase],
+        densePoints.values[cBase + 1],
+        densePoints.values[cBase + 2],
+      );
+      if (projectedA.z <= 0.05 || projectedB.z <= 0.05 || projectedC.z <= 0.05) {
+        continue;
+      }
+      const ab = {
+        x: projectedB.viewX - projectedA.viewX,
+        y: projectedB.viewY - projectedA.viewY,
+        z: projectedB.viewZ - projectedA.viewZ,
+      };
+      const ac = {
+        x: projectedC.viewX - projectedA.viewX,
+        y: projectedC.viewY - projectedA.viewY,
+        z: projectedC.viewZ - projectedA.viewZ,
+      };
+      const normal = {
+        x: ab.y * ac.z - ab.z * ac.y,
+        y: ab.z * ac.x - ab.x * ac.z,
+        z: ab.x * ac.y - ab.y * ac.x,
+      };
+      const normalLength = Math.hypot(normal.x, normal.y, normal.z);
+      const facing = normalLength > 1e-9 ? Math.abs(normal.z) / normalLength : 0;
+      const light = 0.48 + facing * 0.52;
+      const aRgb = aIndex * 3;
+      const bRgb = bIndex * 3;
+      const cRgb = cIndex * 3;
+      projectedMeshTriangles.push({
+        triangleIndex,
+        projected: [projectedA, projectedB, projectedC],
+        depth: (projectedA.z + projectedB.z + projectedC.z) / 3,
+        r: clampedChannel(
+          ((densePoints.rgb[aRgb] + densePoints.rgb[bRgb] + densePoints.rgb[cRgb]) / 3) * light,
+        ),
+        g: clampedChannel(
+          ((densePoints.rgb[aRgb + 1] +
+            densePoints.rgb[bRgb + 1] +
+            densePoints.rgb[cRgb + 1]) /
+            3) *
+            light,
+        ),
+        b: clampedChannel(
+          ((densePoints.rgb[aRgb + 2] +
+            densePoints.rgb[bRgb + 2] +
+            densePoints.rgb[cRgb + 2]) /
+            3) *
+            light,
+        ),
+      });
+    }
+    projectedMeshTriangles.sort((left, right) => right.depth - left.depth);
 
     for (const item of projectedMeshTriangles) {
       const [a, b, c] = item.projected;
@@ -211,7 +273,7 @@ export function SceneCanvas({
       context.lineTo(b.x, b.y);
       context.lineTo(c.x, c.y);
       context.closePath();
-      context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.76 + item.triangle.confidence * 0.24})`;
+      context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.76 + meshTriangles.confidence[item.triangleIndex] * 0.24})`;
       context.fill();
       context.lineWidth = 0.42 * ratio;
       context.strokeStyle = "rgba(4, 10, 13, 0.22)";
@@ -220,17 +282,27 @@ export function SceneCanvas({
 
     const showEvidence = renderMode === "evidence" || !hasSurfaceModel;
     if (showEvidence) {
-      const projectedDensePoints = reconstruction.dense_points
-        .filter((point) => point.confidence > 0.05)
-        .map((point) => ({ point, projected: project(point.x, point.y, point.z) }))
-        .filter(({ projected }) => projected.z > 0.05)
-        .sort((a, b) => b.projected.z - a.projected.z);
+      const projectedDensePoints: Array<{ index: number; projected: Projected }> = [];
+      for (let index = 0; index < densePoints.length; index += 1) {
+        const base = index * 4;
+        if (densePoints.values[base + 3] <= 0.05) continue;
+        const projected = project(
+          densePoints.values[base],
+          densePoints.values[base + 1],
+          densePoints.values[base + 2],
+        );
+        if (projected.z > 0.05) projectedDensePoints.push({ index, projected });
+      }
+      projectedDensePoints.sort((a, b) => b.projected.z - a.projected.z);
 
-      for (const { point, projected } of projectedDensePoints) {
+      for (const { index, projected } of projectedDensePoints) {
+        const valueBase = index * 4;
+        const rgbBase = index * 3;
+        const confidence = densePoints.values[valueBase + 3];
         const radius = Math.max(0.55 * ratio, Math.min(1.8 * ratio, projected.scale * 0.009));
         context.beginPath();
         context.arc(projected.x, projected.y, radius, 0, Math.PI * 2);
-        context.fillStyle = `rgba(${point.r}, ${point.g}, ${point.b}, ${0.14 + point.confidence * 0.38})`;
+        context.fillStyle = `rgba(${densePoints.rgb[rgbBase]}, ${densePoints.rgb[rgbBase + 1]}, ${densePoints.rgb[rgbBase + 2]}, ${0.14 + confidence * 0.38})`;
         context.fill();
       }
 
@@ -332,10 +404,12 @@ export function SceneCanvas({
   }, [
     bounds,
     cameraState,
+    densePoints,
     displayCameras,
     hasRegisteredGeometry,
     hasSurfaceModel,
-    reconstruction,
+    meshTriangles,
+    reconstruction.points,
     renderMode,
     selectedFrameIndex,
     view,

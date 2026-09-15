@@ -275,12 +275,24 @@ export type CameraPipelineState = {
   frames: FrameCameraState[];
 };
 
+export type DensePointBuffer = {
+  values: Float32Array;
+  rgb: Uint8Array;
+  length: number;
+};
+
+export type MeshTriangleBuffer = {
+  indices: Uint32Array;
+  confidence: Float32Array;
+  length: number;
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
-  dense_points: Point3[];
+  dense_points: DensePointBuffer;
   dense: DenseStats;
-  mesh_triangles: MeshTriangle[];
+  mesh_triangles: MeshTriangleBuffer;
   mesh: MeshStats;
   pairs: PairStats[];
   calibrated_pair: CalibratedPairStats | null;
@@ -296,8 +308,31 @@ type WasmModule = {
   reconstruct_sequence: (request: unknown) => unknown;
 };
 
+type RawDensePointBuffer = {
+  values_f32_le: Uint8Array;
+  rgb: Uint8Array;
+  length: number;
+};
+
+type RawMeshTriangleBuffer = {
+  indices_u32_le: Uint8Array;
+  confidence_f32_le: Uint8Array;
+  length: number;
+};
+
+type RawReconstructionResult = Omit<
+  ReconstructionResult,
+  "dense_points" | "mesh_triangles"
+> & {
+  dense_points: RawDensePointBuffer;
+  mesh_triangles: RawMeshTriangleBuffer;
+};
+
 const FEWER_THAN_TWO_REGISTERED_CAMERAS =
   "fewer than two accepted registered cameras are available";
+
+const NATIVE_LITTLE_ENDIAN =
+  new Uint8Array(new Uint32Array([0x01020304]).buffer)[0] === 0x04;
 
 let wasmPromise: Promise<WasmModule> | null = null;
 
@@ -316,12 +351,106 @@ async function loadWasm(): Promise<WasmModule> {
   return wasmPromise;
 }
 
-export function normalizeWasmReconstruction(value: unknown): ReconstructionResult {
+function objectRecord(value: unknown, label: string): Record<string, unknown> {
   const normalized = value instanceof Map ? Object.fromEntries(value) : value;
   if (!normalized || typeof normalized !== "object") {
-    throw new Error("camera-state contract mismatch: WASM returned a non-object reconstruction");
+    throw new Error(`camera-state contract mismatch: WASM returned invalid ${label}`);
   }
-  return normalized as ReconstructionResult;
+  return normalized as Record<string, unknown>;
+}
+
+function byteBuffer(value: unknown, label: string): Uint8Array {
+  if (!(value instanceof Uint8Array)) {
+    throw new Error(`camera-state contract mismatch: ${label} is not a Uint8Array`);
+  }
+  return value;
+}
+
+function packedLength(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`camera-state contract mismatch: ${label} is not a valid length`);
+  }
+  return value as number;
+}
+
+function float32LittleEndian(bytes: Uint8Array, label: string): Float32Array {
+  if (bytes.byteLength % 4 !== 0) {
+    throw new Error(`camera-state contract mismatch: ${label} byte length is not divisible by 4`);
+  }
+  if (NATIVE_LITTLE_ENDIAN) {
+    const aligned = bytes.byteOffset % 4 === 0 ? bytes : bytes.slice();
+    return new Float32Array(
+      aligned.buffer,
+      aligned.byteOffset,
+      aligned.byteLength / Float32Array.BYTES_PER_ELEMENT,
+    );
+  }
+  const source = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const values = new Float32Array(bytes.byteLength / 4);
+  for (let index = 0; index < values.length; index += 1) {
+    values[index] = source.getFloat32(index * 4, true);
+  }
+  return values;
+}
+
+function uint32LittleEndian(bytes: Uint8Array, label: string): Uint32Array {
+  if (bytes.byteLength % 4 !== 0) {
+    throw new Error(`camera-state contract mismatch: ${label} byte length is not divisible by 4`);
+  }
+  if (NATIVE_LITTLE_ENDIAN) {
+    const aligned = bytes.byteOffset % 4 === 0 ? bytes : bytes.slice();
+    return new Uint32Array(
+      aligned.buffer,
+      aligned.byteOffset,
+      aligned.byteLength / Uint32Array.BYTES_PER_ELEMENT,
+    );
+  }
+  const source = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const values = new Uint32Array(bytes.byteLength / 4);
+  for (let index = 0; index < values.length; index += 1) {
+    values[index] = source.getUint32(index * 4, true);
+  }
+  return values;
+}
+
+function normalizeDensePointBuffer(value: unknown): DensePointBuffer {
+  const raw = objectRecord(value, "dense-point buffer") as RawDensePointBuffer;
+  const length = packedLength(raw.length, "dense-point count");
+  const values = float32LittleEndian(
+    byteBuffer(raw.values_f32_le, "dense-point float buffer"),
+    "dense-point float buffer",
+  );
+  const rgb = byteBuffer(raw.rgb, "dense-point RGB buffer");
+  if (values.length !== length * 4 || rgb.length !== length * 3) {
+    throw new Error("camera-state contract mismatch: dense-point buffer lengths are inconsistent");
+  }
+  return { values, rgb, length };
+}
+
+function normalizeMeshTriangleBuffer(value: unknown): MeshTriangleBuffer {
+  const raw = objectRecord(value, "mesh-triangle buffer") as RawMeshTriangleBuffer;
+  const length = packedLength(raw.length, "mesh-triangle count");
+  const indices = uint32LittleEndian(
+    byteBuffer(raw.indices_u32_le, "mesh-triangle index buffer"),
+    "mesh-triangle index buffer",
+  );
+  const confidence = float32LittleEndian(
+    byteBuffer(raw.confidence_f32_le, "mesh-triangle confidence buffer"),
+    "mesh-triangle confidence buffer",
+  );
+  if (indices.length !== length * 3 || confidence.length !== length) {
+    throw new Error("camera-state contract mismatch: mesh-triangle buffer lengths are inconsistent");
+  }
+  return { indices, confidence, length };
+}
+
+export function normalizeWasmReconstruction(value: unknown): ReconstructionResult {
+  const normalized = objectRecord(value, "reconstruction") as RawReconstructionResult;
+  return {
+    ...normalized,
+    dense_points: normalizeDensePointBuffer(normalized.dense_points),
+    mesh_triangles: normalizeMeshTriangleBuffer(normalized.mesh_triangles),
+  };
 }
 
 function frameIndexSet(cameras: CameraPose[]): Set<number> {
@@ -339,6 +468,14 @@ export function assertReconstructionContract(
   const state = result.camera_state;
   if (!state || !Array.isArray(state.frames)) {
     throw new Error("camera-state contract mismatch: WASM result has no explicit camera_state");
+  }
+  if (
+    result.dense_points.values.length !== result.dense_points.length * 4 ||
+    result.dense_points.rgb.length !== result.dense_points.length * 3 ||
+    result.mesh_triangles.indices.length !== result.mesh_triangles.length * 3 ||
+    result.mesh_triangles.confidence.length !== result.mesh_triangles.length
+  ) {
+    throw new Error("camera-state contract mismatch: packed reconstruction geometry is inconsistent");
   }
   if (
     !Array.isArray(result.dense.reference_frames) ||
