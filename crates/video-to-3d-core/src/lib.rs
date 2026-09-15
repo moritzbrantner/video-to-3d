@@ -1,6 +1,7 @@
 //! Reusable reconstruction semantics and interchange contracts.
 
 pub mod colmap;
+pub mod feature_analysis;
 
 // Keep the established reconstruction API at crate root while the large kernel body
 // remains isolated from format/interchange modules.

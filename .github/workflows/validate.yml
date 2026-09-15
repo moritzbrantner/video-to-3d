@@ -30,9 +30,6 @@ jobs:
       - run: cargo test --workspace
       - name: Validate feature-pipeline experiment
         run: |
-          cargo fmt --manifest-path crates/video-to-3d-features/Cargo.toml --check
-          cargo clippy --manifest-path crates/video-to-3d-features/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path crates/video-to-3d-features/Cargo.toml
           cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --check
           cargo check --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --target wasm32-unknown-unknown
       - name: Test golden pose alignment

@@ -1,7 +1,7 @@
-//! Deterministic feature detection and matching experiments for video-to-3d.
+//! Deterministic feature detection and matching semantics for video-to-3d.
 //!
 //! The crate deliberately keeps two pipelines side by side:
-//! - `BaselineHarrisPatch` mirrors the small, easy-to-debug Harris + normalized patch approach.
+//! - `BaselineHarrisPatch` exposes the authoritative reconstruction feature path.
 //! - `OrbStyle` uses a classical multi-scale FAST + intensity-centroid orientation + rotated BRIEF
 //!   descriptor with mutual ratio-checked Hamming matching.
 //!
@@ -130,7 +130,7 @@ struct Candidate {
 
 /// Detect and match features between two RGBA frames with the selected deterministic pipeline.
 ///
-/// `BaselineHarrisPatch` is intentionally close to the original reconstruction feature path.
+/// `BaselineHarrisPatch` calls the authoritative reconstruction feature path directly.
 /// `OrbStyle` is the stronger classical alternative intended for experimentation before promotion
 /// into the authoritative reconstruction path.
 pub fn analyze_rgba_pair(
@@ -142,6 +142,16 @@ pub fn analyze_rgba_pair(
     options: FeatureOptions,
 ) -> Result<FeatureAnalysis, String> {
     validate_input(source_rgba, target_rgba, width, height, options)?;
+
+    if algorithm == FeatureAlgorithm::BaselineHarrisPatch {
+        return analyze_authoritative_baseline(
+            source_rgba,
+            target_rgba,
+            width,
+            height,
+            options,
+        );
+    }
 
     let source = GrayImage {
         width,
@@ -170,6 +180,63 @@ pub fn analyze_rgba_pair(
             .collect(),
         matches,
     })
+}
+
+fn analyze_authoritative_baseline(
+    source_rgba: &[u8],
+    target_rgba: &[u8],
+    width: u32,
+    height: u32,
+    options: FeatureOptions,
+) -> Result<FeatureAnalysis, String> {
+    let reconstruction_options = super::ReconstructionOptions {
+        max_features: options.max_features,
+        min_feature_distance: options.min_feature_distance,
+        descriptor_radius: options.descriptor_radius,
+        match_radius: options.match_radius,
+        max_descriptor_distance: options.baseline_max_distance,
+        ratio_threshold: options.ratio_threshold,
+        focal_length_pixels: None,
+    };
+    let source_luma = super::to_luma(&super::FrameInput {
+        width,
+        height,
+        rgba: source_rgba.to_vec(),
+    });
+    let target_luma = super::to_luma(&super::FrameInput {
+        width,
+        height,
+        rgba: target_rgba.to_vec(),
+    });
+    let source = super::detect_features(&source_luma, width, height, reconstruction_options);
+    let target = super::detect_features(&target_luma, width, height, reconstruction_options);
+    let matches = super::match_features(&source, &target, reconstruction_options)
+        .into_iter()
+        .map(|feature_match| FeatureMatch {
+            source_index: feature_match.a,
+            target_index: feature_match.b,
+            distance: feature_match.distance,
+            dx: target[feature_match.b].x as f32 - source[feature_match.a].x as f32,
+            dy: target[feature_match.b].y as f32 - source[feature_match.a].y as f32,
+        })
+        .collect();
+
+    Ok(FeatureAnalysis {
+        algorithm: FeatureAlgorithm::BaselineHarrisPatch,
+        source_features: source.iter().map(authoritative_point).collect(),
+        target_features: target.iter().map(authoritative_point).collect(),
+        matches,
+    })
+}
+
+fn authoritative_point(feature: &super::Feature) -> FeaturePoint {
+    FeaturePoint {
+        x: feature.x as f32,
+        y: feature.y as f32,
+        score: feature.score,
+        scale: 1.0,
+        angle_radians: 0.0,
+    }
 }
 
 fn validate_input(
@@ -818,6 +885,74 @@ mod tests {
             assert_eq!(left.distance, right.distance);
             assert_eq!(left.dx, right.dx);
             assert_eq!(left.dy, right.dy);
+        }
+    }
+
+    #[test]
+    fn baseline_is_the_authoritative_reconstruction_feature_path() {
+        let width = 96;
+        let height = 72;
+        let source_rgba = textured_rgba(width, height);
+        let target_rgba = translated_rgba(&source_rgba, width, height, 5, -3);
+        let options = FeatureOptions {
+            max_features: 180,
+            min_feature_distance: 5,
+            descriptor_radius: 4,
+            match_radius: 11,
+            baseline_max_distance: 29.0,
+            ratio_threshold: 0.77,
+            ..FeatureOptions::default()
+        };
+        let reconstruction_options = super::super::ReconstructionOptions {
+            max_features: options.max_features,
+            min_feature_distance: options.min_feature_distance,
+            descriptor_radius: options.descriptor_radius,
+            match_radius: options.match_radius,
+            max_descriptor_distance: options.baseline_max_distance,
+            ratio_threshold: options.ratio_threshold,
+            focal_length_pixels: None,
+        };
+        let source_frame = super::super::FrameInput {
+            width,
+            height,
+            rgba: source_rgba.clone(),
+        };
+        let target_frame = super::super::FrameInput {
+            width,
+            height,
+            rgba: target_rgba.clone(),
+        };
+        let source = super::super::detect_features(
+            &super::super::to_luma(&source_frame),
+            width,
+            height,
+            reconstruction_options,
+        );
+        let target = super::super::detect_features(
+            &super::super::to_luma(&target_frame),
+            width,
+            height,
+            reconstruction_options,
+        );
+        let expected = super::super::match_features(&source, &target, reconstruction_options);
+
+        let analysis = analyze_rgba_pair(
+            &source_rgba,
+            &target_rgba,
+            width,
+            height,
+            FeatureAlgorithm::BaselineHarrisPatch,
+            options,
+        )
+        .expect("authoritative baseline analysis");
+
+        assert_eq!(analysis.source_features.len(), source.len());
+        assert_eq!(analysis.target_features.len(), target.len());
+        assert_eq!(analysis.matches.len(), expected.len());
+        for (actual, expected) in analysis.matches.iter().zip(expected) {
+            assert_eq!(actual.source_index, expected.a);
+            assert_eq!(actual.target_index, expected.b);
+            assert_eq!(actual.distance, expected.distance);
         }
     }
 }

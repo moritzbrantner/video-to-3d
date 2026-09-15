@@ -3,7 +3,9 @@ use serde::{
     Deserialize, Serialize,
 };
 use std::fmt;
-use video_to_3d_features::{analyze_rgba_pair, FeatureAlgorithm, FeatureAnalysis, FeatureOptions};
+use video_to_3d_core::feature_analysis::{
+    analyze_rgba_pair, FeatureAlgorithm, FeatureAnalysis, FeatureOptions,
+};
 use wasm_bindgen::prelude::*;
 
 #[derive(Deserialize)]

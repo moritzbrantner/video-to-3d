@@ -161,6 +161,7 @@ function renderAnalysis(
 
 export default function FeatureLabPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const frameGenerationRef = useRef(0);
   const [source, setSource] = useState<ImageData | null>(null);
   const [target, setTarget] = useState<ImageData | null>(null);
   const [algorithm, setAlgorithm] = useState<FeatureAlgorithm>("orb_style");
@@ -178,6 +179,7 @@ export default function FeatureLabPage() {
       return;
     }
 
+    const generation = frameGenerationRef.current;
     setStatus("Running both feature pipelines in WebAssembly…");
     try {
       const [baseline, orb] = await Promise.all([
@@ -189,14 +191,17 @@ export default function FeatureLabPage() {
         ),
         analyzeFeaturePair(nextSource, nextTarget, "orb_style", nextOptions),
       ]);
+      if (generation !== frameGenerationRef.current) return;
       setAnalyses({ baseline_harris_patch: baseline, orb_style: orb });
       setStatus("Ready. Switch pipelines to compare the same frames.");
     } catch (error) {
+      if (generation !== frameGenerationRef.current) return;
       setStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
   function loadSynthetic(): void {
+    frameGenerationRef.current += 1;
     const frames = syntheticFrames();
     setSource(frames.source);
     setTarget(frames.target);
@@ -205,6 +210,7 @@ export default function FeatureLabPage() {
   }
 
   useEffect(() => {
+    frameGenerationRef.current += 1;
     const frames = syntheticFrames();
     setSource(frames.source);
     setTarget(frames.target);
@@ -226,13 +232,17 @@ export default function FeatureLabPage() {
   ): Promise<void> {
     const file = event.target.files?.[0];
     if (!file) return;
+    const generation = ++frameGenerationRef.current;
+    setAnalyses({});
+    setStatus("Loading replacement frame…");
     try {
       const image = await decodeImage(file);
+      if (generation !== frameGenerationRef.current) return;
       if (side === "source") setSource(image);
       else setTarget(image);
-      setAnalyses({});
       setStatus("Frame changed. Run both pipelines to compare it.");
     } catch (error) {
+      if (generation !== frameGenerationRef.current) return;
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       event.target.value = "";
@@ -261,9 +271,10 @@ export default function FeatureLabPage() {
         <p style={{ margin: "0 0 6px", opacity: 0.68 }}>video-to-3d</p>
         <h1 style={{ margin: "0 0 10px", fontSize: 32 }}>Feature matching lab</h1>
         <p style={{ margin: 0, maxWidth: 850, lineHeight: 1.55 }}>
-          Compare the existing small Harris + normalized-patch baseline with the stronger
+          Compare the authoritative reconstruction Harris/patch baseline with the stronger
           multi-scale FAST, orientation and rotated-BRIEF pipeline. Both run against exactly
-          the same frames; the reconstruction pipeline is not silently changed by this lab.
+          the same frames. The baseline calls the exact detector, mean-absolute descriptor
+          distance, circular search window, and acceptance rules used by reconstruction.
         </p>
       </header>
 
