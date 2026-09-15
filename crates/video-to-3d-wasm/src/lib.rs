@@ -67,12 +67,14 @@ struct WasmBrowserReconstructionResult<'a> {
     camera_state: &'a CameraPipelineState,
 }
 
+#[cfg(feature = "boundary-benchmark")]
 #[derive(Serialize)]
 struct GeometryBenchmarkObjectPayload {
     dense_points: Vec<Point3>,
     mesh_triangles: Vec<MeshTriangle>,
 }
 
+#[cfg(feature = "boundary-benchmark")]
 #[derive(Serialize)]
 struct GeometryBenchmarkPackedPayload {
     dense_points: PackedDensePointBuffer,
@@ -196,6 +198,7 @@ fn pack_mesh_triangles(
     })
 }
 
+#[cfg(feature = "boundary-benchmark")]
 fn benchmark_point(index: usize) -> Point3 {
     Point3 {
         x: index as f32 * 0.001,
@@ -208,6 +211,7 @@ fn benchmark_point(index: usize) -> Point3 {
     }
 }
 
+#[cfg(feature = "boundary-benchmark")]
 fn benchmark_triangle(index: usize, point_count: usize) -> MeshTriangle {
     let a = index % point_count;
     MeshTriangle {
@@ -218,6 +222,7 @@ fn benchmark_triangle(index: usize, point_count: usize) -> MeshTriangle {
     }
 }
 
+#[cfg(feature = "boundary-benchmark")]
 fn validate_geometry_benchmark_counts(point_count: u32) -> Result<usize, JsValue> {
     let point_count = point_count as usize;
     if point_count < 3 {
@@ -228,6 +233,7 @@ fn validate_geometry_benchmark_counts(point_count: u32) -> Result<usize, JsValue
     Ok(point_count)
 }
 
+#[cfg(feature = "boundary-benchmark")]
 #[wasm_bindgen]
 pub fn benchmark_object_geometry_result(
     point_count: u32,
@@ -247,6 +253,7 @@ pub fn benchmark_object_geometry_result(
     })
 }
 
+#[cfg(feature = "boundary-benchmark")]
 #[wasm_bindgen]
 pub fn benchmark_packed_geometry_result(
     point_count: u32,

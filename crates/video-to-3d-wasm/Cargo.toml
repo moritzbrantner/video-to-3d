@@ -7,6 +7,9 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+boundary-benchmark = []
+
 [dependencies]
 # Direct Serde access selects the browser-facing WASM transport shape and
 # derives the WASM-local request without leaking transport details into core.
