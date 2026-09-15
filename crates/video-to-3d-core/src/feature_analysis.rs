@@ -144,13 +144,7 @@ pub fn analyze_rgba_pair(
     validate_input(source_rgba, target_rgba, width, height, options)?;
 
     if algorithm == FeatureAlgorithm::BaselineHarrisPatch {
-        return analyze_authoritative_baseline(
-            source_rgba,
-            target_rgba,
-            width,
-            height,
-            options,
-        );
+        return analyze_authoritative_baseline(source_rgba, target_rgba, width, height, options);
     }
 
     let source = GrayImage {
