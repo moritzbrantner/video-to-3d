@@ -273,7 +273,9 @@ fn validate_input(
 }
 
 fn rgba_to_luma(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| {
             ((77 * u16::from(pixel[0]) + 150 * u16::from(pixel[1]) + 29 * u16::from(pixel[2])) >> 8)
                 as u8
