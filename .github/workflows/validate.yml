@@ -44,7 +44,7 @@ jobs:
           if ! git diff --quiet -- crates/video-to-3d-features/src/lib.rs crates/video-to-3d-feature-wasm/src/lib.rs; then
             git diff -- crates/video-to-3d-features/src/lib.rs crates/video-to-3d-feature-wasm/src/lib.rs > /tmp/rustfmt.patch
             git fetch origin "${{ github.head_ref }}"
-            git checkout -B rustfmt-head FETCH_HEAD
+            git reset --hard FETCH_HEAD
             git apply /tmp/rustfmt.patch
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
