@@ -3,9 +3,7 @@ use serde::{
     Deserialize, Serialize,
 };
 use std::fmt;
-use video_to_3d_features::{
-    analyze_rgba_pair, FeatureAlgorithm, FeatureAnalysis, FeatureOptions,
-};
+use video_to_3d_features::{analyze_rgba_pair, FeatureAlgorithm, FeatureAnalysis, FeatureOptions};
 use wasm_bindgen::prelude::*;
 
 #[derive(Deserialize)]
@@ -72,8 +70,10 @@ fn browser_serializer() -> serde_wasm_bindgen::Serializer {
 
 #[wasm_bindgen]
 pub fn analyze_feature_pair(value: JsValue) -> Result<JsValue, JsValue> {
-    let request: FeatureAnalysisRequest = serde_wasm_bindgen::from_value(value)
-        .map_err(|error| JsValue::from_str(&format!("invalid feature-analysis request: {error}")))?;
+    let request: FeatureAnalysisRequest =
+        serde_wasm_bindgen::from_value(value).map_err(|error| {
+            JsValue::from_str(&format!("invalid feature-analysis request: {error}"))
+        })?;
     let analysis: FeatureAnalysis = analyze_rgba_pair(
         &request.source_rgba,
         &request.target_rgba,

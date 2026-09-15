@@ -160,8 +160,14 @@ pub fn analyze_rgba_pair(
 
     Ok(FeatureAnalysis {
         algorithm,
-        source_features: source_features.iter().map(|feature| feature.point).collect(),
-        target_features: target_features.iter().map(|feature| feature.point).collect(),
+        source_features: source_features
+            .iter()
+            .map(|feature| feature.point)
+            .collect(),
+        target_features: target_features
+            .iter()
+            .map(|feature| feature.point)
+            .collect(),
         matches,
     })
 }
@@ -208,8 +214,8 @@ fn validate_input(
 fn rgba_to_luma(rgba: &[u8]) -> Vec<u8> {
     rgba.chunks_exact(4)
         .map(|pixel| {
-            ((77 * u16::from(pixel[0]) + 150 * u16::from(pixel[1]) + 29 * u16::from(pixel[2]))
-                >> 8) as u8
+            ((77 * u16::from(pixel[0]) + 150 * u16::from(pixel[1]) + 29 * u16::from(pixel[2])) >> 8)
+                as u8
         })
         .collect()
 }
@@ -250,24 +256,28 @@ fn detect_baseline(image: &GrayImage, options: FeatureOptions) -> Vec<Feature> {
     }
     sort_candidates(&mut candidates);
 
-    select_candidates(&candidates, options.max_features, options.min_feature_distance)
-        .into_iter()
-        .map(|candidate| Feature {
-            point: FeaturePoint {
-                x: candidate.original_x,
-                y: candidate.original_y,
-                score: candidate.score,
-                scale: 1.0,
-                angle_radians: 0.0,
-            },
-            descriptor: Descriptor::Patch(patch_descriptor(
-                image,
-                candidate.x,
-                candidate.y,
-                options.descriptor_radius,
-            )),
-        })
-        .collect()
+    select_candidates(
+        &candidates,
+        options.max_features,
+        options.min_feature_distance,
+    )
+    .into_iter()
+    .map(|candidate| Feature {
+        point: FeaturePoint {
+            x: candidate.original_x,
+            y: candidate.original_y,
+            score: candidate.score,
+            scale: 1.0,
+            angle_radians: 0.0,
+        },
+        descriptor: Descriptor::Patch(patch_descriptor(
+            image,
+            candidate.x,
+            candidate.y,
+            options.descriptor_radius,
+        )),
+    })
+    .collect()
 }
 
 fn detect_orb_style(image: &GrayImage, options: FeatureOptions) -> Vec<Feature> {
@@ -287,7 +297,8 @@ fn detect_orb_style(image: &GrayImage, options: FeatureOptions) -> Vec<Feature> 
                 else {
                     continue;
                 };
-                if !is_fast_local_maximum(level_image, x, y, options.fast_threshold, fast_strength) {
+                if !is_fast_local_maximum(level_image, x, y, options.fast_threshold, fast_strength)
+                {
                     continue;
                 }
                 let harris = harris_score(level_image, x, y).max(0.0);
@@ -306,28 +317,32 @@ fn detect_orb_style(image: &GrayImage, options: FeatureOptions) -> Vec<Feature> 
     }
     sort_candidates(&mut candidates);
 
-    select_candidates(&candidates, options.max_features, options.min_feature_distance)
-        .into_iter()
-        .map(|candidate| {
-            let level_image = &pyramid[candidate.level];
-            let angle = intensity_centroid_angle(level_image, candidate.x, candidate.y);
-            Feature {
-                point: FeaturePoint {
-                    x: candidate.original_x,
-                    y: candidate.original_y,
-                    score: candidate.score,
-                    scale: candidate.scale,
-                    angle_radians: angle,
-                },
-                descriptor: Descriptor::Binary(rotated_brief_descriptor(
-                    level_image,
-                    candidate.x,
-                    candidate.y,
-                    angle,
-                )),
-            }
-        })
-        .collect()
+    select_candidates(
+        &candidates,
+        options.max_features,
+        options.min_feature_distance,
+    )
+    .into_iter()
+    .map(|candidate| {
+        let level_image = &pyramid[candidate.level];
+        let angle = intensity_centroid_angle(level_image, candidate.x, candidate.y);
+        Feature {
+            point: FeaturePoint {
+                x: candidate.original_x,
+                y: candidate.original_y,
+                score: candidate.score,
+                scale: candidate.scale,
+                angle_radians: angle,
+            },
+            descriptor: Descriptor::Binary(rotated_brief_descriptor(
+                level_image,
+                candidate.x,
+                candidate.y,
+                angle,
+            )),
+        }
+    })
+    .collect()
 }
 
 fn sort_candidates(candidates: &mut [Candidate]) {
@@ -484,13 +499,7 @@ fn has_circular_run(values: &[bool; 16], required: usize) -> bool {
     false
 }
 
-fn is_fast_local_maximum(
-    image: &GrayImage,
-    x: u32,
-    y: u32,
-    threshold: u8,
-    score: f32,
-) -> bool {
+fn is_fast_local_maximum(image: &GrayImage, x: u32, y: u32, threshold: u8, score: f32) -> bool {
     for neighbor_y in y - 1..=y + 1 {
         for neighbor_x in x - 1..=x + 1 {
             if neighbor_x == x && neighbor_y == y {
@@ -528,10 +537,10 @@ fn rotated_brief_descriptor(image: &GrayImage, x: u32, y: u32, angle: f32) -> [u
     let sine = angle.sin();
     let mut words = [0u64; ORB_WORDS];
     for bit in 0..ORB_DESCRIPTOR_BITS {
-        let (left_x, left_y) = brief_offset(0x9e37_79b9u32.wrapping_add((bit as u32).wrapping_mul(2)));
-        let (right_x, right_y) = brief_offset(
-            0x7f4a_7c15u32.wrapping_add((bit as u32).wrapping_mul(2).wrapping_add(1)),
-        );
+        let (left_x, left_y) =
+            brief_offset(0x9e37_79b9u32.wrapping_add((bit as u32).wrapping_mul(2)));
+        let (right_x, right_y) =
+            brief_offset(0x7f4a_7c15u32.wrapping_add((bit as u32).wrapping_mul(2).wrapping_add(1)));
         let rotated_left = rotate_offset(left_x, left_y, cosine, sine);
         let rotated_right = rotate_offset(right_x, right_y, cosine, sine);
         let left_value = sample_offset(image, x, y, rotated_left.0, rotated_left.1);
@@ -579,7 +588,8 @@ fn match_features(
             if !matching_window_allows(source_feature, target_feature, algorithm, options) {
                 continue;
             }
-            let Some(distance) = descriptor_distance(&source_feature.descriptor, &target_feature.descriptor)
+            let Some(distance) =
+                descriptor_distance(&source_feature.descriptor, &target_feature.descriptor)
             else {
                 continue;
             };
@@ -711,13 +721,7 @@ mod tests {
         rgba
     }
 
-    fn translated_rgba(
-        source: &[u8],
-        width: u32,
-        height: u32,
-        dx: i32,
-        dy: i32,
-    ) -> Vec<u8> {
+    fn translated_rgba(source: &[u8], width: u32, height: u32, dx: i32, dy: i32) -> Vec<u8> {
         let mut target = vec![0u8; source.len()];
         for y in 0..height {
             for x in 0..width {
@@ -731,8 +735,7 @@ mod tests {
                     continue;
                 }
                 let source_index = ((y * width + x) * 4) as usize;
-                let target_index =
-                    (((target_y as u32) * width + target_x as u32) * 4) as usize;
+                let target_index = (((target_y as u32) * width + target_x as u32) * 4) as usize;
                 target[target_index..target_index + 4]
                     .copy_from_slice(&source[source_index..source_index + 4]);
             }
@@ -767,8 +770,16 @@ mod tests {
             assert!(analysis.source_features.len() >= 30, "{algorithm:?}");
             assert!(analysis.target_features.len() >= 30, "{algorithm:?}");
             assert!(analysis.matches.len() >= 12, "{algorithm:?}");
-            let mut dx: Vec<_> = analysis.matches.iter().map(|feature_match| feature_match.dx).collect();
-            let mut dy: Vec<_> = analysis.matches.iter().map(|feature_match| feature_match.dy).collect();
+            let mut dx: Vec<_> = analysis
+                .matches
+                .iter()
+                .map(|feature_match| feature_match.dx)
+                .collect();
+            let mut dy: Vec<_> = analysis
+                .matches
+                .iter()
+                .map(|feature_match| feature_match.dy)
+                .collect();
             assert!((median(&mut dx) - 7.0).abs() <= 1.5, "{algorithm:?}");
             assert!((median(&mut dy) - 4.0).abs() <= 1.5, "{algorithm:?}");
         }
