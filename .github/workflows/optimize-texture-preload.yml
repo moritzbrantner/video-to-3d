@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   optimize:
-    if: github.event.head_commit.message == 'Optimize texture reference decoding'
+    if: github.event.head_commit.message == 'Retry texture reference decoding'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -23,12 +23,13 @@ jobs:
         run: |
           python3 <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('apps/web/src/SceneCanvas.tsx')
           text = path.read_text()
 
-          old = '''  const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);'''
-          new = '''  const textureReferenceFrames = useMemo(
+          anchor = '  const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);'
+          insertion = '''  const textureReferenceFrames = useMemo(
             () =>
               [...new Set(reconstruction.dense.reference_patches.map((patch) => patch.reference_frame))].filter(
                 (frameIndex) => textureFrames[frameIndex],
@@ -36,21 +37,12 @@ jobs:
             [reconstruction.dense.reference_patches, textureFrames],
           );
           const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);'''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one texture image state anchor, found {text.count(old)}')
-          text = text.replace(old, new, 1)
+          if text.count(anchor) != 1:
+              raise SystemExit(f'expected one texture image state anchor, found {text.count(anchor)}')
+          text = text.replace(anchor, insertion, 1)
 
-          old = '''    const pending = textureFrames.map((frame, index) => {
-              const image = new Image();
-              image.onload = () => {
-                if (cancelled) return;
-                loaded[index] = image;
-                setTextureImages([...loaded]);
-              };
-              image.src = frame.thumbnail;
-              return image;
-            });'''
-          new = '''    const pending = textureReferenceFrames.flatMap((index) => {
+          pattern = r'    const pending = textureFrames\.map\(\(frame, index\) => \{\n.*?\n    \}\);'
+          replacement = '''    const pending = textureReferenceFrames.flatMap((index) => {
               const frame = textureFrames[index];
               if (!frame) return [];
               const image = new Image();
@@ -62,10 +54,13 @@ jobs:
               image.src = frame.thumbnail;
               return [image];
             });'''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one texture preload block, found {text.count(old)}')
-          text = text.replace(old, new, 1)
-          text = text.replace('  }, [textureFrames]);', '  }, [textureFrames, textureReferenceFrames]);', 1)
+          text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f'expected one texture preload block, found {count}')
+          dependency = '  }, [textureFrames]);'
+          if text.count(dependency) != 1:
+              raise SystemExit(f'expected one texture preload dependency, found {text.count(dependency)}')
+          text = text.replace(dependency, '  }, [textureFrames, textureReferenceFrames]);', 1)
           path.write_text(text)
           PY
       - run: bun run typecheck
