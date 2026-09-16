@@ -1,0 +1,79 @@
+name: Optimize texture reference decoding
+
+on:
+  push:
+    branches: [feature/texture-projection]
+
+permissions:
+  contents: write
+
+jobs:
+  optimize:
+    if: github.event.head_commit.message == 'Optimize texture reference decoding'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: feature/texture-projection
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install
+      - name: Decode only accepted texture references
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('apps/web/src/SceneCanvas.tsx')
+          text = path.read_text()
+
+          old = '''  const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);'''
+          new = '''  const textureReferenceFrames = useMemo(
+            () =>
+              [...new Set(reconstruction.dense.reference_patches.map((patch) => patch.reference_frame))].filter(
+                (frameIndex) => textureFrames[frameIndex],
+              ),
+            [reconstruction.dense.reference_patches, textureFrames],
+          );
+          const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one texture image state anchor, found {text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = '''    const pending = textureFrames.map((frame, index) => {
+              const image = new Image();
+              image.onload = () => {
+                if (cancelled) return;
+                loaded[index] = image;
+                setTextureImages([...loaded]);
+              };
+              image.src = frame.thumbnail;
+              return image;
+            });'''
+          new = '''    const pending = textureReferenceFrames.flatMap((index) => {
+              const frame = textureFrames[index];
+              if (!frame) return [];
+              const image = new Image();
+              image.onload = () => {
+                if (cancelled) return;
+                loaded[index] = image;
+                setTextureImages([...loaded]);
+              };
+              image.src = frame.thumbnail;
+              return [image];
+            });'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one texture preload block, found {text.count(old)}')
+          text = text.replace(old, new, 1)
+          text = text.replace('  }, [textureFrames]);', '  }, [textureFrames, textureReferenceFrames]);', 1)
+          path.write_text(text)
+          PY
+      - run: bun run typecheck
+      - run: bun run test:texture-projection
+      - name: Commit optimization
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/web/src/SceneCanvas.tsx
+          git commit -m "Decode only accepted texture references"
+          git push
