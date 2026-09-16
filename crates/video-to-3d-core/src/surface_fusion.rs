@@ -6,6 +6,8 @@ const GEOMETRIC_EPSILON: f64 = 1.0e-9;
 const MAX_LOCAL_EDGE_FRACTION: f64 = 0.28;
 const MAX_GLOBAL_EDGE_FRACTION: f64 = 0.35;
 const MIN_NORMAL_ALIGNMENT: f64 = 0.94;
+const MIN_INCIDENT_NORMAL_ALIGNMENT: f64 = 0.985;
+const MIN_INCIDENT_AREA_RATIO: f64 = 0.75;
 const MIN_CONFIDENCE_WEIGHT: f64 = 0.05;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -13,6 +15,7 @@ struct FusionStats {
     eligible_vertices: usize,
     candidate_pairs: usize,
     rejected_normal_pairs: usize,
+    rejected_topology_pairs: usize,
     fused_pairs: usize,
 }
 
@@ -31,15 +34,16 @@ pub(super) fn consolidate_surface_patches(reconstruction: &mut ReconstructionRes
 
     let diagnostic = if stats.fused_pairs > 0 {
         format!(
-            "Cross-reference surface fusion aligned {} mutually nearest seam vertex pairs across {} accepted reference patches ({} bounded cross-patch candidates considered; {} rejected for surface-normal disagreement). No vertices or triangles were fabricated.",
+            "Cross-reference surface fusion aligned {} mutually nearest seam vertex pairs across {} accepted reference patches ({} bounded cross-patch candidates considered; {} rejected for surface-normal disagreement and {} because moving the seam would weaken accepted triangle topology). No vertices or triangles were fabricated.",
             stats.fused_pairs,
             patch_count,
             stats.candidate_pairs,
             stats.rejected_normal_pairs,
+            stats.rejected_topology_pairs,
         )
     } else {
         format!(
-            "Cross-reference surface fusion kept {} accepted reference patches separate: {} mesh vertices were eligible and {} bounded cross-patch candidates were considered, but none passed the mutual-nearest and aligned-normal gates. No unsupported holes were closed.",
+            "Cross-reference surface fusion kept {} accepted reference patches separate: {} mesh vertices were eligible and {} bounded cross-patch candidates were considered, but none passed the mutual-nearest, aligned-normal, and topology-preservation gates. No unsupported holes were closed.",
             patch_count,
             stats.eligible_vertices,
             stats.candidate_pairs,
@@ -197,6 +201,7 @@ fn fuse_mutually_supported_vertices(
     }
 
     let mut fused_pairs = 0usize;
+    let mut rejected_topology_pairs = 0usize;
     for index in 0..points.len() {
         let Some((other_index, _)) = nearest[index] else {
             continue;
@@ -215,6 +220,13 @@ fn fuse_mutually_supported_vertices(
         let other_weight =
             f64::from(points[other_index].confidence).max(MIN_CONFIDENCE_WEIGHT);
         let fused = (position * weight + other_position * other_weight) / (weight + other_weight);
+        if !preserves_incident_triangles(points, triangles, index, fused)
+            || !preserves_incident_triangles(points, triangles, other_index, fused)
+        {
+            rejected_topology_pairs += 1;
+            continue;
+        }
+
         set_point_position(&mut points[index], fused);
         set_point_position(&mut points[other_index], fused);
         fused_pairs += 1;
@@ -224,8 +236,60 @@ fn fuse_mutually_supported_vertices(
         eligible_vertices,
         candidate_pairs,
         rejected_normal_pairs,
+        rejected_topology_pairs,
         fused_pairs,
     }
+}
+
+fn preserves_incident_triangles(
+    points: &[Point3],
+    triangles: &[MeshTriangle],
+    vertex_index: usize,
+    proposed_position: Vector3<f64>,
+) -> bool {
+    triangles.iter().all(|triangle| {
+        if triangle.a != vertex_index
+            && triangle.b != vertex_index
+            && triangle.c != vertex_index
+        {
+            return true;
+        }
+        if triangle.a >= points.len() || triangle.b >= points.len() || triangle.c >= points.len() {
+            return false;
+        }
+        let (Some(mut a), Some(mut b), Some(mut c)) = (
+            point_position(points[triangle.a]),
+            point_position(points[triangle.b]),
+            point_position(points[triangle.c]),
+        ) else {
+            return false;
+        };
+        let original_normal = (b - a).cross(&(c - a));
+        let original_area_scale = original_normal.norm();
+        if !original_area_scale.is_finite() || original_area_scale <= GEOMETRIC_EPSILON {
+            return false;
+        }
+
+        if triangle.a == vertex_index {
+            a = proposed_position;
+        }
+        if triangle.b == vertex_index {
+            b = proposed_position;
+        }
+        if triangle.c == vertex_index {
+            c = proposed_position;
+        }
+        let proposed_normal = (b - a).cross(&(c - a));
+        let proposed_area_scale = proposed_normal.norm();
+        if !proposed_area_scale.is_finite()
+            || proposed_area_scale < original_area_scale * MIN_INCIDENT_AREA_RATIO
+        {
+            return false;
+        }
+        original_normal.dot(&proposed_normal)
+            / (original_area_scale * proposed_area_scale)
+            >= MIN_INCIDENT_NORMAL_ALIGNMENT
+    })
 }
 
 fn vertex_surface_evidence(
@@ -387,6 +451,7 @@ mod tests {
 
         assert_eq!(stats.fused_pairs, 3);
         assert_eq!(stats.rejected_normal_pairs, 0);
+        assert_eq!(stats.rejected_topology_pairs, 0);
         for (left, right) in [(0, 3), (1, 4), (2, 5)] {
             assert!((points[left].z - 0.03).abs() < 1.0e-6);
             assert!((points[left].z - points[right].z).abs() < 1.0e-6);
@@ -419,6 +484,34 @@ mod tests {
         assert!(stats.rejected_normal_pairs >= 2);
         assert_eq!(points[0].z, 0.0);
         assert_eq!(points[3].z, 0.05);
+    }
+
+    #[test]
+    fn rejects_a_seam_move_that_would_flip_an_accepted_triangle() {
+        let mut points = vec![
+            point(0.0, 0.0, 0.0, 1.0),
+            point(1.0, 0.0, 0.0, 1.0),
+            point(0.01, 0.01, 0.0, 1.0),
+            point(0.0, 0.12, 0.0, 1.0),
+            point(1.0, 0.12, 0.0, 1.0),
+            point(0.0, 1.12, 0.0, 1.0),
+        ];
+        let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
+        let membership = vec![
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(1),
+            Some(1),
+            Some(1),
+        ];
+
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+
+        assert_eq!(stats.fused_pairs, 0);
+        assert!(stats.rejected_topology_pairs > 0);
+        assert_eq!(points[0].y, 0.0);
+        assert_eq!(points[3].y, 0.12);
     }
 
     #[test]
