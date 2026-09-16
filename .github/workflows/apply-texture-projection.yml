@@ -1,0 +1,458 @@
+name: Apply texture projection patch
+
+on:
+  push:
+    branches: [feature/texture-projection]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Apply texture projection patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: feature/texture-projection
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: bun install
+      - name: Apply bounded texture projection slice
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new):
+              path = Path(path)
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one match in {path}: found {count}\n{old[:160]}")
+              path.write_text(text.replace(old, new, 1))
+
+          def regex_once(path, pattern, replacement):
+              path = Path(path)
+              text = path.read_text()
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one regex match in {path}: found {count}\n{pattern}")
+              path.write_text(updated)
+
+          Path("apps/web/src/meshTexture.ts").write_text(r'''export type Point2 = {
+            x: number;
+            y: number;
+          };
+
+          export type DenseReferencePatchRanges = {
+            reference_frame: number;
+            primary_start: number;
+            primary_points: number;
+            completion_start: number;
+            completed_points: number;
+          };
+
+          const UNASSIGNED_REFERENCE = -1;
+          const AMBIGUOUS_REFERENCE = -2;
+
+          export function buildDensePointReferenceFrames(
+            pointCount: number,
+            patches: DenseReferencePatchRanges[],
+          ): Int32Array {
+            const references = new Int32Array(pointCount);
+            references.fill(UNASSIGNED_REFERENCE);
+
+            const assignRange = (start: number, count: number, referenceFrame: number) => {
+              if (
+                !Number.isSafeInteger(start) ||
+                !Number.isSafeInteger(count) ||
+                !Number.isSafeInteger(referenceFrame) ||
+                start < 0 ||
+                count < 0 ||
+                referenceFrame < 0
+              ) {
+                return;
+              }
+              const end = Math.min(pointCount, start + count);
+              for (let index = start; index < end; index += 1) {
+                const current = references[index];
+                if (current === UNASSIGNED_REFERENCE) {
+                  references[index] = referenceFrame;
+                } else if (current !== referenceFrame) {
+                  references[index] = AMBIGUOUS_REFERENCE;
+                }
+              }
+            };
+
+            for (const patch of patches) {
+              assignRange(patch.primary_start, patch.primary_points, patch.reference_frame);
+              assignRange(patch.completion_start, patch.completed_points, patch.reference_frame);
+            }
+            return references;
+          }
+
+          export function triangleTextureReference(
+            a: number,
+            b: number,
+            c: number,
+            references: Int32Array,
+          ): number | null {
+            if (
+              !Number.isSafeInteger(a) ||
+              !Number.isSafeInteger(b) ||
+              !Number.isSafeInteger(c) ||
+              a < 0 ||
+              b < 0 ||
+              c < 0 ||
+              a >= references.length ||
+              b >= references.length ||
+              c >= references.length
+            ) {
+              return null;
+            }
+            const reference = references[a];
+            if (reference < 0 || references[b] !== reference || references[c] !== reference) {
+              return null;
+            }
+            return reference;
+          }
+
+          export function affineTriangleTransform(
+            source: [Point2, Point2, Point2],
+            destination: [Point2, Point2, Point2],
+          ): [number, number, number, number, number, number] | null {
+            const [s0, s1, s2] = source;
+            const [d0, d1, d2] = destination;
+            const denominator =
+              s0.x * (s1.y - s2.y) +
+              s1.x * (s2.y - s0.y) +
+              s2.x * (s0.y - s1.y);
+            if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-9) return null;
+
+            const a =
+              (d0.x * (s1.y - s2.y) +
+                d1.x * (s2.y - s0.y) +
+                d2.x * (s0.y - s1.y)) /
+              denominator;
+            const c =
+              (d0.x * (s2.x - s1.x) +
+                d1.x * (s0.x - s2.x) +
+                d2.x * (s1.x - s0.x)) /
+              denominator;
+            const e =
+              (d0.x * (s1.x * s2.y - s2.x * s1.y) +
+                d1.x * (s2.x * s0.y - s0.x * s2.y) +
+                d2.x * (s0.x * s1.y - s1.x * s0.y)) /
+              denominator;
+            const b =
+              (d0.y * (s1.y - s2.y) +
+                d1.y * (s2.y - s0.y) +
+                d2.y * (s0.y - s1.y)) /
+              denominator;
+            const d =
+              (d0.y * (s2.x - s1.x) +
+                d1.y * (s0.x - s2.x) +
+                d2.y * (s1.x - s0.x)) /
+              denominator;
+            const f =
+              (d0.y * (s1.x * s2.y - s2.x * s1.y) +
+                d1.y * (s2.x * s0.y - s0.x * s2.y) +
+                d2.y * (s0.x * s1.y - s1.x * s0.y)) /
+              denominator;
+            const transform = [a, b, c, d, e, f] as const;
+            return transform.every(Number.isFinite) ? [...transform] : null;
+          }
+          '''.replace("          ", ""))
+
+          Path("scripts/test-texture-projection.ts").write_text(r'''import {
+            affineTriangleTransform,
+            buildDensePointReferenceFrames,
+            triangleTextureReference,
+            type Point2,
+          } from "../apps/web/src/meshTexture";
+
+          function assert(condition: unknown, message: string): asserts condition {
+            if (!condition) throw new Error(message);
+          }
+
+          function approximatelyEqual(left: number, right: number, epsilon = 1e-6): boolean {
+            return Math.abs(left - right) <= epsilon;
+          }
+
+          function applyTransform(
+            transform: [number, number, number, number, number, number],
+            point: Point2,
+          ): Point2 {
+            const [a, b, c, d, e, f] = transform;
+            return {
+              x: a * point.x + c * point.y + e,
+              y: b * point.x + d * point.y + f,
+            };
+          }
+
+          const references = buildDensePointReferenceFrames(8, [
+            {
+              reference_frame: 2,
+              primary_start: 0,
+              primary_points: 3,
+              completion_start: 6,
+              completed_points: 1,
+            },
+            {
+              reference_frame: 5,
+              primary_start: 3,
+              primary_points: 3,
+              completion_start: 7,
+              completed_points: 1,
+            },
+          ]);
+          assert(references[0] === 2 && references[2] === 2 && references[6] === 2, "first reference ranges were not preserved");
+          assert(references[3] === 5 && references[5] === 5 && references[7] === 5, "second reference ranges were not preserved");
+          assert(triangleTextureReference(0, 1, 2, references) === 2, "single-reference triangle should be texture eligible");
+          assert(triangleTextureReference(1, 2, 3, references) === null, "mixed-reference triangle must fail closed");
+
+          const ambiguous = buildDensePointReferenceFrames(3, [
+            { reference_frame: 1, primary_start: 0, primary_points: 2, completion_start: 2, completed_points: 0 },
+            { reference_frame: 4, primary_start: 1, primary_points: 2, completion_start: 3, completed_points: 0 },
+          ]);
+          assert(ambiguous[1] < 0, "overlapping references must become ambiguous");
+          assert(triangleTextureReference(0, 1, 2, ambiguous) === null, "ambiguous range must never select a texture");
+
+          const source: [Point2, Point2, Point2] = [
+            { x: 2, y: 3 },
+            { x: 8, y: 4 },
+            { x: 4, y: 11 },
+          ];
+          const destination: [Point2, Point2, Point2] = [
+            { x: 20, y: 30 },
+            { x: 70, y: 35 },
+            { x: 32, y: 90 },
+          ];
+          const transform = affineTriangleTransform(source, destination);
+          assert(transform !== null, "non-degenerate source triangle should produce an affine transform");
+          source.forEach((point, index) => {
+            const mapped = applyTransform(transform, point);
+            assert(approximatelyEqual(mapped.x, destination[index].x), `affine transform x mismatch at vertex ${index}`);
+            assert(approximatelyEqual(mapped.y, destination[index].y), `affine transform y mismatch at vertex ${index}`);
+          });
+          assert(
+            affineTriangleTransform(
+              [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }],
+              destination,
+            ) === null,
+            "degenerate texture triangle must fail closed",
+          );
+
+          console.log("texture projection contract passed");
+          '''.replace("          ", ""))
+
+          replace_once(
+              "crates/video-to-3d-core/src/dense.rs",
+              "#[derive(Clone, Copy, Debug)]\npub(super) struct DenseGridSite {",
+              "#[derive(Clone, Copy, Debug, Serialize)]\npub struct DenseGridSite {",
+          )
+          replace_once(
+              "crates/video-to-3d-core/src/reconstruction.rs",
+              "pub use dense::DenseStats;",
+              "pub use dense::{DenseGridSite, DenseStats};",
+          )
+          replace_once(
+              "crates/video-to-3d-core/src/reconstruction.rs",
+              "    pub dense_points: Vec<Point3>,\n    pub dense: DenseStats,",
+              "    pub dense_points: Vec<Point3>,\n    pub dense_grid_sites: Vec<DenseGridSite>,\n    pub dense: DenseStats,",
+          )
+          replace_once(
+              "crates/video-to-3d-core/src/reconstruction.rs",
+              "    let dense = dense_analysis.stats;\n    let dense_points = dense_analysis.points;",
+              "    let dense = dense_analysis.stats;\n    let dense_grid_sites = dense_analysis.grid_sites;\n    let dense_points = dense_analysis.points;",
+          )
+          replace_once(
+              "crates/video-to-3d-core/src/reconstruction.rs",
+              "        dense_points,\n        dense,",
+              "        dense_points,\n        dense_grid_sites,\n        dense,",
+          )
+          replace_once(
+              "crates/video-to-3d-core/src/reconstruction.rs",
+              "This is a reference-grid-local, non-watertight surface preview; texture projection, arbitrary multi-reference surface fusion, and metric scale are not claimed yet.",
+              "This is a bounded multi-reference, non-watertight surface preview. Browser texture projection is appearance-only over accepted per-reference topology; unsupported holes and metric scale are not claimed.",
+          )
+          replace_once(
+              "crates/video-to-3d-core/src/reconstruction.rs",
+              "Fused points remain separate from the sparse map; general multi-reference depth aggregation and metric scale are not claimed yet.",
+              "Fused points remain separate from the sparse map; dense coverage is bounded to accepted reference patches and does not claim unbounded aggregation or metric scale.",
+          )
+
+          replace_once(
+              "crates/video-to-3d-wasm/src/lib.rs",
+              "    reconstruct_browser, CalibratedPairStats, CameraPipelineState, CameraPose, DenseStats,\n    FrameInput, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionOptions,",
+              "    reconstruct_browser, CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite,\n    DenseStats, FrameInput, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionOptions,",
+          )
+          replace_once(
+              "crates/video-to-3d-wasm/src/lib.rs",
+              "#[derive(Serialize)]\nstruct PackedMeshTriangleBuffer {",
+              "#[derive(Serialize)]\nstruct PackedDenseGridSiteBuffer {\n    xy_u32_le: ByteBuffer,\n    length: usize,\n}\n\n#[derive(Serialize)]\nstruct PackedMeshTriangleBuffer {",
+          )
+          replace_once(
+              "crates/video-to-3d-wasm/src/lib.rs",
+              "    dense_points: PackedDensePointBuffer,\n    dense: &'a DenseStats,",
+              "    dense_points: PackedDensePointBuffer,\n    dense_grid_sites: PackedDenseGridSiteBuffer,\n    dense: &'a DenseStats,",
+          )
+          replace_once(
+              "crates/video-to-3d-wasm/src/lib.rs",
+              "fn pack_mesh_triangles(\n    triangles: &[MeshTriangle],",
+              "fn pack_dense_grid_sites(sites: &[DenseGridSite]) -> PackedDenseGridSiteBuffer {\n    let mut xy_u32_le = Vec::with_capacity(sites.len() * 2 * size_of::<u32>());\n    for site in sites {\n        xy_u32_le.extend_from_slice(&site.x.to_le_bytes());\n        xy_u32_le.extend_from_slice(&site.y.to_le_bytes());\n    }\n    PackedDenseGridSiteBuffer {\n        xy_u32_le: ByteBuffer(xy_u32_le),\n        length: sites.len(),\n    }\n}\n\nfn pack_mesh_triangles(\n    triangles: &[MeshTriangle],",
+          )
+          replace_once(
+              "crates/video-to-3d-wasm/src/lib.rs",
+              "        dense_points: pack_dense_points(&reconstruction.dense_points),\n        dense: &reconstruction.dense,",
+              "        dense_points: pack_dense_points(&reconstruction.dense_points),\n        dense_grid_sites: pack_dense_grid_sites(&reconstruction.dense_grid_sites),\n        dense: &reconstruction.dense,",
+          )
+
+          replace_once(
+              "apps/web/src/reconstruction.ts",
+              "export type MeshTriangleBuffer = {\n  indices: Uint32Array;\n  confidence: Float32Array;\n  length: number;\n};",
+              "export type DenseGridSiteBuffer = {\n  xy: Uint32Array;\n  length: number;\n};\n\nexport type MeshTriangleBuffer = {\n  indices: Uint32Array;\n  confidence: Float32Array;\n  length: number;\n};",
+          )
+          replace_once(
+              "apps/web/src/reconstruction.ts",
+              "  dense_points: DensePointBuffer;\n  dense: DenseStats;",
+              "  dense_points: DensePointBuffer;\n  dense_grid_sites: DenseGridSiteBuffer;\n  dense: DenseStats;",
+          )
+          replace_once(
+              "apps/web/src/reconstruction.ts",
+              "type RawMeshTriangleBuffer = {",
+              "type RawDenseGridSiteBuffer = {\n  xy_u32_le: Uint8Array;\n  length: number;\n};\n\ntype RawMeshTriangleBuffer = {",
+          )
+          replace_once(
+              "apps/web/src/reconstruction.ts",
+              "  ReconstructionResult,\n  \"dense_points\" | \"mesh_triangles\"\n> & {\n  dense_points: RawDensePointBuffer;\n  mesh_triangles: RawMeshTriangleBuffer;",
+              "  ReconstructionResult,\n  \"dense_points\" | \"dense_grid_sites\" | \"mesh_triangles\"\n> & {\n  dense_points: RawDensePointBuffer;\n  dense_grid_sites: RawDenseGridSiteBuffer;\n  mesh_triangles: RawMeshTriangleBuffer;",
+          )
+          replace_once(
+              "apps/web/src/reconstruction.ts",
+              "function normalizeMeshTriangleBuffer(value: unknown): MeshTriangleBuffer {",
+              "function normalizeDenseGridSiteBuffer(value: unknown): DenseGridSiteBuffer {\n  const raw = objectRecord(value, \"dense-grid-site buffer\") as RawDenseGridSiteBuffer;\n  const length = packedLength(raw.length, \"dense-grid-site count\");\n  const xy = uint32LittleEndian(\n    byteBuffer(raw.xy_u32_le, \"dense-grid-site coordinate buffer\"),\n    \"dense-grid-site coordinate buffer\",\n  );\n  if (xy.length !== length * 2) {\n    throw new Error(\"camera-state contract mismatch: dense-grid-site buffer lengths are inconsistent\");\n  }\n  return { xy, length };\n}\n\nfunction normalizeMeshTriangleBuffer(value: unknown): MeshTriangleBuffer {",
+          )
+          replace_once(
+              "apps/web/src/reconstruction.ts",
+              "    dense_points: normalizeDensePointBuffer(normalized.dense_points),\n    mesh_triangles: normalizeMeshTriangleBuffer(normalized.mesh_triangles),",
+              "    dense_points: normalizeDensePointBuffer(normalized.dense_points),\n    dense_grid_sites: normalizeDenseGridSiteBuffer(normalized.dense_grid_sites),\n    mesh_triangles: normalizeMeshTriangleBuffer(normalized.mesh_triangles),",
+          )
+          replace_once(
+              "apps/web/src/reconstruction.ts",
+              "    result.dense_points.rgb.length !== result.dense_points.length * 3 ||\n    result.mesh_triangles.indices.length !== result.mesh_triangles.length * 3 ||",
+              "    result.dense_points.rgb.length !== result.dense_points.length * 3 ||\n    result.dense_grid_sites.xy.length !== result.dense_grid_sites.length * 2 ||\n    result.dense_grid_sites.length !== result.dense_points.length ||\n    result.mesh_triangles.indices.length !== result.mesh_triangles.length * 3 ||",
+          )
+
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              'import type { ReconstructionResult } from "./reconstruction";',
+              'import type { ReconstructionResult } from "./reconstruction";\nimport {\n  affineTriangleTransform,\n  buildDensePointReferenceFrames,\n  triangleTextureReference,\n  type Point2,\n} from "./meshTexture";',
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "type SceneCanvasProps = {\n  reconstruction: ReconstructionResult;\n  selectedFrameIndex?: number | null;",
+              "type TextureFrame = {\n  width: number;\n  height: number;\n  thumbnail: string;\n};\n\nconst EMPTY_TEXTURE_FRAMES: TextureFrame[] = [];\n\ntype SceneCanvasProps = {\n  reconstruction: ReconstructionResult;\n  textureFrames?: TextureFrame[];\n  selectedFrameIndex?: number | null;",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "export function SceneCanvas({\n  reconstruction,\n  selectedFrameIndex = null,",
+              "export function SceneCanvas({\n  reconstruction,\n  textureFrames = EMPTY_TEXTURE_FRAMES,\n  selectedFrameIndex = null,",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "  const densePoints = reconstruction.dense_points;\n  const meshTriangles = reconstruction.mesh_triangles;",
+              "  const densePoints = reconstruction.dense_points;\n  const denseGridSites = reconstruction.dense_grid_sites;\n  const meshTriangles = reconstruction.mesh_triangles;\n  const densePointReferenceFrames = useMemo(\n    () =>\n      buildDensePointReferenceFrames(\n        densePoints.length,\n        reconstruction.dense.reference_patches,\n      ),\n    [densePoints.length, reconstruction.dense.reference_patches],\n  );\n  const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "  useEffect(() => {\n    setRenderMode(hasSurfaceModel ? \"model\" : \"evidence\");\n    setView((current) => ({ ...current, zoom: 1 }));\n  }, [hasSurfaceModel, reconstruction]);\n\n  const bounds = useMemo(() => {",
+              "  useEffect(() => {\n    setRenderMode(hasSurfaceModel ? \"model\" : \"evidence\");\n    setView((current) => ({ ...current, zoom: 1 }));\n  }, [hasSurfaceModel, reconstruction]);\n\n  useEffect(() => {\n    let cancelled = false;\n    const loaded = Array<HTMLImageElement | null>(textureFrames.length).fill(null);\n    setTextureImages(loaded);\n    const pending = textureFrames.map((frame, index) => {\n      const image = new Image();\n      image.onload = () => {\n        if (cancelled) return;\n        loaded[index] = image;\n        setTextureImages([...loaded]);\n      };\n      image.src = frame.thumbnail;\n      return image;\n    });\n    return () => {\n      cancelled = true;\n      for (const image of pending) image.onload = null;\n    };\n  }, [textureFrames]);\n\n  const textureEligibleTriangles = useMemo(() => {\n    if (denseGridSites.length !== densePoints.length) return 0;\n    let accepted = 0;\n    for (let triangleIndex = 0; triangleIndex < meshTriangles.length; triangleIndex += 1) {\n      const base = triangleIndex * 3;\n      const referenceFrame = triangleTextureReference(\n        meshTriangles.indices[base],\n        meshTriangles.indices[base + 1],\n        meshTriangles.indices[base + 2],\n        densePointReferenceFrames,\n      );\n      if (referenceFrame !== null && textureFrames[referenceFrame]) accepted += 1;\n    }\n    return accepted;\n  }, [denseGridSites.length, densePointReferenceFrames, densePoints.length, meshTriangles, textureFrames]);\n\n  const bounds = useMemo(() => {",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "      b: number;\n    }> = [];",
+              "      b: number;\n      textureReference: number | null;\n      textureSource: [Point2, Point2, Point2] | null;\n    }> = [];",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "      const aRgb = aIndex * 3;\n      const bRgb = bIndex * 3;\n      const cRgb = cIndex * 3;\n      projectedMeshTriangles.push({",
+              "      const aRgb = aIndex * 3;\n      const bRgb = bIndex * 3;\n      const cRgb = cIndex * 3;\n      const textureReference = triangleTextureReference(\n        aIndex,\n        bIndex,\n        cIndex,\n        densePointReferenceFrames,\n      );\n      const textureSource =\n        textureReference !== null && denseGridSites.length === densePoints.length\n          ? ([aIndex, bIndex, cIndex].map((index) => ({\n              x: denseGridSites.xy[index * 2],\n              y: denseGridSites.xy[index * 2 + 1],\n            })) as [Point2, Point2, Point2])\n          : null;\n      projectedMeshTriangles.push({",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "        b: clampedChannel(\n          ((densePoints.rgb[aRgb + 2] +\n            densePoints.rgb[bRgb + 2] +\n            densePoints.rgb[cRgb + 2]) /\n            3) *\n            light,\n        ),\n      });",
+              "        b: clampedChannel(\n          ((densePoints.rgb[aRgb + 2] +\n            densePoints.rgb[bRgb + 2] +\n            densePoints.rgb[cRgb + 2]) /\n            3) *\n            light,\n        ),\n        textureReference,\n        textureSource,\n      });",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "    for (const item of projectedMeshTriangles) {\n      const [a, b, c] = item.projected;\n      context.beginPath();\n      context.moveTo(a.x, a.y);\n      context.lineTo(b.x, b.y);\n      context.lineTo(c.x, c.y);\n      context.closePath();\n      context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.76 + meshTriangles.confidence[item.triangleIndex] * 0.24})`;\n      context.fill();\n      context.lineWidth = 0.42 * ratio;\n      context.strokeStyle = \"rgba(4, 10, 13, 0.22)\";\n      context.stroke();\n    }",
+              "    for (const item of projectedMeshTriangles) {\n      const [a, b, c] = item.projected;\n      const traceTriangle = () => {\n        context.beginPath();\n        context.moveTo(a.x, a.y);\n        context.lineTo(b.x, b.y);\n        context.lineTo(c.x, c.y);\n        context.closePath();\n      };\n      const textureFrame =\n        item.textureReference === null ? null : textureFrames[item.textureReference] ?? null;\n      const textureImage =\n        item.textureReference === null ? null : textureImages[item.textureReference] ?? null;\n      const textureTransform =\n        textureFrame && textureImage && item.textureSource\n          ? affineTriangleTransform(item.textureSource, [\n              { x: a.x, y: a.y },\n              { x: b.x, y: b.y },\n              { x: c.x, y: c.y },\n            ])\n          : null;\n\n      if (textureFrame && textureImage && textureTransform) {\n        traceTriangle();\n        context.save();\n        context.clip();\n        context.setTransform(...textureTransform);\n        context.globalAlpha = 0.8 + meshTriangles.confidence[item.triangleIndex] * 0.2;\n        context.drawImage(textureImage, 0, 0, textureFrame.width, textureFrame.height);\n        context.restore();\n        traceTriangle();\n      } else {\n        traceTriangle();\n        context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.76 + meshTriangles.confidence[item.triangleIndex] * 0.24})`;\n        context.fill();\n      }\n      context.lineWidth = 0.42 * ratio;\n      context.strokeStyle = \"rgba(4, 10, 13, 0.22)\";\n      context.stroke();\n    }",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "    cameraState,\n    densePoints,\n    displayCameras,",
+              "    cameraState,\n    denseGridSites,\n    densePointReferenceFrames,\n    densePoints,\n    displayCameras,",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "    selectedFrameIndex,\n    view,",
+              "    selectedFrameIndex,\n    textureFrames,\n    textureImages,\n    view,",
+          )
+          replace_once(
+              "apps/web/src/SceneCanvas.tsx",
+              "  const primaryDiagnostic =\n    hasSurfaceModel && renderMode === \"model\"\n      ? `${meshDiagnostic} · ${denseDiagnostic}`",
+              "  const textureDiagnostic = hasSurfaceModel\n    ? textureEligibleTriangles > 0\n      ? `Texture projection: ${textureEligibleTriangles} of ${meshTriangles.length} accepted triangles retain an unambiguous Rust-owned reference-grid mapping; missing or unloaded reference images fall back to vertex color without changing geometry`\n      : \"Texture projection: no accepted triangle has an unambiguous single-reference grid mapping, so vertex-color shading is retained without changing geometry\"\n    : \"Texture projection unavailable without accepted surface triangles\";\n\n  const primaryDiagnostic =\n    hasSurfaceModel && renderMode === \"model\"\n      ? `${meshDiagnostic} · ${textureDiagnostic} · ${denseDiagnostic}`",
+          )
+
+          replace_once(
+              "apps/web/app/page.tsx",
+              "              <SceneCanvas\n                reconstruction={reconstruction}\n                selectedFrameIndex={selectedFrameIndex}",
+              "              <SceneCanvas\n                reconstruction={reconstruction}\n                textureFrames={frames}\n                selectedFrameIndex={selectedFrameIndex}",
+          )
+
+          replace_once(
+              "package.json",
+              '    "test:browser-contract": "bun scripts/test-browser-contract.ts",\n    "test:video-sampling-contract": "bun scripts/test-video-sampling-contract.ts",',
+              '    "test:browser-contract": "bun scripts/test-browser-contract.ts",\n    "test:texture-projection": "bun scripts/test-texture-projection.ts",\n    "test:video-sampling-contract": "bun scripts/test-video-sampling-contract.ts",',
+          )
+          replace_once(
+              ".github/workflows/validate.yml",
+              "      - run: bun run typecheck\n      - run: cargo fmt --check",
+              "      - run: bun run typecheck\n      - run: bun run test:texture-projection\n      - run: cargo fmt --check",
+          )
+
+          regex_once(
+              "ROADMAP.md",
+              r'- \*\*Multi-reference surface coverage — next\.\*\*.*?\n- Texture projection over accepted bounded mesh topology after surface coverage is strong enough that texturing improves a model rather than just decorating sparse fragments\.\n- Memory-aware native and WASM execution strategies, including progressive/chunked processing where full-resolution depth would exceed practical browser memory budgets\.',
+              '- **Multi-reference surface coverage — integrated.** Run bounded dense/mesh reconstruction from up to three well-supported registered reference views and co-render each accepted patch in the shared sparse reconstruction frame. Per-reference grid identity, source evidence, continuity gates, and rejected-attempt diagnostics remain explicit; unsupported gaps stay open instead of being closed merely for visual completeness.\n- **Reference-view texture projection — integrated.** Preserve every accepted dense sample\'s Rust-owned reference-grid site through the core/WASM/browser contract. A surface triangle is texture-eligible only when all three vertices retain the same unambiguous accepted reference. The browser clips that local sampled reference image onto the already accepted triangle; mixed-reference, ambiguous, missing, or not-yet-loaded texture evidence falls back to the existing vertex-color shading and never creates, repairs, or promotes geometry.\n- **Memory-aware native and WASM execution — next.** Add progressive/chunked processing where full-resolution depth or texture working sets would exceed practical browser memory budgets.',
+          )
+          replace_once(
+              "ROADMAP.md",
+              "The dense search and mesh topology are still anchored to one selected reference, so larger scenes can remain fragmentary from viewpoints not well covered by that reference. Watertight completion, texture projection, metric scale, full-resolution depth maps, and general multi-reference surface aggregation remain outside the implemented boundary.",
+              "Dense search and mesh topology are bounded to a small set of accepted reference patches, and texture projection is appearance-only over those already accepted triangles. Larger scenes can still remain fragmentary when the bounded references do not cover them. Watertight completion, metric scale, full-resolution depth maps, unbounded surface aggregation, and texture-driven geometry changes remain outside the implemented boundary.",
+          )
+          replace_once(
+              "ROADMAP.md",
+              "Next implementation slice: increase actual model coverage with additional registered reference views and conservative surface-patch fusion before spending more work on texture projection.",
+              "Next implementation slice: make dense reconstruction and texture working sets memory-aware and progressive without weakening the existing fail-closed geometry gates.",
+          )
+          PY
+      - run: cargo fmt --all
+      - run: bun run typecheck
+      - run: bun run test:texture-projection
+      - run: cargo test -p video-to-3d-core
+      - run: cargo check -p video-to-3d-wasm
+      - name: Commit slice
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ROADMAP.md package.json .github/workflows/validate.yml apps/web/app/page.tsx apps/web/src/SceneCanvas.tsx apps/web/src/reconstruction.ts apps/web/src/meshTexture.ts scripts/test-texture-projection.ts crates/video-to-3d-core/src/dense.rs crates/video-to-3d-core/src/reconstruction.rs crates/video-to-3d-wasm/src/lib.rs
+          git commit -m "Add fail-closed mesh texture projection"
+          git push
