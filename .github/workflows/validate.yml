@@ -28,6 +28,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Validate feature-pipeline experiment
+        run: |
+          cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --check
+          cargo check --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --target wasm32-unknown-unknown
       - name: Test golden pose alignment
         run: cargo test -p video-to-3d-core --example golden_fixture
       - name: Test benchmark and COLMAP tooling
