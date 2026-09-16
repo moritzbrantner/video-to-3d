@@ -487,11 +487,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_seam_move_that_would_flip_an_accepted_triangle() {
+    fn rejects_a_seam_move_that_would_weaken_an_accepted_triangle() {
         let mut points = vec![
             point(0.0, 0.0, 0.0, 1.0),
             point(1.0, 0.0, 0.0, 1.0),
-            point(0.01, 0.01, 0.0, 1.0),
+            point(0.9, 0.01, 0.0, 1.0),
             point(0.0, 0.12, 0.0, 1.0),
             point(1.0, 0.12, 0.0, 1.0),
             point(0.0, 1.12, 0.0, 1.0),
