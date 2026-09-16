@@ -1,0 +1,51 @@
+name: Retry texture projection patch
+
+on:
+  push:
+    branches: [feature/texture-projection]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Retry texture projection patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: feature/texture-projection
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: bun install
+      - name: Reapply validated slice
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/apply-texture-projection.yml').read_text()
+          start_marker = "          python3 <<'PY'\n"
+          end_marker = "\n          PY\n"
+          if start_marker not in workflow:
+              raise SystemExit('patch script start marker not found')
+          script = workflow.split(start_marker, 1)[1].split(end_marker, 1)[0]
+          exec(compile(textwrap.dedent(script), '<texture-projection-patch>', 'exec'))
+          PY
+      - run: cargo fmt --all
+      - run: bun run typecheck
+      - run: bun run test:texture-projection
+      - run: cargo test -p video-to-3d-core
+      - run: cargo check -p video-to-3d-wasm
+      - name: Commit slice without workflow mutation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ROADMAP.md package.json apps/web/app/page.tsx apps/web/src/SceneCanvas.tsx apps/web/src/reconstruction.ts apps/web/src/meshTexture.ts scripts/test-texture-projection.ts crates/video-to-3d-core/src/dense.rs crates/video-to-3d-core/src/reconstruction.rs crates/video-to-3d-wasm/src/lib.rs
+          git commit -m "Add fail-closed mesh texture projection"
+          git push
