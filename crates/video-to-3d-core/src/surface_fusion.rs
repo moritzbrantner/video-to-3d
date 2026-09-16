@@ -19,6 +19,13 @@ struct FusionStats {
     fused_pairs: usize,
 }
 
+struct SurfaceEvidence {
+    normals: Vec<Option<Vector3<f64>>>,
+    local_scales: Vec<Option<f64>>,
+    incident_triangles: Vec<Vec<usize>>,
+    global_edge_scale: Option<f64>,
+}
+
 pub(super) fn consolidate_surface_patches(reconstruction: &mut ReconstructionResult) {
     let patch_count = reconstruction.dense.reference_patches.len();
     if patch_count < 2 || reconstruction.mesh_triangles.is_empty() {
@@ -104,7 +111,12 @@ fn fuse_mutually_supported_vertices(
         return FusionStats::default();
     }
 
-    let (normals, local_scales, global_edge_scale) = vertex_surface_evidence(points, triangles);
+    let SurfaceEvidence {
+        normals,
+        local_scales,
+        incident_triangles,
+        global_edge_scale,
+    } = vertex_surface_evidence(points, triangles);
     let Some(global_edge_scale) = global_edge_scale else {
         return FusionStats::default();
     };
@@ -214,9 +226,19 @@ fn fuse_mutually_supported_vertices(
         let weight = f64::from(points[index].confidence).max(MIN_CONFIDENCE_WEIGHT);
         let other_weight = f64::from(points[other_index].confidence).max(MIN_CONFIDENCE_WEIGHT);
         let fused = (position * weight + other_position * other_weight) / (weight + other_weight);
-        if !preserves_incident_triangles(points, triangles, index, fused)
-            || !preserves_incident_triangles(points, triangles, other_index, fused)
-        {
+        if !preserves_incident_triangles(
+            points,
+            triangles,
+            &incident_triangles[index],
+            index,
+            fused,
+        ) || !preserves_incident_triangles(
+            points,
+            triangles,
+            &incident_triangles[other_index],
+            other_index,
+            fused,
+        ) {
             rejected_topology_pairs += 1;
             continue;
         }
@@ -238,20 +260,21 @@ fn fuse_mutually_supported_vertices(
 fn preserves_incident_triangles(
     points: &[Point3],
     triangles: &[MeshTriangle],
+    incident_triangle_indices: &[usize],
     vertex_index: usize,
     proposed_position: Vector3<f64>,
 ) -> bool {
-    triangles.iter().all(|triangle| {
+    incident_triangle_indices.iter().all(|&triangle_index| {
+        let Some(triangle) = triangles.get(triangle_index) else {
+            return false;
+        };
         if triangle.a != vertex_index && triangle.b != vertex_index && triangle.c != vertex_index {
-            return true;
-        }
-        if triangle.a >= points.len() || triangle.b >= points.len() || triangle.c >= points.len() {
             return false;
         }
         let (Some(mut a), Some(mut b), Some(mut c)) = (
-            point_position(points[triangle.a]),
-            point_position(points[triangle.b]),
-            point_position(points[triangle.c]),
+            points.get(triangle.a).copied().and_then(point_position),
+            points.get(triangle.b).copied().and_then(point_position),
+            points.get(triangle.c).copied().and_then(point_position),
         ) else {
             return false;
         };
@@ -282,16 +305,14 @@ fn preserves_incident_triangles(
     })
 }
 
-fn vertex_surface_evidence(
-    points: &[Point3],
-    triangles: &[MeshTriangle],
-) -> (Vec<Option<Vector3<f64>>>, Vec<Option<f64>>, Option<f64>) {
+fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> SurfaceEvidence {
     let mut normal_sums = vec![Vector3::zeros(); points.len()];
     let mut edge_sums = vec![0.0f64; points.len()];
     let mut edge_counts = vec![0usize; points.len()];
+    let mut incident_triangles = vec![Vec::new(); points.len()];
     let mut edge_lengths = Vec::with_capacity(triangles.len() * 3);
 
-    for triangle in triangles {
+    for (triangle_index, triangle) in triangles.iter().enumerate() {
         if triangle.a == triangle.b
             || triangle.b == triangle.c
             || triangle.c == triangle.a
@@ -330,6 +351,7 @@ fn vertex_surface_evidence(
         let weighted_normal = normal / normal_length * confidence;
         for index in [triangle.a, triangle.b, triangle.c] {
             normal_sums[index] += weighted_normal;
+            incident_triangles[index].push(triangle_index);
         }
 
         edge_sums[triangle.a] += ab_length + ac_length;
@@ -356,7 +378,12 @@ fn vertex_surface_evidence(
         .map(|(sum, count)| (count > 0 && sum.is_finite()).then_some(sum / count as f64))
         .collect();
 
-    (normals, local_scales, global_edge_scale)
+    SurfaceEvidence {
+        normals,
+        local_scales,
+        incident_triangles,
+        global_edge_scale,
+    }
 }
 
 fn spatial_cell(position: Vector3<f64>, cell_size: f64) -> (i64, i64, i64) {
@@ -386,7 +413,7 @@ fn median(values: &[f64]) -> Option<f64> {
         return None;
     }
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         Some((values[middle - 1] + values[middle]) * 0.5)
     } else {
         Some(values[middle])
