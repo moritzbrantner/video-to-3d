@@ -7,8 +7,8 @@ pub mod feature_analysis;
 // remains isolated from format/interchange modules.
 include!("reconstruction.rs");
 
-mod surface_fusion;
 mod browser_contract;
+mod surface_fusion;
 pub use browser_contract::{
     BrowserReconstructionResult, BundleAdjustmentStatus, CameraKind, CameraPipelineState,
     DenseCameraRole, FrameCameraState, RegistrationStatus,
