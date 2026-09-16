@@ -78,12 +78,7 @@ fn patch_membership(reconstruction: &ReconstructionResult) -> Vec<Option<usize>>
         .collect()
 }
 
-fn assign_patch_range(
-    membership: &mut [usize],
-    start: usize,
-    count: usize,
-    patch_index: usize,
-) {
+fn assign_patch_range(membership: &mut [usize], start: usize, count: usize, patch_index: usize) {
     let Some(end) = start.checked_add(count) else {
         return;
     };
@@ -118,9 +113,7 @@ fn fuse_mutually_supported_vertices(
     let mut buckets: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
     let mut eligible_vertices = 0usize;
     for index in 0..points.len() {
-        if membership[index].is_none()
-            || normals[index].is_none()
-            || local_scales[index].is_none()
+        if membership[index].is_none() || normals[index].is_none() || local_scales[index].is_none()
         {
             continue;
         }
@@ -186,11 +179,12 @@ fn fuse_mutually_supported_vertices(
                             continue;
                         }
 
-                        let replace = nearest[index].is_none_or(|(current_index, current_distance)| {
-                            distance < current_distance - GEOMETRIC_EPSILON
-                                || ((distance - current_distance).abs() <= GEOMETRIC_EPSILON
-                                    && other_index < current_index)
-                        });
+                        let replace =
+                            nearest[index].is_none_or(|(current_index, current_distance)| {
+                                distance < current_distance - GEOMETRIC_EPSILON
+                                    || ((distance - current_distance).abs() <= GEOMETRIC_EPSILON
+                                        && other_index < current_index)
+                            });
                         if replace {
                             nearest[index] = Some((other_index, distance));
                         }
@@ -211,14 +205,14 @@ fn fuse_mutually_supported_vertices(
         {
             continue;
         }
-        let (Some(position), Some(other_position)) =
-            (point_position(points[index]), point_position(points[other_index]))
-        else {
+        let (Some(position), Some(other_position)) = (
+            point_position(points[index]),
+            point_position(points[other_index]),
+        ) else {
             continue;
         };
         let weight = f64::from(points[index].confidence).max(MIN_CONFIDENCE_WEIGHT);
-        let other_weight =
-            f64::from(points[other_index].confidence).max(MIN_CONFIDENCE_WEIGHT);
+        let other_weight = f64::from(points[other_index].confidence).max(MIN_CONFIDENCE_WEIGHT);
         let fused = (position * weight + other_position * other_weight) / (weight + other_weight);
         if !preserves_incident_triangles(points, triangles, index, fused)
             || !preserves_incident_triangles(points, triangles, other_index, fused)
@@ -248,10 +242,7 @@ fn preserves_incident_triangles(
     proposed_position: Vector3<f64>,
 ) -> bool {
     triangles.iter().all(|triangle| {
-        if triangle.a != vertex_index
-            && triangle.b != vertex_index
-            && triangle.c != vertex_index
-        {
+        if triangle.a != vertex_index && triangle.b != vertex_index && triangle.c != vertex_index {
             return true;
         }
         if triangle.a >= points.len() || triangle.b >= points.len() || triangle.c >= points.len() {
@@ -286,8 +277,7 @@ fn preserves_incident_triangles(
         {
             return false;
         }
-        original_normal.dot(&proposed_normal)
-            / (original_area_scale * proposed_area_scale)
+        original_normal.dot(&proposed_normal) / (original_area_scale * proposed_area_scale)
             >= MIN_INCIDENT_NORMAL_ALIGNMENT
     })
 }
@@ -363,9 +353,7 @@ fn vertex_surface_evidence(
     let local_scales = edge_sums
         .into_iter()
         .zip(edge_counts)
-        .map(|(sum, count)| {
-            (count > 0 && sum.is_finite()).then_some(sum / count as f64)
-        })
+        .map(|(sum, count)| (count > 0 && sum.is_finite()).then_some(sum / count as f64))
         .collect();
 
     (normals, local_scales, global_edge_scale)
@@ -381,7 +369,10 @@ fn spatial_cell(position: Vector3<f64>, cell_size: f64) -> (i64, i64, i64) {
 
 fn point_position(point: Point3) -> Option<Vector3<f64>> {
     let position = Vector3::new(f64::from(point.x), f64::from(point.y), f64::from(point.z));
-    position.iter().all(|value| value.is_finite()).then_some(position)
+    position
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(position)
 }
 
 fn set_point_position(point: &mut Point3, position: Vector3<f64>) {
@@ -438,14 +429,7 @@ mod tests {
             point(0.0, 1.0, 0.06, 1.0),
         ];
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
-        let membership = vec![
-            Some(0),
-            Some(0),
-            Some(0),
-            Some(1),
-            Some(1),
-            Some(1),
-        ];
+        let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
         let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
 
@@ -469,14 +453,7 @@ mod tests {
             point(0.0, 0.05, 1.0, 1.0),
         ];
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
-        let membership = vec![
-            Some(0),
-            Some(0),
-            Some(0),
-            Some(1),
-            Some(1),
-            Some(1),
-        ];
+        let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
         let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
 
@@ -497,14 +474,7 @@ mod tests {
             point(0.0, 1.12, 0.0, 1.0),
         ];
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
-        let membership = vec![
-            Some(0),
-            Some(0),
-            Some(0),
-            Some(1),
-            Some(1),
-            Some(1),
-        ];
+        let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
         let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
 
