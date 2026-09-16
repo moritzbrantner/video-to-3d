@@ -73,7 +73,14 @@ export function SceneCanvas({
       ),
     [densePoints.length, reconstruction.dense.reference_patches],
   );
-  const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);
+  const textureReferenceFrames = useMemo(
+  () =>
+    [...new Set(reconstruction.dense.reference_patches.map((patch) => patch.reference_frame))].filter(
+      (frameIndex) => textureFrames[frameIndex],
+    ),
+  [reconstruction.dense.reference_patches, textureFrames],
+);
+const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);
   const hasRegisteredGeometry = cameraState.calibrated_seed_cameras.length === 2;
   const acceptedCameras = useMemo(
     () => [...cameraState.calibrated_seed_cameras, ...cameraState.registered_cameras],
@@ -97,21 +104,23 @@ export function SceneCanvas({
     let cancelled = false;
     const loaded = Array<HTMLImageElement | null>(textureFrames.length).fill(null);
     setTextureImages(loaded);
-    const pending = textureFrames.map((frame, index) => {
-      const image = new Image();
-      image.onload = () => {
-        if (cancelled) return;
-        loaded[index] = image;
-        setTextureImages([...loaded]);
-      };
-      image.src = frame.thumbnail;
-      return image;
-    });
+    const pending = textureReferenceFrames.flatMap((index) => {
+    const frame = textureFrames[index];
+    if (!frame) return [];
+    const image = new Image();
+    image.onload = () => {
+      if (cancelled) return;
+      loaded[index] = image;
+      setTextureImages([...loaded]);
+    };
+    image.src = frame.thumbnail;
+    return [image];
+  });
     return () => {
       cancelled = true;
       for (const image of pending) image.onload = null;
     };
-  }, [textureFrames]);
+  }, [textureFrames, textureReferenceFrames]);
 
   const textureEligibleTriangles = useMemo(() => {
     if (denseGridSites.length !== densePoints.length) return 0;
