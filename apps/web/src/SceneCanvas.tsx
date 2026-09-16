@@ -2,9 +2,24 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReconstructionResult } from "./reconstruction";
+import {
+  affineTriangleTransform,
+  buildDensePointReferenceFrames,
+  triangleTextureReference,
+  type Point2,
+} from "./meshTexture";
+
+type TextureFrame = {
+  width: number;
+  height: number;
+  thumbnail: string;
+};
+
+const EMPTY_TEXTURE_FRAMES: TextureFrame[] = [];
 
 type SceneCanvasProps = {
   reconstruction: ReconstructionResult;
+  textureFrames?: TextureFrame[];
   selectedFrameIndex?: number | null;
   onSelectFrame?: (frameIndex: number) => void;
 };
@@ -38,6 +53,7 @@ function clampedChannel(value: number): number {
 
 export function SceneCanvas({
   reconstruction,
+  textureFrames = EMPTY_TEXTURE_FRAMES,
   selectedFrameIndex = null,
   onSelectFrame,
 }: SceneCanvasProps) {
@@ -47,7 +63,26 @@ export function SceneCanvas({
   const [view, setView] = useState<ViewState>({ yaw: -0.45, pitch: 0.18, zoom: 1 });
   const cameraState = reconstruction.camera_state;
   const densePoints = reconstruction.dense_points;
+  const denseGridSites = reconstruction.dense_grid_sites;
   const meshTriangles = reconstruction.mesh_triangles;
+  const densePointReferenceFrames = useMemo(
+    () =>
+      buildDensePointReferenceFrames(
+        densePoints.length,
+        reconstruction.dense.reference_patches,
+      ),
+    [densePoints.length, reconstruction.dense.reference_patches],
+  );
+  const textureReferenceFrames = useMemo(
+    () =>
+      [
+        ...new Set(
+          reconstruction.dense.reference_patches.map((patch) => patch.reference_frame),
+        ),
+      ].filter((frameIndex) => textureFrames[frameIndex]),
+    [reconstruction.dense.reference_patches, textureFrames],
+  );
+  const [textureImages, setTextureImages] = useState<Array<HTMLImageElement | null>>([]);
   const hasRegisteredGeometry = cameraState.calibrated_seed_cameras.length === 2;
   const acceptedCameras = useMemo(
     () => [...cameraState.calibrated_seed_cameras, ...cameraState.registered_cameras],
@@ -66,6 +101,44 @@ export function SceneCanvas({
     setRenderMode(hasSurfaceModel ? "model" : "evidence");
     setView((current) => ({ ...current, zoom: 1 }));
   }, [hasSurfaceModel, reconstruction]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loaded = Array<HTMLImageElement | null>(textureFrames.length).fill(null);
+    setTextureImages(loaded);
+    const pending = textureReferenceFrames.flatMap((index) => {
+      const frame = textureFrames[index];
+      if (!frame) return [];
+      const image = new Image();
+      image.onload = () => {
+        if (cancelled) return;
+        loaded[index] = image;
+        setTextureImages([...loaded]);
+      };
+      image.src = frame.thumbnail;
+      return [image];
+    });
+    return () => {
+      cancelled = true;
+      for (const image of pending) image.onload = null;
+    };
+  }, [textureFrames, textureReferenceFrames]);
+
+  const textureEligibleTriangles = useMemo(() => {
+    if (denseGridSites.length !== densePoints.length) return 0;
+    let accepted = 0;
+    for (let triangleIndex = 0; triangleIndex < meshTriangles.length; triangleIndex += 1) {
+      const base = triangleIndex * 3;
+      const referenceFrame = triangleTextureReference(
+        meshTriangles.indices[base],
+        meshTriangles.indices[base + 1],
+        meshTriangles.indices[base + 2],
+        densePointReferenceFrames,
+      );
+      if (referenceFrame !== null && textureFrames[referenceFrame]) accepted += 1;
+    }
+    return accepted;
+  }, [denseGridSites.length, densePointReferenceFrames, densePoints.length, meshTriangles, textureFrames]);
 
   const bounds = useMemo(() => {
     const min = [Infinity, Infinity, Infinity];
@@ -185,6 +258,8 @@ export function SceneCanvas({
       r: number;
       g: number;
       b: number;
+      textureReference: number | null;
+      textureSource: [Point2, Point2, Point2] | null;
     }> = [];
 
     for (let triangleIndex = 0; triangleIndex < meshTriangles.length; triangleIndex += 1) {
@@ -241,6 +316,19 @@ export function SceneCanvas({
       const aRgb = aIndex * 3;
       const bRgb = bIndex * 3;
       const cRgb = cIndex * 3;
+      const textureReference = triangleTextureReference(
+        aIndex,
+        bIndex,
+        cIndex,
+        densePointReferenceFrames,
+      );
+      const textureSource =
+        textureReference !== null && denseGridSites.length === densePoints.length
+          ? ([aIndex, bIndex, cIndex].map((index) => ({
+              x: denseGridSites.xy[index * 2],
+              y: denseGridSites.xy[index * 2 + 1],
+            })) as [Point2, Point2, Point2])
+          : null;
       projectedMeshTriangles.push({
         triangleIndex,
         projected: [projectedA, projectedB, projectedC],
@@ -262,19 +350,48 @@ export function SceneCanvas({
             3) *
             light,
         ),
+        textureReference,
+        textureSource,
       });
     }
     projectedMeshTriangles.sort((left, right) => right.depth - left.depth);
 
     for (const item of projectedMeshTriangles) {
       const [a, b, c] = item.projected;
-      context.beginPath();
-      context.moveTo(a.x, a.y);
-      context.lineTo(b.x, b.y);
-      context.lineTo(c.x, c.y);
-      context.closePath();
-      context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.76 + meshTriangles.confidence[item.triangleIndex] * 0.24})`;
-      context.fill();
+      const traceTriangle = () => {
+        context.beginPath();
+        context.moveTo(a.x, a.y);
+        context.lineTo(b.x, b.y);
+        context.lineTo(c.x, c.y);
+        context.closePath();
+      };
+      const textureFrame =
+        item.textureReference === null ? null : textureFrames[item.textureReference] ?? null;
+      const textureImage =
+        item.textureReference === null ? null : textureImages[item.textureReference] ?? null;
+      const textureTransform =
+        textureFrame && textureImage && item.textureSource
+          ? affineTriangleTransform(item.textureSource, [
+              { x: a.x, y: a.y },
+              { x: b.x, y: b.y },
+              { x: c.x, y: c.y },
+            ])
+          : null;
+
+      if (textureFrame && textureImage && textureTransform) {
+        traceTriangle();
+        context.save();
+        context.clip();
+        context.setTransform(...textureTransform);
+        context.globalAlpha = 0.8 + meshTriangles.confidence[item.triangleIndex] * 0.2;
+        context.drawImage(textureImage, 0, 0, textureFrame.width, textureFrame.height);
+        context.restore();
+        traceTriangle();
+      } else {
+        traceTriangle();
+        context.fillStyle = `rgba(${item.r}, ${item.g}, ${item.b}, ${0.76 + meshTriangles.confidence[item.triangleIndex] * 0.24})`;
+        context.fill();
+      }
       context.lineWidth = 0.42 * ratio;
       context.strokeStyle = "rgba(4, 10, 13, 0.22)";
       context.stroke();
@@ -404,6 +521,8 @@ export function SceneCanvas({
   }, [
     bounds,
     cameraState,
+    denseGridSites,
+    densePointReferenceFrames,
     densePoints,
     displayCameras,
     hasRegisteredGeometry,
@@ -412,6 +531,8 @@ export function SceneCanvas({
     reconstruction.points,
     renderMode,
     selectedFrameIndex,
+    textureFrames,
+    textureImages,
     view,
   ]);
 
@@ -505,9 +626,15 @@ export function SceneCanvas({
         }. The points shown are reconstruction evidence, not the final model.`
       : `Surface model unavailable; ${meshCoverageDiagnostic}. The points shown are reconstruction evidence, not the final model.`;
 
+  const textureDiagnostic = hasSurfaceModel
+    ? textureEligibleTriangles > 0
+      ? `Texture projection: ${textureEligibleTriangles} of ${meshTriangles.length} accepted triangles retain an unambiguous Rust-owned reference-grid mapping; missing or unloaded reference images fall back to vertex color without changing geometry`
+      : "Texture projection: no accepted triangle has an unambiguous single-reference grid mapping, so vertex-color shading is retained without changing geometry"
+    : "Texture projection unavailable without accepted surface triangles";
+
   const primaryDiagnostic =
     hasSurfaceModel && renderMode === "model"
-      ? `${meshDiagnostic} · ${denseDiagnostic}`
+      ? `${meshDiagnostic} · ${textureDiagnostic} · ${denseDiagnostic}`
       : `${cameraDiagnostic} · ${denseDiagnostic} · ${meshDiagnostic}`;
 
   return (

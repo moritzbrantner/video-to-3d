@@ -5,7 +5,7 @@ mod pnp;
 mod revisit;
 mod two_view;
 
-pub use dense::DenseStats;
+pub use dense::{DenseGridSite, DenseStats};
 pub use mesh::{MeshStats, MeshTriangle};
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
@@ -134,6 +134,7 @@ pub struct ReconstructionResult {
     pub cameras: Vec<CameraPose>,
     pub points: Vec<Point3>,
     pub dense_points: Vec<Point3>,
+    pub dense_grid_sites: Vec<DenseGridSite>,
     pub dense: DenseStats,
     pub mesh_triangles: Vec<MeshTriangle>,
     pub mesh: MeshStats,
@@ -723,6 +724,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     let mesh = mesh_analysis.stats;
     let mesh_triangles = mesh_analysis.triangles;
     let dense = dense_analysis.stats;
+    let dense_grid_sites = dense_analysis.grid_sites;
     let dense_points = dense_analysis.points;
     let multi_view = multi_view_analysis.stats;
 
@@ -949,6 +951,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         cameras,
         points,
         dense_points,
+        dense_grid_sites,
         dense,
         mesh_triangles,
         mesh,
@@ -968,7 +971,7 @@ fn mesh_warning(mesh: &MeshStats) -> Option<String> {
 
     if mesh.accepted_triangles > 0 {
         return Some(format!(
-            "Slice 4 bounded mesh reconstruction accepted {} triangles from {} candidate triangles across {} reference-grid cells. It rejected {} triangles at depth/spatial discontinuities and {} degenerate or orientation-flipped triangles. This is a reference-grid-local, non-watertight surface preview; texture projection, arbitrary multi-reference surface fusion, and metric scale are not claimed yet.",
+            "Slice 4 bounded mesh reconstruction accepted {} triangles from {} candidate triangles across {} reference-grid cells. It rejected {} triangles at depth/spatial discontinuities and {} degenerate or orientation-flipped triangles. This is a bounded multi-reference, non-watertight surface preview. Browser texture projection is appearance-only over accepted per-reference topology; unsupported holes and metric scale are not claimed.",
             mesh.accepted_triangles,
             mesh.candidate_triangles,
             mesh.candidate_cells,
@@ -991,7 +994,7 @@ fn dense_warning(dense: &DenseStats) -> Option<String> {
     let reference_frame = dense.reference_frame.map_or(0, |frame| frame + 1);
     if dense.accepted_points > 0 {
         return Some(format!(
-            "Slice 4 dense point fusion accepted {} fused scene points from reference frame {} using {} registered source views and {} inverse-depth hypotheses. {} primary candidates passed reciprocal depth consistency; spatial fusion rejected {} reverse observations. Fused points remain separate from the sparse map; general multi-reference depth aggregation and metric scale are not claimed yet.",
+            "Slice 4 dense point fusion accepted {} fused scene points from reference frame {} using {} registered source views and {} inverse-depth hypotheses. {} primary candidates passed reciprocal depth consistency; spatial fusion rejected {} reverse observations. Fused points remain separate from the sparse map; dense coverage is bounded to accepted reference patches and does not claim unbounded aggregation or metric scale.",
             dense.accepted_points,
             reference_frame,
             dense.source_views,

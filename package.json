@@ -14,6 +14,7 @@
     "tauri:dev": "bun run wasm:build && bun --cwd apps/desktop tauri dev",
     "test": "cargo test --workspace",
     "test:browser-contract": "bun scripts/test-browser-contract.ts",
+    "test:texture-projection": "bun scripts/test-texture-projection.ts",
     "test:video-sampling-contract": "bun scripts/test-video-sampling-contract.ts",
     "typecheck": "bun --cwd apps/web typecheck",
     "wasm:build": "bash scripts/build-wasm.sh",
