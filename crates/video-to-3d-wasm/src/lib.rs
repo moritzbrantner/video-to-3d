@@ -227,14 +227,16 @@ fn pack_mesh_triangles(
 }
 
 fn decode_f32_le(bytes: &[u8], label: &str) -> Result<Vec<f32>, JsValue> {
-    if bytes.len() % size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(size_of::<f32>()) {
         return Err(JsValue::from_str(&format!(
             "invalid {label}: byte length is not divisible by four"
         )));
     }
     Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
 }
 
@@ -246,7 +248,9 @@ fn unpack_dense_points(bytes: &[u8], point_count: usize) -> Result<Vec<Point3>, 
         ));
     }
     Ok(values
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|values| Point3 {
             x: values[0],
             y: values[1],
