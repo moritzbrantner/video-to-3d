@@ -85,12 +85,18 @@ fn evaluate_frame(
     frame: RelativeDepthFrame<'_>,
 ) -> RelativeDepthFrameDiagnostics {
     if frame.width == 0 || frame.height == 0 || frame.values.len() != frame.width * frame.height {
-        return skipped(frame.frame_index, "relative-depth dimensions are inconsistent");
+        return skipped(
+            frame.frame_index,
+            "relative-depth dimensions are inconsistent",
+        );
     }
     if !focal_pixels.is_finite() || focal_pixels <= 0.0 {
         return skipped(frame.frame_index, "accepted focal length is unavailable");
     }
-    let Some(camera) = cameras.iter().find(|camera| camera.frame_index == frame.frame_index) else {
+    let Some(camera) = cameras
+        .iter()
+        .find(|camera| camera.frame_index == frame.frame_index)
+    else {
         return skipped(
             frame.frame_index,
             "relative depth does not correspond to an accepted final camera",
@@ -136,11 +142,13 @@ fn evaluate_frame(
     let direct = robust_linear_fit(&anchors, RelativeDepthFitKind::Direct);
     let inverse = robust_linear_fit(&anchors, RelativeDepthFitKind::Inverse);
     let best = match (direct, inverse) {
-        (Some(left), Some(right)) => Some(if left.median_relative_error <= right.median_relative_error {
-            left
-        } else {
-            right
-        }),
+        (Some(left), Some(right)) => Some(
+            if left.median_relative_error <= right.median_relative_error {
+                left
+            } else {
+                right
+            },
+        ),
         (Some(fit), None) | (None, Some(fit)) => Some(fit),
         (None, None) => None,
     };
@@ -160,8 +168,8 @@ fn evaluate_frame(
         };
     };
 
-    let calibration_usable = fit.median_relative_error <= AGREEMENT_RELATIVE_ERROR
-        && fit.agreement_ratio >= 0.60;
+    let calibration_usable =
+        fit.median_relative_error <= AGREEMENT_RELATIVE_ERROR && fit.agreement_ratio >= 0.60;
     RelativeDepthFrameDiagnostics {
         frame_index: frame.frame_index,
         projected_geometry_points,
