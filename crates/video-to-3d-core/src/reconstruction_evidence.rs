@@ -261,6 +261,7 @@ fn classic_camera_evidence(
         },
     ];
 
+    let final_cameras = &reconstruction.multi_view.bundle_adjustment.final_cameras;
     for view in &reconstruction.registered_views {
         if view.frame_index == seed.from_frame || view.frame_index == seed.to_frame {
             return Err(format!(
@@ -268,11 +269,34 @@ fn classic_camera_evidence(
                 view.frame_index
             ));
         }
+        let final_pose = final_cameras
+            .iter()
+            .find(|camera| camera.frame_index == view.frame_index)
+            .ok_or_else(|| {
+                format!(
+                    "classic reconstruction evidence is missing the final retained pose for registered frame {}",
+                    view.frame_index
+                )
+            })?;
         cameras.push(EvidenceCamera {
             frame_index: view.frame_index,
             authority: EvidenceCameraAuthority::RegisteredGeometry,
-            rotation: view.rotation,
-            translation: view.translation,
+            rotation: [
+                final_pose.rotation[(0, 0)] as f32,
+                final_pose.rotation[(0, 1)] as f32,
+                final_pose.rotation[(0, 2)] as f32,
+                final_pose.rotation[(1, 0)] as f32,
+                final_pose.rotation[(1, 1)] as f32,
+                final_pose.rotation[(1, 2)] as f32,
+                final_pose.rotation[(2, 0)] as f32,
+                final_pose.rotation[(2, 1)] as f32,
+                final_pose.rotation[(2, 2)] as f32,
+            ],
+            translation: [
+                final_pose.translation.x as f32,
+                final_pose.translation.y as f32,
+                final_pose.translation.z as f32,
+            ],
             confidence: Some(view.inlier_ratio),
             median_reprojection_error_pixels: Some(view.median_reprojection_error_pixels),
         });
