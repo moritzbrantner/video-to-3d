@@ -8,10 +8,15 @@ pub mod feature_analysis;
 include!("reconstruction.rs");
 
 mod browser_contract;
+mod learned_depth;
 mod reconstruction_evidence;
 pub use browser_contract::{
     BrowserReconstructionResult, BundleAdjustmentStatus, CameraKind, CameraPipelineState,
     DenseCameraRole, FrameCameraState, RegistrationStatus,
+};
+pub use learned_depth::{
+    evaluate_relative_depth, LearnedDepthCamera, RelativeDepthEvaluation, RelativeDepthFitKind,
+    RelativeDepthFrame, RelativeDepthFrameDiagnostics,
 };
 pub use reconstruction_evidence::{
     EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin, EvidenceRange, EvidenceScale,
