@@ -602,8 +602,8 @@ mod tests {
             options: ReconstructionOptions::default(),
         };
         let reconstruction = crate::reconstruct(&request).expect("reconstruction");
-        let evidence = ReconstructionEvidenceView::from_classic(&reconstruction)
-            .expect("classic evidence");
+        let evidence =
+            ReconstructionEvidenceView::from_classic(&reconstruction).expect("classic evidence");
 
         assert!(evidence.cameras.is_empty());
         assert!(evidence.regions.is_empty());
