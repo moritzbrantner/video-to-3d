@@ -23,6 +23,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         >
           <Link href="/">Reconstruction</Link>
           <Link href="/feature-lab/">Feature matching lab</Link>
+          <Link href="/learned-lab/">Learned reconstruction lab</Link>
         </nav>
         {children}
       </body>

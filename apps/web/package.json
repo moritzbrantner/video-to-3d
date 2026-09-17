@@ -2,11 +2,13 @@
   "name": "@video-to-3d/web",
   "private": true,
   "scripts": {
-    "build": "next build",
-    "dev": "next dev",
+    "build": "bun ../../scripts/copy-litert-runtime.ts && next build",
+    "dev": "bun ../../scripts/copy-litert-runtime.ts && next dev",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@huggingface/transformers": "3.7.1",
+    "@litertjs/core": "2.5.3",
     "next": "16.3.4",
     "react": "19.1.0",
     "react-dom": "19.1.0"
