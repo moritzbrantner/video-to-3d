@@ -35,12 +35,16 @@ jobs:
         run: bun run wasm:build
       - name: Build static Next.js export
         run: GITHUB_PAGES=true bun --cwd apps/web build
-      - name: Verify interactive feature lab export
+      - name: Verify interactive lab exports
         run: |
           test -f apps/web/out/feature-lab/index.html
           test -f apps/web/out/feature-wasm/video_to_3d_feature_wasm.js
           test -f apps/web/out/feature-wasm/video_to_3d_feature_wasm_bg.wasm
           grep -R -q "Feature matching lab" apps/web/out/feature-lab
+          test -f apps/web/out/learned-lab/index.html
+          grep -R -q "Learned reconstruction lab" apps/web/out/learned-lab
+          test -f apps/web/out/litert-wasm/litert_wasm_internal.js
+          test -f apps/web/out/litert-wasm/litert_wasm_internal.wasm
       - name: Upload pull-request static export
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
