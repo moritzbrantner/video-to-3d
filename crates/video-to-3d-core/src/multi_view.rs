@@ -26,6 +26,8 @@ pub struct BundleAdjustmentStats {
     pub final_median_reprojection_error_pixels: Option<f32>,
     pub initial_rmse_reprojection_error_pixels: Option<f32>,
     pub final_rmse_reprojection_error_pixels: Option<f32>,
+    #[serde(skip)]
+    pub(crate) final_cameras: Vec<RegisteredCamera>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -333,14 +335,16 @@ pub(super) fn bundle_adjust(
     height: u32,
     focal_pixels: f64,
 ) -> BundleAdjustmentResult {
-    bundle_adjustment::optimize(
+    let mut result = bundle_adjustment::optimize(
         analysis,
         seed_points,
         new_landmarks,
         cameras,
         features,
         bundle_adjustment::ProjectionModel::new(width, height, focal_pixels),
-    )
+    );
+    result.stats.final_cameras = result.cameras.clone();
+    result
 }
 
 fn collect_seed_tracks(
@@ -1001,5 +1005,30 @@ mod tests {
         ];
 
         assert_eq!(select_keyframes(&pairs), vec![0]);
+    }
+
+    #[test]
+    fn bundle_adjust_stats_retain_returned_camera_poses() {
+        let analysis = analyze(&[], &[], Some((0, &[])));
+        let cameras = vec![camera(0, 0.0), camera(1, 1.0)];
+        let features = vec![Vec::<Feature>::new(), Vec::<Feature>::new()];
+
+        let result = bundle_adjust(
+            &analysis,
+            &[],
+            &[],
+            &cameras,
+            &features,
+            640,
+            480,
+            500.0,
+        );
+
+        assert_eq!(result.stats.final_cameras.len(), cameras.len());
+        for (retained, returned) in result.stats.final_cameras.iter().zip(&result.cameras) {
+            assert_eq!(retained.frame_index, returned.frame_index);
+            assert_eq!(retained.rotation, returned.rotation);
+            assert_eq!(retained.translation, returned.translation);
+        }
     }
 }
