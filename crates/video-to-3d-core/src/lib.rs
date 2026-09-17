@@ -16,7 +16,8 @@ pub use browser_contract::{
 pub use reconstruction_evidence::{
     EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin, EvidenceRange, EvidenceScale,
     ReconstructionEvidenceSummary, ReconstructionEvidenceView, ReconstructionProviderClass,
-    ReconstructionProviderDescriptor, SurfaceEvidenceRegion, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+    ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 
 pub fn reconstruct_browser(
