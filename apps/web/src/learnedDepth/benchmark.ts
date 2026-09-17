@@ -5,20 +5,45 @@ import {
   type LearnedProviderId,
   type LearnedReconstructionMode,
 } from "./catalog";
+import { evaluateRelativeDepthGeometry } from "./geometry";
 import { evidenceQuality, median, percentile } from "./metrics";
 import { createLearnedProviderSession } from "./runtime";
 import { selectLearnedFrameIndices } from "./selection";
-import type { LearnedBenchmarkSuite, LearnedProviderBenchmark } from "./types";
+import type {
+  LearnedBenchmarkSuite,
+  LearnedGeometryBenchmark,
+  LearnedProviderBenchmark,
+  RelativeDepthFrameEvidence,
+} from "./types";
 
 function mean(values: number[]): number | null {
   if (values.length === 0) return null;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+function summarizeGeometry(
+  evaluation: Awaited<ReturnType<typeof evaluateRelativeDepthGeometry>>,
+): LearnedGeometryBenchmark | null {
+  if (!evaluation) return null;
+  const errors = evaluation.frames
+    .map((frame) => frame.median_relative_error)
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+  const agreement = evaluation.frames
+    .map((frame) => frame.agreement_ratio_15_percent)
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+  return {
+    evaluatedFrames: evaluation.frames.length,
+    usableFrames: evaluation.frames.filter((frame) => frame.calibration_usable).length,
+    medianRelativeError: median(errors),
+    meanAgreementRatio15Percent: mean(agreement),
+  };
+}
+
 async function benchmarkProvider(
   providerId: LearnedProviderId,
   frames: SampledFrame[],
   selectedFrames: number[],
+  reconstruction: ReconstructionResult,
 ): Promise<LearnedProviderBenchmark> {
   const descriptor = learnedProviderDescriptor(providerId);
   if (selectedFrames.length === 0) {
@@ -37,6 +62,7 @@ async function benchmarkProvider(
       p90InferenceMs: null,
       finiteEvidenceRatio: null,
       confidenceCoverage: null,
+      geometricAgreement: null,
       diagnostic: "Skipped because the classical reconstruction exposed no accepted registered cameras.",
     };
   }
@@ -49,6 +75,7 @@ async function benchmarkProvider(
     const inferenceMs: number[] = [];
     const finiteRatios: number[] = [];
     const confidenceCoverage: number[] = [];
+    const relativeDepthEvidence: RelativeDepthFrameEvidence[] = [];
 
     for (const frameIndex of selectedFrames) {
       const frame = frames[frameIndex];
@@ -60,7 +87,22 @@ async function benchmarkProvider(
       if (quality.confidenceCoverage !== null) {
         confidenceCoverage.push(quality.confidenceCoverage);
       }
+      if (evidence.representation === "relative_depth") {
+        relativeDepthEvidence.push(evidence);
+      }
     }
+
+    const geometryEvaluation =
+      relativeDepthEvidence.length > 0
+        ? await evaluateRelativeDepthGeometry(reconstruction, relativeDepthEvidence)
+        : null;
+    const geometricAgreement = summarizeGeometry(geometryEvaluation);
+    const diagnostic =
+      descriptor.evidence === "affine_point_map"
+        ? "Raw MoGe affine point evidence only; focal/shift recovery and Rust cross-view validation are still required before geometry promotion."
+        : geometricAgreement
+          ? `Rust aligned relative depth to final SfM geometry on ${geometricAgreement.usableFrames}/${geometricAgreement.evaluatedFrames} evaluated frames; this is still diagnostic evidence, not promoted mesh geometry.`
+          : "Relative-depth inference completed, but accepted dense geometry was insufficient for Rust alignment diagnostics.";
 
     return {
       providerId,
@@ -77,10 +119,8 @@ async function benchmarkProvider(
       p90InferenceMs: percentile(inferenceMs, 0.9),
       finiteEvidenceRatio: mean(finiteRatios),
       confidenceCoverage: mean(confidenceCoverage),
-      diagnostic:
-        descriptor.evidence === "affine_point_map"
-          ? "Raw MoGe affine point evidence only; focal/shift recovery and Rust cross-view validation are still required before geometry promotion."
-          : "Relative-depth evidence only; Rust scale alignment and cross-view validation are still required before geometry promotion.",
+      geometricAgreement,
+      diagnostic,
     };
   } catch (error) {
     return {
@@ -98,6 +138,7 @@ async function benchmarkProvider(
       p90InferenceMs: null,
       finiteEvidenceRatio: null,
       confidenceCoverage: null,
+      geometricAgreement: null,
       diagnostic: error instanceof Error ? error.message : String(error),
     };
   } finally {
@@ -116,7 +157,7 @@ export async function benchmarkLearnedMode(
   const selectedFrames = selectLearnedFrameIndices(reconstruction);
   const providers: LearnedProviderBenchmark[] = [];
   for (const providerId of providerIds) {
-    providers.push(await benchmarkProvider(providerId, frames, selectedFrames));
+    providers.push(await benchmarkProvider(providerId, frames, selectedFrames, reconstruction));
   }
   return {
     selectedFrames,

@@ -4,9 +4,11 @@ use serde::{
 };
 use std::fmt;
 use video_to_3d_core::{
-    reconstruct_browser, CalibratedPairStats, CameraPipelineState, CameraPose, DenseStats,
-    FrameInput, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionOptions,
-    ReconstructionRequest, RegisteredViewStats, RevisitStats,
+    evaluate_relative_depth, reconstruct_browser, CalibratedPairStats, CameraPipelineState,
+    CameraPose, DenseStats, EvidenceCamera, FrameInput, LearnedDepthCamera, MeshStats,
+    MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionEvidenceView,
+    ReconstructionOptions, ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame,
+    RevisitStats,
 };
 use wasm_bindgen::prelude::*;
 
@@ -14,7 +16,7 @@ use wasm_bindgen::prelude::*;
 struct WasmFrameInput {
     width: u32,
     height: u32,
-    #[serde(deserialize_with = "deserialize_rgba_bytes")]
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
     rgba: Vec<u8>,
 }
 
@@ -23,6 +25,32 @@ struct WasmReconstructionRequest {
     frames: Vec<WasmFrameInput>,
     #[serde(default)]
     options: ReconstructionOptions,
+}
+
+#[derive(Deserialize)]
+struct WasmLearnedDepthCamera {
+    frame_index: usize,
+    rotation: [f32; 9],
+    translation: [f32; 3],
+}
+
+#[derive(Deserialize)]
+struct WasmRelativeDepthFrameInput {
+    frame_index: usize,
+    width: usize,
+    height: usize,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    values_f32_le: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct WasmRelativeDepthEvaluationRequest {
+    focal_pixels: f32,
+    cameras: Vec<WasmLearnedDepthCamera>,
+    dense_point_count: usize,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    dense_points_f32_le: Vec<u8>,
+    frames: Vec<WasmRelativeDepthFrameInput>,
 }
 
 struct ByteBuffer(Vec<u8>);
@@ -65,6 +93,7 @@ struct WasmBrowserReconstructionResult<'a> {
     registered_views: &'a [RegisteredViewStats],
     warnings: &'a [String],
     camera_state: &'a CameraPipelineState,
+    accepted_camera_evidence: &'a [EvidenceCamera],
 }
 
 #[cfg(feature = "boundary-benchmark")]
@@ -81,7 +110,7 @@ struct GeometryBenchmarkPackedPayload {
     mesh_triangles: PackedMeshTriangleBuffer,
 }
 
-fn deserialize_rgba_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+fn deserialize_byte_buffer<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -91,7 +120,7 @@ where
         type Value = Vec<u8>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("an RGBA byte buffer or byte sequence")
+            formatter.write_str("a byte buffer or byte sequence")
         }
 
         fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Self::Value, E>
@@ -122,8 +151,7 @@ where
 
     // serde-wasm-bindgen maps Uint8Array/ArrayBuffer to visit_byte_buf, which
     // performs one bulk copy instead of iterating through every JavaScript value.
-    // visit_seq preserves the legacy number[] request shape for compatibility and
-    // for the benchmark comparison.
+    // visit_seq preserves the legacy number[] request shape for compatibility.
     deserializer.deserialize_byte_buf(ByteVisitor)
 }
 
@@ -196,6 +224,43 @@ fn pack_mesh_triangles(
         confidence_f32_le: ByteBuffer(confidence_f32_le),
         length: triangles.len(),
     })
+}
+
+fn decode_f32_le(bytes: &[u8], label: &str) -> Result<Vec<f32>, JsValue> {
+    if !bytes.len().is_multiple_of(size_of::<f32>()) {
+        return Err(JsValue::from_str(&format!(
+            "invalid {label}: byte length is not divisible by four"
+        )));
+    }
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect())
+}
+
+fn unpack_dense_points(bytes: &[u8], point_count: usize) -> Result<Vec<Point3>, JsValue> {
+    let values = decode_f32_le(bytes, "dense learned-evaluation point buffer")?;
+    if values.len() != point_count * 4 {
+        return Err(JsValue::from_str(
+            "invalid learned-depth evaluation: dense-point buffer length is inconsistent",
+        ));
+    }
+    Ok(values
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|values| Point3 {
+            x: values[0],
+            y: values[1],
+            z: values[2],
+            confidence: values[3],
+            r: 0,
+            g: 0,
+            b: 0,
+        })
+        .collect())
 }
 
 #[cfg(feature = "boundary-benchmark")]
@@ -278,12 +343,67 @@ pub fn benchmark_packed_geometry_result(
 }
 
 #[wasm_bindgen]
+pub fn evaluate_relative_depth_evidence(value: JsValue) -> Result<JsValue, JsValue> {
+    let request: WasmRelativeDepthEvaluationRequest = serde_wasm_bindgen::from_value(value)
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "invalid learned-depth evaluation request: {error}"
+            ))
+        })?;
+    let dense_points =
+        unpack_dense_points(&request.dense_points_f32_le, request.dense_point_count)?;
+    let cameras: Vec<_> = request
+        .cameras
+        .into_iter()
+        .map(|camera| LearnedDepthCamera {
+            frame_index: camera.frame_index,
+            rotation: camera.rotation,
+            translation: camera.translation,
+        })
+        .collect();
+    let decoded_frames: Vec<_> = request
+        .frames
+        .iter()
+        .map(|frame| {
+            let values = decode_f32_le(&frame.values_f32_le, "relative-depth frame buffer")?;
+            if values.len() != frame.width * frame.height {
+                return Err(JsValue::from_str(
+                    "invalid learned-depth evaluation: frame buffer dimensions are inconsistent",
+                ));
+            }
+            Ok(values)
+        })
+        .collect::<Result<_, _>>()?;
+    let frames: Vec<_> = request
+        .frames
+        .iter()
+        .zip(decoded_frames.iter())
+        .map(|(frame, values)| RelativeDepthFrame {
+            frame_index: frame.frame_index,
+            width: frame.width,
+            height: frame.height,
+            values,
+        })
+        .collect();
+    let evaluation =
+        evaluate_relative_depth(&cameras, &dense_points, request.focal_pixels, &frames);
+    let serializer = browser_serializer();
+    evaluation.serialize(&serializer).map_err(|error| {
+        JsValue::from_str(&format!(
+            "failed to serialize learned-depth evaluation: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
 pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
     let request: WasmReconstructionRequest = serde_wasm_bindgen::from_value(value)
         .map_err(|error| JsValue::from_str(&format!("invalid reconstruction request: {error}")))?;
     let request = ReconstructionRequest::from(request);
     let result = reconstruct_browser(&request).map_err(|error| JsValue::from_str(&error))?;
     let reconstruction = &result.reconstruction;
+    let evidence = ReconstructionEvidenceView::from_classic(reconstruction)
+        .map_err(|error| JsValue::from_str(&error))?;
     let payload = WasmBrowserReconstructionResult {
         cameras: &reconstruction.cameras,
         points: &reconstruction.points,
@@ -301,6 +421,7 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         registered_views: &reconstruction.registered_views,
         warnings: &reconstruction.warnings,
         camera_state: &result.camera_state,
+        accepted_camera_evidence: &evidence.cameras,
     };
     let serializer = browser_serializer();
     payload

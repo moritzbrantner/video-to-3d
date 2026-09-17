@@ -199,6 +199,9 @@ export default function LearnedLab() {
                   <th>P90 frame</th>
                   <th>Finite evidence</th>
                   <th>Confidence &gt; 0.5</th>
+                  <th>Geometry usable</th>
+                  <th>Geometry median error</th>
+                  <th>Geometry agreement ≤15%</th>
                 </tr>
               </thead>
               <tbody>
@@ -212,6 +215,17 @@ export default function LearnedLab() {
                     <td>{formatMilliseconds(provider.p90InferenceMs)}</td>
                     <td>{formatPercent(provider.finiteEvidenceRatio)}</td>
                     <td>{formatPercent(provider.confidenceCoverage)}</td>
+                    <td>
+                      {provider.geometricAgreement
+                        ? `${provider.geometricAgreement.usableFrames}/${provider.geometricAgreement.evaluatedFrames}`
+                        : "—"}
+                    </td>
+                    <td>{formatPercent(provider.geometricAgreement?.medianRelativeError ?? null)}</td>
+                    <td>
+                      {formatPercent(
+                        provider.geometricAgreement?.meanAgreementRatio15Percent ?? null,
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

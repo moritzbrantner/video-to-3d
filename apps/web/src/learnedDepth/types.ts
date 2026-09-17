@@ -35,6 +35,13 @@ export type LearnedProviderSession = {
   dispose(): Promise<void> | void;
 };
 
+export type LearnedGeometryBenchmark = {
+  evaluatedFrames: number;
+  usableFrames: number;
+  medianRelativeError: number | null;
+  meanAgreementRatio15Percent: number | null;
+};
+
 export type LearnedProviderBenchmark = {
   providerId: LearnedProviderId;
   label: string;
@@ -50,6 +57,7 @@ export type LearnedProviderBenchmark = {
   p90InferenceMs: number | null;
   finiteEvidenceRatio: number | null;
   confidenceCoverage: number | null;
+  geometricAgreement: LearnedGeometryBenchmark | null;
   diagnostic: string;
 };
 

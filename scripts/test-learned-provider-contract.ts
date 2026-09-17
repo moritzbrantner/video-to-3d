@@ -4,6 +4,7 @@ import {
   learnedProvidersForMode,
 } from "../apps/web/src/learnedDepth/catalog";
 import { median, percentile } from "../apps/web/src/learnedDepth/metrics";
+import { resampleRelativeDepth } from "../apps/web/src/learnedDepth/resample";
 
 assert.equal(
   new Set(LEARNED_PROVIDER_CATALOG.map(({ id }) => id)).size,
@@ -18,6 +19,15 @@ assert.equal(median([5, 1, 3]), 3);
 assert.equal(median([4, 2]), 3);
 assert.equal(percentile([10, 20, 30, 40, 50], 0.9), 50);
 assert.equal(percentile([], 0.9), null);
+
+const resampledDepth = resampleRelativeDepth(
+  new Float32Array([0, 10, 20, 30]),
+  2,
+  2,
+  3,
+  3,
+);
+assert.deepEqual(Array.from(resampledDepth), [0, 5, 10, 10, 15, 20, 20, 25, 30]);
 
 for (const provider of LEARNED_PROVIDER_CATALOG) {
   assert.ok(provider.approximateDownloadBytes > 0);
