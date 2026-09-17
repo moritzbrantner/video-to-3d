@@ -1,5 +1,6 @@
 import type { SampledFrame } from "../reconstruction";
 import { learnedProviderDescriptor } from "./catalog";
+import { resampleRelativeDepth } from "./resample";
 import type { LearnedProviderSession, RelativeDepthFrameEvidence } from "./types";
 
 const MODEL_ID = "onnx-community/depth-anything-v2-small";
@@ -30,11 +31,6 @@ function webGpuAvailable(): boolean {
   return typeof navigator !== "undefined" && "gpu" in navigator;
 }
 
-function copyDepth(data: ArrayLike<number>): Float32Array {
-  if (data instanceof Float32Array) return data.slice();
-  return Float32Array.from(data);
-}
-
 export async function createDepthAnythingSession(): Promise<LearnedProviderSession> {
   const runtime = (await import("@huggingface/transformers")) as unknown as TransformersRuntime;
   const useWebGpu = webGpuAvailable();
@@ -52,20 +48,21 @@ export async function createDepthAnythingSession(): Promise<LearnedProviderSessi
       const output = await pipeline(rawImage);
       const inferenceMs = performance.now() - startedAt;
       const dims = output.predicted_depth.dims;
-      const height = dims.at(-2) ?? frame.height;
-      const width = dims.at(-1) ?? frame.width;
-      const depth = copyDepth(output.predicted_depth.data);
-      if (depth.length !== width * height) {
-        throw new Error(
-          `Depth Anything contract mismatch: ${depth.length} values for ${width}×${height}`,
-        );
-      }
+      const sourceHeight = dims.at(-2) ?? frame.height;
+      const sourceWidth = dims.at(-1) ?? frame.width;
+      const depth = resampleRelativeDepth(
+        output.predicted_depth.data,
+        sourceWidth,
+        sourceHeight,
+        frame.width,
+        frame.height,
+      );
       return {
         providerId: "depth-anything-v2-small",
         frameIndex,
         representation: "relative_depth",
-        width,
-        height,
+        width: frame.width,
+        height: frame.height,
         depth,
         inferenceMs,
       };
