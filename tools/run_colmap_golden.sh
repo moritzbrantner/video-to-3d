@@ -10,6 +10,11 @@ mkdir -p "$work_dir/sparse" "$work_dir/models"
 
 database="$work_dir/database.db"
 
+# COLMAP 3.9.1 exposes a process-wide random_seed option. Keep every
+# stochastic stage on the same fixed seed so this reference lane is
+# deterministic instead of occasionally changing registration coverage.
+colmap_random_args=(--random_seed 0)
+
 colmap feature_extractor \
   --database_path "$database" \
   --image_path "$images_dir" \
@@ -18,12 +23,14 @@ colmap feature_extractor \
   --ImageReader.camera_params 520,520,320,240 \
   --SiftExtraction.num_threads 1 \
   --SiftExtraction.use_gpu 0 \
+  "${colmap_random_args[@]}" \
   >/dev/null
 
 colmap exhaustive_matcher \
   --database_path "$database" \
   --SiftMatching.num_threads 1 \
   --SiftMatching.use_gpu 0 \
+  "${colmap_random_args[@]}" \
   >/dev/null
 
 colmap mapper \
@@ -35,6 +42,7 @@ colmap mapper \
   --Mapper.ba_refine_focal_length 0 \
   --Mapper.ba_refine_principal_point 0 \
   --Mapper.ba_refine_extra_params 0 \
+  "${colmap_random_args[@]}" \
   >/dev/null
 
 best_model=""
