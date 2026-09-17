@@ -340,8 +340,10 @@ fn validate_cameras(
                 camera.frame_index
             ));
         }
-        if !matches!(provider.class, ReconstructionProviderClass::GeometricMultiView)
-            && !matches!(camera.authority, EvidenceCameraAuthority::ProviderEstimated)
+        if !matches!(
+            provider.class,
+            ReconstructionProviderClass::GeometricMultiView
+        ) && !matches!(camera.authority, EvidenceCameraAuthority::ProviderEstimated)
         {
             return Err(format!(
                 "reconstruction evidence provider {} ({:?}) cannot claim {:?} camera authority for frame {}",
