@@ -1,5 +1,11 @@
 import type { ReconstructionResult } from "../reconstruction";
-import type { RelativeDepthFrameEvidence } from "./types";
+
+export type GeometryDepthFrameEvidence = {
+  frameIndex: number;
+  width: number;
+  height: number;
+  depth: Float32Array;
+};
 
 export type LearnedGeometryFrameDiagnostic = {
   frame_index: number;
@@ -78,7 +84,7 @@ function normalizeEvaluation(value: unknown): LearnedGeometryEvaluation {
 
 export async function evaluateRelativeDepthGeometry(
   reconstruction: ReconstructionResult,
-  evidence: RelativeDepthFrameEvidence[],
+  evidence: GeometryDepthFrameEvidence[],
 ): Promise<LearnedGeometryEvaluation | null> {
   if (evidence.length === 0 || reconstruction.dense_points.length === 0) return null;
   const focalPixels = reconstruction.calibrated_pair?.focal_pixels;
