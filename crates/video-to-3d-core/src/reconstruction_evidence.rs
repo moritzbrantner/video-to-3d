@@ -178,6 +178,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
 
         validate_cameras(&self.cameras)?;
         validate_points(self.points)?;
+        validate_provider_origins(&self.provider, &self.regions)?;
         validate_regions(&self.regions, self.points.len(), &self.cameras)?;
         validate_triangles(self.triangles, self.points.len())?;
         Ok(())
@@ -361,6 +362,33 @@ fn validate_points(points: &[Point3]) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_provider_origins(
+    provider: &ReconstructionProviderDescriptor,
+    regions: &[SurfaceEvidenceRegion],
+) -> Result<(), String> {
+    for (region_index, region) in regions.iter().enumerate() {
+        let allowed = match provider.class {
+            ReconstructionProviderClass::GeometricMultiView => matches!(
+                region.origin,
+                EvidenceOrigin::GeometricMultiView | EvidenceOrigin::RevalidatedCompletion
+            ),
+            ReconstructionProviderClass::LearnedMultiView => {
+                matches!(region.origin, EvidenceOrigin::LearnedMultiView)
+            }
+            ReconstructionProviderClass::GenerativeCompletion => {
+                matches!(region.origin, EvidenceOrigin::GenerativeCompletion)
+            }
+        };
+        if !allowed {
+            return Err(format!(
+                "reconstruction evidence provider {} ({:?}) cannot emit {:?} provenance in region {region_index}",
+                provider.id, provider.class, region.origin
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_regions(
     regions: &[SurfaceEvidenceRegion],
     point_count: usize,
@@ -412,7 +440,18 @@ fn validate_regions(
                     "reconstruction evidence region {region_index} has no supporting source cameras"
                 ));
             }
+            let mut distinct_sources = HashSet::with_capacity(region.source_frames.len());
             for source_frame in &region.source_frames {
+                if *source_frame == reference_frame {
+                    return Err(format!(
+                        "reconstruction evidence region {region_index} cannot use reference camera frame {reference_frame} as a supporting source"
+                    ));
+                }
+                if !distinct_sources.insert(*source_frame) {
+                    return Err(format!(
+                        "reconstruction evidence region {region_index} repeats supporting source camera frame {source_frame}"
+                    ));
+                }
                 if !camera_frames.contains(source_frame) {
                     return Err(format!(
                         "reconstruction evidence region {region_index} references unaccepted source camera frame {source_frame}"
@@ -492,6 +531,15 @@ mod tests {
         }
     }
 
+    fn learned_provider() -> ReconstructionProviderDescriptor {
+        ReconstructionProviderDescriptor::new(
+            "test/learned",
+            ReconstructionProviderClass::LearnedMultiView,
+            Some("1".into()),
+        )
+        .expect("provider")
+    }
+
     #[test]
     fn provider_boundary_borrows_geometry_buffers() {
         let points = vec![
@@ -512,12 +560,7 @@ mod tests {
             points: EvidenceRange::new(0, 3),
         }];
         let evidence = ReconstructionEvidenceView::new(
-            ReconstructionProviderDescriptor::new(
-                "test/learned",
-                ReconstructionProviderClass::LearnedMultiView,
-                Some("1".into()),
-            )
-            .expect("provider"),
+            learned_provider(),
             EvidenceScale::ProviderLocal,
             vec![camera(0), camera(1)],
             regions,
@@ -544,12 +587,7 @@ mod tests {
             points: EvidenceRange::new(1, 1),
         }];
         let error = ReconstructionEvidenceView::new(
-            ReconstructionProviderDescriptor::new(
-                "test/learned",
-                ReconstructionProviderClass::LearnedMultiView,
-                None,
-            )
-            .expect("provider"),
+            learned_provider(),
             EvidenceScale::ProviderLocal,
             vec![camera(0), camera(1)],
             regions,
@@ -558,6 +596,65 @@ mod tests {
         )
         .expect_err("provenance gap must fail closed");
         assert!(error.contains("exact non-overlapping partition"));
+    }
+
+    #[test]
+    fn learned_provider_cannot_claim_geometric_provenance() {
+        let points = vec![point(0.0, 0.0, 1.0)];
+        let regions = vec![SurfaceEvidenceRegion {
+            origin: EvidenceOrigin::GeometricMultiView,
+            reference_frame: Some(0),
+            source_frames: vec![1],
+            points: EvidenceRange::new(0, 1),
+        }];
+        let error = ReconstructionEvidenceView::new(
+            learned_provider(),
+            EvidenceScale::ProviderLocal,
+            vec![camera(0), camera(1)],
+            regions,
+            &points,
+            &[],
+        )
+        .expect_err("learned provider must not claim geometric provenance");
+        assert!(error.contains("cannot emit GeometricMultiView provenance"));
+    }
+
+    #[test]
+    fn camera_backed_regions_require_distinct_supporting_views() {
+        let points = vec![point(0.0, 0.0, 1.0)];
+        let self_source = vec![SurfaceEvidenceRegion {
+            origin: EvidenceOrigin::LearnedMultiView,
+            reference_frame: Some(0),
+            source_frames: vec![0],
+            points: EvidenceRange::new(0, 1),
+        }];
+        let error = ReconstructionEvidenceView::new(
+            learned_provider(),
+            EvidenceScale::ProviderLocal,
+            vec![camera(0), camera(1)],
+            self_source,
+            &points,
+            &[],
+        )
+        .expect_err("reference camera must not support itself");
+        assert!(error.contains("cannot use reference camera frame"));
+
+        let duplicate_sources = vec![SurfaceEvidenceRegion {
+            origin: EvidenceOrigin::LearnedMultiView,
+            reference_frame: Some(0),
+            source_frames: vec![1, 1],
+            points: EvidenceRange::new(0, 1),
+        }];
+        let error = ReconstructionEvidenceView::new(
+            learned_provider(),
+            EvidenceScale::ProviderLocal,
+            vec![camera(0), camera(1)],
+            duplicate_sources,
+            &points,
+            &[],
+        )
+        .expect_err("duplicate source cameras must fail closed");
+        assert!(error.contains("repeats supporting source camera frame"));
     }
 
     #[test]
