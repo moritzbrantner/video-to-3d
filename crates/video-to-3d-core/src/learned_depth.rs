@@ -360,22 +360,25 @@ mod tests {
         let focal = 60.0f32;
         let mut depths = vec![1.0; width * height];
         let mut points = Vec::new();
-        for index in 0..20usize {
-            let u = 12 + (index % 5) * 16;
-            let v = 12 + (index / 5) * 14;
-            let z = 1.5 + index as f32 * 0.08;
-            let x = (u as f32 - width as f32 * 0.5) / focal * z;
-            let y = (v as f32 - height as f32 * 0.5) / focal * z;
-            points.push(Point3 {
-                x,
-                y,
-                z,
-                confidence: 1.0,
-                r: 0,
-                g: 0,
-                b: 0,
-            });
-            depths[v * width + u] = if inverse { 1.0 / z } else { (z - 0.3) / 1.7 };
+        for row in 0..4usize {
+            for column in 0..5usize {
+                let index = row * 5 + column;
+                let u = 12 + column * 16;
+                let v = 12 + row * 14;
+                let z = 1.5 + index as f32 * 0.08;
+                let x = (u as f32 - width as f32 * 0.5) / focal * z;
+                let y = (v as f32 - height as f32 * 0.5) / focal * z;
+                points.push(Point3 {
+                    x,
+                    y,
+                    z,
+                    confidence: 1.0,
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                });
+                depths[v * width + u] = if inverse { 1.0 / z } else { (z - 0.3) / 1.7 };
+            }
         }
         (points, depths)
     }
