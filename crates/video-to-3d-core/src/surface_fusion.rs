@@ -1,4 +1,6 @@
-use crate::{MeshTriangle, Point3, ReconstructionEvidenceView, ReconstructionResult, SurfaceEvidenceRegion};
+use crate::{
+    MeshTriangle, Point3, ReconstructionEvidenceView, ReconstructionResult, SurfaceEvidenceRegion,
+};
 use nalgebra::Vector3;
 use std::collections::HashMap;
 
@@ -256,12 +258,8 @@ fn fuse_mutually_supported_vertices(
         });
     }
 
-    let (accepted_moves, rejected_topology_pairs) = topology_safe_moves(
-        points,
-        triangles,
-        &incident_triangles,
-        proposed_moves,
-    );
+    let (accepted_moves, rejected_topology_pairs) =
+        topology_safe_moves(points, triangles, &incident_triangles, proposed_moves);
     for movement in &accepted_moves {
         set_point_position(&mut points[movement.first], movement.position);
         set_point_position(&mut points[movement.second], movement.position);
@@ -572,8 +570,20 @@ mod tests {
     #[test]
     fn groups_evidence_regions_by_camera_support_instead_of_dense_patch_identity() {
         let regions = vec![
-            region(EvidenceOrigin::GeometricMultiView, Some(0), vec![2, 1], 0, 2),
-            region(EvidenceOrigin::RevalidatedCompletion, Some(0), vec![1, 2], 2, 1),
+            region(
+                EvidenceOrigin::GeometricMultiView,
+                Some(0),
+                vec![2, 1],
+                0,
+                2,
+            ),
+            region(
+                EvidenceOrigin::RevalidatedCompletion,
+                Some(0),
+                vec![1, 2],
+                2,
+                1,
+            ),
             region(EvidenceOrigin::LearnedMultiView, Some(3), vec![4], 3, 1),
             region(EvidenceOrigin::GenerativeCompletion, None, Vec::new(), 4, 1),
         ];
@@ -698,9 +708,7 @@ mod tests {
 
     #[test]
     fn removes_the_stale_not_claimed_warning_after_successful_fusion() {
-        let mut warnings = vec![format!(
-            "Surface preview; {PRE_FUSION_WARNING_CLAIM}"
-        )];
+        let mut warnings = vec![format!("Surface preview; {PRE_FUSION_WARNING_CLAIM}")];
 
         remove_stale_surface_fusion_claim(&mut warnings);
 
