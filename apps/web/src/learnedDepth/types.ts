@@ -1,5 +1,6 @@
 import type { SampledFrame } from "../reconstruction";
 import type { LearnedProviderDescriptor, LearnedProviderId } from "./catalog";
+import type { MogeLetterbox } from "./mogeGeometry";
 
 export type BrowserInferenceBackend = "webgpu" | "wasm";
 
@@ -22,6 +23,7 @@ export type AffinePointMapFrameEvidence = {
   points: Float32Array;
   confidence: Float32Array;
   metricScale: number | null;
+  letterbox: MogeLetterbox;
   inferenceMs: number;
 };
 
