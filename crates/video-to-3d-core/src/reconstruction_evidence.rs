@@ -176,7 +176,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
             return Err("reconstruction evidence provider id must not be empty".into());
         }
 
-        validate_cameras(&self.cameras)?;
+        validate_cameras(&self.provider, &self.cameras)?;
         validate_points(self.points)?;
         validate_provider_origins(&self.provider, &self.regions)?;
         validate_regions(&self.regions, self.points.len(), &self.cameras)?;
@@ -328,13 +328,24 @@ fn classic_surface_regions(reconstruction: &ReconstructionResult) -> Vec<Surface
     regions
 }
 
-fn validate_cameras(cameras: &[EvidenceCamera]) -> Result<(), String> {
+fn validate_cameras(
+    provider: &ReconstructionProviderDescriptor,
+    cameras: &[EvidenceCamera],
+) -> Result<(), String> {
     let mut frames = HashSet::with_capacity(cameras.len());
     for camera in cameras {
         if !frames.insert(camera.frame_index) {
             return Err(format!(
                 "reconstruction evidence contains duplicate camera frame {}",
                 camera.frame_index
+            ));
+        }
+        if !matches!(provider.class, ReconstructionProviderClass::GeometricMultiView)
+            && !matches!(camera.authority, EvidenceCameraAuthority::ProviderEstimated)
+        {
+            return Err(format!(
+                "reconstruction evidence provider {} ({:?}) cannot claim {:?} camera authority for frame {}",
+                provider.id, provider.class, camera.authority, camera.frame_index
             ));
         }
         if camera
@@ -482,6 +493,10 @@ fn validate_regions(
                     ));
                 }
             }
+        } else if region.reference_frame.is_some() || !region.source_frames.is_empty() {
+            return Err(format!(
+                "reconstruction evidence generative completion region {region_index} must not claim camera support"
+            ));
         }
 
         intervals.push((region.points.start, end, region_index));
@@ -560,6 +575,15 @@ mod tests {
             "test/learned",
             ReconstructionProviderClass::LearnedMultiView,
             Some("1".into()),
+        )
+        .expect("provider")
+    }
+
+    fn generative_provider() -> ReconstructionProviderDescriptor {
+        ReconstructionProviderDescriptor::new(
+            "test/completion",
+            ReconstructionProviderClass::GenerativeCompletion,
+            None,
         )
         .expect("provider")
     }
@@ -644,6 +668,28 @@ mod tests {
     }
 
     #[test]
+    fn learned_provider_cannot_claim_geometric_camera_authority() {
+        for authority in [
+            EvidenceCameraAuthority::CalibratedSeed,
+            EvidenceCameraAuthority::RegisteredGeometry,
+        ] {
+            let mut authoritative_camera = camera(0);
+            authoritative_camera.authority = authority;
+            let error = ReconstructionEvidenceView::new(
+                learned_provider(),
+                EvidenceScale::ProviderLocal,
+                vec![authoritative_camera],
+                Vec::new(),
+                &[],
+                &[],
+            )
+            .expect_err("learned provider must not claim geometric camera authority");
+            assert!(error.contains("cannot claim"));
+            assert!(error.contains("camera authority"));
+        }
+    }
+
+    #[test]
     fn camera_backed_regions_require_distinct_supporting_views() {
         let points = vec![point(0.0, 0.0, 1.0)];
         let self_source = vec![SurfaceEvidenceRegion {
@@ -691,12 +737,7 @@ mod tests {
             points: EvidenceRange::new(0, 1),
         }];
         let evidence = ReconstructionEvidenceView::new(
-            ReconstructionProviderDescriptor::new(
-                "test/completion",
-                ReconstructionProviderClass::GenerativeCompletion,
-                None,
-            )
-            .expect("provider"),
+            generative_provider(),
             EvidenceScale::ProviderLocal,
             Vec::new(),
             regions,
@@ -705,6 +746,28 @@ mod tests {
         )
         .expect("explicit generative completion provenance is valid");
         assert_eq!(evidence.summary().generative_completion_points, 1);
+    }
+
+    #[test]
+    fn generative_completion_must_not_claim_camera_support() {
+        let points = vec![point(0.0, 0.0, 1.0)];
+        let regions = vec![SurfaceEvidenceRegion {
+            origin: EvidenceOrigin::GenerativeCompletion,
+            reference_frame: Some(0),
+            source_frames: vec![1],
+            points: EvidenceRange::new(0, 1),
+        }];
+        let error = ReconstructionEvidenceView::new(
+            generative_provider(),
+            EvidenceScale::ProviderLocal,
+            vec![camera(0), camera(1)],
+            regions,
+            &points,
+            &[],
+        )
+        .expect_err("generative completion must stay camera-free at the evidence-region boundary");
+        assert!(error.contains("generative completion region"));
+        assert!(error.contains("must not claim camera support"));
     }
 
     #[test]
