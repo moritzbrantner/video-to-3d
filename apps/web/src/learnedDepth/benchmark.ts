@@ -5,15 +5,18 @@ import {
   type LearnedProviderId,
   type LearnedReconstructionMode,
 } from "./catalog";
-import { evaluateRelativeDepthGeometry } from "./geometry";
+import {
+  evaluateRelativeDepthGeometry,
+  type GeometryDepthFrameEvidence,
+} from "./geometry";
 import { evidenceQuality, median, percentile } from "./metrics";
+import { recoverMogeDepth } from "./mogeGeometry";
 import { createLearnedProviderSession } from "./runtime";
 import { selectLearnedFrameIndices } from "./selection";
 import type {
   LearnedBenchmarkSuite,
   LearnedGeometryBenchmark,
   LearnedProviderBenchmark,
-  RelativeDepthFrameEvidence,
 } from "./types";
 
 function mean(values: number[]): number | null {
@@ -75,7 +78,10 @@ async function benchmarkProvider(
     const inferenceMs: number[] = [];
     const finiteRatios: number[] = [];
     const confidenceCoverage: number[] = [];
-    const relativeDepthEvidence: RelativeDepthFrameEvidence[] = [];
+    const geometryDepthEvidence: GeometryDepthFrameEvidence[] = [];
+    let mogeRecoveredFrames = 0;
+    let mogeRecoveryFailures = 0;
+    const focalPixels = reconstruction.calibrated_pair?.focal_pixels ?? null;
 
     for (const frameIndex of selectedFrames) {
       const frame = frames[frameIndex];
@@ -88,21 +94,48 @@ async function benchmarkProvider(
         confidenceCoverage.push(quality.confidenceCoverage);
       }
       if (evidence.representation === "relative_depth") {
-        relativeDepthEvidence.push(evidence);
+        geometryDepthEvidence.push(evidence);
+      } else if (focalPixels && Number.isFinite(focalPixels) && focalPixels > 0) {
+        try {
+          const recovered = recoverMogeDepth(
+            evidence.points,
+            evidence.confidence,
+            evidence.metricScale,
+            evidence.letterbox,
+            focalPixels,
+          );
+          geometryDepthEvidence.push({
+            frameIndex: evidence.frameIndex,
+            width: recovered.width,
+            height: recovered.height,
+            depth: recovered.depth,
+          });
+          mogeRecoveredFrames += 1;
+        } catch {
+          mogeRecoveryFailures += 1;
+        }
       }
     }
 
     const geometryEvaluation =
-      relativeDepthEvidence.length > 0
-        ? await evaluateRelativeDepthGeometry(reconstruction, relativeDepthEvidence)
+      geometryDepthEvidence.length > 0
+        ? await evaluateRelativeDepthGeometry(reconstruction, geometryDepthEvidence)
         : null;
     const geometricAgreement = summarizeGeometry(geometryEvaluation);
-    const diagnostic =
-      descriptor.evidence === "affine_point_map"
-        ? "Raw MoGe affine point evidence only; focal/shift recovery and Rust cross-view validation are still required before geometry promotion."
-        : geometricAgreement
-          ? `Rust aligned relative depth to final SfM geometry on ${geometricAgreement.usableFrames}/${geometricAgreement.evaluatedFrames} evaluated frames; this is still diagnostic evidence, not promoted mesh geometry.`
-          : "Relative-depth inference completed, but accepted dense geometry was insufficient for Rust alignment diagnostics.";
+    let diagnostic: string;
+    if (descriptor.evidence === "affine_point_map") {
+      if (mogeRecoveredFrames > 0 && geometricAgreement) {
+        diagnostic = `Recovered MoGe depth with the accepted SfM focal on ${mogeRecoveredFrames} frames and Rust found ${geometricAgreement.usableFrames}/${geometricAgreement.evaluatedFrames} geometrically usable; ${mogeRecoveryFailures} frame recoveries failed closed. No learned geometry is promoted yet.`;
+      } else if (!focalPixels) {
+        diagnostic = "MoGe produced affine point evidence, but no accepted classical focal was available for fail-closed Z-shift recovery.";
+      } else {
+        diagnostic = `MoGe inference completed, but calibrated Z-shift recovery produced no evaluable depth frames; ${mogeRecoveryFailures} recoveries failed closed.`;
+      }
+    } else if (geometricAgreement) {
+      diagnostic = `Rust aligned relative depth to final SfM geometry on ${geometricAgreement.usableFrames}/${geometricAgreement.evaluatedFrames} evaluated frames; this is still diagnostic evidence, not promoted mesh geometry.`;
+    } else {
+      diagnostic = "Relative-depth inference completed, but accepted dense geometry was insufficient for Rust alignment diagnostics.";
+    }
 
     return {
       providerId,
