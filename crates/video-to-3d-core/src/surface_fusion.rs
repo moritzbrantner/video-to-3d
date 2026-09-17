@@ -1,4 +1,4 @@
-use crate::{MeshTriangle, Point3, ReconstructionResult};
+use crate::{MeshTriangle, Point3, ReconstructionEvidenceView, ReconstructionResult, SurfaceEvidenceRegion};
 use nalgebra::Vector3;
 use std::collections::HashMap;
 
@@ -9,6 +9,9 @@ const MIN_NORMAL_ALIGNMENT: f64 = 0.94;
 const MIN_INCIDENT_NORMAL_ALIGNMENT: f64 = 0.985;
 const MIN_INCIDENT_AREA_RATIO: f64 = 0.75;
 const MIN_CONFIDENCE_WEIGHT: f64 = 0.05;
+const PRE_FUSION_WARNING_CLAIM: &str =
+    "texture projection, arbitrary multi-reference surface fusion, and metric scale are not claimed yet.";
+const POST_FUSION_WARNING_CLAIM: &str = "texture projection and metric scale are not claimed yet.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FusionStats {
@@ -19,85 +22,106 @@ struct FusionStats {
     fused_pairs: usize,
 }
 
-struct SurfaceEvidence {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct EvidenceSupportKey {
+    reference_frame: usize,
+    source_frames: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FusionMove {
+    first: usize,
+    second: usize,
+    position: Vector3<f64>,
+}
+
+struct VertexSurfaceEvidence {
     normals: Vec<Option<Vector3<f64>>>,
     local_scales: Vec<Option<f64>>,
     incident_triangles: Vec<Vec<usize>>,
     global_edge_scale: Option<f64>,
 }
 
-pub(super) fn consolidate_surface_patches(reconstruction: &mut ReconstructionResult) {
-    let patch_count = reconstruction.dense.reference_patches.len();
-    if patch_count < 2 || reconstruction.mesh_triangles.is_empty() {
-        return;
+pub(super) fn consolidate_surface_evidence(
+    reconstruction: &mut ReconstructionResult,
+) -> Result<(), String> {
+    if reconstruction.mesh_triangles.is_empty() || reconstruction.dense_points.is_empty() {
+        return Ok(());
     }
 
-    let membership = patch_membership(reconstruction);
+    let (membership, support_group_count) = {
+        let evidence = ReconstructionEvidenceView::from_classic(reconstruction)?;
+        evidence_support_membership(&evidence.regions, evidence.points.len())
+    };
+    if support_group_count < 2 {
+        return Ok(());
+    }
+
     let stats = fuse_mutually_supported_vertices(
         &mut reconstruction.dense_points,
         &reconstruction.mesh_triangles,
         &membership,
     );
 
+    if stats.fused_pairs > 0 {
+        remove_stale_surface_fusion_claim(&mut reconstruction.warnings);
+    }
     let diagnostic = if stats.fused_pairs > 0 {
         format!(
-            "Cross-reference surface fusion aligned {} mutually nearest seam vertex pairs across {} accepted reference patches ({} bounded cross-patch candidates considered; {} rejected for surface-normal disagreement and {} because moving the seam would weaken accepted triangle topology). No vertices or triangles were fabricated.",
+            "Cross-reference surface fusion aligned {} mutually nearest seam vertex pairs across {} validated camera-support groups ({} bounded cross-group candidates considered; {} rejected for surface-normal disagreement and {} because the complete proposed seam move set would weaken accepted triangle topology). No vertices or triangles were fabricated.",
             stats.fused_pairs,
-            patch_count,
+            support_group_count,
             stats.candidate_pairs,
             stats.rejected_normal_pairs,
             stats.rejected_topology_pairs,
         )
     } else {
         format!(
-            "Cross-reference surface fusion kept {} accepted reference patches separate: {} mesh vertices were eligible and {} bounded cross-patch candidates were considered, but none passed the mutual-nearest, aligned-normal, and topology-preservation gates. No unsupported holes were closed.",
-            patch_count,
+            "Cross-reference surface fusion kept {} validated camera-support groups separate: {} mesh vertices were eligible and {} bounded cross-group candidates were considered, but none passed the mutual-nearest, aligned-normal, and topology-preservation gates. No unsupported holes were closed.",
+            support_group_count,
             stats.eligible_vertices,
             stats.candidate_pairs,
         )
     };
     reconstruction.warnings.push(diagnostic);
+    Ok(())
 }
 
-fn patch_membership(reconstruction: &ReconstructionResult) -> Vec<Option<usize>> {
-    let mut encoded = vec![0usize; reconstruction.dense_points.len()];
-    for (patch_index, patch) in reconstruction.dense.reference_patches.iter().enumerate() {
-        assign_patch_range(
-            &mut encoded,
-            patch.primary_start,
-            patch.primary_points,
-            patch_index,
-        );
-        assign_patch_range(
-            &mut encoded,
-            patch.completion_start,
-            patch.completed_points,
-            patch_index,
-        );
+fn evidence_support_membership(
+    regions: &[SurfaceEvidenceRegion],
+    point_count: usize,
+) -> (Vec<Option<usize>>, usize) {
+    let mut membership = vec![None; point_count];
+    let mut support_groups = HashMap::<EvidenceSupportKey, usize>::new();
+
+    for region in regions {
+        let Some(reference_frame) = region.reference_frame else {
+            continue;
+        };
+        let mut source_frames = region.source_frames.clone();
+        source_frames.sort_unstable();
+        let key = EvidenceSupportKey {
+            reference_frame,
+            source_frames,
+        };
+        let next_group = support_groups.len();
+        let group = *support_groups.entry(key).or_insert(next_group);
+        let Some(end) = region.points.start.checked_add(region.points.count) else {
+            continue;
+        };
+        let Some(range) = membership.get_mut(region.points.start..end) else {
+            continue;
+        };
+        range.fill(Some(group));
     }
 
-    encoded
-        .into_iter()
-        .map(|value| match value {
-            0 | usize::MAX => None,
-            value => Some(value - 1),
-        })
-        .collect()
+    (membership, support_groups.len())
 }
 
-fn assign_patch_range(membership: &mut [usize], start: usize, count: usize, patch_index: usize) {
-    let Some(end) = start.checked_add(count) else {
-        return;
-    };
-    let Some(range) = membership.get_mut(start..end) else {
-        return;
-    };
-    let encoded_patch = patch_index + 1;
-    for slot in range {
-        if *slot == 0 {
-            *slot = encoded_patch;
-        } else if *slot != encoded_patch {
-            *slot = usize::MAX;
+fn remove_stale_surface_fusion_claim(warnings: &mut [String]) {
+    for warning in warnings {
+        if warning.contains(PRE_FUSION_WARNING_CLAIM) {
+            *warning = warning.replace(PRE_FUSION_WARNING_CLAIM, POST_FUSION_WARNING_CLAIM);
         }
     }
 }
@@ -111,7 +135,7 @@ fn fuse_mutually_supported_vertices(
         return FusionStats::default();
     }
 
-    let SurfaceEvidence {
+    let VertexSurfaceEvidence {
         normals,
         local_scales,
         incident_triangles,
@@ -144,7 +168,7 @@ fn fuse_mutually_supported_vertices(
     let mut rejected_normal_pairs = 0usize;
 
     for index in 0..points.len() {
-        let (Some(patch_index), Some(normal), Some(local_scale), Some(position)) = (
+        let (Some(support_group), Some(normal), Some(local_scale), Some(position)) = (
             membership[index],
             normals[index],
             local_scales[index],
@@ -162,7 +186,7 @@ fn fuse_mutually_supported_vertices(
                         continue;
                     };
                     for &other_index in indices {
-                        if other_index == index || membership[other_index] == Some(patch_index) {
+                        if other_index == index || membership[other_index] == Some(support_group) {
                             continue;
                         }
                         let (Some(other_normal), Some(other_scale), Some(other_position)) = (
@@ -206,8 +230,7 @@ fn fuse_mutually_supported_vertices(
         }
     }
 
-    let mut fused_pairs = 0usize;
-    let mut rejected_topology_pairs = 0usize;
+    let mut proposed_moves = Vec::new();
     for index in 0..points.len() {
         let Some((other_index, _)) = nearest[index] else {
             continue;
@@ -226,26 +249,22 @@ fn fuse_mutually_supported_vertices(
         let weight = f64::from(points[index].confidence).max(MIN_CONFIDENCE_WEIGHT);
         let other_weight = f64::from(points[other_index].confidence).max(MIN_CONFIDENCE_WEIGHT);
         let fused = (position * weight + other_position * other_weight) / (weight + other_weight);
-        if !preserves_incident_triangles(
-            points,
-            triangles,
-            &incident_triangles[index],
-            index,
-            fused,
-        ) || !preserves_incident_triangles(
-            points,
-            triangles,
-            &incident_triangles[other_index],
-            other_index,
-            fused,
-        ) {
-            rejected_topology_pairs += 1;
-            continue;
-        }
+        proposed_moves.push(FusionMove {
+            first: index,
+            second: other_index,
+            position: fused,
+        });
+    }
 
-        set_point_position(&mut points[index], fused);
-        set_point_position(&mut points[other_index], fused);
-        fused_pairs += 1;
+    let (accepted_moves, rejected_topology_pairs) = topology_safe_moves(
+        points,
+        triangles,
+        &incident_triangles,
+        proposed_moves,
+    );
+    for movement in &accepted_moves {
+        set_point_position(&mut points[movement.first], movement.position);
+        set_point_position(&mut points[movement.second], movement.position);
     }
 
     FusionStats {
@@ -253,59 +272,148 @@ fn fuse_mutually_supported_vertices(
         candidate_pairs,
         rejected_normal_pairs,
         rejected_topology_pairs,
-        fused_pairs,
+        fused_pairs: accepted_moves.len(),
     }
 }
 
-fn preserves_incident_triangles(
+fn topology_safe_moves(
     points: &[Point3],
     triangles: &[MeshTriangle],
-    incident_triangle_indices: &[usize],
-    vertex_index: usize,
-    proposed_position: Vector3<f64>,
-) -> bool {
-    incident_triangle_indices.iter().all(|&triangle_index| {
-        let Some(triangle) = triangles.get(triangle_index) else {
-            return false;
-        };
-        if triangle.a != vertex_index && triangle.b != vertex_index && triangle.c != vertex_index {
-            return false;
+    incident_triangles: &[Vec<usize>],
+    moves: Vec<FusionMove>,
+) -> (Vec<FusionMove>, usize) {
+    if moves.is_empty() {
+        return (moves, 0);
+    }
+
+    let mut active = vec![true; moves.len()];
+    let mut move_by_vertex = vec![None; points.len()];
+    for (move_index, movement) in moves.iter().enumerate() {
+        if movement.first >= points.len() || movement.second >= points.len() {
+            active[move_index] = false;
+            continue;
         }
-        let (Some(mut a), Some(mut b), Some(mut c)) = (
-            points.get(triangle.a).copied().and_then(point_position),
-            points.get(triangle.b).copied().and_then(point_position),
-            points.get(triangle.c).copied().and_then(point_position),
-        ) else {
-            return false;
-        };
-        let original_normal = (b - a).cross(&(c - a));
-        let original_area_scale = original_normal.norm();
-        if !original_area_scale.is_finite() || original_area_scale <= GEOMETRIC_EPSILON {
-            return false;
+        move_by_vertex[movement.first] = Some(move_index);
+        move_by_vertex[movement.second] = Some(move_index);
+    }
+
+    loop {
+        let mut touched = vec![false; triangles.len()];
+        let mut touched_triangles = Vec::new();
+        for (move_index, movement) in moves.iter().enumerate() {
+            if !active[move_index] {
+                continue;
+            }
+            for vertex in [movement.first, movement.second] {
+                let Some(vertex_incident) = incident_triangles.get(vertex) else {
+                    continue;
+                };
+                for &triangle_index in vertex_incident {
+                    if triangle_index < triangles.len() && !touched[triangle_index] {
+                        touched[triangle_index] = true;
+                        touched_triangles.push(triangle_index);
+                    }
+                }
+            }
         }
 
-        if triangle.a == vertex_index {
-            a = proposed_position;
+        let mut reject = vec![false; moves.len()];
+        for triangle_index in touched_triangles {
+            let triangle = &triangles[triangle_index];
+            if triangle_preserved_with_moves(points, triangle, &moves, &active, &move_by_vertex) {
+                continue;
+            }
+            for vertex in [triangle.a, triangle.b, triangle.c] {
+                let Some(move_index) = move_by_vertex.get(vertex).copied().flatten() else {
+                    continue;
+                };
+                if active[move_index] {
+                    reject[move_index] = true;
+                }
+            }
         }
-        if triangle.b == vertex_index {
-            b = proposed_position;
+
+        if !reject.iter().any(|rejected| *rejected) {
+            break;
         }
-        if triangle.c == vertex_index {
-            c = proposed_position;
+        for (move_index, rejected) in reject.into_iter().enumerate() {
+            if rejected {
+                active[move_index] = false;
+            }
         }
-        let proposed_normal = (b - a).cross(&(c - a));
-        let proposed_area_scale = proposed_normal.norm();
-        if !proposed_area_scale.is_finite()
-            || proposed_area_scale < original_area_scale * MIN_INCIDENT_AREA_RATIO
-        {
-            return false;
-        }
-        original_normal.dot(&proposed_normal) / (original_area_scale * proposed_area_scale)
-            >= MIN_INCIDENT_NORMAL_ALIGNMENT
-    })
+    }
+
+    let rejected = active.iter().filter(|accepted| !**accepted).count();
+    let accepted = moves
+        .into_iter()
+        .zip(active)
+        .filter_map(|(movement, accepted)| accepted.then_some(movement))
+        .collect();
+    (accepted, rejected)
 }
 
-fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> SurfaceEvidence {
+fn triangle_preserved_with_moves(
+    points: &[Point3],
+    triangle: &MeshTriangle,
+    moves: &[FusionMove],
+    active: &[bool],
+    move_by_vertex: &[Option<usize>],
+) -> bool {
+    if triangle.a >= points.len() || triangle.b >= points.len() || triangle.c >= points.len() {
+        return false;
+    }
+    let (Some(a), Some(b), Some(c)) = (
+        point_position(points[triangle.a]),
+        point_position(points[triangle.b]),
+        point_position(points[triangle.c]),
+    ) else {
+        return false;
+    };
+    let original_normal = (b - a).cross(&(c - a));
+    let original_area_scale = original_normal.norm();
+    if !original_area_scale.is_finite() || original_area_scale <= GEOMETRIC_EPSILON {
+        return false;
+    }
+
+    let Some(proposed_a) = proposed_position(triangle.a, points, moves, active, move_by_vertex)
+    else {
+        return false;
+    };
+    let Some(proposed_b) = proposed_position(triangle.b, points, moves, active, move_by_vertex)
+    else {
+        return false;
+    };
+    let Some(proposed_c) = proposed_position(triangle.c, points, moves, active, move_by_vertex)
+    else {
+        return false;
+    };
+    let proposed_normal = (proposed_b - proposed_a).cross(&(proposed_c - proposed_a));
+    let proposed_area_scale = proposed_normal.norm();
+    if !proposed_area_scale.is_finite()
+        || proposed_area_scale < original_area_scale * MIN_INCIDENT_AREA_RATIO
+    {
+        return false;
+    }
+    original_normal.dot(&proposed_normal) / (original_area_scale * proposed_area_scale)
+        >= MIN_INCIDENT_NORMAL_ALIGNMENT
+}
+
+fn proposed_position(
+    vertex: usize,
+    points: &[Point3],
+    moves: &[FusionMove],
+    active: &[bool],
+    move_by_vertex: &[Option<usize>],
+) -> Option<Vector3<f64>> {
+    if let Some(move_index) = move_by_vertex.get(vertex).copied().flatten() {
+        if active.get(move_index).copied().unwrap_or(false) {
+            return moves.get(move_index).map(|movement| movement.position);
+        }
+    }
+    points.get(vertex).copied().and_then(point_position)
+}
+
+fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> VertexSurfaceEvidence {
     let mut normal_sums = vec![Vector3::zeros(); points.len()];
     let mut edge_sums = vec![0.0f64; points.len()];
     let mut edge_counts = vec![0usize; points.len()];
@@ -378,7 +486,7 @@ fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> Sur
         .map(|(sum, count)| (count > 0 && sum.is_finite()).then_some(sum / count as f64))
         .collect();
 
-    SurfaceEvidence {
+    VertexSurfaceEvidence {
         normals,
         local_scales,
         incident_triangles,
@@ -423,6 +531,7 @@ fn median(values: &[f64]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EvidenceOrigin, EvidenceRange};
 
     fn point(x: f32, y: f32, z: f32, confidence: f32) -> Point3 {
         Point3 {
@@ -445,8 +554,38 @@ mod tests {
         }
     }
 
+    fn region(
+        origin: EvidenceOrigin,
+        reference_frame: Option<usize>,
+        source_frames: Vec<usize>,
+        start: usize,
+        count: usize,
+    ) -> SurfaceEvidenceRegion {
+        SurfaceEvidenceRegion {
+            origin,
+            reference_frame,
+            source_frames,
+            points: EvidenceRange::new(start, count),
+        }
+    }
+
     #[test]
-    fn aligns_mutually_nearest_vertices_from_consistent_reference_patches() {
+    fn groups_evidence_regions_by_camera_support_instead_of_dense_patch_identity() {
+        let regions = vec![
+            region(EvidenceOrigin::GeometricMultiView, Some(0), vec![2, 1], 0, 2),
+            region(EvidenceOrigin::RevalidatedCompletion, Some(0), vec![1, 2], 2, 1),
+            region(EvidenceOrigin::LearnedMultiView, Some(3), vec![4], 3, 1),
+            region(EvidenceOrigin::GenerativeCompletion, None, Vec::new(), 4, 1),
+        ];
+
+        let (membership, groups) = evidence_support_membership(&regions, 5);
+
+        assert_eq!(groups, 2);
+        assert_eq!(membership, vec![Some(0), Some(0), Some(0), Some(1), None]);
+    }
+
+    #[test]
+    fn aligns_mutually_nearest_vertices_from_consistent_evidence_groups() {
         let mut points = vec![
             point(0.0, 0.0, 0.0, 1.0),
             point(1.0, 0.0, 0.0, 1.0),
@@ -512,7 +651,37 @@ mod tests {
     }
 
     #[test]
-    fn never_fuses_vertices_from_the_same_reference_patch() {
+    fn validates_the_complete_move_set_against_original_topology() {
+        let points = vec![
+            point(0.0, 0.0, 0.0, 1.0),
+            point(1.0, 0.0, 0.0, 1.0),
+            point(0.0, 1.0, 0.0, 1.0),
+            point(0.2, 0.0, 0.0, 1.0),
+            point(0.8, 0.0, 0.0, 1.0),
+        ];
+        let triangles = [triangle(0, 1, 2)];
+        let incident = vec![vec![0], vec![0], vec![0], Vec::new(), Vec::new()];
+        let moves = vec![
+            FusionMove {
+                first: 0,
+                second: 3,
+                position: Vector3::new(0.2, 0.0, 0.0),
+            },
+            FusionMove {
+                first: 1,
+                second: 4,
+                position: Vector3::new(0.8, 0.0, 0.0),
+            },
+        ];
+
+        let (accepted, rejected) = topology_safe_moves(&points, &triangles, &incident, moves);
+
+        assert!(accepted.is_empty());
+        assert_eq!(rejected, 2);
+    }
+
+    #[test]
+    fn never_fuses_vertices_from_the_same_evidence_group() {
         let mut points = vec![
             point(0.0, 0.0, 0.0, 1.0),
             point(1.0, 0.0, 0.0, 1.0),
@@ -525,5 +694,17 @@ mod tests {
 
         assert_eq!(stats.fused_pairs, 0);
         assert_eq!(stats.candidate_pairs, 0);
+    }
+
+    #[test]
+    fn removes_the_stale_not_claimed_warning_after_successful_fusion() {
+        let mut warnings = vec![format!(
+            "Surface preview; {PRE_FUSION_WARNING_CLAIM}"
+        )];
+
+        remove_stale_surface_fusion_claim(&mut warnings);
+
+        assert!(!warnings[0].contains("arbitrary multi-reference surface fusion"));
+        assert!(warnings[0].contains(POST_FUSION_WARNING_CLAIM));
     }
 }

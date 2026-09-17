@@ -8,17 +8,25 @@ pub mod feature_analysis;
 include!("reconstruction.rs");
 
 mod browser_contract;
+mod reconstruction_evidence;
 mod surface_fusion;
 pub use browser_contract::{
     BrowserReconstructionResult, BundleAdjustmentStatus, CameraKind, CameraPipelineState,
     DenseCameraRole, FrameCameraState, RegistrationStatus,
+};
+pub use reconstruction_evidence::{
+    EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin, EvidenceRange, EvidenceScale,
+    ReconstructionEvidenceSummary, ReconstructionEvidenceView, ReconstructionProviderClass,
+    ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 
 pub fn reconstruct_browser(
     request: &ReconstructionRequest,
 ) -> Result<BrowserReconstructionResult, String> {
     let mut result = browser_contract::reconstruct_browser(request)?;
-    surface_fusion::consolidate_surface_patches(&mut result.reconstruction);
+    let evidence = ReconstructionEvidenceView::from_classic(&result.reconstruction)?;
+    result.reconstruction.warnings.push(evidence.diagnostic());
     Ok(result)
 }
 
