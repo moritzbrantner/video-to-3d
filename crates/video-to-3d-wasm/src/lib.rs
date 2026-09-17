@@ -342,9 +342,12 @@ pub fn benchmark_packed_geometry_result(
 pub fn evaluate_relative_depth_evidence(value: JsValue) -> Result<JsValue, JsValue> {
     let request: WasmRelativeDepthEvaluationRequest = serde_wasm_bindgen::from_value(value)
         .map_err(|error| {
-            JsValue::from_str(&format!("invalid learned-depth evaluation request: {error}"))
+            JsValue::from_str(&format!(
+                "invalid learned-depth evaluation request: {error}"
+            ))
         })?;
-    let dense_points = unpack_dense_points(&request.dense_points_f32_le, request.dense_point_count)?;
+    let dense_points =
+        unpack_dense_points(&request.dense_points_f32_le, request.dense_point_count)?;
     let cameras: Vec<_> = request
         .cameras
         .into_iter()
@@ -378,12 +381,8 @@ pub fn evaluate_relative_depth_evidence(value: JsValue) -> Result<JsValue, JsVal
             values,
         })
         .collect();
-    let evaluation = evaluate_relative_depth(
-        &cameras,
-        &dense_points,
-        request.focal_pixels,
-        &frames,
-    );
+    let evaluation =
+        evaluate_relative_depth(&cameras, &dense_points, request.focal_pixels, &frames);
     let serializer = browser_serializer();
     evaluation.serialize(&serializer).map_err(|error| {
         JsValue::from_str(&format!(
