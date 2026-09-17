@@ -1,5 +1,6 @@
 import type { SampledFrame } from "../reconstruction";
 import { learnedProviderDescriptor } from "./catalog";
+import type { MogeLetterbox } from "./mogeGeometry";
 import type { AffinePointMapFrameEvidence, LearnedProviderSession } from "./types";
 
 const SIZE = 448;
@@ -51,7 +52,7 @@ async function fetchModelBytes(url: string): Promise<Uint8Array> {
   return bytes;
 }
 
-function preprocess(frame: SampledFrame): Float32Array {
+function preprocess(frame: SampledFrame): { nchw: Float32Array; letterbox: MogeLetterbox } {
   const source = document.createElement("canvas");
   source.width = frame.width;
   source.height = frame.height;
@@ -86,7 +87,19 @@ function preprocess(frame: SampledFrame): Float32Array {
     nchw[PLANE + index] = image[index * 4 + 1] / 255;
     nchw[PLANE * 2 + index] = image[index * 4 + 2] / 255;
   }
-  return nchw;
+  return {
+    nchw,
+    letterbox: {
+      sourceWidth: frame.width,
+      sourceHeight: frame.height,
+      targetSize: SIZE,
+      drawWidth,
+      drawHeight,
+      offsetX,
+      offsetY,
+      scale,
+    },
+  };
 }
 
 function sampledAbsMax(values: Float32Array): number {
@@ -144,8 +157,8 @@ export async function createMogeSession(): Promise<LearnedProviderSession> {
     backend: accelerator,
     runtimeLabel: `LiteRT.js · ${accelerator === "webgpu" ? "WebGPU · fp16 weights" : "WASM · fp32"}`,
     async infer(frame: SampledFrame, frameIndex: number): Promise<AffinePointMapFrameEvidence> {
-      const inputValues = preprocess(frame);
-      const input = runtime.Tensor.fromTypedArray(inputValues, [1, 3, SIZE, SIZE]) as {
+      const { nchw, letterbox } = preprocess(frame);
+      const input = runtime.Tensor.fromTypedArray(nchw, [1, 3, SIZE, SIZE]) as {
         delete?: () => void;
       };
       const startedAt = performance.now();
@@ -168,6 +181,7 @@ export async function createMogeSession(): Promise<LearnedProviderSession> {
         points,
         confidence,
         metricScale,
+        letterbox,
         inferenceMs,
       };
     },
