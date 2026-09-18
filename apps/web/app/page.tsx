@@ -120,6 +120,7 @@ export default function Home() {
   const [runs, setRuns] = useState<VideoRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
   const [batchRunning, setBatchRunning] = useState(false);
+  const [demoDownloading, setDemoDownloading] = useState(false);
   const [samplingFps, setSamplingFps] = useState(1.25);
   const [frameCap, setFrameCap] = useState(18);
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
@@ -191,6 +192,7 @@ export default function Home() {
     if (batchRunning) return;
 
     setBatchRunning(true);
+    setDemoDownloading(true);
     try {
       const response = await fetch(TREVI_DEMO_URL);
       if (!response.ok) {
@@ -201,6 +203,7 @@ export default function Home() {
         type: blob.type || "video/webm",
         lastModified: 0,
       });
+      setDemoDownloading(false);
       await runFiles([file]);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
@@ -220,6 +223,7 @@ export default function Home() {
       setActiveRunId(failedRun.id);
       setSelectedFrameIndex(null);
     } finally {
+      setDemoDownloading(false);
       setBatchRunning(false);
     }
   }
@@ -250,15 +254,17 @@ export default function Home() {
     Boolean(reconstruction?.multi_view.keyframes.includes(selectedFrameIndex));
   const selectedEvidence = selectedFrameEvidence(selectedFrameState);
 
-  const status = processingRun
-    ? processingRun.phase === "sampling"
-      ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
-      : `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`
-    : runs.length > 0
-      ? failedCount > 0
-        ? `${readyCount} ready · ${failedCount} failed`
-        : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
-      : "Choose one or more videos to begin";
+  const status = demoDownloading
+    ? "Downloading the Trevi test video from Wikimedia Commons…"
+    : processingRun
+      ? processingRun.phase === "sampling"
+        ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
+        : `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`
+      : runs.length > 0
+        ? failedCount > 0
+          ? `${readyCount} ready · ${failedCount} failed`
+          : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
+        : "Choose one or more videos to begin";
 
   return (
     <main>
@@ -323,7 +329,7 @@ export default function Home() {
               onClick={() => void handleTreviDemo()}
               disabled={batchRunning}
             >
-              Try Trevi test video
+              {demoDownloading ? "Loading Trevi…" : "Try Trevi test video"}
             </button>
           </div>
           <small>Sampling settings apply to newly selected videos and the test clip.</small>
