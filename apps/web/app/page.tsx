@@ -191,6 +191,9 @@ export default function Home() {
   async function handleTreviDemo() {
     if (batchRunning) return;
 
+    setRuns([]);
+    setActiveRunId("");
+    setSelectedFrameIndex(null);
     setBatchRunning(true);
     setDemoDownloading(true);
     try {
@@ -237,7 +240,9 @@ export default function Home() {
     : -1;
   const failedCount = runs.filter((run) => run.phase === "error").length;
   const readyCount = runs.filter((run) => run.phase === "done").length;
-  const statusPhase: StatusPhase = processingRun?.phase ?? activeRun?.phase ?? "idle";
+  const statusPhase: StatusPhase = demoDownloading
+    ? "sampling"
+    : (processingRun?.phase ?? activeRun?.phase ?? "idle");
   const frames = activeRun?.frames ?? [];
   const reconstruction = activeRun?.reconstruction ?? null;
   const error = activeRun?.error ?? "";
@@ -356,7 +361,9 @@ export default function Home() {
       <section className="status-line" aria-live="polite">
         <span className={`status-dot status-${statusPhase}`} />
         <strong>{status}</strong>
-        {processingRun?.fileName ?? activeRun?.fileName ? (
+        {demoDownloading ? (
+          <span>{TREVI_DEMO_FILE_NAME}</span>
+        ) : processingRun?.fileName ?? activeRun?.fileName ? (
           <span>{processingRun?.fileName ?? activeRun?.fileName}</span>
         ) : null}
       </section>
