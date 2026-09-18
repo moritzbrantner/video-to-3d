@@ -30,6 +30,13 @@ const MAX_SAMPLING_FPS = 8;
 const MIN_FRAME_CAP = 4;
 const MAX_FRAME_CAP = 60;
 
+const TREVI_DEMO_URL =
+  "https://upload.wikimedia.org/wikipedia/commons/a/a8/Fontaine_de_Trevi.webm";
+const TREVI_DEMO_FILE_PAGE =
+  "https://commons.wikimedia.org/wiki/File:Fontaine_de_Trevi.webm";
+const TREVI_DEMO_LICENSE = "https://creativecommons.org/licenses/by-sa/4.0/";
+const TREVI_DEMO_FILE_NAME = "trevi-fountain-demo.webm";
+
 function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
   return frames.map((frame) => ({
     width: frame.width,
@@ -123,11 +130,7 @@ export default function Home() {
     );
   }
 
-  async function handleVideos(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
-    if (files.length === 0 || batchRunning) return;
-
+  async function runFiles(files: File[]) {
     const runSamplingFps = normalizedSamplingFps(samplingFps);
     const runFrameCap = normalizedFrameCap(frameCap);
     setSamplingFps(runSamplingFps);
@@ -147,7 +150,6 @@ export default function Home() {
     setRuns(nextRuns);
     setActiveRunId(nextRuns[0].id);
     setSelectedFrameIndex(null);
-    setBatchRunning(true);
 
     for (const [index, file] of files.entries()) {
       const run = nextRuns[index];
@@ -170,8 +172,56 @@ export default function Home() {
         });
       }
     }
+  }
 
-    setBatchRunning(false);
+  async function handleVideos(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0 || batchRunning) return;
+
+    setBatchRunning(true);
+    try {
+      await runFiles(files);
+    } finally {
+      setBatchRunning(false);
+    }
+  }
+
+  async function handleTreviDemo() {
+    if (batchRunning) return;
+
+    setBatchRunning(true);
+    try {
+      const response = await fetch(TREVI_DEMO_URL);
+      if (!response.ok) {
+        throw new Error(`Trevi demo download failed with HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const file = new File([blob], TREVI_DEMO_FILE_NAME, {
+        type: blob.type || "video/webm",
+        lastModified: 0,
+      });
+      await runFiles([file]);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      const runSamplingFps = normalizedSamplingFps(samplingFps);
+      const runFrameCap = normalizedFrameCap(frameCap);
+      const failedRun: VideoRun = {
+        id: "trevi-fountain-demo:error",
+        fileName: TREVI_DEMO_FILE_NAME,
+        phase: "error",
+        frames: [],
+        reconstruction: null,
+        error: message,
+        samplingFps: runSamplingFps,
+        frameCap: runFrameCap,
+      };
+      setRuns([failedRun]);
+      setActiveRunId(failedRun.id);
+      setSelectedFrameIndex(null);
+    } finally {
+      setBatchRunning(false);
+    }
   }
 
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
@@ -256,17 +306,39 @@ export default function Home() {
               />
             </label>
           </div>
-          <label className="upload-button">
-            <input
-              type="file"
-              accept="video/*"
-              multiple
-              onChange={handleVideos}
+          <div className="input-actions">
+            <label className="upload-button">
+              <input
+                type="file"
+                accept="video/*"
+                multiple
+                onChange={handleVideos}
+                disabled={batchRunning}
+              />
+              Select video files
+            </label>
+            <button
+              type="button"
+              className="demo-button"
+              onClick={() => void handleTreviDemo()}
               disabled={batchRunning}
-            />
-            Select video files
-          </label>
-          <small>Sampling settings apply to newly selected videos.</small>
+            >
+              Try Trevi test video
+            </button>
+          </div>
+          <small>Sampling settings apply to newly selected videos and the test clip.</small>
+          <small className="demo-attribution">
+            Trevi Fountain demo:{" "}
+            <a href={TREVI_DEMO_FILE_PAGE} target="_blank" rel="noreferrer">
+              Benoit-caen / Wikimedia Commons
+            </a>{" "}
+            ·{" "}
+            <a href={TREVI_DEMO_LICENSE} target="_blank" rel="noreferrer">
+              CC BY-SA 4.0
+            </a>{" "}
+            · 18 s · 14.9 MB. The clip is fetched only when you choose it; reconstruction still runs
+            locally in your browser.
+          </small>
         </div>
       </header>
 
@@ -503,7 +575,10 @@ export default function Home() {
         </details>
       ) : null}
 
-      <footer>All video processing is local. The GitHub Pages demo has no upload endpoint.</footer>
+      <footer>
+        User-selected videos never leave the browser. The optional Trevi test clip is fetched from
+        Wikimedia Commons, then processed locally; the GitHub Pages demo has no upload endpoint.
+      </footer>
     </main>
   );
 }
