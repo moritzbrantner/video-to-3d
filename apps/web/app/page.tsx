@@ -30,6 +30,13 @@ const MAX_SAMPLING_FPS = 8;
 const MIN_FRAME_CAP = 4;
 const MAX_FRAME_CAP = 60;
 
+const TREVI_DEMO_URL =
+  "https://upload.wikimedia.org/wikipedia/commons/a/a8/Fontaine_de_Trevi.webm";
+const TREVI_DEMO_FILE_PAGE =
+  "https://commons.wikimedia.org/wiki/File:Fontaine_de_Trevi.webm";
+const TREVI_DEMO_LICENSE = "https://creativecommons.org/licenses/by-sa/4.0/";
+const TREVI_DEMO_FILE_NAME = "trevi-fountain-demo.webm";
+
 function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
   return frames.map((frame) => ({
     width: frame.width,
@@ -113,6 +120,7 @@ export default function Home() {
   const [runs, setRuns] = useState<VideoRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
   const [batchRunning, setBatchRunning] = useState(false);
+  const [demoDownloading, setDemoDownloading] = useState(false);
   const [samplingFps, setSamplingFps] = useState(1.25);
   const [frameCap, setFrameCap] = useState(18);
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
@@ -123,11 +131,7 @@ export default function Home() {
     );
   }
 
-  async function handleVideos(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
-    if (files.length === 0 || batchRunning) return;
-
+  async function runFiles(files: File[]) {
     const runSamplingFps = normalizedSamplingFps(samplingFps);
     const runFrameCap = normalizedFrameCap(frameCap);
     setSamplingFps(runSamplingFps);
@@ -147,7 +151,6 @@ export default function Home() {
     setRuns(nextRuns);
     setActiveRunId(nextRuns[0].id);
     setSelectedFrameIndex(null);
-    setBatchRunning(true);
 
     for (const [index, file] of files.entries()) {
       const run = nextRuns[index];
@@ -170,8 +173,62 @@ export default function Home() {
         });
       }
     }
+  }
 
-    setBatchRunning(false);
+  async function handleVideos(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0 || batchRunning) return;
+
+    setBatchRunning(true);
+    try {
+      await runFiles(files);
+    } finally {
+      setBatchRunning(false);
+    }
+  }
+
+  async function handleTreviDemo() {
+    if (batchRunning) return;
+
+    setRuns([]);
+    setActiveRunId("");
+    setSelectedFrameIndex(null);
+    setBatchRunning(true);
+    setDemoDownloading(true);
+    try {
+      const response = await fetch(TREVI_DEMO_URL);
+      if (!response.ok) {
+        throw new Error(`Trevi demo download failed with HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const file = new File([blob], TREVI_DEMO_FILE_NAME, {
+        type: blob.type || "video/webm",
+        lastModified: 0,
+      });
+      setDemoDownloading(false);
+      await runFiles([file]);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      const runSamplingFps = normalizedSamplingFps(samplingFps);
+      const runFrameCap = normalizedFrameCap(frameCap);
+      const failedRun: VideoRun = {
+        id: "trevi-fountain-demo:error",
+        fileName: TREVI_DEMO_FILE_NAME,
+        phase: "error",
+        frames: [],
+        reconstruction: null,
+        error: message,
+        samplingFps: runSamplingFps,
+        frameCap: runFrameCap,
+      };
+      setRuns([failedRun]);
+      setActiveRunId(failedRun.id);
+      setSelectedFrameIndex(null);
+    } finally {
+      setDemoDownloading(false);
+      setBatchRunning(false);
+    }
   }
 
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
@@ -183,7 +240,9 @@ export default function Home() {
     : -1;
   const failedCount = runs.filter((run) => run.phase === "error").length;
   const readyCount = runs.filter((run) => run.phase === "done").length;
-  const statusPhase: StatusPhase = processingRun?.phase ?? activeRun?.phase ?? "idle";
+  const statusPhase: StatusPhase = demoDownloading
+    ? "sampling"
+    : (processingRun?.phase ?? activeRun?.phase ?? "idle");
   const frames = activeRun?.frames ?? [];
   const reconstruction = activeRun?.reconstruction ?? null;
   const error = activeRun?.error ?? "";
@@ -200,15 +259,17 @@ export default function Home() {
     Boolean(reconstruction?.multi_view.keyframes.includes(selectedFrameIndex));
   const selectedEvidence = selectedFrameEvidence(selectedFrameState);
 
-  const status = processingRun
-    ? processingRun.phase === "sampling"
-      ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
-      : `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`
-    : runs.length > 0
-      ? failedCount > 0
-        ? `${readyCount} ready · ${failedCount} failed`
-        : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
-      : "Choose one or more videos to begin";
+  const status = demoDownloading
+    ? "Downloading the Trevi test video from Wikimedia Commons…"
+    : processingRun
+      ? processingRun.phase === "sampling"
+        ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
+        : `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`
+      : runs.length > 0
+        ? failedCount > 0
+          ? `${readyCount} ready · ${failedCount} failed`
+          : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
+        : "Choose one or more videos to begin";
 
   return (
     <main>
@@ -256,17 +317,39 @@ export default function Home() {
               />
             </label>
           </div>
-          <label className="upload-button">
-            <input
-              type="file"
-              accept="video/*"
-              multiple
-              onChange={handleVideos}
+          <div className="input-actions">
+            <label className="upload-button">
+              <input
+                type="file"
+                accept="video/*"
+                multiple
+                onChange={handleVideos}
+                disabled={batchRunning}
+              />
+              Select video files
+            </label>
+            <button
+              type="button"
+              className="demo-button"
+              onClick={() => void handleTreviDemo()}
               disabled={batchRunning}
-            />
-            Select video files
-          </label>
-          <small>Sampling settings apply to newly selected videos.</small>
+            >
+              {demoDownloading ? "Loading Trevi…" : "Try Trevi test video"}
+            </button>
+          </div>
+          <small>Sampling settings apply to newly selected videos and the test clip.</small>
+          <small className="demo-attribution">
+            Trevi Fountain demo:{" "}
+            <a href={TREVI_DEMO_FILE_PAGE} target="_blank" rel="noreferrer">
+              Benoit-caen / Wikimedia Commons
+            </a>{" "}
+            ·{" "}
+            <a href={TREVI_DEMO_LICENSE} target="_blank" rel="noreferrer">
+              CC BY-SA 4.0
+            </a>{" "}
+            · 18 s · 14.9 MB. The clip is fetched only when you choose it; reconstruction still runs
+            locally in your browser.
+          </small>
         </div>
       </header>
 
@@ -278,7 +361,9 @@ export default function Home() {
       <section className="status-line" aria-live="polite">
         <span className={`status-dot status-${statusPhase}`} />
         <strong>{status}</strong>
-        {processingRun?.fileName ?? activeRun?.fileName ? (
+        {demoDownloading ? (
+          <span>{TREVI_DEMO_FILE_NAME}</span>
+        ) : processingRun?.fileName ?? activeRun?.fileName ? (
           <span>{processingRun?.fileName ?? activeRun?.fileName}</span>
         ) : null}
       </section>
@@ -503,7 +588,10 @@ export default function Home() {
         </details>
       ) : null}
 
-      <footer>All video processing is local. The GitHub Pages demo has no upload endpoint.</footer>
+      <footer>
+        User-selected videos never leave the browser. The optional Trevi test clip is fetched from
+        Wikimedia Commons, then processed locally; the GitHub Pages demo has no upload endpoint.
+      </footer>
     </main>
   );
 }

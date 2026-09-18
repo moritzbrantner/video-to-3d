@@ -63,6 +63,24 @@ Current boundary: Rust turns reciprocal-consistent source depth estimates into e
 
 Next implementation slice: reconcile the active multi-reference seam-fusion work with `ReconstructionEvidenceView`, then add the owned native-provider interchange form before integrating a learned backend.
 
+## Slice 4A — Learned evidence and escalation — planned
+
+The learned path strengthens observations and proposes reconstruction evidence; it does not replace Rust-owned geometry validation, fusion, or provenance.
+
+- **Learned local features — planned.** Evaluate XFeat as the browser-capable learned feature baseline, first as an optional provider beside the current detector/descriptor path. Preserve a cheap deterministic path and compare accepted geometry, not just match counts.
+- **Adaptive learned matching — planned.** Evaluate LightGlue as an escalation when the ordinary matcher lacks enough reliable correspondence evidence. Keep pair selection, essential-matrix/PnP acceptance, and downstream geometry gates Rust-owned.
+- **Dense correspondence recovery — planned.** Evaluate RoMa for difficult wide-baseline, revisit, or texture-poor pairs where sparse matching fails. Dense confidence remains evidence and must be geometrically revalidated before it can affect cameras or surfaces.
+- **Learned calibration priors — planned.** Evaluate AnyCalib and GeoCalib for focal length, principal point, lens/distortion, and gravity priors. These are proposals only; accepted intrinsics must survive the same reconstruction consistency checks as manually supplied or image-size-derived values.
+- **Long-range point tracks — planned.** Evaluate TAPNext++ and CoTracker3 as optional multi-frame track providers. Learned trajectories must cross Rust epipolar, visibility, positive-depth, triangulation, reprojection, and bundle-adjustment gates before becoming geometry.
+- **Interchangeable native multi-view providers — planned.** Add one native research adapter through the owned form of `ReconstructionEvidenceView`. Use MapAnything as a research integration surface where practical so Pi3X, VGGT-Ω, Depth Anything 3, MASt3R/MUSt3R/Pow3R-class providers can be compared without creating model-specific geometry authority.
+- **Conditioned dense reconstruction — planned.** Prefer providers that can consume already accepted cameras, intrinsics, or depth so the classical Rust solution can condition learned dense geometry instead of being discarded.
+- **Streaming reconstruction research — planned.** Compare LingBot-Map and STream3R for long-video bounded-state processing, keyframe/cache policies, and drift recovery. Borrow the state-management ideas even when the full models remain native-only.
+- **Dynamic-scene geometry — later.** Evaluate 4RC/MonST3R-class approaches for explicit scene motion so moving people, vehicles, water, and other dynamic content can be modeled or rejected geometrically instead of relying only on semantic masks.
+- **Browser deployment rule.** Prefer compact ONNX/WebGPU or equivalent browser-local models only when their download, memory, and latency budgets remain practical. Large multi-view transformers stay opt-in native/Tauri research providers.
+- **Trevi Pages field canary — integrated.** Keep an openly licensed Trevi Fountain clip available directly in GitHub Pages as a one-click real-video smoke test. Treat it as a difficult field canary with camera motion, water, and changing local appearance, not as ground-truth quality evidence; synthetic fixtures and reference datasets remain authoritative for regression metrics.
+
+Exit criterion: at least one learned observation provider improves accepted reconstruction evidence on deterministic fixtures and the Trevi field canary without bypassing Rust-owned acceptance, and at least one interchangeable native multi-view provider is benchmarked through the common evidence boundary.
+
 ## Slice 5 — 3D Gaussian splatting
 
 - Initialize splats from registered cameras and sparse/dense points.
