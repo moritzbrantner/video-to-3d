@@ -10,6 +10,7 @@ include!("reconstruction.rs");
 mod browser_contract;
 mod learned_depth;
 mod reconstruction_evidence;
+mod surface_fusion;
 pub use browser_contract::{
     BrowserReconstructionResult, BundleAdjustmentStatus, CameraKind, CameraPipelineState,
     DenseCameraRole, FrameCameraState, RegistrationStatus,

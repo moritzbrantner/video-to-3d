@@ -163,11 +163,11 @@ struct FeatureMatch {
 pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
     let initial = reconstruct_once(request)?;
     if !needs_registration_recovery(request, &initial) {
-        return Ok(initial);
+        return finalize_reconstruction(initial);
     }
 
     let Some(first_frame) = request.frames.first() else {
-        return Ok(initial);
+        return finalize_reconstruction(initial);
     };
     let retry_radius =
         pan_recovery_radius(first_frame.width, request.options.match_radius, &initial);
@@ -219,7 +219,14 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
         ));
     }
 
-    Ok(best)
+    finalize_reconstruction(best)
+}
+
+fn finalize_reconstruction(
+    mut reconstruction: ReconstructionResult,
+) -> Result<ReconstructionResult, String> {
+    crate::surface_fusion::consolidate_surface_evidence(&mut reconstruction)?;
+    Ok(reconstruction)
 }
 
 fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
