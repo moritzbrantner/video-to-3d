@@ -32,8 +32,8 @@ mod legacy {
     include!("dense_legacy.rs");
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) struct DenseGridSite {
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct DenseGridSite {
     pub x: u32,
     pub y: u32,
 }
