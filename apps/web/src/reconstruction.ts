@@ -281,6 +281,11 @@ export type DensePointBuffer = {
   length: number;
 };
 
+export type DenseGridSiteBuffer = {
+  xy: Uint32Array;
+  length: number;
+};
+
 export type MeshTriangleBuffer = {
   indices: Uint32Array;
   confidence: Float32Array;
@@ -291,6 +296,7 @@ export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
   dense_points: DensePointBuffer;
+  dense_grid_sites: DenseGridSiteBuffer;
   dense: DenseStats;
   mesh_triangles: MeshTriangleBuffer;
   mesh: MeshStats;
@@ -314,6 +320,11 @@ type RawDensePointBuffer = {
   length: number;
 };
 
+type RawDenseGridSiteBuffer = {
+  xy_u32_le: Uint8Array;
+  length: number;
+};
+
 type RawMeshTriangleBuffer = {
   indices_u32_le: Uint8Array;
   confidence_f32_le: Uint8Array;
@@ -322,9 +333,10 @@ type RawMeshTriangleBuffer = {
 
 type RawReconstructionResult = Omit<
   ReconstructionResult,
-  "dense_points" | "mesh_triangles"
+  "dense_points" | "dense_grid_sites" | "mesh_triangles"
 > & {
   dense_points: RawDensePointBuffer;
+  dense_grid_sites: RawDenseGridSiteBuffer;
   mesh_triangles: RawMeshTriangleBuffer;
 };
 
@@ -427,6 +439,19 @@ function normalizeDensePointBuffer(value: unknown): DensePointBuffer {
   return { values, rgb, length };
 }
 
+function normalizeDenseGridSiteBuffer(value: unknown): DenseGridSiteBuffer {
+  const raw = objectRecord(value, "dense-grid-site buffer") as RawDenseGridSiteBuffer;
+  const length = packedLength(raw.length, "dense-grid-site count");
+  const xy = uint32LittleEndian(
+    byteBuffer(raw.xy_u32_le, "dense-grid-site coordinate buffer"),
+    "dense-grid-site coordinate buffer",
+  );
+  if (xy.length !== length * 2) {
+    throw new Error("camera-state contract mismatch: dense-grid-site buffer lengths are inconsistent");
+  }
+  return { xy, length };
+}
+
 function normalizeMeshTriangleBuffer(value: unknown): MeshTriangleBuffer {
   const raw = objectRecord(value, "mesh-triangle buffer") as RawMeshTriangleBuffer;
   const length = packedLength(raw.length, "mesh-triangle count");
@@ -449,6 +474,7 @@ export function normalizeWasmReconstruction(value: unknown): ReconstructionResul
   return {
     ...normalized,
     dense_points: normalizeDensePointBuffer(normalized.dense_points),
+    dense_grid_sites: normalizeDenseGridSiteBuffer(normalized.dense_grid_sites),
     mesh_triangles: normalizeMeshTriangleBuffer(normalized.mesh_triangles),
   };
 }
@@ -472,6 +498,8 @@ export function assertReconstructionContract(
   if (
     result.dense_points.values.length !== result.dense_points.length * 4 ||
     result.dense_points.rgb.length !== result.dense_points.length * 3 ||
+    result.dense_grid_sites.xy.length !== result.dense_grid_sites.length * 2 ||
+    result.dense_grid_sites.length !== result.dense_points.length ||
     result.mesh_triangles.indices.length !== result.mesh_triangles.length * 3 ||
     result.mesh_triangles.confidence.length !== result.mesh_triangles.length
   ) {
