@@ -566,6 +566,13 @@ export default function Home() {
                     </td>
                   </tr>
                   <tr>
+                    <th>Dense working set</th>
+                    <td>
+                      {(reconstruction.dense.working_set_estimate.total_bytes / (1024 * 1024)).toFixed(1)} MiB estimated
+                      {` / ${(reconstruction.dense.working_set_budget_bytes / (1024 * 1024)).toFixed(0)} MiB budget`}
+                    </td>
+                  </tr>
+                  <tr>
                     <th>Bundle adjustment</th>
                     <td>
                       {reconstruction.multi_view.bundle_adjustment.accepted

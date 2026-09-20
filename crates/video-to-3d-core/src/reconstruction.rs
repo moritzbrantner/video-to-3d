@@ -5,7 +5,7 @@ mod pnp;
 mod revisit;
 mod two_view;
 
-pub use dense::{DenseGridSite, DenseStats};
+pub use dense::{DenseGridSite, DenseStats, DenseWorkingSetEstimate};
 pub use mesh::{MeshStats, MeshTriangle};
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
@@ -26,6 +26,11 @@ const MIN_TRACK_MATCHES: usize = 8;
 const MIN_TRACK_OVERLAP: f32 = 0.18;
 const MOTION_GUIDED_COARSE_RATIO_THRESHOLD: f32 = 0.72;
 const MOTION_GUIDED_MIN_SUPPORT: usize = 4;
+const DEFAULT_DENSE_WORKING_SET_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+const fn default_dense_working_set_budget_bytes() -> usize {
+    DEFAULT_DENSE_WORKING_SET_BUDGET_BYTES
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrameInput {
@@ -44,6 +49,8 @@ pub struct ReconstructionOptions {
     pub max_descriptor_distance: f32,
     pub ratio_threshold: f32,
     pub focal_length_pixels: Option<f32>,
+    #[serde(default = "default_dense_working_set_budget_bytes")]
+    pub max_dense_working_set_bytes: usize,
 }
 
 impl Default for ReconstructionOptions {
@@ -56,6 +63,7 @@ impl Default for ReconstructionOptions {
             max_descriptor_distance: 36.0,
             ratio_threshold: 0.82,
             focal_length_pixels: None,
+            max_dense_working_set_bytes: DEFAULT_DENSE_WORKING_SET_BUDGET_BYTES,
         }
     }
 }
@@ -713,11 +721,12 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         .chain(&optimized_new_landmark_positions)
         .copied()
         .collect();
-    let dense_analysis = dense::estimate_depth_points(
+    let dense_analysis = dense::estimate_depth_points_with_budget(
         &request.frames,
         &registered_geometry,
         &dense_sparse_points,
         focal as f64,
+        options.max_dense_working_set_bytes,
     );
     let mesh_analysis = mesh::reconstruct_dense_mesh(
         &dense_analysis.points,
@@ -1104,6 +1113,9 @@ fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
     }
     if request.options.max_descriptor_distance <= 0.0 {
         return Err("max descriptor distance must be positive".into());
+    }
+    if request.options.max_dense_working_set_bytes == 0 {
+        return Err("dense working-set budget must be positive".into());
     }
     if request
         .options

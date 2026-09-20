@@ -173,6 +173,16 @@ export type DenseReferencePatchStats = {
   search_max_depth: number | null;
 };
 
+export type DenseWorkingSetEstimate = {
+  frame_bytes: number;
+  remapped_frame_bytes: number;
+  luminance_bytes: number;
+  dense_sample_bytes: number;
+  topology_bytes: number;
+  packed_output_bytes: number;
+  total_bytes: number;
+};
+
 export type DenseStats = {
   attempted: boolean;
   skip_reason: string | null;
@@ -205,6 +215,8 @@ export type DenseStats = {
   reference_frames: number[];
   reference_attempts: DenseReferenceAttemptStats[];
   reference_patches: DenseReferencePatchStats[];
+  working_set_estimate: DenseWorkingSetEstimate;
+  working_set_budget_bytes: number;
 };
 
 export type MeshTriangle = {
@@ -492,8 +504,41 @@ export function assertReconstructionContract(
   expectedFrameCount: number,
 ): void {
   const state = result.camera_state;
+  const workingSet = result.dense.working_set_estimate;
   if (!state || !Array.isArray(state.frames)) {
     throw new Error("camera-state contract mismatch: WASM result has no explicit camera_state");
+  }
+  if (
+    !workingSet ||
+    !Object.values(workingSet).every(
+      (value) => Number.isSafeInteger(value) && value >= 0,
+    ) ||
+    !Number.isSafeInteger(result.dense.working_set_budget_bytes) ||
+    result.dense.working_set_budget_bytes <= 0
+  ) {
+    throw new Error("camera-state contract mismatch: dense working-set evidence is invalid");
+  }
+  const workingSetSum =
+    workingSet.frame_bytes +
+    workingSet.remapped_frame_bytes +
+    workingSet.luminance_bytes +
+    workingSet.dense_sample_bytes +
+    workingSet.topology_bytes +
+    workingSet.packed_output_bytes;
+  if (workingSet.total_bytes !== workingSetSum) {
+    throw new Error("camera-state contract mismatch: dense working-set components do not sum to the total");
+  }
+  if (
+    workingSet.total_bytes > result.dense.working_set_budget_bytes &&
+    (result.dense.attempted ||
+      result.dense_points.length > 0 ||
+      result.mesh.attempted ||
+      result.mesh_triangles.length > 0 ||
+      !result.dense.skip_reason?.includes("working set"))
+  ) {
+    throw new Error(
+      "camera-state contract mismatch: over-budget dense reconstruction did not fail closed",
+    );
   }
   if (
     result.dense_points.values.length !== result.dense_points.length * 4 ||
@@ -641,6 +686,7 @@ export async function reconstructFrames(frames: SampledFrame[]): Promise<Reconst
         match_radius: 42,
         max_descriptor_distance: 36,
         ratio_threshold: 0.82,
+        max_dense_working_set_bytes: 256 * 1024 * 1024,
       },
     }),
   );
