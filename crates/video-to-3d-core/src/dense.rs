@@ -2,10 +2,29 @@ use crate::{multi_view::RegisteredCamera, FrameInput, Point3};
 use nalgebra::Vector3;
 use serde::Serialize;
 use std::collections::BTreeSet;
+use std::mem::size_of;
 
 const MAX_REFERENCE_VIEWS: usize = 3;
 const MAX_REFERENCE_ATTEMPTS: usize = 6;
 const MIN_REFERENCE_PATCH_POINTS: usize = 3;
+const MAX_SOURCE_VIEWS_PER_REFERENCE: usize = 4;
+const DENSE_GRID_BORDER: usize = 3;
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct DenseWorkingSetEstimate {
+    pub frame_bytes: usize,
+    pub retry_frame_bytes: usize,
+    pub remapped_frame_bytes: usize,
+    pub luminance_bytes: usize,
+    pub sparse_pipeline_bytes: usize,
+    pub dense_sample_bytes: usize,
+    pub topology_bytes: usize,
+    pub mesh_builder_bytes: usize,
+    pub surface_fusion_bytes: usize,
+    pub retained_candidate_bytes: usize,
+    pub packed_output_bytes: usize,
+    pub total_bytes: usize,
+}
 
 mod legacy {
     pub(super) fn minimum_visible_sparse_points() -> usize {
@@ -108,6 +127,8 @@ pub struct DenseStats {
     pub reference_frames: Vec<usize>,
     pub reference_attempts: Vec<DenseReferenceAttemptStats>,
     pub reference_patches: Vec<DenseReferencePatchStats>,
+    pub working_set_estimate: DenseWorkingSetEstimate,
+    pub working_set_budget_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -183,6 +204,235 @@ pub(super) fn estimate_depth_points(
     }
 
     combine_patches(patches, attempts)
+}
+
+pub(super) fn estimate_depth_points_with_budget(
+    frames: &[FrameInput],
+    cameras: &[RegisteredCamera],
+    sparse_points: &[Vector3<f64>],
+    focal: f64,
+    working_set_budget_bytes: usize,
+    max_features: usize,
+    descriptor_radius: u32,
+) -> DenseAnalysis {
+    let working_set_estimate = estimate_working_set(frames, max_features, descriptor_radius);
+    if working_set_estimate.total_bytes > working_set_budget_bytes {
+        return DenseAnalysis {
+            stats: DenseStats {
+                skip_reason: Some(format!(
+                    "estimated dense working set of {} bytes exceeds the configured {} byte budget",
+                    working_set_estimate.total_bytes, working_set_budget_bytes
+                )),
+                working_set_estimate,
+                working_set_budget_bytes,
+                ..DenseStats::default()
+            },
+            points: Vec::new(),
+            grid_sites: Vec::new(),
+        };
+    }
+
+    let mut analysis = estimate_depth_points(frames, cameras, sparse_points, focal);
+    analysis.stats.working_set_estimate = working_set_estimate;
+    analysis.stats.working_set_budget_bytes = working_set_budget_bytes;
+    analysis
+}
+
+fn estimate_working_set(
+    frames: &[FrameInput],
+    max_features: usize,
+    descriptor_radius: u32,
+) -> DenseWorkingSetEstimate {
+    let frame_bytes = frames
+        .iter()
+        .map(|frame| frame.rgba.len())
+        .fold(0usize, usize::saturating_add);
+    let luminance_pixels = frames
+        .iter()
+        .map(|frame| (frame.width as usize).saturating_mul(frame.height as usize))
+        .fold(0usize, usize::saturating_add);
+    let largest_frame_pixels = frames
+        .iter()
+        .map(|frame| (frame.width as usize).saturating_mul(frame.height as usize))
+        .max()
+        .unwrap_or_default();
+
+    let max_grid_samples = frames
+        .first()
+        .map(|frame| {
+            let stride = (frame.width.min(frame.height) / 48).clamp(4, 12) as usize;
+            grid_axis_samples(frame.width as usize, stride)
+                .saturating_mul(grid_axis_samples(frame.height as usize, stride))
+        })
+        .unwrap_or_default()
+        .saturating_mul(MAX_REFERENCE_VIEWS);
+    // Ordinary cells contribute two triangles, while bounded horizontal/vertical gap bridges can
+    // add more candidates. Eight candidates per retained sample is a conservative upper bound for
+    // all current mesh passes.
+    let max_mesh_triangles = max_grid_samples.saturating_mul(8);
+
+    // Recovery can hold one owned request clone alongside the caller's request.
+    let retry_frame_bytes = frame_bytes;
+    // Multi-reference dense processing clones every registered frame into reference-first order.
+    // Charging all input frames is conservative when only a subset registered successfully.
+    let remapped_frame_bytes = frame_bytes;
+    // Sparse feature extraction keeps one luminance copy per frame. A dense reference attempt
+    // adds one reference plus up to four source luminance buffers at peak.
+    let luminance_bytes = luminance_pixels.saturating_add(
+        largest_frame_pixels.saturating_mul(1 + MAX_SOURCE_VIEWS_PER_REFERENCE),
+    );
+    // Feature descriptors, adjacent matches, track membership, and sparse/two-view points remain
+    // live while dense reconstruction runs. Bound them from the request options rather than from
+    // observed counts so feature-heavy configurations cannot bypass the pre-dense budget gate.
+    let descriptor_side = (descriptor_radius as usize)
+        .saturating_mul(2)
+        .saturating_add(1);
+    let descriptor_bytes = descriptor_side
+        .saturating_mul(descriptor_side)
+        .saturating_mul(size_of::<i16>());
+    let feature_count = frames.len().saturating_mul(max_features);
+    let adjacent_match_count = frames
+        .len()
+        .saturating_sub(1)
+        .saturating_mul(max_features);
+    let observation_count = adjacent_match_count.saturating_mul(2);
+    let feature_record_bytes = 3 * size_of::<u32>() + size_of::<Vec<i16>>();
+    let sparse_pipeline_bytes = feature_count
+        .saturating_mul(feature_record_bytes.saturating_add(descriptor_bytes))
+        // FeatureMatch plus adjacent match-vector capacity.
+        .saturating_add(adjacent_match_count.saturating_mul(3 * size_of::<usize>()))
+        // FeatureTrack vector headers and their observation storage.
+        .saturating_add(
+            adjacent_match_count.saturating_mul(size_of::<Vec<(usize, usize)>>()),
+        )
+        .saturating_add(observation_count.saturating_mul(2 * size_of::<usize>()))
+        // Observation -> track membership hash entries, including control/capacity overhead.
+        .saturating_add(
+            observation_count.saturating_mul(hash_entry_bytes(3 * size_of::<usize>())),
+        )
+        // Sparse display points, two-view triangulated points, and registration correspondence
+        // buffers can overlap; charge a full conservative record for each possible match.
+        .saturating_add(adjacent_match_count.saturating_mul(
+            size_of::<Point3>()
+                + size_of::<usize>()
+                + size_of::<f32>()
+                + size_of::<Vector3<f64>>()
+                + 2 * size_of::<f64>()
+                + 4 * size_of::<usize>(),
+        ));
+    // Multi-reference processing temporarily retains both patch-local and combined point/site
+    // storage, plus error/support vectors and the occupied-grid index used by completion.
+    let retained_sample_bytes = size_of::<Point3>()
+        + size_of::<DenseGridSite>()
+        + 2 * size_of::<f64>()
+        + 3 * size_of::<usize>();
+    let dense_sample_bytes = max_grid_samples
+        .saturating_mul(retained_sample_bytes)
+        .saturating_mul(2);
+    let topology_bytes = max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>());
+    // The mesh builder retains a grid map, expanded cell-origin set, candidate-key set, and
+    // accepted-triangle vector together. BTree entries include a deliberately generous node/link
+    // allowance so this remains conservative on both native and wasm32 layouts.
+    let mesh_builder_bytes = max_grid_samples
+        .saturating_mul(btree_entry_bytes(
+            2 * size_of::<i32>()
+                + size_of::<usize>()
+                + 6 * size_of::<f64>()
+                + size_of::<f32>(),
+        ))
+        .saturating_add(
+            max_grid_samples
+                .saturating_mul(4)
+                .saturating_mul(btree_entry_bytes(2 * size_of::<i32>())),
+        )
+        .saturating_add(
+            max_mesh_triangles.saturating_mul(btree_entry_bytes(3 * size_of::<usize>())),
+        )
+        .saturating_add(
+            max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
+        );
+    // Surface fusion retains per-vertex normal/scale/incident evidence, spatial hash buckets,
+    // mutual-nearest state, proposed moves, and topology-validation arrays at the same time as
+    // the accepted dense points and mesh. Charge every major container at full conservative
+    // capacity, including three incident indices and three edge lengths per triangle.
+    let per_vertex_fusion_bytes = size_of::<Option<usize>>()
+        + size_of::<Vector3<f64>>()
+        + size_of::<f64>()
+        + size_of::<usize>()
+        + size_of::<Vec<usize>>()
+        + size_of::<Option<Vector3<f64>>>()
+        + size_of::<Option<f64>>()
+        + size_of::<Option<(usize, f64)>>()
+        + size_of::<Option<usize>>()
+        + 2 * size_of::<bool>()
+        // Worst case: one spatial bucket allocation per eligible vertex.
+        + 3 * size_of::<i64>()
+        + size_of::<Vec<usize>>()
+        + 4 * size_of::<usize>()
+        + size_of::<usize>()
+        // At most one proposed FusionMove for every two vertices; charging one per vertex is safe.
+        + 2 * size_of::<usize>()
+        + size_of::<Vector3<f64>>();
+    let per_triangle_fusion_bytes = 6 * size_of::<usize>()
+        + 3 * size_of::<f64>()
+        + size_of::<bool>()
+        + size_of::<usize>();
+    let surface_fusion_bytes = max_grid_samples
+        .saturating_mul(per_vertex_fusion_bytes)
+        .saturating_add(max_mesh_triangles.saturating_mul(per_triangle_fusion_bytes));
+    // Recovery retains the previous best result while reconstructing a retry. Charge its final
+    // dense point/site and mesh buffers even on the initial attempt so the same budget applies to
+    // every candidate and remains fail-closed when recovery is needed.
+    let retained_candidate_bytes = max_grid_samples
+        .saturating_mul(size_of::<Point3>() + size_of::<DenseGridSite>())
+        .saturating_add(
+            max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
+        );
+    // Packed WASM output: xyzw, RGB, original grid site, triangle indices and confidence.
+    let packed_output_bytes = max_grid_samples
+        .saturating_mul(4 * size_of::<f32>() + 3 * size_of::<u8>() + 2 * size_of::<u32>())
+        .saturating_add(
+            max_mesh_triangles.saturating_mul(4 * size_of::<u32>()),
+        );
+    let total_bytes = frame_bytes
+        .saturating_add(retry_frame_bytes)
+        .saturating_add(remapped_frame_bytes)
+        .saturating_add(luminance_bytes)
+        .saturating_add(sparse_pipeline_bytes)
+        .saturating_add(dense_sample_bytes)
+        .saturating_add(topology_bytes)
+        .saturating_add(mesh_builder_bytes)
+        .saturating_add(surface_fusion_bytes)
+        .saturating_add(retained_candidate_bytes)
+        .saturating_add(packed_output_bytes);
+
+    DenseWorkingSetEstimate {
+        frame_bytes,
+        retry_frame_bytes,
+        remapped_frame_bytes,
+        luminance_bytes,
+        sparse_pipeline_bytes,
+        dense_sample_bytes,
+        topology_bytes,
+        mesh_builder_bytes,
+        surface_fusion_bytes,
+        retained_candidate_bytes,
+        packed_output_bytes,
+        total_bytes,
+    }
+}
+
+const fn btree_entry_bytes(payload_bytes: usize) -> usize {
+    payload_bytes + 4 * size_of::<usize>() + 32
+}
+
+const fn hash_entry_bytes(payload_bytes: usize) -> usize {
+    payload_bytes + 4 * size_of::<usize>() + 32
+}
+
+fn grid_axis_samples(extent: usize, stride: usize) -> usize {
+    let usable = extent.saturating_sub(DENSE_GRID_BORDER.saturating_mul(2));
+    usable.saturating_add(stride.saturating_sub(1)) / stride
 }
 
 fn reference_candidate_order(
@@ -537,6 +787,8 @@ fn combine_patches(
             reference_frames,
             reference_attempts,
             reference_patches,
+            working_set_estimate: DenseWorkingSetEstimate::default(),
+            working_set_budget_bytes: 0,
         },
         points,
         grid_sites,
@@ -618,6 +870,8 @@ fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
             reference_frames,
             reference_attempts,
             reference_patches,
+            working_set_estimate: DenseWorkingSetEstimate::default(),
+            working_set_budget_bytes: 0,
         },
         points,
         grid_sites: convert_grid_sites(grid_sites),
@@ -735,6 +989,122 @@ mod multi_reference_tests {
             .stats
             .source_frames
             .contains(&result.stats.reference_frame.expect("primary reference")));
+    }
+
+    #[test]
+    fn budget_below_estimate_suppresses_only_dense_geometry() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let depth = 4.0;
+        let frames = vec![
+            plane_frame(width, height, focal, 0.0, depth),
+            plane_frame(width, height, focal, 0.24, depth),
+        ];
+        let cameras = vec![camera(0, 0.0), camera(1, 0.24)];
+        let sparse = sparse_plane(width, height, focal, depth);
+
+        let result =
+            estimate_depth_points_with_budget(&frames, &cameras, &sparse, focal, 1, 320, 3);
+
+        assert!(!result.stats.attempted);
+        assert!(result.points.is_empty());
+        assert!(result.grid_sites.is_empty());
+        assert!(result.stats.working_set_estimate.total_bytes > 1);
+        assert_eq!(result.stats.working_set_budget_bytes, 1);
+        assert!(result
+            .stats
+            .skip_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("exceeds the configured")));
+    }
+
+    #[test]
+    fn budget_above_estimate_preserves_dense_output() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let depth = 4.0;
+        let frames = vec![
+            plane_frame(width, height, focal, 0.0, depth),
+            plane_frame(width, height, focal, 0.24, depth),
+            plane_frame(width, height, focal, -0.22, depth),
+        ];
+        let cameras = vec![camera(0, 0.0), camera(1, 0.24), camera(2, -0.22)];
+        let sparse = sparse_plane(width, height, focal, depth);
+
+        let baseline = estimate_depth_points(&frames, &cameras, &sparse, focal);
+        let budgeted = estimate_depth_points_with_budget(
+            &frames,
+            &cameras,
+            &sparse,
+            focal,
+            usize::MAX,
+            320,
+            3,
+        );
+
+        assert_eq!(baseline.points.len(), budgeted.points.len());
+        assert_eq!(baseline.grid_sites.len(), budgeted.grid_sites.len());
+        for (left, right) in baseline.points.iter().zip(&budgeted.points) {
+            assert_eq!(left.x.to_bits(), right.x.to_bits());
+            assert_eq!(left.y.to_bits(), right.y.to_bits());
+            assert_eq!(left.z.to_bits(), right.z.to_bits());
+            assert_eq!(left.confidence.to_bits(), right.confidence.to_bits());
+            assert_eq!((left.r, left.g, left.b), (right.r, right.g, right.b));
+        }
+        for (left, right) in baseline.grid_sites.iter().zip(&budgeted.grid_sites) {
+            assert_eq!((left.x, left.y), (right.x, right.y));
+        }
+        assert_eq!(
+            budgeted.stats.working_set_estimate.total_bytes,
+            budgeted
+                .stats
+                .working_set_estimate
+                .frame_bytes
+                .saturating_add(budgeted.stats.working_set_estimate.retry_frame_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.remapped_frame_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.luminance_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.sparse_pipeline_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.dense_sample_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.topology_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.mesh_builder_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.surface_fusion_bytes)
+                .saturating_add(
+                    budgeted
+                        .stats
+                        .working_set_estimate
+                        .retained_candidate_bytes,
+                )
+                .saturating_add(budgeted.stats.working_set_estimate.packed_output_bytes)
+        );
+        assert_eq!(
+            budgeted.stats.working_set_estimate.retry_frame_bytes,
+            budgeted.stats.working_set_estimate.frame_bytes
+        );
+        assert_eq!(
+            budgeted.stats.working_set_estimate.remapped_frame_bytes,
+            budgeted.stats.working_set_estimate.frame_bytes
+        );
+        assert!(budgeted.stats.working_set_estimate.retained_candidate_bytes > 0);
+        assert!(budgeted.stats.working_set_estimate.mesh_builder_bytes > 0);
+        assert!(budgeted.stats.working_set_estimate.surface_fusion_bytes > 0);
+        assert!(budgeted.stats.working_set_estimate.sparse_pipeline_bytes > 0);
+    }
+
+    #[test]
+    fn feature_options_increase_the_retained_sparse_estimate() {
+        let frames = vec![
+            plane_frame(68, 48, 60.0, 0.0, 4.0),
+            plane_frame(68, 48, 60.0, 0.24, 4.0),
+            plane_frame(68, 48, 60.0, -0.22, 4.0),
+        ];
+
+        let ordinary = estimate_working_set(&frames, 320, 3);
+        let feature_heavy = estimate_working_set(&frames, 640, 7);
+
+        assert!(feature_heavy.sparse_pipeline_bytes > ordinary.sparse_pipeline_bytes);
+        assert!(feature_heavy.total_bytes > ordinary.total_bytes);
     }
 
     #[test]

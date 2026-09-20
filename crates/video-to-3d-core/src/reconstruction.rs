@@ -5,7 +5,7 @@ mod pnp;
 mod revisit;
 mod two_view;
 
-pub use dense::{DenseGridSite, DenseStats};
+pub use dense::{DenseGridSite, DenseStats, DenseWorkingSetEstimate};
 pub use mesh::{MeshStats, MeshTriangle};
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
@@ -26,6 +26,11 @@ const MIN_TRACK_MATCHES: usize = 8;
 const MIN_TRACK_OVERLAP: f32 = 0.18;
 const MOTION_GUIDED_COARSE_RATIO_THRESHOLD: f32 = 0.72;
 const MOTION_GUIDED_MIN_SUPPORT: usize = 4;
+const DEFAULT_DENSE_WORKING_SET_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+const fn default_dense_working_set_budget_bytes() -> usize {
+    DEFAULT_DENSE_WORKING_SET_BUDGET_BYTES
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrameInput {
@@ -44,6 +49,8 @@ pub struct ReconstructionOptions {
     pub max_descriptor_distance: f32,
     pub ratio_threshold: f32,
     pub focal_length_pixels: Option<f32>,
+    #[serde(default = "default_dense_working_set_budget_bytes")]
+    pub max_dense_working_set_bytes: usize,
 }
 
 impl Default for ReconstructionOptions {
@@ -56,6 +63,7 @@ impl Default for ReconstructionOptions {
             max_descriptor_distance: 36.0,
             ratio_threshold: 0.82,
             focal_length_pixels: None,
+            max_dense_working_set_bytes: DEFAULT_DENSE_WORKING_SET_BUDGET_BYTES,
         }
     }
 }
@@ -713,11 +721,14 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         .chain(&optimized_new_landmark_positions)
         .copied()
         .collect();
-    let dense_analysis = dense::estimate_depth_points(
+    let dense_analysis = dense::estimate_depth_points_with_budget(
         &request.frames,
         &registered_geometry,
         &dense_sparse_points,
         focal as f64,
+        options.max_dense_working_set_bytes,
+        options.max_features,
+        options.descriptor_radius,
     );
     let mesh_analysis = mesh::reconstruct_dense_mesh(
         &dense_analysis.points,
@@ -1083,7 +1094,10 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult) -> [usize; 10] {
+fn reconstruction_score(result: &ReconstructionResult) -> [usize; 8] {
+    // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
+    // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
+    // camera/point solution survives.
     [
         usize::from(result.calibrated_pair.is_some()),
         accepted_registered_camera_count(result),
@@ -1093,8 +1107,6 @@ fn reconstruction_score(result: &ReconstructionResult) -> [usize; 10] {
         result.multi_view.longest_track,
         result.multi_view.linked_pairs,
         result.points.len(),
-        result.dense_points.len(),
-        result.mesh_triangles.len(),
     ]
 }
 
@@ -1104,6 +1116,9 @@ fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
     }
     if request.options.max_descriptor_distance <= 0.0 {
         return Err("max descriptor distance must be positive".into());
+    }
+    if request.options.max_dense_working_set_bytes == 0 {
+        return Err("dense working-set budget must be positive".into());
     }
     if request
         .options
@@ -1732,6 +1747,36 @@ mod tests {
         assert_eq!(pan_recovery_radius(360, 128, &result), 128);
         result.pairs[0].median_motion = 44.0;
         assert_eq!(pan_recovery_radius(240, 42, &result), 104);
+    }
+
+    #[test]
+    fn recovery_score_is_independent_of_dense_budget_output() {
+        let request = ReconstructionRequest {
+            frames: vec![synthetic_frame(96, 80, 0), synthetic_frame(96, 80, 0)],
+            options: ReconstructionOptions::default(),
+        };
+        let without_dense = reconstruct_once(&request).expect("fixture should reconstruct");
+        let mut with_dense = without_dense.clone();
+        with_dense.dense_points.push(Point3 {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            confidence: 0.9,
+            r: 10,
+            g: 20,
+            b: 30,
+        });
+        with_dense.mesh_triangles.push(MeshTriangle {
+            a: 0,
+            b: 0,
+            c: 0,
+            confidence: 0.8,
+        });
+
+        assert_eq!(
+            reconstruction_score(&without_dense),
+            reconstruction_score(&with_dense)
+        );
     }
 
     #[test]

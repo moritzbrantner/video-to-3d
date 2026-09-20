@@ -191,6 +191,7 @@ fn analyze_authoritative_baseline(
         max_descriptor_distance: options.baseline_max_distance,
         ratio_threshold: options.ratio_threshold,
         focal_length_pixels: None,
+        ..super::ReconstructionOptions::default()
     };
     let source_luma = super::to_luma(&super::FrameInput {
         width,
@@ -907,6 +908,7 @@ mod tests {
             max_descriptor_distance: options.baseline_max_distance,
             ratio_threshold: options.ratio_threshold,
             focal_length_pixels: None,
+            ..super::super::ReconstructionOptions::default()
         };
         let source_frame = super::super::FrameInput {
             width,

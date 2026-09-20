@@ -41,6 +41,13 @@ const result = normalizeWasmReconstruction(
 assertReconstructionContract(result, 2);
 
 if (
+  result.dense.working_set_estimate.total_bytes <= 0 ||
+  result.dense.working_set_budget_bytes !== 256 * 1024 * 1024
+) {
+  throw new Error("WASM reconstruction did not expose its Rust-owned dense working-set budget");
+}
+
+if (
   !(result.dense_points.values instanceof Float32Array) ||
   !(result.dense_points.rgb instanceof Uint8Array) ||
   !(result.mesh_triangles.indices instanceof Uint32Array) ||
