@@ -180,6 +180,7 @@ export type DenseWorkingSetEstimate = {
   luminance_bytes: number;
   dense_sample_bytes: number;
   topology_bytes: number;
+  retained_candidate_bytes: number;
   packed_output_bytes: number;
   total_bytes: number;
 };
@@ -526,6 +527,7 @@ export function assertReconstructionContract(
     workingSet.luminance_bytes +
     workingSet.dense_sample_bytes +
     workingSet.topology_bytes +
+    workingSet.retained_candidate_bytes +
     workingSet.packed_output_bytes;
   if (workingSet.total_bytes !== workingSetSum) {
     throw new Error("camera-state contract mismatch: dense working-set components do not sum to the total");

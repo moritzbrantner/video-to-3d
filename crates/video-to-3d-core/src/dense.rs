@@ -18,6 +18,7 @@ pub struct DenseWorkingSetEstimate {
     pub luminance_bytes: usize,
     pub dense_sample_bytes: usize,
     pub topology_bytes: usize,
+    pub retained_candidate_bytes: usize,
     pub packed_output_bytes: usize,
     pub total_bytes: usize,
 }
@@ -289,6 +290,16 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
     let topology_bytes = max_grid_cells
         .saturating_mul(2)
         .saturating_mul(4 * size_of::<u32>() + size_of::<usize>());
+    // Recovery retains the previous best result while reconstructing a retry. Charge its final
+    // dense point/site and mesh buffers even on the initial attempt so the same budget applies to
+    // every candidate and remains fail-closed when recovery is needed.
+    let retained_candidate_bytes = max_grid_samples
+        .saturating_mul(size_of::<Point3>() + size_of::<DenseGridSite>())
+        .saturating_add(
+            max_grid_cells
+                .saturating_mul(2)
+                .saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
+        );
     // Packed WASM output: xyzw, RGB, original grid site, triangle indices and confidence.
     let packed_output_bytes = max_grid_samples
         .saturating_mul(4 * size_of::<f32>() + 3 * size_of::<u8>() + 2 * size_of::<u32>())
@@ -303,6 +314,7 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         .saturating_add(luminance_bytes)
         .saturating_add(dense_sample_bytes)
         .saturating_add(topology_bytes)
+        .saturating_add(retained_candidate_bytes)
         .saturating_add(packed_output_bytes);
 
     DenseWorkingSetEstimate {
@@ -312,6 +324,7 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         luminance_bytes,
         dense_sample_bytes,
         topology_bytes,
+        retained_candidate_bytes,
         packed_output_bytes,
         total_bytes,
     }
@@ -946,6 +959,12 @@ mod multi_reference_tests {
                 .saturating_add(budgeted.stats.working_set_estimate.luminance_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.dense_sample_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.topology_bytes)
+                .saturating_add(
+                    budgeted
+                        .stats
+                        .working_set_estimate
+                        .retained_candidate_bytes,
+                )
                 .saturating_add(budgeted.stats.working_set_estimate.packed_output_bytes)
         );
         assert_eq!(
@@ -956,6 +975,7 @@ mod multi_reference_tests {
             budgeted.stats.working_set_estimate.remapped_frame_bytes,
             budgeted.stats.working_set_estimate.frame_bytes
         );
+        assert!(budgeted.stats.working_set_estimate.retained_candidate_bytes > 0);
     }
 
     #[test]
