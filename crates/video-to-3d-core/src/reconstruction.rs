@@ -727,6 +727,8 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         &dense_sparse_points,
         focal as f64,
         options.max_dense_working_set_bytes,
+        options.max_features,
+        options.descriptor_radius,
     );
     let mesh_analysis = mesh::reconstruct_dense_mesh(
         &dense_analysis.points,

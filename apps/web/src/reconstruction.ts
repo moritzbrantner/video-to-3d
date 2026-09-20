@@ -178,6 +178,7 @@ export type DenseWorkingSetEstimate = {
   retry_frame_bytes: number;
   remapped_frame_bytes: number;
   luminance_bytes: number;
+  sparse_pipeline_bytes: number;
   dense_sample_bytes: number;
   topology_bytes: number;
   mesh_builder_bytes: number;
@@ -527,6 +528,7 @@ export function assertReconstructionContract(
     workingSet.retry_frame_bytes +
     workingSet.remapped_frame_bytes +
     workingSet.luminance_bytes +
+    workingSet.sparse_pipeline_bytes +
     workingSet.dense_sample_bytes +
     workingSet.topology_bytes +
     workingSet.mesh_builder_bytes +

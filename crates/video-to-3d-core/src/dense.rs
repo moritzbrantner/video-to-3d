@@ -16,6 +16,7 @@ pub struct DenseWorkingSetEstimate {
     pub retry_frame_bytes: usize,
     pub remapped_frame_bytes: usize,
     pub luminance_bytes: usize,
+    pub sparse_pipeline_bytes: usize,
     pub dense_sample_bytes: usize,
     pub topology_bytes: usize,
     pub mesh_builder_bytes: usize,
@@ -211,8 +212,10 @@ pub(super) fn estimate_depth_points_with_budget(
     sparse_points: &[Vector3<f64>],
     focal: f64,
     working_set_budget_bytes: usize,
+    max_features: usize,
+    descriptor_radius: u32,
 ) -> DenseAnalysis {
-    let working_set_estimate = estimate_working_set(frames);
+    let working_set_estimate = estimate_working_set(frames, max_features, descriptor_radius);
     if working_set_estimate.total_bytes > working_set_budget_bytes {
         return DenseAnalysis {
             stats: DenseStats {
@@ -235,7 +238,11 @@ pub(super) fn estimate_depth_points_with_budget(
     analysis
 }
 
-fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
+fn estimate_working_set(
+    frames: &[FrameInput],
+    max_features: usize,
+    descriptor_radius: u32,
+) -> DenseWorkingSetEstimate {
     let frame_bytes = frames
         .iter()
         .map(|frame| frame.rgba.len())
@@ -274,6 +281,45 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
     let luminance_bytes = luminance_pixels.saturating_add(
         largest_frame_pixels.saturating_mul(1 + MAX_SOURCE_VIEWS_PER_REFERENCE),
     );
+    // Feature descriptors, adjacent matches, track membership, and sparse/two-view points remain
+    // live while dense reconstruction runs. Bound them from the request options rather than from
+    // observed counts so feature-heavy configurations cannot bypass the pre-dense budget gate.
+    let descriptor_side = (descriptor_radius as usize)
+        .saturating_mul(2)
+        .saturating_add(1);
+    let descriptor_bytes = descriptor_side
+        .saturating_mul(descriptor_side)
+        .saturating_mul(size_of::<i16>());
+    let feature_count = frames.len().saturating_mul(max_features);
+    let adjacent_match_count = frames
+        .len()
+        .saturating_sub(1)
+        .saturating_mul(max_features);
+    let observation_count = adjacent_match_count.saturating_mul(2);
+    let feature_record_bytes = 3 * size_of::<u32>() + size_of::<Vec<i16>>();
+    let sparse_pipeline_bytes = feature_count
+        .saturating_mul(feature_record_bytes.saturating_add(descriptor_bytes))
+        // FeatureMatch plus adjacent match-vector capacity.
+        .saturating_add(adjacent_match_count.saturating_mul(3 * size_of::<usize>()))
+        // FeatureTrack vector headers and their observation storage.
+        .saturating_add(
+            adjacent_match_count.saturating_mul(size_of::<Vec<(usize, usize)>>()),
+        )
+        .saturating_add(observation_count.saturating_mul(2 * size_of::<usize>()))
+        // Observation -> track membership hash entries, including control/capacity overhead.
+        .saturating_add(
+            observation_count.saturating_mul(hash_entry_bytes(3 * size_of::<usize>())),
+        )
+        // Sparse display points, two-view triangulated points, and registration correspondence
+        // buffers can overlap; charge a full conservative record for each possible match.
+        .saturating_add(adjacent_match_count.saturating_mul(
+            size_of::<Point3>()
+                + size_of::<usize>()
+                + size_of::<f32>()
+                + size_of::<Vector3<f64>>()
+                + 2 * size_of::<f64>()
+                + 4 * size_of::<usize>(),
+        ));
     // Multi-reference processing temporarily retains both patch-local and combined point/site
     // storage, plus error/support vectors and the occupied-grid index used by completion.
     let retained_sample_bytes = size_of::<Point3>()
@@ -352,6 +398,7 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         .saturating_add(retry_frame_bytes)
         .saturating_add(remapped_frame_bytes)
         .saturating_add(luminance_bytes)
+        .saturating_add(sparse_pipeline_bytes)
         .saturating_add(dense_sample_bytes)
         .saturating_add(topology_bytes)
         .saturating_add(mesh_builder_bytes)
@@ -364,6 +411,7 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         retry_frame_bytes,
         remapped_frame_bytes,
         luminance_bytes,
+        sparse_pipeline_bytes,
         dense_sample_bytes,
         topology_bytes,
         mesh_builder_bytes,
@@ -375,6 +423,10 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
 }
 
 const fn btree_entry_bytes(payload_bytes: usize) -> usize {
+    payload_bytes + 4 * size_of::<usize>() + 32
+}
+
+const fn hash_entry_bytes(payload_bytes: usize) -> usize {
     payload_bytes + 4 * size_of::<usize>() + 32
 }
 
@@ -952,7 +1004,8 @@ mod multi_reference_tests {
         let cameras = vec![camera(0, 0.0), camera(1, 0.24)];
         let sparse = sparse_plane(width, height, focal, depth);
 
-        let result = estimate_depth_points_with_budget(&frames, &cameras, &sparse, focal, 1);
+        let result =
+            estimate_depth_points_with_budget(&frames, &cameras, &sparse, focal, 1, 320, 3);
 
         assert!(!result.stats.attempted);
         assert!(result.points.is_empty());
@@ -981,8 +1034,15 @@ mod multi_reference_tests {
         let sparse = sparse_plane(width, height, focal, depth);
 
         let baseline = estimate_depth_points(&frames, &cameras, &sparse, focal);
-        let budgeted =
-            estimate_depth_points_with_budget(&frames, &cameras, &sparse, focal, usize::MAX);
+        let budgeted = estimate_depth_points_with_budget(
+            &frames,
+            &cameras,
+            &sparse,
+            focal,
+            usize::MAX,
+            320,
+            3,
+        );
 
         assert_eq!(baseline.points.len(), budgeted.points.len());
         assert_eq!(baseline.grid_sites.len(), budgeted.grid_sites.len());
@@ -1005,6 +1065,7 @@ mod multi_reference_tests {
                 .saturating_add(budgeted.stats.working_set_estimate.retry_frame_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.remapped_frame_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.luminance_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.sparse_pipeline_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.dense_sample_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.topology_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.mesh_builder_bytes)
@@ -1028,6 +1089,22 @@ mod multi_reference_tests {
         assert!(budgeted.stats.working_set_estimate.retained_candidate_bytes > 0);
         assert!(budgeted.stats.working_set_estimate.mesh_builder_bytes > 0);
         assert!(budgeted.stats.working_set_estimate.surface_fusion_bytes > 0);
+        assert!(budgeted.stats.working_set_estimate.sparse_pipeline_bytes > 0);
+    }
+
+    #[test]
+    fn feature_options_increase_the_retained_sparse_estimate() {
+        let frames = vec![
+            plane_frame(68, 48, 60.0, 0.0, 4.0),
+            plane_frame(68, 48, 60.0, 0.24, 4.0),
+            plane_frame(68, 48, 60.0, -0.22, 4.0),
+        ];
+
+        let ordinary = estimate_working_set(&frames, 320, 3);
+        let feature_heavy = estimate_working_set(&frames, 640, 7);
+
+        assert!(feature_heavy.sparse_pipeline_bytes > ordinary.sparse_pipeline_bytes);
+        assert!(feature_heavy.total_bytes > ordinary.total_bytes);
     }
 
     #[test]
