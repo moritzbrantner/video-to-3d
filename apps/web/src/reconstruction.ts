@@ -180,6 +180,8 @@ export type DenseWorkingSetEstimate = {
   luminance_bytes: number;
   dense_sample_bytes: number;
   topology_bytes: number;
+  mesh_builder_bytes: number;
+  surface_fusion_bytes: number;
   retained_candidate_bytes: number;
   packed_output_bytes: number;
   total_bytes: number;
@@ -527,6 +529,8 @@ export function assertReconstructionContract(
     workingSet.luminance_bytes +
     workingSet.dense_sample_bytes +
     workingSet.topology_bytes +
+    workingSet.mesh_builder_bytes +
+    workingSet.surface_fusion_bytes +
     workingSet.retained_candidate_bytes +
     workingSet.packed_output_bytes;
   if (workingSet.total_bytes !== workingSetSum) {

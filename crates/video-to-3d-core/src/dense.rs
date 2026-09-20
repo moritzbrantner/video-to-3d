@@ -18,6 +18,8 @@ pub struct DenseWorkingSetEstimate {
     pub luminance_bytes: usize,
     pub dense_sample_bytes: usize,
     pub topology_bytes: usize,
+    pub mesh_builder_bytes: usize,
+    pub surface_fusion_bytes: usize,
     pub retained_candidate_bytes: usize,
     pub packed_output_bytes: usize,
     pub total_bytes: usize,
@@ -257,16 +259,10 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         })
         .unwrap_or_default()
         .saturating_mul(MAX_REFERENCE_VIEWS);
-    let max_grid_cells = frames
-        .first()
-        .map(|frame| {
-            let stride = (frame.width.min(frame.height) / 48).clamp(4, 12) as usize;
-            grid_axis_samples(frame.width as usize, stride)
-                .saturating_sub(1)
-                .saturating_mul(grid_axis_samples(frame.height as usize, stride).saturating_sub(1))
-        })
-        .unwrap_or_default()
-        .saturating_mul(MAX_REFERENCE_VIEWS);
+    // Ordinary cells contribute two triangles, while bounded horizontal/vertical gap bridges can
+    // add more candidates. Eight candidates per retained sample is a conservative upper bound for
+    // all current mesh passes.
+    let max_mesh_triangles = max_grid_samples.saturating_mul(8);
 
     // Recovery can hold one owned request clone alongside the caller's request.
     let retry_frame_bytes = frame_bytes;
@@ -287,26 +283,70 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
     let dense_sample_bytes = max_grid_samples
         .saturating_mul(retained_sample_bytes)
         .saturating_mul(2);
-    let topology_bytes = max_grid_cells
-        .saturating_mul(2)
-        .saturating_mul(4 * size_of::<u32>() + size_of::<usize>());
+    let topology_bytes = max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>());
+    // The mesh builder retains a grid map, expanded cell-origin set, candidate-key set, and
+    // accepted-triangle vector together. BTree entries include a deliberately generous node/link
+    // allowance so this remains conservative on both native and wasm32 layouts.
+    let mesh_builder_bytes = max_grid_samples
+        .saturating_mul(btree_entry_bytes(
+            2 * size_of::<i32>()
+                + size_of::<usize>()
+                + 6 * size_of::<f64>()
+                + size_of::<f32>(),
+        ))
+        .saturating_add(
+            max_grid_samples
+                .saturating_mul(4)
+                .saturating_mul(btree_entry_bytes(2 * size_of::<i32>())),
+        )
+        .saturating_add(
+            max_mesh_triangles.saturating_mul(btree_entry_bytes(3 * size_of::<usize>())),
+        )
+        .saturating_add(
+            max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
+        );
+    // Surface fusion retains per-vertex normal/scale/incident evidence, spatial hash buckets,
+    // mutual-nearest state, proposed moves, and topology-validation arrays at the same time as
+    // the accepted dense points and mesh. Charge every major container at full conservative
+    // capacity, including three incident indices and three edge lengths per triangle.
+    let per_vertex_fusion_bytes = size_of::<Option<usize>>()
+        + size_of::<Vector3<f64>>()
+        + size_of::<f64>()
+        + size_of::<usize>()
+        + size_of::<Vec<usize>>()
+        + size_of::<Option<Vector3<f64>>>()
+        + size_of::<Option<f64>>()
+        + size_of::<Option<(usize, f64)>>()
+        + size_of::<Option<usize>>()
+        + 2 * size_of::<bool>()
+        // Worst case: one spatial bucket allocation per eligible vertex.
+        + 3 * size_of::<i64>()
+        + size_of::<Vec<usize>>()
+        + 4 * size_of::<usize>()
+        + size_of::<usize>()
+        // At most one proposed FusionMove for every two vertices; charging one per vertex is safe.
+        + 2 * size_of::<usize>()
+        + size_of::<Vector3<f64>>();
+    let per_triangle_fusion_bytes = 6 * size_of::<usize>()
+        + 3 * size_of::<f64>()
+        + size_of::<bool>()
+        + size_of::<usize>();
+    let surface_fusion_bytes = max_grid_samples
+        .saturating_mul(per_vertex_fusion_bytes)
+        .saturating_add(max_mesh_triangles.saturating_mul(per_triangle_fusion_bytes));
     // Recovery retains the previous best result while reconstructing a retry. Charge its final
     // dense point/site and mesh buffers even on the initial attempt so the same budget applies to
     // every candidate and remains fail-closed when recovery is needed.
     let retained_candidate_bytes = max_grid_samples
         .saturating_mul(size_of::<Point3>() + size_of::<DenseGridSite>())
         .saturating_add(
-            max_grid_cells
-                .saturating_mul(2)
-                .saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
+            max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
         );
     // Packed WASM output: xyzw, RGB, original grid site, triangle indices and confidence.
     let packed_output_bytes = max_grid_samples
         .saturating_mul(4 * size_of::<f32>() + 3 * size_of::<u8>() + 2 * size_of::<u32>())
         .saturating_add(
-            max_grid_cells
-                .saturating_mul(2)
-                .saturating_mul(4 * size_of::<u32>()),
+            max_mesh_triangles.saturating_mul(4 * size_of::<u32>()),
         );
     let total_bytes = frame_bytes
         .saturating_add(retry_frame_bytes)
@@ -314,6 +354,8 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         .saturating_add(luminance_bytes)
         .saturating_add(dense_sample_bytes)
         .saturating_add(topology_bytes)
+        .saturating_add(mesh_builder_bytes)
+        .saturating_add(surface_fusion_bytes)
         .saturating_add(retained_candidate_bytes)
         .saturating_add(packed_output_bytes);
 
@@ -324,10 +366,16 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         luminance_bytes,
         dense_sample_bytes,
         topology_bytes,
+        mesh_builder_bytes,
+        surface_fusion_bytes,
         retained_candidate_bytes,
         packed_output_bytes,
         total_bytes,
     }
+}
+
+const fn btree_entry_bytes(payload_bytes: usize) -> usize {
+    payload_bytes + 4 * size_of::<usize>() + 32
 }
 
 fn grid_axis_samples(extent: usize, stride: usize) -> usize {
@@ -959,6 +1007,8 @@ mod multi_reference_tests {
                 .saturating_add(budgeted.stats.working_set_estimate.luminance_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.dense_sample_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.topology_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.mesh_builder_bytes)
+                .saturating_add(budgeted.stats.working_set_estimate.surface_fusion_bytes)
                 .saturating_add(
                     budgeted
                         .stats
@@ -976,6 +1026,8 @@ mod multi_reference_tests {
             budgeted.stats.working_set_estimate.frame_bytes
         );
         assert!(budgeted.stats.working_set_estimate.retained_candidate_bytes > 0);
+        assert!(budgeted.stats.working_set_estimate.mesh_builder_bytes > 0);
+        assert!(budgeted.stats.working_set_estimate.surface_fusion_bytes > 0);
     }
 
     #[test]
