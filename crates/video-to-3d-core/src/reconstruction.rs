@@ -1092,7 +1092,10 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult) -> [usize; 10] {
+fn reconstruction_score(result: &ReconstructionResult) -> [usize; 8] {
+    // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
+    // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
+    // camera/point solution survives.
     [
         usize::from(result.calibrated_pair.is_some()),
         accepted_registered_camera_count(result),
@@ -1102,8 +1105,6 @@ fn reconstruction_score(result: &ReconstructionResult) -> [usize; 10] {
         result.multi_view.longest_track,
         result.multi_view.linked_pairs,
         result.points.len(),
-        result.dense_points.len(),
-        result.mesh_triangles.len(),
     ]
 }
 
@@ -1744,6 +1745,36 @@ mod tests {
         assert_eq!(pan_recovery_radius(360, 128, &result), 128);
         result.pairs[0].median_motion = 44.0;
         assert_eq!(pan_recovery_radius(240, 42, &result), 104);
+    }
+
+    #[test]
+    fn recovery_score_is_independent_of_dense_budget_output() {
+        let request = ReconstructionRequest {
+            frames: vec![synthetic_frame(96, 80, 0), synthetic_frame(96, 80, 0)],
+            options: ReconstructionOptions::default(),
+        };
+        let without_dense = reconstruct_once(&request).expect("fixture should reconstruct");
+        let mut with_dense = without_dense.clone();
+        with_dense.dense_points.push(Point3 {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            confidence: 0.9,
+            r: 10,
+            g: 20,
+            b: 30,
+        });
+        with_dense.mesh_triangles.push(MeshTriangle {
+            a: 0,
+            b: 0,
+            c: 0,
+            confidence: 0.8,
+        });
+
+        assert_eq!(
+            reconstruction_score(&without_dense),
+            reconstruction_score(&with_dense)
+        );
     }
 
     #[test]
