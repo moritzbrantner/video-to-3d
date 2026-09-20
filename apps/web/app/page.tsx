@@ -396,6 +396,7 @@ export default function Home() {
             <>
               <SceneCanvas
                 reconstruction={reconstruction}
+                textureFrames={frames}
                 selectedFrameIndex={selectedFrameIndex}
                 onSelectFrame={setSelectedFrameIndex}
               />

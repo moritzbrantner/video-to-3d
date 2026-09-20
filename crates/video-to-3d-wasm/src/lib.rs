@@ -5,8 +5,8 @@ use serde::{
 use std::fmt;
 use video_to_3d_core::{
     evaluate_relative_depth, reconstruct_browser, CalibratedPairStats, CameraPipelineState,
-    CameraPose, DenseStats, EvidenceCamera, FrameInput, LearnedDepthCamera, MeshStats,
-    MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionEvidenceView,
+    CameraPose, DenseGridSite, DenseStats, EvidenceCamera, FrameInput, LearnedDepthCamera,
+    MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionEvidenceView,
     ReconstructionOptions, ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame,
     RevisitStats,
 };
@@ -72,6 +72,12 @@ struct PackedDensePointBuffer {
 }
 
 #[derive(Serialize)]
+struct PackedDenseGridSiteBuffer {
+    xy_u32_le: ByteBuffer,
+    length: usize,
+}
+
+#[derive(Serialize)]
 struct PackedMeshTriangleBuffer {
     indices_u32_le: ByteBuffer,
     confidence_f32_le: ByteBuffer,
@@ -83,6 +89,7 @@ struct WasmBrowserReconstructionResult<'a> {
     cameras: &'a [CameraPose],
     points: &'a [Point3],
     dense_points: PackedDensePointBuffer,
+    dense_grid_sites: PackedDenseGridSiteBuffer,
     dense: &'a DenseStats,
     mesh_triangles: PackedMeshTriangleBuffer,
     mesh: &'a MeshStats,
@@ -194,6 +201,18 @@ fn pack_dense_points(points: &[Point3]) -> PackedDensePointBuffer {
         values_f32_le: ByteBuffer(values_f32_le),
         rgb: ByteBuffer(rgb),
         length: points.len(),
+    }
+}
+
+fn pack_dense_grid_sites(sites: &[DenseGridSite]) -> PackedDenseGridSiteBuffer {
+    let mut xy_u32_le = Vec::with_capacity(sites.len() * 2 * size_of::<u32>());
+    for site in sites {
+        xy_u32_le.extend_from_slice(&site.x.to_le_bytes());
+        xy_u32_le.extend_from_slice(&site.y.to_le_bytes());
+    }
+    PackedDenseGridSiteBuffer {
+        xy_u32_le: ByteBuffer(xy_u32_le),
+        length: sites.len(),
     }
 }
 
@@ -408,6 +427,7 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         cameras: &reconstruction.cameras,
         points: &reconstruction.points,
         dense_points: pack_dense_points(&reconstruction.dense_points),
+        dense_grid_sites: pack_dense_grid_sites(&reconstruction.dense_grid_sites),
         dense: &reconstruction.dense,
         mesh_triangles: pack_mesh_triangles(
             &reconstruction.mesh_triangles,

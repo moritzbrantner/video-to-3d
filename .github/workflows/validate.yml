@@ -26,6 +26,7 @@ jobs:
       - run: cargo install wasm-bindgen-cli --version 0.2.104 --locked
       - run: bun run typecheck
       - run: bun run test:learned-provider-contract
+      - run: bun run test:texture-projection
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
