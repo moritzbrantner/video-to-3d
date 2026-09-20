@@ -13,6 +13,7 @@ const DENSE_GRID_BORDER: usize = 3;
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct DenseWorkingSetEstimate {
     pub frame_bytes: usize,
+    pub retry_frame_bytes: usize,
     pub remapped_frame_bytes: usize,
     pub luminance_bytes: usize,
     pub dense_sample_bytes: usize,
@@ -266,7 +267,10 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
         .unwrap_or_default()
         .saturating_mul(MAX_REFERENCE_VIEWS);
 
-    // A reconstruction retry can hold one owned request clone alongside the active request.
+    // Recovery can hold one owned request clone alongside the caller's request.
+    let retry_frame_bytes = frame_bytes;
+    // Multi-reference dense processing clones every registered frame into reference-first order.
+    // Charging all input frames is conservative when only a subset registered successfully.
     let remapped_frame_bytes = frame_bytes;
     // Sparse feature extraction keeps one luminance copy per frame. A dense reference attempt
     // adds one reference plus up to four source luminance buffers at peak.
@@ -294,6 +298,7 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
                 .saturating_mul(4 * size_of::<u32>()),
         );
     let total_bytes = frame_bytes
+        .saturating_add(retry_frame_bytes)
         .saturating_add(remapped_frame_bytes)
         .saturating_add(luminance_bytes)
         .saturating_add(dense_sample_bytes)
@@ -302,6 +307,7 @@ fn estimate_working_set(frames: &[FrameInput]) -> DenseWorkingSetEstimate {
 
     DenseWorkingSetEstimate {
         frame_bytes,
+        retry_frame_bytes,
         remapped_frame_bytes,
         luminance_bytes,
         dense_sample_bytes,
@@ -935,11 +941,20 @@ mod multi_reference_tests {
                 .stats
                 .working_set_estimate
                 .frame_bytes
+                .saturating_add(budgeted.stats.working_set_estimate.retry_frame_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.remapped_frame_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.luminance_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.dense_sample_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.topology_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.packed_output_bytes)
+        );
+        assert_eq!(
+            budgeted.stats.working_set_estimate.retry_frame_bytes,
+            budgeted.stats.working_set_estimate.frame_bytes
+        );
+        assert_eq!(
+            budgeted.stats.working_set_estimate.remapped_frame_bytes,
+            budgeted.stats.working_set_estimate.frame_bytes
         );
     }
 

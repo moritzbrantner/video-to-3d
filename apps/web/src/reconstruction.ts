@@ -175,6 +175,7 @@ export type DenseReferencePatchStats = {
 
 export type DenseWorkingSetEstimate = {
   frame_bytes: number;
+  retry_frame_bytes: number;
   remapped_frame_bytes: number;
   luminance_bytes: number;
   dense_sample_bytes: number;
@@ -520,6 +521,7 @@ export function assertReconstructionContract(
   }
   const workingSetSum =
     workingSet.frame_bytes +
+    workingSet.retry_frame_bytes +
     workingSet.remapped_frame_bytes +
     workingSet.luminance_bytes +
     workingSet.dense_sample_bytes +
