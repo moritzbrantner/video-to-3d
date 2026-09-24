@@ -368,9 +368,7 @@ export default function Home() {
             <select
               value={mode}
               disabled={batchRunning}
-              onChange={(event) =>
-                selectMode(event.currentTarget.value as LearnedReconstructionMode)
-              }
+              onChange={(event) => selectMode(learnedModeFromQueryParam(event.currentTarget.value))}
             >
               <option value="classic">Classical Rust/WASM</option>
               {LEARNED_PROVIDER_CATALOG.map((provider) => (
