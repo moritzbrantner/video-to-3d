@@ -1,6 +1,15 @@
 "use client";
 
-import { type ChangeEvent, useState } from "react";
+import { type ChangeEvent, useEffect, useState } from "react";
+import {
+  LEARNED_PROVIDER_CATALOG,
+  benchmarkLearnedMode,
+  learnedModeFromQueryParam,
+  learnedModeLabel,
+  learnedModeQueryParam,
+  type LearnedBenchmarkSuite,
+  type LearnedReconstructionMode,
+} from "../src/learnedDepth";
 import {
   reconstructFrames,
   type FrameCameraState,
@@ -10,7 +19,7 @@ import {
 import { SceneCanvas } from "../src/SceneCanvas";
 import { sampleVideo } from "../src/video";
 
-type RunPhase = "queued" | "sampling" | "reconstructing" | "done" | "error";
+type RunPhase = "queued" | "sampling" | "reconstructing" | "learned" | "done" | "error";
 type StatusPhase = "idle" | RunPhase;
 type PreviewFrame = Pick<SampledFrame, "height" | "thumbnail" | "time" | "width">;
 
@@ -23,12 +32,15 @@ type VideoRun = {
   error: string;
   samplingFps: number;
   frameCap: number;
+  mode: LearnedReconstructionMode;
+  learnedBenchmark: LearnedBenchmarkSuite | null;
 };
 
 const MIN_SAMPLING_FPS = 0.25;
 const MAX_SAMPLING_FPS = 8;
 const MIN_FRAME_CAP = 4;
 const MAX_FRAME_CAP = 60;
+const RECONSTRUCTION_MODE_QUERY_PARAM = "reconstruction";
 
 const TREVI_DEMO_URL =
   "https://upload.wikimedia.org/wikipedia/commons/a/a8/Fontaine_de_Trevi.webm";
@@ -64,6 +76,8 @@ function phaseLabel(phase: RunPhase): string {
       return "Sampling";
     case "reconstructing":
       return "Rust/WASM";
+    case "learned":
+      return "AI model";
     case "done":
       return "Ready";
     case "error":
@@ -123,7 +137,37 @@ export default function Home() {
   const [demoDownloading, setDemoDownloading] = useState(false);
   const [samplingFps, setSamplingFps] = useState(1.25);
   const [frameCap, setFrameCap] = useState(18);
+  const [mode, setMode] = useState<LearnedReconstructionMode>("classic");
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    const synchronizeModeFromLocation = () => {
+      const query = new URLSearchParams(window.location.search);
+      setMode(learnedModeFromQueryParam(query.get(RECONSTRUCTION_MODE_QUERY_PARAM)));
+    };
+
+    synchronizeModeFromLocation();
+    window.addEventListener("popstate", synchronizeModeFromLocation);
+    return () => {
+      window.removeEventListener("popstate", synchronizeModeFromLocation);
+    };
+  }, []);
+
+  function selectMode(nextMode: LearnedReconstructionMode) {
+    setMode(nextMode);
+    const url = new URL(window.location.href);
+    const queryValue = learnedModeQueryParam(nextMode);
+    if (queryValue === null) {
+      url.searchParams.delete(RECONSTRUCTION_MODE_QUERY_PARAM);
+    } else {
+      url.searchParams.set(RECONSTRUCTION_MODE_QUERY_PARAM, queryValue);
+    }
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }
 
   function updateRun(id: string, update: Partial<VideoRun>) {
     setRuns((current) =>
@@ -134,6 +178,7 @@ export default function Home() {
   async function runFiles(files: File[]) {
     const runSamplingFps = normalizedSamplingFps(samplingFps);
     const runFrameCap = normalizedFrameCap(frameCap);
+    const runMode = mode;
     setSamplingFps(runSamplingFps);
     setFrameCap(runFrameCap);
 
@@ -146,6 +191,8 @@ export default function Home() {
       error: "",
       samplingFps: runSamplingFps,
       frameCap: runFrameCap,
+      mode: runMode,
+      learnedBenchmark: null,
     }));
 
     setRuns(nextRuns);
@@ -165,7 +212,16 @@ export default function Home() {
           frames: previewFrames(sampled),
         });
         const result = await reconstructFrames(sampled);
-        updateRun(run.id, { phase: "done", reconstruction: result });
+        let learnedBenchmark: LearnedBenchmarkSuite | null = null;
+        if (run.mode !== "classic") {
+          updateRun(run.id, { phase: "learned", reconstruction: result });
+          learnedBenchmark = await benchmarkLearnedMode(run.mode, sampled, result);
+        }
+        updateRun(run.id, {
+          phase: "done",
+          reconstruction: result,
+          learnedBenchmark,
+        });
       } catch (caught) {
         updateRun(run.id, {
           phase: "error",
@@ -221,6 +277,8 @@ export default function Home() {
         error: message,
         samplingFps: runSamplingFps,
         frameCap: runFrameCap,
+        mode,
+        learnedBenchmark: null,
       };
       setRuns([failedRun]);
       setActiveRunId(failedRun.id);
@@ -233,7 +291,8 @@ export default function Home() {
 
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
   const processingRun = runs.find(
-    (run) => run.phase === "sampling" || run.phase === "reconstructing",
+    (run) =>
+      run.phase === "sampling" || run.phase === "reconstructing" || run.phase === "learned",
   );
   const processingIndex = processingRun
     ? runs.findIndex((run) => run.id === processingRun.id)
@@ -259,17 +318,38 @@ export default function Home() {
     Boolean(reconstruction?.multi_view.keyframes.includes(selectedFrameIndex));
   const selectedEvidence = selectedFrameEvidence(selectedFrameState);
 
-  const status = demoDownloading
-    ? "Downloading the Trevi test video from Wikimedia Commons…"
-    : processingRun
-      ? processingRun.phase === "sampling"
-        ? `Sampling video ${processingIndex + 1} of ${runs.length} locally…`
-        : `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`
-      : runs.length > 0
-        ? failedCount > 0
-          ? `${readyCount} ready · ${failedCount} failed`
-          : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`
-        : "Choose one or more videos to begin";
+  let status = "Choose one or more videos to begin";
+  if (demoDownloading) {
+    status = "Downloading the Trevi test video from Wikimedia Commons…";
+  } else if (processingRun) {
+    if (processingRun.phase === "sampling") {
+      status = `Sampling video ${processingIndex + 1} of ${runs.length} locally…`;
+    } else if (processingRun.phase === "reconstructing") {
+      status = `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`;
+    } else {
+      status = `Running ${learnedModeLabel(processingRun.mode)} on accepted frames for video ${processingIndex + 1} of ${runs.length}…`;
+    }
+  } else if (runs.length > 0) {
+    status = failedCount > 0
+      ? `${readyCount} ready · ${failedCount} failed`
+      : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`;
+  }
+
+  const selectedProvider =
+    mode === "classic" || mode === "benchmark"
+      ? null
+      : (LEARNED_PROVIDER_CATALOG.find((provider) => provider.id === mode) ?? null);
+  let modeHelp =
+    "Classical Rust/WASM feature matching, camera registration, dense depth, and surface reconstruction.";
+  if (mode === "benchmark") {
+    const totalDownloadBytes = LEARNED_PROVIDER_CATALOG.reduce(
+      (sum, provider) => sum + provider.approximateDownloadBytes,
+      0,
+    );
+    modeHelp = `Runs both browser-local AI providers after the Rust camera reconstruction (~${Math.round(totalDownloadBytes / 1_000_000)} MB of model weights total).`;
+  } else if (selectedProvider) {
+    modeHelp = `Runs ${selectedProvider.label} after the Rust camera reconstruction (~${Math.round(selectedProvider.approximateDownloadBytes / 1_000_000)} MB model download). Its output remains evidence until Rust validation/fusion accepts it.`;
+  }
 
   return (
     <main>
@@ -283,6 +363,25 @@ export default function Home() {
           </p>
         </div>
         <div className="run-controls">
+          <label className="reconstruction-mode-control">
+            <span>Algorithm / AI model</span>
+            <select
+              value={mode}
+              disabled={batchRunning}
+              onChange={(event) =>
+                selectMode(event.currentTarget.value as LearnedReconstructionMode)
+              }
+            >
+              <option value="classic">Classical Rust/WASM</option>
+              {LEARNED_PROVIDER_CATALOG.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.label}
+                </option>
+              ))}
+              <option value="benchmark">Compare both AI models</option>
+            </select>
+          </label>
+          <small className="reconstruction-mode-note">{modeHelp}</small>
           <div className="sampling-controls" aria-label="Sampling controls">
             <label>
               <span>Sample FPS</span>
@@ -382,7 +481,9 @@ export default function Home() {
               }}
             >
               <span>{run.fileName}</span>
-              <small>{phaseLabel(run.phase)}</small>
+              <small>
+                {phaseLabel(run.phase)} · {learnedModeLabel(run.mode)}
+              </small>
             </button>
           ))}
         </nav>
@@ -440,6 +541,46 @@ export default function Home() {
           </p>
         </aside>
       </section>
+
+      {activeRun?.learnedBenchmark ? (
+        <section className="section-block">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Selected model evidence</p>
+              <h2>AI reconstruction diagnostics</h2>
+            </div>
+            <p>{learnedModeLabel(activeRun.mode)}</p>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Status</th>
+                  <th>Backend</th>
+                  <th>Frames</th>
+                  <th>Diagnostic</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeRun.learnedBenchmark.providers.map((provider) => (
+                  <tr key={provider.providerId}>
+                    <td>{provider.label}</td>
+                    <td>{provider.status}</td>
+                    <td>{provider.runtimeLabel ?? provider.backend ?? "—"}</td>
+                    <td>
+                      {provider.selectedFrames.length > 0
+                        ? provider.selectedFrames.map((frame) => frame + 1).join(", ")
+                        : "—"}
+                    </td>
+                    <td>{provider.diagnostic}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       {frames.length > 0 ? (
         <section className="section-block">
