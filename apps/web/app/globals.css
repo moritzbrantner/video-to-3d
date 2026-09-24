@@ -31,6 +31,11 @@ h2 { margin: 0; font-size: 1.25rem; letter-spacing: -0.02em; }
 .lede { max-width: 650px; margin: 20px 0 0; color: #b8cbd4; font-size: clamp(1rem, 2vw, 1.12rem); line-height: 1.6; }
 .run-controls { display: grid; justify-items: end; gap: 10px; }
 .run-controls > small { color: var(--muted); font-size: 0.72rem; }
+.reconstruction-mode-control { display: grid; width: min(330px, 100%); gap: 5px; color: var(--muted); font-size: 0.72rem; }
+.reconstruction-mode-control select { min-height: 40px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px; background: rgba(13, 24, 31, 0.9); color: var(--text); }
+.reconstruction-mode-control select:focus { outline: 2px solid rgba(111, 220, 255, 0.35); outline-offset: 1px; }
+.reconstruction-mode-control select:disabled { opacity: 0.55; }
+.reconstruction-mode-note { max-width: 430px; line-height: 1.45; text-align: right; }
 .sampling-controls { display: flex; gap: 8px; }
 .sampling-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 0.72rem; }
 .sampling-controls input { width: 105px; min-height: 38px; border: 1px solid var(--line); border-radius: 9px; padding: 0 10px; background: rgba(13, 24, 31, 0.9); color: var(--text); }
@@ -49,7 +54,7 @@ h2 { margin: 0; font-size: 1.25rem; letter-spacing: -0.02em; }
 .status-line { display: flex; min-height: 48px; align-items: center; gap: 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
 .status-line strong { color: var(--text); }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #58717d; }
-.status-sampling, .status-reconstructing { background: #ffd166; box-shadow: 0 0 16px rgba(255, 209, 102, 0.55); }
+.status-sampling, .status-reconstructing, .status-learned { background: #ffd166; box-shadow: 0 0 16px rgba(255, 209, 102, 0.55); }
 .status-done { background: #7fe0a3; box-shadow: 0 0 16px rgba(127, 224, 163, 0.45); }
 .status-error { background: #ff8d7d; }
 .video-runs { display: flex; gap: 8px; overflow-x: auto; padding: 12px 0 0; }
@@ -106,6 +111,8 @@ footer { padding: 30px 0 8px; color: #6f8995; font-size: 0.8rem; text-align: cen
   main { width: min(100% - 20px, 1220px); padding-top: 28px; }
   .hero { grid-template-columns: 1fr; align-items: start; gap: 22px; }
   .run-controls { justify-items: start; width: 100%; }
+  .reconstruction-mode-control { width: 100%; }
+  .reconstruction-mode-note { max-width: none; text-align: left; }
   .input-actions { justify-content: flex-start; }
   .demo-attribution { max-width: none; text-align: left; }
   .sampling-controls { width: 100%; }
