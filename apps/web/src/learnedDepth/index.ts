@@ -1,6 +1,10 @@
 export {
+  DEFAULT_LEARNED_RECONSTRUCTION_MODE,
   LEARNED_PROVIDER_CATALOG,
+  isLearnedProviderId,
+  learnedModeFromQueryParam,
   learnedModeLabel,
+  learnedModeQueryParam,
   learnedProviderDescriptor,
   learnedProvidersForMode,
   type LearnedProviderDescriptor,
