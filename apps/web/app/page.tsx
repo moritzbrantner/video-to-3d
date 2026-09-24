@@ -546,8 +546,8 @@ export default function Home() {
         <section className="section-block">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">Selected model evidence</p>
-              <h2>AI reconstruction diagnostics</h2>
+              <p className="eyebrow">Selected AI evidence</p>
+              <h2>AI model diagnostics</h2>
             </div>
             <p>{learnedModeLabel(activeRun.mode)}</p>
           </div>
