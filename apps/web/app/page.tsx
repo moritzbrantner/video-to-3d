@@ -88,7 +88,7 @@ function phaseLabel(phase: RunPhase): string {
     case "done":
       return "Ready";
     case "partial":
-      return "AI model failed";
+      return "AI model incomplete";
     case "error":
       return "Failed";
   }
@@ -222,22 +222,34 @@ export default function Home() {
         });
         const result = await reconstructFrames(sampled);
         let learnedBenchmark: LearnedBenchmarkSuite | null = null;
+        const learnedIssues: string[] = [];
         if (run.mode !== "classic") {
           updateRun(run.id, { phase: "learned", reconstruction: result });
-          learnedBenchmark = await benchmarkLearnedMode(run.mode, sampled, result);
+          try {
+            learnedBenchmark = await benchmarkLearnedMode(run.mode, sampled, result);
+            for (const provider of learnedBenchmark?.providers ?? []) {
+              if (provider.status === "completed") continue;
+              const outcome = provider.status === "skipped" ? "was skipped" : "produced no evidence";
+              learnedIssues.push(
+                `${provider.label} ${outcome}: ${provider.diagnostic.replace(/\.$/, "")}.`,
+              );
+            }
+          } catch (learnedError) {
+            learnedIssues.push(
+              `${learnedModeLabel(run.mode)} failed: ${
+                learnedError instanceof Error ? learnedError.message : String(learnedError)
+              }.`,
+            );
+          }
         }
-        const failedProviders =
-          learnedBenchmark?.providers.filter((provider) => provider.status === "failed") ?? [];
         updateRun(run.id, {
-          phase: failedProviders.length > 0 ? "partial" : "done",
+          phase: learnedIssues.length > 0 ? "partial" : "done",
           reconstruction: result,
           learnedBenchmark,
-          error: failedProviders
-            .map(
-              (provider) =>
-                `${provider.label} produced no evidence: ${provider.diagnostic}. The Rust/WASM reconstruction is shown without it.`,
-            )
-            .join(" "),
+          error:
+            learnedIssues.length > 0
+              ? `${learnedIssues.join(" ")} The Rust/WASM reconstruction is shown without AI model evidence.`
+              : "",
         });
       } catch (caught) {
         updateRun(run.id, {
@@ -349,7 +361,7 @@ export default function Home() {
     }
   } else if (runs.length > 0) {
     const outcomes = [`${readyCount} ready`];
-    if (partialCount > 0) outcomes.push(`${partialCount} AI model failed`);
+    if (partialCount > 0) outcomes.push(`${partialCount} AI model incomplete`);
     if (failedCount > 0) outcomes.push(`${failedCount} failed`);
     status =
       outcomes.length > 1
