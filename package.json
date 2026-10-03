@@ -1,7 +1,7 @@
 {
   "name": "video-to-3d",
   "private": true,
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "workspaces": ["apps/*"],
   "scripts": {
     "benchmark:wasm-boundary": "WASM_FEATURES=boundary-benchmark bash scripts/build-wasm.sh && bun scripts/benchmark-wasm-boundary.ts",
