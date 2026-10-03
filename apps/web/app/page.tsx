@@ -19,7 +19,14 @@ import {
 import { SceneCanvas } from "../src/SceneCanvas";
 import { sampleVideo } from "../src/video";
 
-type RunPhase = "queued" | "sampling" | "reconstructing" | "learned" | "done" | "error";
+type RunPhase =
+  | "queued"
+  | "sampling"
+  | "reconstructing"
+  | "learned"
+  | "done"
+  | "partial"
+  | "error";
 type StatusPhase = "idle" | RunPhase;
 type PreviewFrame = Pick<SampledFrame, "height" | "thumbnail" | "time" | "width">;
 
@@ -80,6 +87,8 @@ function phaseLabel(phase: RunPhase): string {
       return "AI model";
     case "done":
       return "Ready";
+    case "partial":
+      return "AI model failed";
     case "error":
       return "Failed";
   }
@@ -217,10 +226,18 @@ export default function Home() {
           updateRun(run.id, { phase: "learned", reconstruction: result });
           learnedBenchmark = await benchmarkLearnedMode(run.mode, sampled, result);
         }
+        const failedProviders =
+          learnedBenchmark?.providers.filter((provider) => provider.status === "failed") ?? [];
         updateRun(run.id, {
-          phase: "done",
+          phase: failedProviders.length > 0 ? "partial" : "done",
           reconstruction: result,
           learnedBenchmark,
+          error: failedProviders
+            .map(
+              (provider) =>
+                `${provider.label} produced no evidence: ${provider.diagnostic}. The Rust/WASM reconstruction is shown without it.`,
+            )
+            .join(" "),
         });
       } catch (caught) {
         updateRun(run.id, {
@@ -299,6 +316,7 @@ export default function Home() {
     : -1;
   const failedCount = runs.filter((run) => run.phase === "error").length;
   const readyCount = runs.filter((run) => run.phase === "done").length;
+  const partialCount = runs.filter((run) => run.phase === "partial").length;
   const statusPhase: StatusPhase = demoDownloading
     ? "sampling"
     : (processingRun?.phase ?? activeRun?.phase ?? "idle");
@@ -330,9 +348,13 @@ export default function Home() {
       status = `Running ${learnedModeLabel(processingRun.mode)} on accepted frames for video ${processingIndex + 1} of ${runs.length}…`;
     }
   } else if (runs.length > 0) {
-    status = failedCount > 0
-      ? `${readyCount} ready · ${failedCount} failed`
-      : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`;
+    const outcomes = [`${readyCount} ready`];
+    if (partialCount > 0) outcomes.push(`${partialCount} AI model failed`);
+    if (failedCount > 0) outcomes.push(`${failedCount} failed`);
+    status =
+      outcomes.length > 1
+        ? outcomes.join(" · ")
+        : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`;
   }
 
   const selectedProvider =
