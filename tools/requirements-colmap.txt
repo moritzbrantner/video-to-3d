@@ -1,0 +1,3 @@
+# 3.13 exposes exact CPU matching and interoperates with the Ubuntu 24.04
+# COLMAP 3.9.1 database used by extraction, mapping, and model conversion.
+pycolmap==3.13.0

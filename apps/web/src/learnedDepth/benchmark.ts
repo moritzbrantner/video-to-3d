@@ -142,7 +142,12 @@ async function benchmarkProvider(
       diagnostic: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    await session?.dispose();
+    try {
+      await session?.dispose();
+    } catch (cleanupError) {
+      // Cleanup failure must not discard evidence or diagnostics that were already collected.
+      console.warn(`${descriptor.label} cleanup failed`, cleanupError);
+    }
   }
 }
 
