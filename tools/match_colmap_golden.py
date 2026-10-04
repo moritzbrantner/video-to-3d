@@ -16,8 +16,13 @@ def main() -> None:
     options = pycolmap.FeatureMatchingOptions()
     options.num_threads = 1
     options.sift.cpu_brute_force_matcher = True
+    verification = pycolmap.TwoViewGeometryOptions()
+    verification.ransac.random_seed = 0
     pycolmap.match_exhaustive(
-        str(args.database), matching_options=options, device=pycolmap.Device.cpu
+        str(args.database),
+        matching_options=options,
+        verification_options=verification,
+        device=pycolmap.Device.cpu,
     )
 
 
