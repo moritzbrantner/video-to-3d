@@ -58,6 +58,8 @@ The product does **not** promise that every input contains enough evidence for f
 5. **Explicit escalation.** Cheap/local/deterministic paths run first; learned or paid providers run only when declared quality gates justify them.
 6. **One coordinate system.** Every camera, mesh, splat, generated object, collider, and annotation is registered into one scene frame before assembly.
 7. **Quality is tested on scenes, not screenshots.** Each milestone adds objective acceptance evidence and a human-inspectable preview.
+8. **Source video stays on-device.** Browser decoding and sampling remain local. Cloud operations may consume only explicitly permitted locally derived artifacts; provider policy cannot authorize source-video uploads.
+9. **Shared evidence validation gates provider geometry.** Learned and generated surfaces cross the versioned `ReconstructionEvidenceView` boundary before participating in shared validation/fusion, with their original provenance retained.
 
 ---
 
@@ -360,9 +362,9 @@ Requirements:
 
 ## 6.3 World-model provider adapter
 
-Add a provider-neutral world-generation operation capable of sending image, multi-image, or video conditioning to a world model.
+Add a provider-neutral world-generation operation with explicit conditioning capabilities. Video conditioning is available only to providers running locally; the uploaded source video must never leave the device. Cloud adapters may receive only explicitly permitted locally derived images or other artifacts after the user authorizes that operation.
 
-The first cloud adapter may target Marble because it accepts video and can return navigable worlds, splats, and mesh representations. This must remain optional and replaceable.
+A first optional, replaceable cloud adapter may target Marble if its supported conditioning can satisfy this boundary. A cloud provider that requires source-video upload is unsupported, regardless of quality mode or paid-cloud policy.
 
 ## 6.4 World-model import
 
@@ -373,7 +375,7 @@ Normalize returned:
 - provider cameras/transforms;
 - metadata.
 
-Do not assume provider coordinates match the reconstruction frame.
+Do not assume provider coordinates match the reconstruction frame. Compatible generated meshes/surfaces must enter the owned, versioned `ReconstructionEvidenceView` contract with generative-completion provenance and pass Rust-owned validation before shared fusion or per-region selection. Import and registration alone do not accept geometry. Splats without a compatible surface evidence view remain explicitly generative visual artifacts and cannot participate in shared surface fusion.
 
 ## 6.5 World-to-observed registration
 
@@ -400,7 +402,7 @@ Choose among:
 - splat;
 - hybrid mesh+splat;
 
-per region based on evidence and target runtime.
+per region based on accepted evidence and target runtime. Only surfaces admitted through the shared evidence gate may participate in shared validation/fusion; visual-only generative artifacts retain their separate provenance and do not become observed geometry.
 
 ---
 
@@ -736,7 +738,7 @@ Before execution, estimate which paid operations may run and their configured ma
 
 ## 15.4 Privacy classification
 
-Clearly identify which operations keep media local and which upload derived/source imagery or video.
+Source video always stays local. Reject any cloud request containing source-video bytes, including a repackaged or transcoded source clip. Clearly identify which optional operations upload explicitly permitted locally derived imagery or other artifacts, require authorization before transfer, and record that choice in the operation receipt. Local-only policy forbids all such transfers.
 
 ## 15.5 Provider substitution tests
 
