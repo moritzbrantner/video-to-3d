@@ -57,11 +57,11 @@ Uploaded video stays browser-local. The browser owns decoding, sampling, present
 
 ## Development
 
-Requirements: Bun 1.4+, stable Rust with `wasm32-unknown-unknown`, and `wasm-bindgen-cli` 0.2.104.
+Requirements: Bun 1.4+, stable Rust with `wasm32-unknown-unknown`, and `wasm-bindgen-cli` 0.2.129.
 
 ```bash
 bun install
-cargo install wasm-bindgen-cli --version 0.2.104 --locked
+cargo install wasm-bindgen-cli --version 0.2.129 --locked
 bun run dev
 ```
 
