@@ -1,7 +1,7 @@
 export type SampledFrame = {
   width: number;
   height: number;
-  rgba: Uint8Array;
+  rgba: Uint8Array<ArrayBuffer>;
   thumbnail: string;
   time: number;
 };
