@@ -1,5 +1,9 @@
 # Roadmap
 
+> Product-level roadmap: [Video clip → whole scene](docs/video-to-world-roadmap.md)
+>
+> The slice roadmap below tracks reconstruction-engine progress. The linked product roadmap extends it through deterministic orchestration, scene understanding, generative completion, editable-object extraction, registration, physics/navigation, hybrid splat/mesh viewing, export, and end-to-end acceptance.
+
 ## Slice 1 — Sparse reconstruction MVP — integrated
 
 - One browser-local video input.
