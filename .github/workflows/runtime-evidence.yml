@@ -46,8 +46,14 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
           rustup default stable
           sudo apt-get update
-          sudo apt-get install -y colmap
+          sudo apt-get install -y colmap python3-venv
           colmap -h | head -n 4
+
+      - name: Install exact COLMAP reference matcher
+        run: |
+          python3 -m venv "$RUNNER_TEMP/colmap-python"
+          "$RUNNER_TEMP/colmap-python/bin/pip" install -r candidate/tools/requirements-colmap.txt
+          echo "$RUNNER_TEMP/colmap-python/bin" >> "$GITHUB_PATH"
 
       - name: Install runtime-profiler
         run: cargo install --git https://github.com/moritzbrantner/runtime-profiler --rev "$RUNTIME_PROFILER_REV" --locked
@@ -191,6 +197,11 @@ jobs:
               )
             fi
             if ! python3 tools/check_colmap_golden.py "${args[@]}"; then
+              status=1
+            fi
+            if ! python3 tools/check_colmap_match_repeatability.py \
+              --reference "target/golden-reference/$case_name/colmap-quality/database.db" \
+              --candidate "target/golden-reference/$case_name/colmap-runtime/database.db"; then
               status=1
             fi
             if test -f "$case_report"; then
