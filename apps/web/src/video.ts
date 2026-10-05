@@ -25,10 +25,24 @@ function waitFor(target: EventTarget, event: string): Promise<void> {
   });
 }
 
+/** Display metadata of the sampled media (orientation already applied by the browser). */
+export type SampledVideoInfo = {
+  duration: number;
+  displayWidth: number;
+  displayHeight: number;
+};
+
 export async function sampleVideo(
   file: File,
   options: VideoSamplingOptions = {},
 ): Promise<SampledFrame[]> {
+  return (await sampleVideoWithInfo(file, options)).frames;
+}
+
+export async function sampleVideoWithInfo(
+  file: File,
+  options: VideoSamplingOptions = {},
+): Promise<{ frames: SampledFrame[]; info: SampledVideoInfo }> {
   const url = URL.createObjectURL(file);
   const video = document.createElement("video");
   video.muted = true;
@@ -72,9 +86,17 @@ export async function sampleVideo(
         ),
         thumbnail: canvas.toDataURL("image/jpeg", 0.68),
         time,
+        presentedTime: video.currentTime,
       });
     }
-    return frames;
+    return {
+      frames,
+      info: {
+        duration: video.duration,
+        displayWidth: video.videoWidth,
+        displayHeight: video.videoHeight,
+      },
+    };
   } finally {
     video.removeAttribute("src");
     video.load();

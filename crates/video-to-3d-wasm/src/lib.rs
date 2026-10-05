@@ -3,6 +3,7 @@ use serde::{
     Deserialize, Serialize,
 };
 use std::fmt;
+use video_to_3d_core::input_readiness::{assess_readiness, SamplingMetadata};
 use video_to_3d_core::{
     evaluate_relative_depth, reconstruct_browser, CalibratedPairStats, CameraPipelineState,
     CameraPose, DenseGridSite, DenseStats, EvidenceCamera, FrameInput, LearnedDepthCamera,
@@ -412,6 +413,34 @@ pub fn evaluate_relative_depth_evidence(value: JsValue) -> Result<JsValue, JsVal
             "failed to serialize learned-depth evaluation: {error}"
         ))
     })
+}
+
+#[derive(Deserialize)]
+struct WasmReadinessRequest {
+    frames: Vec<WasmFrameInput>,
+    metadata: SamplingMetadata,
+}
+
+/// Measure reconstruction readiness of sampled frames (core-owned evidence).
+#[wasm_bindgen]
+pub fn assess_input_readiness(value: JsValue) -> Result<JsValue, JsValue> {
+    let request: WasmReadinessRequest = serde_wasm_bindgen::from_value(value)
+        .map_err(|error| JsValue::from_str(&format!("invalid readiness request: {error}")))?;
+    let frames: Vec<FrameInput> = request
+        .frames
+        .into_iter()
+        .map(|frame| FrameInput {
+            width: frame.width,
+            height: frame.height,
+            rgba: frame.rgba,
+        })
+        .collect();
+    let report =
+        assess_readiness(&frames, &request.metadata).map_err(|error| JsValue::from_str(&error))?;
+    let serializer = browser_serializer();
+    report
+        .serialize(&serializer)
+        .map_err(|error| JsValue::from_str(&format!("failed to serialize readiness: {error}")))
 }
 
 #[wasm_bindgen]

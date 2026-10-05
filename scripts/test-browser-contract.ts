@@ -1,4 +1,5 @@
 import init, {
+  assess_input_readiness,
   reconstruct_sequence,
 } from "../apps/web/public/wasm/video_to_3d_wasm.js";
 import {
@@ -127,4 +128,28 @@ if (!contradictionRejected) {
   );
 }
 
-console.log("Rust -> WASM -> TypeScript camera-state contract passed");
+// Readiness evidence crosses the same boundary; flat duplicate frames must be
+// reported as unsuitable for geometry while generative paths stay allowed.
+const readinessValue = assess_input_readiness({
+  frames: [
+    { width, height, rgba },
+    { width, height, rgba },
+  ],
+  metadata: {
+    duration_seconds: 2,
+    display_width: width,
+    display_height: height,
+    requested_times: [0.1, 1.1],
+    presented_times: [0.1, 1.1],
+  },
+});
+const readiness = (readinessValue instanceof Map
+  ? Object.fromEntries(readinessValue)
+  : readinessValue) as Record<string, unknown>;
+if (readiness.geometric_verdict !== "unsuitable" || readiness.generative_paths_allowed !== true) {
+  throw new Error(
+    `readiness contract mismatch: ${String(readiness.geometric_verdict)} / ${String(readiness.generative_paths_allowed)}`,
+  );
+}
+
+console.log("Rust -> WASM -> TypeScript camera-state and readiness contracts passed");

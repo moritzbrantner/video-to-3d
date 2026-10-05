@@ -129,3 +129,4 @@ footer { padding: 30px 0 8px; color: #6f8995; font-size: 0.8rem; text-align: cen
   .selected-frame-preview { top: auto; bottom: 56px; width: 128px; }
   .viewer-caption { right: 16px; }
 }
+.readiness [data-severity="blocking"] strong { color: #f2a65a; }

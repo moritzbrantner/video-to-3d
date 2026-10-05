@@ -3,7 +3,10 @@ export type SampledFrame = {
   height: number;
   rgba: Uint8Array<ArrayBuffer>;
   thumbnail: string;
+  /** Requested sample time in seconds. */
   time: number;
+  /** Time the decoder actually presented after seeking, in seconds. */
+  presentedTime: number;
 };
 
 export type CameraPose = {
