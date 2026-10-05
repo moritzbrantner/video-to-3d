@@ -275,6 +275,10 @@ fn compute_status(
     let reconcile = store
         .reconcile(&mut verified, VerifyMode::Cached)
         .map_err(project_error)?;
+    // status, inspect and export all explain verification problems.
+    for line in reconcile.diagnostics() {
+        eprintln!("{line}");
+    }
     let identities = verified.operation_identities().map_err(project_error)?;
     let mut operations = BTreeMap::new();
     let mut complete = true;
@@ -330,9 +334,6 @@ fn compute_status(
 
 fn status(manifest_path: &std::path::Path) -> Outcome {
     let (_, status) = compute_status(manifest_path)?;
-    for line in status.reconcile.diagnostics() {
-        eprintln!("{line}");
-    }
     let exit = if status.complete {
         Exit::Success
     } else if status
