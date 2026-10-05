@@ -180,6 +180,14 @@ impl OperationKind {
         }
     }
 
+    /// Revision of the built-in implementation of this operation kind. Bump
+    /// it whenever the built-in semantics change so previously recorded
+    /// artifacts become stale. Provider operations are versioned by their
+    /// provider declaration instead.
+    pub fn implementation_revision(self) -> u32 {
+        1
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::IngestVideo => "ingest_video",
@@ -491,6 +499,9 @@ pub struct SceneProjectManifest {
 struct OperationIdentityInput {
     schema_version: u32,
     kind: OperationKind,
+    /// Built-in implementation revision and core crate version; `None` for
+    /// provider operations, which are versioned by their declarations.
+    implementation: Option<(u32, &'static str)>,
     /// Declared provider followed by reachable fallbacks, in order.
     providers: Vec<ProviderDeclaration>,
     max_attempts: u32,
@@ -900,6 +911,19 @@ impl SceneProjectManifest {
                         operation.id
                     ));
                 }
+                if self.provider_policy.execution == ExecutionPolicy::LocalFirst
+                    && provider.location == ProviderLocation::Cloud
+                {
+                    if let Some(local) = self.provider_policy.providers.iter().find(|candidate| {
+                        candidate.location == ProviderLocation::Local
+                            && candidate.capabilities.contains(&kind)
+                    }) {
+                        return invalid(format!(
+                            "local_first policy: operation `{}` names cloud provider `{provider_id}` although local provider `{}` can serve it",
+                            operation.id, local.id
+                        ));
+                    }
+                }
                 for reachable in self.reachable_providers(operation) {
                     if reachable.location != ProviderLocation::Cloud {
                         continue;
@@ -1058,6 +1082,14 @@ impl SceneProjectManifest {
             let identity_input = OperationIdentityInput {
                 schema_version: SCENE_PROJECT_SCHEMA_VERSION,
                 kind: operation.kind,
+                implementation: (operation.kind.execution() == OperationExecution::BuiltIn).then(
+                    || {
+                        (
+                            operation.kind.implementation_revision(),
+                            env!("CARGO_PKG_VERSION"),
+                        )
+                    },
+                ),
                 providers,
                 max_attempts: operation.max_attempts,
                 inputs,

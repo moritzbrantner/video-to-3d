@@ -595,3 +595,44 @@ fn filesystem_aliases_are_rejected() {
         "used more than once",
     );
 }
+
+#[test]
+fn local_first_rejects_cloud_primary_when_local_can_serve() {
+    let mut document = standard_document();
+    document["provider_policy"]["execution"] = json!("local_first");
+    document["provider_policy"]["providers"][1]["cost_per_attempt"] = json!(0);
+    document["provider_policy"]["providers"][1]["capabilities"] =
+        json!(["generative_completion", "learned_reconstruction"]);
+    document["provider_policy"]["cloud_upload_allowlist"] =
+        json!(["keyframes", "sparse_reconstruction", "surface_mesh"]);
+    parse(&document).expect("local primary with cloud fallback is valid");
+    document["operations"][2]["provider"] = json!("cloud-world");
+    expect_invalid(
+        &document,
+        "although local provider `local-depth` can serve it",
+    );
+}
+
+#[test]
+fn built_in_operations_carry_an_implementation_revision() {
+    let identity = OperationIdentityInput {
+        schema_version: SCENE_PROJECT_SCHEMA_VERSION,
+        kind: OperationKind::SparseReconstruction,
+        implementation: Some((
+            OperationKind::SparseReconstruction.implementation_revision(),
+            env!("CARGO_PKG_VERSION"),
+        )),
+        providers: Vec::new(),
+        max_attempts: 1,
+        inputs: Vec::new(),
+    };
+    let encoded = serde_json::to_vec(&identity).unwrap();
+    let bumped = OperationIdentityInput {
+        implementation: Some((
+            OperationKind::SparseReconstruction.implementation_revision() + 1,
+            env!("CARGO_PKG_VERSION"),
+        )),
+        ..identity
+    };
+    assert_ne!(encoded, serde_json::to_vec(&bumped).unwrap());
+}
