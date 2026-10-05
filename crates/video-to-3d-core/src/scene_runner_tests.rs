@@ -647,3 +647,23 @@ fn unsupported_probes_release_their_reservation_immediately() {
     // Reserve, release, reserve (fallback provider), release.
     assert_eq!(learned, [1, 0, 1, 0]);
 }
+
+#[test]
+fn unsupported_primary_does_not_consume_a_single_attempt_budget() {
+    let mut document = manifest_document();
+    document["operations"][2]["max_attempts"] = json!(1);
+    let mut manifest = SceneProjectManifest::from_json(&document.to_string()).unwrap();
+    let executor = FakeExecutor::scripted(|request| {
+        let provider = request
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.as_str());
+        (request.operation.id == "learned" && provider == Some("depth-a"))
+            .then(|| AttemptOutcome::Unsupported("no GPU".into()))
+    });
+    let report = run_with(&mut manifest, &executor, 1);
+    assert!(matches!(
+        &report.states["learned"],
+        OperationState::Succeeded { provider: Some(provider), .. } if provider == "depth-b"
+    ));
+}

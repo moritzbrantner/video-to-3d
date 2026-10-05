@@ -136,6 +136,9 @@ pub struct ReconcileReport {
     /// the receipt and saving the manifest). They are ignored and overwritten
     /// when the operation runs again.
     pub orphan_receipts: Vec<String>,
+    /// Operations whose output was recovered from a verified receipt after the
+    /// manifest record was lost (crash between receipt and manifest writes).
+    pub recovered: Vec<String>,
 }
 
 impl ReconcileReport {
@@ -150,6 +153,11 @@ impl ReconcileReport {
                 )
             })
             .collect();
+        lines.extend(
+            self.recovered.iter().map(|operation| {
+                format!("{operation}: recovered output from its verified receipt")
+            }),
+        );
         lines.extend(
             self.orphan_receipts.iter().map(|operation| {
                 format!("{operation}: ignoring receipt without a recorded artifact")
@@ -320,6 +328,7 @@ impl ProjectStore {
             orphans.sort();
             report.orphan_receipts = orphans;
         }
+        self.recover_orphans(manifest, &mut report, &mut cache)?;
         // Only full verification refreshes the cache; cached verification is
         // read-only so status queries never mutate the project.
         if mode == VerifyMode::Full {
@@ -327,6 +336,76 @@ impl ProjectStore {
         }
         manifest.validate()?;
         Ok(report)
+    }
+
+    /// Adopt orphan receipts whose identity is current and whose output and
+    /// provenance verify, clearing the attempt reservation they left behind.
+    /// Repeats so a recovered upstream can make a downstream receipt current.
+    fn recover_orphans(
+        &self,
+        manifest: &mut SceneProjectManifest,
+        report: &mut ReconcileReport,
+        cache: &mut HashCache,
+    ) -> Result<(), SceneProjectError> {
+        loop {
+            let identities = manifest.operation_identities()?;
+            let mut adopted = false;
+            for operation in report.orphan_receipts.clone() {
+                let Some(declaration) = manifest
+                    .operations
+                    .iter()
+                    .find(|candidate| candidate.id == operation)
+                else {
+                    continue;
+                };
+                let Ok(Some(receipt)) = self.read_receipt(&operation) else {
+                    continue;
+                };
+                if receipt.operation != operation
+                    || receipt.operation_identity != identities[&operation]
+                {
+                    continue;
+                }
+                let candidate = ArtifactRecord {
+                    id: crate::scene_runner::artifact_id(
+                        manifest,
+                        &operation,
+                        &receipt.operation_identity,
+                    ),
+                    kind: declaration.kind.output(),
+                    produced_by: operation.clone(),
+                    operation_identity: receipt.operation_identity.clone(),
+                    path: receipt.output.path.clone(),
+                    content_hash: receipt.output.content_hash.clone(),
+                    provider: receipt
+                        .provider
+                        .as_ref()
+                        .map(|provider| provider.id.clone()),
+                };
+                if verify_receipt_provenance(manifest, &candidate, &receipt).is_err() {
+                    continue;
+                }
+                match cache.hash(&self.resolve(&candidate.path), candidate.path.as_str()) {
+                    Some((hash, length))
+                        if hash == candidate.content_hash
+                            && length == receipt.output.byte_length => {}
+                    _ => continue,
+                }
+                let mut next = manifest.clone();
+                next.artifacts.push(candidate);
+                next.attempt_usage
+                    .retain(|usage| usage.operation != operation);
+                if next.validate().is_ok() {
+                    *manifest = next;
+                    report.orphan_receipts.retain(|orphan| *orphan != operation);
+                    report.recovered.push(operation);
+                    adopted = true;
+                }
+            }
+            if !adopted {
+                return Ok(());
+            }
+        }
     }
 
     fn verify_artifact(

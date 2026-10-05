@@ -606,7 +606,9 @@ fn execute_operation(
     let mut attempts = base.attempt;
     let mut charged = 0;
     let mut last: Option<AttemptOutcome> = None;
-    while attempts < max_attempts {
+    // The budget bounds charged attempts; unsupported probes advance the
+    // provider walk without consuming it.
+    while base.attempt + charged < max_attempts {
         if cancel.is_canceled() {
             return (OperationState::Canceled { attempts }, None, charged);
         }
@@ -732,7 +734,7 @@ fn record(
 }
 
 /// Deterministic, valid, collision-free artifact id for a new record.
-fn artifact_id(
+pub(crate) fn artifact_id(
     manifest: &SceneProjectManifest,
     operation_id: &str,
     identity: &ContentHash,

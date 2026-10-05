@@ -292,20 +292,50 @@ fn interrupted_build_resumes_to_the_cold_result() {
 }
 
 #[test]
-fn receipts_without_records_are_orphans_and_get_rebuilt() {
+fn receipts_without_records_are_recovered_after_a_crash() {
     let project = TempProject::new("orphan");
     build(&project, &WritingExecutor::new(&project.root));
-    // Crash between writing receipts and saving the manifest: the manifest
-    // lost the `assemble` record while its receipt remains.
+    // Crash between writing the `assemble` receipt and saving the manifest:
+    // the record is missing and the pre-dispatch reservation remains.
+    let (store, mut manifest) = project.open();
+    let identity = manifest.operation_identities().unwrap()["assemble"].clone();
+    manifest
+        .artifacts
+        .retain(|artifact| artifact.produced_by != "assemble");
+    manifest
+        .attempt_usage
+        .push(crate::scene_project::AttemptUsage {
+            operation: "assemble".into(),
+            operation_identity: identity,
+            attempts: 1,
+        });
+    store.save_manifest(&manifest).unwrap();
+
+    let executor = WritingExecutor::new(&project.root);
+    let report = build(&project, &executor);
+    assert_eq!(report.reconcile.recovered, ["assemble"]);
+    assert!(report.reconcile.orphan_receipts.is_empty());
+    assert!(executor.executed().is_empty());
+    assert!(report.run.is_complete());
+    let (_, persisted) = project.open();
+    assert!(persisted.attempt_usage.is_empty());
+}
+
+#[test]
+fn stale_or_unverifiable_orphans_are_not_recovered() {
+    let project = TempProject::new("orphan-stale");
+    build(&project, &WritingExecutor::new(&project.root));
     let (store, mut manifest) = project.open();
     manifest
         .artifacts
         .retain(|artifact| artifact.produced_by != "assemble");
     store.save_manifest(&manifest).unwrap();
+    fs::write(project.file("artifacts/assemble.bin"), b"partial").unwrap();
 
     let executor = WritingExecutor::new(&project.root);
     let report = build(&project, &executor);
     assert_eq!(report.reconcile.orphan_receipts, ["assemble"]);
+    assert!(report.reconcile.recovered.is_empty());
     assert_eq!(executor.executed(), BTreeSet::from(["assemble".to_owned()]));
 }
 
