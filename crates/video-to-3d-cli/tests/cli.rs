@@ -228,6 +228,15 @@ fn tampered_outputs_show_up_in_status_and_inspect() {
     assert!(status
         .stderr
         .contains("sparse: recorded artifact invalidated"));
+    let inspect = cli(&["inspect", &path(&project)]);
+    assert!(inspect
+        .stderr
+        .contains("sparse: recorded artifact invalidated"));
+    let export = cli(&["export", &path(&project), "--target", "web"]);
+    assert_eq!(export.code, 5);
+    assert!(export
+        .stderr
+        .contains("sparse: recorded artifact invalidated"));
 }
 
 #[test]
