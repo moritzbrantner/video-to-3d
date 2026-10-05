@@ -1,4 +1,5 @@
 mod dense;
+mod keyframe_selection;
 mod mesh;
 mod multi_view;
 mod pnp;
@@ -6,6 +7,9 @@ mod revisit;
 mod two_view;
 
 pub use dense::{DenseGridSite, DenseStats, DenseWorkingSetEstimate};
+pub use keyframe_selection::{
+    ClipSegmentStats, FrameDecision, FrameSelectionStats, KeyframeSelectionStats, SegmentBreak,
+};
 pub use mesh::{MeshStats, MeshTriangle};
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
@@ -422,8 +426,14 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
                 .collect::<Vec<_>>(),
         )
     });
+    let frame_evidence: Vec<_> = luma_frames
+        .iter()
+        .enumerate()
+        .map(|(index, luma)| crate::input_readiness::frame_evidence(index, luma, width, height))
+        .collect();
+    let keyframe_selection = keyframe_selection::select(&pairs, &frame_evidence, width, height);
     let mut multi_view_analysis = multi_view::analyze(
-        &pairs,
+        &keyframe_selection,
         &adjacent_matches,
         seed_landmarks
             .as_ref()
@@ -864,6 +874,19 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         "Motion-guided adjacent matching recovered {motion_guided_pairs} sampled frame pair(s) after the ordinary origin-centered local search was starved. A strict global descriptor consensus only predicts the dominant displacement used to center the existing bounded local search; all calibrated geometry still passes the normal epipolar, PnP, bundle-adjustment, dense-depth, and mesh gates."
     ));
 }
+
+    let segments = &multi_view.keyframe_selection.segments;
+    if segments.len() > 1 {
+        let spans = segments
+            .iter()
+            .map(|segment| format!("{}–{}", segment.first_frame, segment.last_frame))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warnings.push(format!(
+            "The clip splits into {} segments at hard cuts or discontinuities (frames {spans}). Only the segment containing the seed pair is solved; the others are reported, not forced into one geometric solve.",
+            segments.len()
+        ));
+    }
 
     let low_pairs = pairs.iter().filter(|pair| pair.low_parallax).count();
     if low_pairs > pairs.len() / 2 {

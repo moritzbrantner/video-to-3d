@@ -443,7 +443,7 @@ pub fn assess_readiness(
     })
 }
 
-fn frame_evidence(index: usize, luma: &[u8], width: u32, height: u32) -> FrameEvidence {
+pub(crate) fn frame_evidence(index: usize, luma: &[u8], width: u32, height: u32) -> FrameEvidence {
     let (w, h) = (width as usize, height as usize);
     let pixel_count = luma.len() as f32;
     let sum: u64 = luma.iter().map(|value| u64::from(*value)).sum();

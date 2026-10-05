@@ -11,6 +11,8 @@ import {
   type LearnedReconstructionMode,
 } from "../src/learnedDepth";
 import {
+  describeClipSegments,
+  describeFrameSelection,
   reconstructFrames,
   type FrameCameraState,
   type ReconstructionResult,
@@ -361,9 +363,10 @@ export default function Home() {
       : (reconstruction?.camera_state.frames[selectedFrameIndex] ?? null);
   const hasRegisteredGeometry =
     reconstruction?.camera_state.calibrated_seed_cameras.length === 2;
-  const selectedIsKeyframe =
-    selectedFrameIndex !== null &&
-    Boolean(reconstruction?.multi_view.keyframes.includes(selectedFrameIndex));
+  const selectedSelection =
+    selectedFrameIndex !== null && reconstruction
+      ? describeFrameSelection(reconstruction.multi_view.keyframe_selection, selectedFrameIndex)
+      : null;
   const selectedEvidence = selectedFrameEvidence(selectedFrameState);
 
   let status = "Choose one or more videos to begin";
@@ -669,7 +672,7 @@ export default function Home() {
             <div className="selection-summary">
               <strong>
                 Frame {selectedFrameIndex + 1}
-                {selectedIsKeyframe ? " · keyframe" : ""}
+                {selectedSelection ? ` · ${selectedSelection}` : ""}
               </strong>
               {selectedEvidence.length > 0 ? <span>{selectedEvidence.join(" · ")}</span> : null}
             </div>
@@ -728,6 +731,10 @@ export default function Home() {
                             .join(", ")
                         : "None"}
                     </td>
+                  </tr>
+                  <tr>
+                    <th>Clip segments</th>
+                    <td>{describeClipSegments(reconstruction.multi_view.keyframe_selection)}</td>
                   </tr>
                   <tr>
                     <th>Approximate motion samples</th>

@@ -131,8 +131,69 @@ export type BundleAdjustmentStats = {
   final_rmse_reprojection_error_pixels: number | null;
 };
 
+export type FrameDecision = "keyframe" | "redundant" | "blurred" | "poor_exposure";
+
+export type SegmentBreak = "hard_cut" | "lost_overlap" | "motion_jump";
+
+export type FrameSelectionStats = {
+  frame_index: number;
+  segment: number;
+  decision: FrameDecision;
+  sharpness_ratio: number;
+  mean_luma: number;
+};
+
+export type ClipSegmentStats = {
+  first_frame: number;
+  last_frame: number;
+  keyframes: number;
+  ends_with: SegmentBreak | null;
+};
+
+export type KeyframeSelectionStats = {
+  segments: ClipSegmentStats[];
+  frames: FrameSelectionStats[];
+};
+
+const FRAME_DECISION_LABELS: Record<FrameDecision, string> = {
+  keyframe: "keyframe",
+  redundant: "not a keyframe: too little parallax since the last keyframe",
+  blurred: "rejected: motion blur",
+  poor_exposure: "rejected: poor exposure",
+};
+
+const SEGMENT_BREAK_LABELS: Record<SegmentBreak, string> = {
+  hard_cut: "hard cut",
+  lost_overlap: "lost overlap",
+  motion_jump: "motion jump",
+};
+
+/** Why a frame was or was not selected, and its clip segment when the clip splits. */
+export function describeFrameSelection(
+  selection: KeyframeSelectionStats,
+  frameIndex: number,
+): string | null {
+  const frame = selection.frames[frameIndex];
+  if (!frame) {
+    return null;
+  }
+  const label = FRAME_DECISION_LABELS[frame.decision];
+  return selection.segments.length > 1 ? `${label} · segment ${frame.segment + 1}` : label;
+}
+
+/** Clip segments as one-based frame spans with the reason each one ends. */
+export function describeClipSegments(selection: KeyframeSelectionStats): string {
+  return selection.segments
+    .map((segment) => {
+      const span = `frames ${segment.first_frame + 1}–${segment.last_frame + 1}`;
+      return segment.ends_with ? `${span} (${SEGMENT_BREAK_LABELS[segment.ends_with]})` : span;
+    })
+    .join(", ");
+}
+
 export type MultiViewStats = {
   keyframes: number[];
+  keyframe_selection: KeyframeSelectionStats;
   track_count: number;
   tracks_three_plus: number;
   longest_track: number;
@@ -517,6 +578,18 @@ export function assertReconstructionContract(
   const workingSet = result.dense.working_set_estimate;
   if (!state || !Array.isArray(state.frames)) {
     throw new Error("camera-state contract mismatch: WASM result has no explicit camera_state");
+  }
+  const selection = result.multi_view.keyframe_selection;
+  if (
+    !selection ||
+    selection.frames.length !== expectedFrameCount ||
+    !result.multi_view.keyframes.every(
+      (frameIndex) => selection.frames[frameIndex]?.decision === "keyframe",
+    )
+  ) {
+    throw new Error(
+      "camera-state contract mismatch: keyframe selection does not explain every frame",
+    );
   }
   if (
     !workingSet ||
