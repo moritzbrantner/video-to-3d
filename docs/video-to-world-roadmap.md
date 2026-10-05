@@ -132,6 +132,8 @@ Required semantics:
 - bounded retries;
 - concurrency only where operations are independent.
 
+Status: implemented in `crates/video-to-3d-core/src/scene_runner.rs` (`scene_runner::run`). It derives work from the manifest, reuses recorded artifacts whose operation identity is current, executes ready operations in deterministic waves (threads only when `max_concurrency > 1`), retries transient failures within `max_attempts`, walks reachable providers in fallback order on unsupported/permanent failures, honours a cancellation token, and records produced artifacts back into the manifest. Byte verification of recorded artifacts is left to receipt-backed reconciliation (1.2).
+
 ## 1.2 Receipt-backed cache and reconciliation
 
 Every expensive operation records:
