@@ -177,6 +177,10 @@ pub struct PairEvidence {
     /// Fraction of matches explained by a second, different homography among
     /// the first model's outliers (a separately moving depth layer).
     pub secondary_motion_fraction: f32,
+    /// The residuals left by the best homography point consistently toward or
+    /// away from one epipole, as translation parallax does (random mismatches
+    /// and independently moving content do not).
+    pub residuals_epipolar_coherent: bool,
     pub relative_exposure_change: f32,
     pub motion: PairMotion,
 }
@@ -302,10 +306,16 @@ pub fn normalize_sampling(
         .windows(2)
         .map(|pair| pair[1] - pair[0])
         .collect();
+    let decoded_at = |index: usize| {
+        metadata.presented_time_sources.get(index) == Some(&PresentedTimeSource::DecodedFrame)
+    };
+    // Only two decoder timestamps can show that presentation did not advance.
     let non_advancing_samples = intervals
         .iter()
         .enumerate()
-        .filter(|(_, interval)| **interval <= 0.0)
+        .filter(|(index, interval)| {
+            **interval <= 0.0 && decoded_at(*index) && decoded_at(index + 1)
+        })
         .map(|(index, _)| index + 1)
         .collect();
     let max_seek_error_seconds = metadata
@@ -555,52 +565,12 @@ fn pair_evidence(
         .collect();
     motions.sort_by(f32::total_cmp);
     let median_motion_pixels = motions.get(motions.len() / 2).copied().unwrap_or(0.0);
-    let (homography_inlier_fraction, residual_p75_pixels, secondary_motion_fraction) =
-        match robust_homography(&correspondences) {
-            Some(homography) => {
-                let residuals: Vec<f32> = correspondences
-                    .iter()
-                    .map(|(a, b)| transfer_error(&homography, *a, *b))
-                    .collect();
-                let inliers = residuals
-                    .iter()
-                    .filter(|residual| **residual <= RANSAC_INLIER_PIXELS)
-                    .count();
-                // Random mismatches do not agree on a motion; a separately
-                // moving depth layer does.
-                let outliers: Vec<_> = correspondences
-                    .iter()
-                    .zip(&residuals)
-                    .filter(|(_, residual)| **residual > THRESHOLDS.parallax_residual_pixels * 2.0)
-                    .map(|(correspondence, _)| *correspondence)
-                    .collect();
-                let secondary = if outliers.len() >= SECONDARY_MIN_MATCHES {
-                    robust_homography(&outliers).map_or(0, |second| {
-                        outliers
-                            .iter()
-                            .filter(|(a, b)| {
-                                transfer_error(&second, *a, *b) <= RANSAC_INLIER_PIXELS
-                            })
-                            .count()
-                    })
-                } else {
-                    0
-                };
-                let mut sorted = residuals.clone();
-                sorted.sort_by(f32::total_cmp);
-                let count = residuals.len() as f32;
-                (
-                    inliers as f32 / count,
-                    sorted[(sorted.len() * 3) / 4],
-                    if secondary >= SECONDARY_MIN_MATCHES {
-                        secondary as f32 / count
-                    } else {
-                        0.0
-                    },
-                )
-            }
-            None => (0.0, 0.0, 0.0),
-        };
+    let ResidualEvidence {
+        inlier_fraction: homography_inlier_fraction,
+        residual_p75_pixels,
+        secondary_motion_fraction,
+        epipolar_coherent: residuals_epipolar_coherent,
+    } = residual_evidence(&correspondences);
     let before = frames[from].mean_luma.max(1.0);
     let relative_exposure_change = (frames[to].mean_luma - frames[from].mean_luma).abs() / before;
     let motion = if identical {
@@ -609,7 +579,8 @@ fn pair_evidence(
         PairMotion::Unknown
     } else if median_motion_pixels < THRESHOLDS.static_motion_pixels {
         PairMotion::Static
-    } else if residual_p75_pixels >= THRESHOLDS.parallax_residual_pixels
+    } else if (residual_p75_pixels >= THRESHOLDS.parallax_residual_pixels
+        && residuals_epipolar_coherent)
         || secondary_motion_fraction >= THRESHOLDS.min_secondary_motion_fraction
     {
         PairMotion::Parallax
@@ -627,6 +598,7 @@ fn pair_evidence(
         homography_inlier_fraction,
         residual_p75_pixels,
         secondary_motion_fraction,
+        residuals_epipolar_coherent,
         relative_exposure_change,
         motion,
     }
@@ -848,6 +820,128 @@ fn issues(
         );
     }
     issues
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResidualEvidence {
+    inlier_fraction: f32,
+    residual_p75_pixels: f32,
+    secondary_motion_fraction: f32,
+    epipolar_coherent: bool,
+}
+
+fn residual_evidence(correspondences: &[([f32; 2], [f32; 2])]) -> ResidualEvidence {
+    let Some(homography) = robust_homography(correspondences) else {
+        return ResidualEvidence {
+            inlier_fraction: 0.0,
+            residual_p75_pixels: 0.0,
+            secondary_motion_fraction: 0.0,
+            epipolar_coherent: false,
+        };
+    };
+    let residuals: Vec<f32> = correspondences
+        .iter()
+        .map(|(a, b)| transfer_error(&homography, *a, *b))
+        .collect();
+    let inliers = residuals
+        .iter()
+        .filter(|residual| **residual <= RANSAC_INLIER_PIXELS)
+        .count();
+    // Random mismatches do not agree on a motion; a separately moving depth
+    // layer does.
+    let outliers: Vec<_> = correspondences
+        .iter()
+        .zip(&residuals)
+        .filter(|(_, residual)| **residual > THRESHOLDS.parallax_residual_pixels * 2.0)
+        .map(|(correspondence, _)| *correspondence)
+        .collect();
+    let secondary = if outliers.len() >= SECONDARY_MIN_MATCHES {
+        robust_homography(&outliers).map_or(0, |second| {
+            outliers
+                .iter()
+                .filter(|(a, b)| transfer_error(&second, *a, *b) <= RANSAC_INLIER_PIXELS)
+                .count()
+        })
+    } else {
+        0
+    };
+    // Residual vectors b - H(a) of a translating camera lie on lines through
+    // a common epipole.
+    let residual_lines: Vec<([f64; 2], [f64; 2])> = correspondences
+        .iter()
+        .zip(&residuals)
+        .filter(|(_, residual)| **residual >= THRESHOLDS.parallax_residual_pixels)
+        .filter_map(|((a, b), _)| {
+            let projected = homography * Vector3::new(f64::from(a[0]), f64::from(a[1]), 1.0);
+            if projected.z.abs() < 1e-12 {
+                return None;
+            }
+            let point = [f64::from(b[0]), f64::from(b[1])];
+            let direction = [
+                point[0] - projected.x / projected.z,
+                point[1] - projected.y / projected.z,
+            ];
+            Some((point, direction))
+        })
+        .collect();
+    let mut sorted = residuals.clone();
+    sorted.sort_by(f32::total_cmp);
+    let count = residuals.len() as f32;
+    ResidualEvidence {
+        inlier_fraction: inliers as f32 / count,
+        residual_p75_pixels: sorted[(sorted.len() * 3) / 4],
+        secondary_motion_fraction: if secondary >= SECONDARY_MIN_MATCHES {
+            secondary as f32 / count
+        } else {
+            0.0
+        },
+        epipolar_coherent: epipolar_coherent(&residual_lines),
+    }
+}
+
+/// Deterministic RANSAC for a common intersection (epipole) of residual
+/// lines; coherent when most lines pass within 10 degrees of it.
+fn epipolar_coherent(lines: &[([f64; 2], [f64; 2])]) -> bool {
+    let n = lines.len();
+    if n < SECONDARY_MIN_MATCHES {
+        return false;
+    }
+    let max_angle = 10f64.to_radians().sin();
+    let supports = |epipole: [f64; 2]| {
+        lines
+            .iter()
+            .filter(|(point, direction)| {
+                let to_epipole = [epipole[0] - point[0], epipole[1] - point[1]];
+                let cross = direction[0] * to_epipole[1] - direction[1] * to_epipole[0];
+                let norms =
+                    (direction[0].hypot(direction[1])) * (to_epipole[0].hypot(to_epipole[1]));
+                norms > 1e-9 && (cross / norms).abs() <= max_angle
+            })
+            .count()
+    };
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d ^ n as u64;
+    let mut next = |bound: usize| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 33) as usize) % bound
+    };
+    let mut best = 0;
+    for _ in 0..RANSAC_ITERATIONS {
+        let (i, j) = (next(n), next(n));
+        if i == j {
+            continue;
+        }
+        let ((p, d), (q, e)) = (lines[i], lines[j]);
+        let denominator = d[0] * e[1] - d[1] * e[0];
+        if denominator.abs() < 1e-9 {
+            continue;
+        }
+        let t = ((q[0] - p[0]) * e[1] - (q[1] - p[1]) * e[0]) / denominator;
+        let epipole = [p[0] + t * d[0], p[1] + t * d[1]];
+        best = best.max(supports(epipole));
+    }
+    best * 10 >= n * 6
 }
 
 /// Deterministic RANSAC over 4-point homographies, refit on the inliers.

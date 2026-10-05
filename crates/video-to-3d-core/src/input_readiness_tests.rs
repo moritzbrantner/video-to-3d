@@ -340,3 +340,71 @@ fn blockiness_is_orientation_independent() {
     let banded = frame_evidence(0, &luma, W, H);
     assert!(banded.blockiness > THRESHOLDS.max_blockiness, "{banded:?}");
 }
+
+fn lcg(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    ((*state >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+#[test]
+fn incoherent_outliers_are_not_parallax() {
+    // Uniform shift (rotation-like) plus 30% random mismatches.
+    let mut state = 7u64;
+    let mut correspondences = Vec::new();
+    for index in 0..200 {
+        let a = [lcg(&mut state) * 180.0, lcg(&mut state) * 130.0];
+        let b = if index % 10 < 3 {
+            [lcg(&mut state) * 180.0, lcg(&mut state) * 130.0]
+        } else {
+            [a[0] + 5.0, a[1] - 2.0]
+        };
+        correspondences.push((a, b));
+    }
+    let evidence = residual_evidence(&correspondences);
+    assert!(evidence.residual_p75_pixels >= THRESHOLDS.parallax_residual_pixels);
+    assert!(!evidence.epipolar_coherent, "{evidence:?}");
+}
+
+#[test]
+fn forward_translation_with_depth_is_coherent_parallax() {
+    // Camera moving toward a focus of expansion at (90, 65) over points at
+    // varied depth: displacement is radial with depth-dependent magnitude.
+    let mut state = 11u64;
+    let correspondences: Vec<_> = (0..200)
+        .map(|_| {
+            let a = [lcg(&mut state) * 180.0, lcg(&mut state) * 130.0];
+            let inverse_depth = 0.02 + lcg(&mut state) * 0.2;
+            let b = [
+                a[0] + (a[0] - 90.0) * inverse_depth,
+                a[1] + (a[1] - 65.0) * inverse_depth,
+            ];
+            (a, b)
+        })
+        .collect();
+    let evidence = residual_evidence(&correspondences);
+    assert!(
+        evidence.residual_p75_pixels >= THRESHOLDS.parallax_residual_pixels,
+        "{evidence:?}"
+    );
+    assert!(evidence.epipolar_coherent, "{evidence:?}");
+}
+
+#[test]
+fn non_advancing_timing_needs_decoded_endpoints() {
+    let mut sampling = metadata(3);
+    sampling.presented_times = vec![0.5, 1.2, 1.1];
+    sampling.presented_time_sources[2] = PresentedTimeSource::SeekPosition;
+    assert!(normalize_sampling(&sampling, 3)
+        .unwrap()
+        .non_advancing_samples
+        .is_empty());
+    sampling.presented_time_sources[2] = PresentedTimeSource::DecodedFrame;
+    assert_eq!(
+        normalize_sampling(&sampling, 3)
+            .unwrap()
+            .non_advancing_samples,
+        [2]
+    );
+}

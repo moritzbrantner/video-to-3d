@@ -17,6 +17,7 @@ export type ReadinessPair = {
   overlap: number;
   median_motion_pixels: number;
   residual_p75_pixels: number;
+  residuals_epipolar_coherent: boolean;
   secondary_motion_fraction: number;
   motion: "duplicate" | "static" | "rotation_or_planar" | "parallax" | "unknown";
 };
