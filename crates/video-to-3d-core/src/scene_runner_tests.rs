@@ -402,7 +402,7 @@ fn attempt_budget_persists_across_resumed_runs() {
 }
 
 #[test]
-fn rejected_records_leave_the_manifest_untouched() {
+fn rejected_records_are_failures_that_keep_the_attempt_budget() {
     let mut manifest = manifest();
     let before = manifest.clone();
     let clashing = FakeExecutor::scripted(|request| {
@@ -413,16 +413,41 @@ fn rejected_records_leave_the_manifest_untouched() {
             })
         })
     });
-    let error = run(
-        &mut manifest,
-        &clashing,
-        RunOptions::default(),
-        &CancellationToken::new(),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("used more than once"));
-    assert_eq!(manifest, before);
+    let report = run_with(&mut manifest, &clashing, 1);
+    assert!(matches!(
+        &report.states["ingest"],
+        OperationState::Failed { attempts: 1, message } if message.contains("used more than once")
+    ));
+    assert!(manifest.artifacts.is_empty());
+    assert_eq!(manifest.operations, before.operations);
+    assert_eq!(manifest.attempt_usage.len(), 1);
     manifest.validate().unwrap();
+
+    // The single declared attempt is spent: a rerun does not call the executor.
+    let rerun = FakeExecutor::new();
+    let report = run_with(&mut manifest, &rerun, 1);
+    assert!(rerun.calls().is_empty());
+    assert_eq!(report.executed(), 0);
+}
+
+#[test]
+fn executor_panics_are_counted_attempts() {
+    let panicking = || {
+        FakeExecutor::scripted(|request| {
+            if request.operation.id == "dense" {
+                panic!("boom");
+            }
+            None
+        })
+    };
+    let mut manifest = manifest();
+    for (concurrency, expected) in [(2, 1), (1, 2)] {
+        let report = run_with(&mut manifest, &panicking(), concurrency);
+        assert_eq!(report.states["dense"].attempts(), expected);
+    }
+    let third = panicking();
+    run_with(&mut manifest, &third, 2);
+    assert!(!third.executed_operations().contains("dense"));
 }
 
 #[test]

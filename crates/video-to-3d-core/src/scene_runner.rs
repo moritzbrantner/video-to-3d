@@ -167,6 +167,8 @@ impl OperationState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunReport {
     pub states: BTreeMap<String, OperationState>,
+    /// Operations that made at least one executor attempt during this run.
+    pub executed: BTreeSet<String>,
 }
 
 impl RunReport {
@@ -186,17 +188,7 @@ impl RunReport {
 
     /// Number of operations that were actually executed (at least one attempt).
     pub fn executed(&self) -> usize {
-        self.states
-            .values()
-            .filter(|state| {
-                !matches!(
-                    state,
-                    OperationState::Reused
-                        | OperationState::Blocked { .. }
-                        | OperationState::Canceled { attempts: 0 }
-                )
-            })
-            .count()
+        self.executed.len()
     }
 }
 
@@ -229,6 +221,7 @@ pub fn run(
     }
     manifest.validate()?;
     let mut states: BTreeMap<String, OperationState> = BTreeMap::new();
+    let mut executed: BTreeSet<String> = BTreeSet::new();
 
     loop {
         let identities = manifest.operation_identities()?;
@@ -303,22 +296,35 @@ pub fn run(
         let outcomes = execute_wave(manifest, executor, options, cancel, &wave);
         // Record in operation-id order so the manifest is independent of
         // completion order.
-        for (request, (state, produced)) in wave.iter().zip(outcomes) {
+        for (request, (mut state, produced)) in wave.iter().zip(outcomes) {
             let id = &request.operation.id;
+            if state.attempts() > request.attempt {
+                executed.insert(id.clone());
+            }
             manifest
                 .attempt_usage
                 .retain(|usage| usage.operation != *id);
-            if let Some(produced) = produced {
-                record(manifest, id, &request.identity, produced)?;
-            } else {
-                let attempts = state.attempts();
-                if attempts > 0 {
-                    manifest.attempt_usage.push(AttemptUsage {
-                        operation: id.clone(),
-                        operation_identity: request.identity.clone(),
-                        attempts,
-                    });
-                }
+            let recorded = match produced {
+                Some(produced) => match record(manifest, id, &request.identity, produced) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        // The attempt was spent even though its output was
+                        // rejected; keep it in the budget.
+                        state = OperationState::Failed {
+                            attempts: state.attempts(),
+                            message: format!("output could not be recorded: {error}"),
+                        };
+                        false
+                    }
+                },
+                None => false,
+            };
+            if !recorded && state.attempts() > 0 {
+                manifest.attempt_usage.push(AttemptUsage {
+                    operation: id.clone(),
+                    operation_identity: request.identity.clone(),
+                    attempts: state.attempts(),
+                });
             }
             states.insert(id.clone(), state);
         }
@@ -332,7 +338,7 @@ pub fn run(
     }
     manifest.canonicalize();
     manifest.validate()?;
-    Ok(RunReport { states })
+    Ok(RunReport { states, executed })
 }
 
 fn prior_attempts(manifest: &SceneProjectManifest, operation: &str, identity: &ContentHash) -> u32 {
@@ -426,7 +432,7 @@ fn execute_wave(
                 results[index] = Some(handle.join().unwrap_or_else(|_| {
                     (
                         OperationState::Failed {
-                            attempts: 1,
+                            attempts: wave[index].attempt + 1,
                             message: "executor panicked".into(),
                         },
                         None,
@@ -469,7 +475,10 @@ fn execute_operation(
         let mut request = base.clone();
         request.provider = provider.clone();
         request.attempt = attempts;
-        let outcome = executor.execute(&request, cancel);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.execute(&request, cancel)
+        }))
+        .unwrap_or_else(|_| AttemptOutcome::Failed("executor panicked".into()));
         match &outcome {
             AttemptOutcome::Succeeded(produced) => {
                 return (
