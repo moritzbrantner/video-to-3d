@@ -1021,7 +1021,7 @@ impl SceneProjectManifest {
 
     /// Deterministic identity of every declared operation. Identities ignore
     /// operation ids and declaration order and depend only on kind, reachable
-    /// provider declarations (including revision and cost), attempt bound,
+    /// provider declarations (id, revision, cost; not credentials), attempt bound,
     /// media hashes, and for each upstream operation its identity plus the
     /// content hash of its current recorded artifact (`pending` when none).
     /// Replacing an upstream artifact therefore invalidates its descendants.
@@ -1072,8 +1072,8 @@ impl SceneProjectManifest {
                 .map(|provider| {
                     let mut provider = provider.clone();
                     provider.capabilities.sort();
-                    // The provider's local name is not semantic; its declaration is.
-                    provider.id.clear();
+                    // The provider id is kept: it is the stable backend key that
+                    // distinguishes otherwise identical declarations.
                     // Credentials select an account, not a result.
                     provider.credential_capability = None;
                     provider

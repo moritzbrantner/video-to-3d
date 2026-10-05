@@ -636,3 +636,24 @@ fn built_in_operations_carry_an_implementation_revision() {
     };
     assert_ne!(encoded, serde_json::to_vec(&bumped).unwrap());
 }
+
+#[test]
+fn switching_between_identical_providers_changes_identity() {
+    let mut document = standard_document();
+    document["provider_policy"]["providers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": "local-depth-alt",
+            "location": "local",
+            "capabilities": ["learned_reconstruction"],
+            "revision": "v2"
+        }));
+    document["provider_policy"]["fallback_order"] =
+        json!(["local-depth", "local-depth-alt", "cloud-world"]);
+    let base = parse(&document).unwrap().operation_identities().unwrap();
+    document["operations"][2]["provider"] = json!("local-depth-alt");
+    let switched = parse(&document).unwrap().operation_identities().unwrap();
+    assert_ne!(base["learned"], switched["learned"]);
+    assert_eq!(base["sparse"], switched["sparse"]);
+}
