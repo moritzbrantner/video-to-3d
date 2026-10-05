@@ -97,6 +97,8 @@ impl OperationExecutor for FakeExecutor {
         AttemptOutcome::Succeeded(ProducedArtifact {
             path: ProjectPath::new(format!("artifacts/{}.bin", request.operation.id)).unwrap(),
             content_hash: ContentHash::of_bytes(&bytes),
+            reproducibility: Reproducibility::Deterministic,
+            observations: BTreeMap::new(),
         })
     }
 }
@@ -410,6 +412,8 @@ fn rejected_records_are_failures_that_keep_the_attempt_budget() {
             AttemptOutcome::Succeeded(ProducedArtifact {
                 path: ProjectPath::new("media/clip.webm").unwrap(),
                 content_hash: ContentHash::of_bytes(b"x"),
+                reproducibility: Reproducibility::Deterministic,
+                observations: BTreeMap::new(),
             })
         })
     });

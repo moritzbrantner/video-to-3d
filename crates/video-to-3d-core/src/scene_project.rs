@@ -20,6 +20,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub const SCENE_PROJECT_SCHEMA_VERSION: u32 = 1;
+/// Project-relative directory reserved for build state (receipts, caches).
+/// Declared manifest paths may not point into it.
+pub const STATE_DIRECTORY: &str = ".video-to-3d";
 /// Upper bound for declared attempts of one operation (first attempt plus retries).
 pub const MAX_OPERATION_ATTEMPTS: u32 = 5;
 const MAX_IDENTIFIER_LENGTH: usize = 64;
@@ -1202,7 +1205,14 @@ fn validate_capability_name(provider: &str, capability: &str) -> Result<(), Scen
 /// Paths are compared case-insensitively so that two declarations cannot alias
 /// one file on case-insensitive filesystems.
 fn unique_path(paths: &mut BTreeSet<String>, path: &ProjectPath) -> Result<(), SceneProjectError> {
-    if !paths.insert(path.as_str().to_ascii_lowercase()) {
+    let folded = path.as_str().to_ascii_lowercase();
+    if folded == STATE_DIRECTORY || folded.starts_with(&format!("{STATE_DIRECTORY}/")) {
+        return invalid(format!(
+            "project path `{}` is inside the reserved `{STATE_DIRECTORY}` state directory",
+            path.as_str()
+        ));
+    }
+    if !paths.insert(folded) {
         return invalid(format!(
             "project path `{}` is used more than once",
             path.as_str()

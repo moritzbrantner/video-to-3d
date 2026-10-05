@@ -20,6 +20,7 @@ use crate::scene_project::{
     ArtifactRecord, AttemptUsage, ContentHash, MediaInput, OperationDeclaration, OperationInput,
     ProjectPath, ProviderDeclaration, SceneProjectError, SceneProjectManifest,
 };
+pub use crate::scene_store::Reproducibility;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -69,6 +70,57 @@ pub struct OperationRequest {
 pub struct ProducedArtifact {
     pub path: ProjectPath,
     pub content_hash: ContentHash,
+    /// How reproducible this output is; recorded in the operation receipt.
+    pub reproducibility: Reproducibility,
+    /// Deterministic observations worth keeping with the receipt (counts,
+    /// acceptance diagnostics, seeds). Never secrets.
+    pub observations: BTreeMap<String, String>,
+}
+
+impl ProducedArtifact {
+    pub fn new(
+        path: ProjectPath,
+        content_hash: ContentHash,
+        reproducibility: Reproducibility,
+    ) -> Self {
+        Self {
+            path,
+            content_hash,
+            reproducibility,
+            observations: BTreeMap::new(),
+        }
+    }
+}
+
+/// An output recorded during a run, handed to a [`RunObserver`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedOutput {
+    pub artifact: ArtifactRecord,
+    pub produced: ProducedArtifact,
+    pub provider: Option<ProviderDeclaration>,
+}
+
+/// Persistence hook invoked after every wave whose outputs were recorded, with
+/// the manifest already containing those records. Returning an error stops the
+/// run; the in-memory manifest stays valid.
+pub trait RunObserver {
+    fn wave_recorded(
+        &mut self,
+        manifest: &SceneProjectManifest,
+        recorded: &[RecordedOutput],
+    ) -> Result<(), SceneProjectError>;
+}
+
+struct NoObserver;
+
+impl RunObserver for NoObserver {
+    fn wave_recorded(
+        &mut self,
+        _manifest: &SceneProjectManifest,
+        _recorded: &[RecordedOutput],
+    ) -> Result<(), SceneProjectError> {
+        Ok(())
+    }
 }
 
 /// Result of one attempt.
@@ -214,6 +266,17 @@ pub fn run(
     options: RunOptions,
     cancel: &CancellationToken,
 ) -> Result<RunReport, SceneProjectError> {
+    run_observed(manifest, executor, options, cancel, &mut NoObserver)
+}
+
+/// [`run`] with a persistence hook called after each recorded wave.
+pub fn run_observed(
+    manifest: &mut SceneProjectManifest,
+    executor: &dyn OperationExecutor,
+    options: RunOptions,
+    cancel: &CancellationToken,
+    observer: &mut dyn RunObserver,
+) -> Result<RunReport, SceneProjectError> {
     if options.max_concurrency == 0 {
         return Err(SceneProjectError::Invalid(
             "runner max_concurrency must be positive".into(),
@@ -294,6 +357,7 @@ pub fn run(
         }
 
         let outcomes = execute_wave(manifest, executor, options, cancel, &wave);
+        let mut recorded_outputs = Vec::new();
         // Record in operation-id order so the manifest is independent of
         // completion order.
         for (request, (mut state, produced)) in wave.iter().zip(outcomes) {
@@ -305,8 +369,33 @@ pub fn run(
                 .attempt_usage
                 .retain(|usage| usage.operation != *id);
             let recorded = match produced {
-                Some(produced) => match record(manifest, id, &request.identity, produced) {
-                    Ok(()) => true,
+                Some(produced) => match record(manifest, id, &request.identity, produced.clone()) {
+                    Ok(()) => {
+                        let provider = match &state {
+                            OperationState::Succeeded {
+                                provider: Some(provider),
+                                ..
+                            } => manifest
+                                .provider_policy
+                                .providers
+                                .iter()
+                                .find(|candidate| candidate.id == *provider)
+                                .cloned(),
+                            _ => None,
+                        };
+                        let artifact = manifest
+                            .artifacts
+                            .iter()
+                            .find(|artifact| artifact.produced_by == *id)
+                            .expect("just recorded")
+                            .clone();
+                        recorded_outputs.push(RecordedOutput {
+                            artifact,
+                            produced,
+                            provider,
+                        });
+                        true
+                    }
                     Err(error) => {
                         // The attempt was spent even though its output was
                         // rejected; keep it in the budget.
@@ -328,6 +417,8 @@ pub fn run(
             }
             states.insert(id.clone(), state);
         }
+        manifest.canonicalize();
+        observer.wave_recorded(manifest, &recorded_outputs)?;
     }
 
     // Anything left unresolved was never reachable because of cancellation.
