@@ -511,6 +511,19 @@ impl AssembledScene {
             let camera_backed = classes
                 .iter()
                 .any(|provenance| provenance.requires_camera_evidence());
+            // Only reconstructed surfaces and projected textures can carry
+            // camera-backed evidence; audio and environment maps cannot.
+            if camera_backed
+                && matches!(
+                    resource.kind,
+                    ResourceKind::AudioClip | ResourceKind::EnvironmentMap
+                )
+            {
+                return invalid(format!(
+                    "{:?} resource `{}` cannot claim camera-backed provenance",
+                    resource.kind, resource.id
+                ));
+            }
             if camera_backed && resource.source_frames.is_empty() {
                 return invalid(format!(
                     "camera-supported resource `{}` must list its supporting source frames",
@@ -552,6 +565,12 @@ impl AssembledScene {
         let mut materials = BTreeSet::new();
         for material in &self.materials {
             declare(&material.id)?;
+            if material.provenance.requires_camera_evidence() {
+                return invalid(format!(
+                    "material `{}` factors carry no evidence links and cannot claim camera-backed provenance; use a camera-backed texture resource instead",
+                    material.id
+                ));
+            }
             let factors = material
                 .base_color
                 .iter()

@@ -488,3 +488,24 @@ fn semantic_label_order_does_not_change_canonical_form() {
         parse(&original).unwrap().to_canonical_json().unwrap()
     );
 }
+
+#[test]
+fn materials_and_audio_cannot_claim_camera_backed_provenance() {
+    expect_invalid(
+        &with(
+            scene_document(),
+            "/materials/0/provenance",
+            json!("geometric_multi_view"),
+        ),
+        "material `room-material` factors carry no evidence links",
+    );
+    let audio = with(
+        scene_document(),
+        "/resources/5/provenance",
+        json!(["learned_multi_view"]),
+    );
+    expect_invalid(
+        &with(audio, "/resources/5/source_frames", json!([0])),
+        "cannot claim camera-backed provenance",
+    );
+}
