@@ -2,6 +2,7 @@
 
 pub mod colmap;
 pub mod feature_analysis;
+pub mod input_readiness;
 pub mod scene_model;
 pub mod scene_project;
 pub mod scene_runner;

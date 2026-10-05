@@ -25,10 +25,51 @@ function waitFor(target: EventTarget, event: string): Promise<void> {
   });
 }
 
+/** Display metadata of the sampled media (orientation already applied by the browser). */
+export type SampledVideoInfo = {
+  duration: number;
+  displayWidth: number;
+  displayHeight: number;
+};
+
+type FrameCallbackVideo = HTMLVideoElement & {
+  requestVideoFrameCallback?: (
+    callback: (now: number, metadata: { mediaTime: number }) => void,
+  ) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
+/**
+ * Resolve with the media timestamp of the next frame the decoder presents, or
+ * `null` when the browser lacks requestVideoFrameCallback or presents nothing
+ * within the timeout. Register before seeking so the seeked frame is caught.
+ */
+function nextPresentedMediaTime(video: FrameCallbackVideo): Promise<number | null> {
+  if (!video.requestVideoFrameCallback) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let handle = 0;
+    const timer = setTimeout(() => {
+      video.cancelVideoFrameCallback?.(handle);
+      resolve(null);
+    }, 500);
+    handle = video.requestVideoFrameCallback!((_, metadata) => {
+      clearTimeout(timer);
+      resolve(metadata.mediaTime);
+    });
+  });
+}
+
 export async function sampleVideo(
   file: File,
   options: VideoSamplingOptions = {},
 ): Promise<SampledFrame[]> {
+  return (await sampleVideoWithInfo(file, options)).frames;
+}
+
+export async function sampleVideoWithInfo(
+  file: File,
+  options: VideoSamplingOptions = {},
+): Promise<{ frames: SampledFrame[]; info: SampledVideoInfo }> {
   const url = URL.createObjectURL(file);
   const video = document.createElement("video");
   video.muted = true;
@@ -56,10 +97,14 @@ export async function sampleVideo(
 
     const frames: SampledFrame[] = [];
     for (const time of plan.times) {
+      let decodedTime: number | null = null;
       if (Math.abs(video.currentTime - time) > 0.001) {
+        const presented = nextPresentedMediaTime(video as FrameCallbackVideo);
         video.currentTime = time;
         await waitFor(video, "seeked");
+        decodedTime = await presented;
       }
+
       context.drawImage(video, 0, 0, plan.analysisWidth, plan.analysisHeight);
       const image = context.getImageData(0, 0, plan.analysisWidth, plan.analysisHeight);
       frames.push({
@@ -72,9 +117,20 @@ export async function sampleVideo(
         ),
         thumbnail: canvas.toDataURL("image/jpeg", 0.68),
         time,
+        // The decoded frame's media timestamp when the browser reports it;
+        // otherwise only the seek position is known.
+        presentedTime: decodedTime ?? video.currentTime,
+        presentedTimeDecoded: decodedTime !== null,
       });
     }
-    return frames;
+    return {
+      frames,
+      info: {
+        duration: video.duration,
+        displayWidth: video.videoWidth,
+        displayHeight: video.videoHeight,
+      },
+    };
   } finally {
     video.removeAttribute("src");
     video.load();

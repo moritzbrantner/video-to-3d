@@ -17,7 +17,8 @@ import {
   type SampledFrame,
 } from "../src/reconstruction";
 import { SceneCanvas } from "../src/SceneCanvas";
-import { sampleVideo } from "../src/video";
+import { assessReadiness, type ReadinessReport } from "../src/readiness";
+import { sampleVideoWithInfo } from "../src/video";
 
 type RunPhase =
   | "queued"
@@ -41,6 +42,8 @@ type VideoRun = {
   frameCap: number;
   mode: LearnedReconstructionMode;
   learnedBenchmark: LearnedBenchmarkSuite | null;
+  readiness: ReadinessReport | null;
+  readinessError: string;
 };
 
 const MIN_SAMPLING_FPS = 0.25;
@@ -202,6 +205,8 @@ export default function Home() {
       frameCap: runFrameCap,
       mode: runMode,
       learnedBenchmark: null,
+      readiness: null,
+      readinessError: "",
     }));
 
     setRuns(nextRuns);
@@ -212,13 +217,24 @@ export default function Home() {
       const run = nextRuns[index];
       try {
         updateRun(run.id, { phase: "sampling", error: "" });
-        const sampled = await sampleVideo(file, {
+        const { frames: sampled, info } = await sampleVideoWithInfo(file, {
           framesPerSecond: run.samplingFps,
           maxFrames: run.frameCap,
         });
+        // Readiness is evidence only: it never prevents the reconstruction attempt.
+        let readiness: ReadinessReport | null = null;
+        let readinessError = "";
+        try {
+          readiness = await assessReadiness(sampled, info);
+        } catch (readinessFailure) {
+          readinessError =
+            readinessFailure instanceof Error ? readinessFailure.message : String(readinessFailure);
+        }
         updateRun(run.id, {
           phase: "reconstructing",
           frames: previewFrames(sampled),
+          readiness,
+          readinessError,
         });
         const result = await reconstructFrames(sampled);
         let learnedBenchmark: LearnedBenchmarkSuite | null = null;
@@ -308,6 +324,8 @@ export default function Home() {
         frameCap: runFrameCap,
         mode,
         learnedBenchmark: null,
+        readiness: null,
+        readinessError: "",
       };
       setRuns([failedRun]);
       setActiveRunId(failedRun.id);
@@ -655,6 +673,41 @@ export default function Home() {
               </strong>
               {selectedEvidence.length > 0 ? <span>{selectedEvidence.join(" · ")}</span> : null}
             </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {activeRun?.readiness || activeRun?.readinessError ? (
+        <section className="section-block readiness">
+          <div className="section-heading">
+            <div>
+              <h2>Input readiness</h2>
+              <p>
+                {activeRun.readiness
+                  ? `Geometric reconstruction: ${activeRun.readiness.geometric_verdict}. ` +
+                    (activeRun.readiness.sampling.decoded_time_samples < activeRun.readiness.pairs.length + 1
+                      ? `${activeRun.readiness.pairs.length + 1 - activeRun.readiness.sampling.decoded_time_samples} sample times are seek positions (no decoded frame time reported). `
+                      : "") +
+                    `Max seek error ${activeRun.readiness.sampling.max_seek_error_seconds.toFixed(3)} s, ` +
+                    `median sample interval ${activeRun.readiness.sampling.median_interval_seconds.toFixed(2)} s. ` +
+                    "This is measured evidence about the sampled frames, not a confidence score; " +
+                    "it never blocks reconstruction or generative paths."
+                  : `Readiness could not be measured: ${activeRun.readinessError}`}
+              </p>
+            </div>
+          </div>
+          {activeRun.readiness && activeRun.readiness.issues.length > 0 ? (
+            <ul className="warnings">
+              {activeRun.readiness.issues.map((issue, index) => (
+                <li key={`${issue.code}-${index}`} data-severity={issue.severity}>
+                  <strong>{issue.severity === "blocking" ? "Blocking" : "Warning"}:</strong>{" "}
+                  {issue.message}
+                  {issue.frames.length > 0
+                    ? ` (frames ${issue.frames.map((frame) => frame + 1).join(", ")})`
+                    : ""}
+                </li>
+              ))}
+            </ul>
           ) : null}
         </section>
       ) : null}

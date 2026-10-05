@@ -217,6 +217,8 @@ Before expensive work, classify whether the clip has:
 
 Do not fabricate confidence. A weak clip can still proceed to world-model generation, but its geometric evidence remains weak.
 
+Status (2.1 and 2.4): implemented in `crates/video-to-3d-core/src/input_readiness.rs` and shown in the browser's "Input readiness" panel. Sampling metadata (duration, display size, rotation, requested and presented sample times) is normalized and validated. Each frame gets texture density, a blur ratio, exposure and clipping, and 8x8 blockiness. Each neighbouring pair gets overlap, median motion, the 75th-percentile residual after a robust homography, and a second-homography fraction that classifies motion as duplicate, static, rotation/planar or parallax. Issues are reported against fixed, published thresholds with a geometric verdict (`ready`, `marginal` or `unsuitable`). `generative_paths_allowed` is always true and readiness never blocks reconstruction. Browser canvas output is sRGB; container colour metadata is not exposed to the page and is not claimed.
+
 ---
 
 # Milestone 3 — Finish the observed reconstruction baseline
