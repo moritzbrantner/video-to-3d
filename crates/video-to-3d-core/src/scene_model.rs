@@ -78,6 +78,12 @@ impl SceneProvenance {
     pub fn is_observed_geometry(self) -> bool {
         matches!(self, Self::GeometricMultiView | Self::RevalidatedCompletion)
     }
+
+    /// Provenance classes whose evidence must stay linked to accepted cameras,
+    /// matching the `ReconstructionEvidenceView` camera-support rule.
+    pub fn requires_camera_evidence(self) -> bool {
+        self.is_observed_geometry() || self == Self::LearnedMultiView
+    }
 }
 
 impl From<EvidenceOrigin> for SceneProvenance {
@@ -477,9 +483,9 @@ impl AssembledScene {
                     resource.id
                 ));
             }
-            if resource.provenance.is_observed_geometry() && resource.source_frames.is_empty() {
+            if resource.provenance.requires_camera_evidence() && resource.source_frames.is_empty() {
                 return invalid(format!(
-                    "observed resource `{}` must list its supporting source frames",
+                    "camera-supported resource `{}` must list its supporting source frames",
                     resource.id
                 ));
             }
@@ -680,7 +686,7 @@ impl AssembledScene {
                 }
                 _ => {}
             }
-            if light.provenance.is_observed_geometry() {
+            if light.provenance.requires_camera_evidence() {
                 return invalid(format!(
                     "light `{}` cannot claim observed-geometry provenance",
                     light.id
@@ -714,7 +720,7 @@ impl AssembledScene {
             if let Some(transform) = &anchor.transform {
                 transform.validate(&anchor.id)?;
             }
-            if anchor.provenance.is_observed_geometry() {
+            if anchor.provenance.requires_camera_evidence() {
                 return invalid(format!(
                     "audio `{}` cannot claim observed-geometry provenance",
                     anchor.id
@@ -738,6 +744,15 @@ impl AssembledScene {
         if let Some(representation) = &asset.visual {
             if let Some(mesh) = &representation.mesh {
                 visual.extend(provenance_of(&mesh.mesh));
+                // Appearance is part of the visual: a generated texture on an
+                // observed mesh must still surface as generative content.
+                let texture = mesh.material.as_deref().and_then(|material| {
+                    self.materials
+                        .iter()
+                        .find(|candidate| candidate.id == material)
+                        .and_then(|material| material.base_color_texture.as_deref())
+                });
+                visual.extend(texture.and_then(provenance_of));
             }
             if let Some(splat) = &representation.splat {
                 visual.extend(provenance_of(splat));

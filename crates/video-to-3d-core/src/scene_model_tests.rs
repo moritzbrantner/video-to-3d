@@ -384,3 +384,27 @@ fn unknown_versions_and_fields_fail_closed() {
         Err(SceneProjectError::Malformed(_))
     ));
 }
+
+#[test]
+fn learned_resources_require_accepted_camera_support() {
+    expect_invalid(
+        &without(scene_document(), "/resources/1/source_frames"),
+        "must list its supporting source frames",
+    );
+}
+
+#[test]
+fn generated_textures_surface_in_asset_provenance() {
+    let document = with(
+        scene_document(),
+        "/resources/2/provenance",
+        json!("generative_completion"),
+    );
+    let document = without(document, "/resources/2/source_frames");
+    let scene = parse(&document).unwrap();
+    let environment = scene.asset_provenance("environment").unwrap();
+    assert!(environment.contains_generative());
+    assert!(environment
+        .visual
+        .contains(&SceneProvenance::GenerativeCompletion));
+}
