@@ -657,3 +657,21 @@ fn switching_between_identical_providers_changes_identity() {
     assert_ne!(base["learned"], switched["learned"]);
     assert_eq!(base["sparse"], switched["sparse"]);
 }
+
+#[test]
+fn cloud_providers_must_declare_their_cost() {
+    let mut document = standard_document();
+    document["provider_policy"]["providers"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("cost_per_attempt");
+    expect_invalid(&document, "must declare cost_per_attempt");
+    expect_invalid(
+        &with(
+            standard_document(),
+            "/provider_policy/providers/0/cost_per_attempt",
+            json!(0),
+        ),
+        "must not declare a cost",
+    );
+}

@@ -408,8 +408,10 @@ pub struct ProviderDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_capability: Option<String>,
     /// Declared worst-case cost of one attempt, in the policy's minor cost unit.
-    #[serde(default)]
-    pub cost_per_attempt: u64,
+    /// Required for cloud providers (`0` declares them free explicitly); local
+    /// providers must omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_attempt: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -739,9 +741,15 @@ impl SceneProjectManifest {
                 validate_capability_name(&provider.id, capability)?;
             }
             match provider.location {
-                ProviderLocation::Local if provider.cost_per_attempt > 0 => {
+                ProviderLocation::Local if provider.cost_per_attempt.is_some() => {
                     return invalid(format!(
                         "local provider `{}` must not declare a cost",
+                        provider.id
+                    ))
+                }
+                ProviderLocation::Cloud if provider.cost_per_attempt.is_none() => {
+                    return invalid(format!(
+                        "cloud provider `{}` must declare cost_per_attempt (0 when free)",
                         provider.id
                     ))
                 }
@@ -752,7 +760,7 @@ impl SceneProjectManifest {
                     ))
                 }
                 ProviderLocation::Cloud
-                    if provider.cost_per_attempt > 0
+                    if provider.cost_per_attempt.unwrap_or(0) > 0
                         && policy.execution != ExecutionPolicy::AllowPaidCloud =>
                 {
                     return invalid(format!(
@@ -987,7 +995,7 @@ impl SceneProjectManifest {
             }
             let worst_case = reachable
                 .iter()
-                .map(|provider| provider.cost_per_attempt)
+                .map(|provider| provider.cost_per_attempt.unwrap_or(0))
                 .max()
                 .unwrap_or(0)
                 .checked_mul(u64::from(operation.max_attempts))
