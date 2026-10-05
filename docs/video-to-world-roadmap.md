@@ -75,6 +75,8 @@ Acceptance:
 - secret/API credentials are referenced by capability name, never persisted in the manifest;
 - the same manifest can be resumed after process restart.
 
+Status: schema v1 is implemented in `crates/video-to-3d-core/src/scene_project.rs` (`SceneProjectManifest`). It records media identities, quality mode, provider policy (local/cloud, cost bounds, cloud-upload allowlist, fallback order, credential capability names), the declared operation graph with content-derived operation identities, recorded artifacts, and export targets. Quality modes gate which operation kinds may be declared; loading fails closed on unknown versions/fields and invalid combinations.
+
 ## 0.2 Canonical scene artifact model
 
 Define the assembled scene contract without inventing another renderer-specific scene graph.
