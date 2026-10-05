@@ -305,3 +305,20 @@ fn pair_matching_agrees_with_the_reconstruction_matcher() {
         assert_eq!(readiness, reconstructed, "step {step}");
     }
 }
+
+#[test]
+fn decoded_seek_errors_are_surfaced() {
+    let lumas = parallax_sequence();
+    let frames: Vec<FrameInput> = lumas.iter().map(|luma| frame(luma)).collect();
+    let mut sampling = metadata(frames.len());
+    // Requested every 0.8 s; the decoder presented sample 3 0.5 s late.
+    sampling.presented_times[3] += 0.5;
+    let report = assess_readiness(&frames, &sampling).unwrap();
+    assert_eq!(report.sampling.seek_error_samples, [3]);
+    assert!(codes(&report).contains(&IssueCode::TimingIrregular));
+
+    // Seek positions cannot reveal seek error.
+    sampling.presented_time_source = PresentedTimeSource::SeekPosition;
+    let report = assess_readiness(&frames, &sampling).unwrap();
+    assert!(report.sampling.seek_error_samples.is_empty());
+}

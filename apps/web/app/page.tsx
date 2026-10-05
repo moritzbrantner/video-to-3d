@@ -687,7 +687,8 @@ export default function Home() {
                   ? `Geometric reconstruction: ${activeRun.readiness.geometric_verdict}. ` +
                     (activeRun.readiness.sampling.presented_time_source === "seek_position"
                       ? "Sample timing uses seek positions (this browser does not report decoded frame times). "
-                      : "") +
+                      : `Max seek error ${activeRun.readiness.sampling.max_seek_error_seconds.toFixed(3)} s, ` +
+                        `median sample interval ${activeRun.readiness.sampling.median_interval_seconds.toFixed(2)} s. `) +
                     "This is measured evidence about the sampled frames, not a confidence score; " +
                     "it never blocks reconstruction or generative paths."
                   : `Readiness could not be measured: ${activeRun.readinessError}`}

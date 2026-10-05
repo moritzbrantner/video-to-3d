@@ -51,6 +51,9 @@ pub struct ReadinessThresholds {
     pub max_clipped_fraction: f32,
     /// Relative change of mean luma between neighbours above which exposure is unstable.
     pub max_exposure_change: f32,
+    /// Seek error, as a fraction of the requested sampling interval, above
+    /// which a decoded sample is reported as mistimed.
+    pub max_seek_error_fraction: f64,
     /// 8x8 block-boundary to interior gradient ratio above which decoding is blocky.
     pub max_blockiness: f32,
 }
@@ -67,6 +70,7 @@ pub const THRESHOLDS: ReadinessThresholds = ReadinessThresholds {
     max_mean_luma: 220.0,
     max_clipped_fraction: 0.35,
     max_exposure_change: 0.2,
+    max_seek_error_fraction: 0.5,
     max_blockiness: 1.8,
 };
 
@@ -122,6 +126,9 @@ pub struct NormalizedSampling {
     pub max_seek_error_seconds: f64,
     /// Pairs whose presented time did not advance.
     pub non_advancing_samples: Vec<usize>,
+    /// Decoded samples whose seek error exceeds the threshold (only with
+    /// decoded-frame timestamps; seek positions cannot show seek error).
+    pub seek_error_samples: Vec<usize>,
     pub presented_time_source: PresentedTimeSource,
     /// Pixels are sRGB as produced by a 2D canvas.
     pub color_space: &'static str,
@@ -297,6 +304,33 @@ pub fn normalize_sampling(
         .zip(&metadata.presented_times)
         .map(|(requested, presented)| (requested - presented).abs())
         .fold(0.0, f64::max);
+    let mut requested_intervals: Vec<f64> = metadata
+        .requested_times
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .collect();
+    requested_intervals.sort_by(f64::total_cmp);
+    let requested_interval = requested_intervals
+        .get(requested_intervals.len() / 2)
+        .copied()
+        .unwrap_or(0.0);
+    let seek_error_samples = if metadata.presented_time_source == PresentedTimeSource::DecodedFrame
+        && requested_interval > 0.0
+    {
+        metadata
+            .requested_times
+            .iter()
+            .zip(&metadata.presented_times)
+            .enumerate()
+            .filter(|(_, (requested, presented))| {
+                (*requested - *presented).abs()
+                    > THRESHOLDS.max_seek_error_fraction * requested_interval
+            })
+            .map(|(index, _)| index)
+            .collect()
+    } else {
+        Vec::new()
+    };
     intervals.sort_by(f64::total_cmp);
     let median_interval_seconds = intervals.get(intervals.len() / 2).copied().unwrap_or(0.0);
     let max_interval_seconds = intervals.last().copied().unwrap_or(0.0);
@@ -310,6 +344,7 @@ pub fn normalize_sampling(
         max_interval_seconds,
         max_seek_error_seconds,
         non_advancing_samples,
+        seek_error_samples,
         presented_time_source: metadata.presented_time_source,
         color_space: "srgb",
     })
@@ -721,11 +756,11 @@ fn issues(
             ),
         );
     }
+    // Only rotation/planar pairs are expected to follow one homography;
+    // parallax pairs legitimately spread over several depth layers.
     let unstable = pair_frames(&|pair| {
-        matches!(
-            pair.motion,
-            PairMotion::Parallax | PairMotion::RotationOrPlanar
-        ) && pair.homography_inlier_fraction < t.min_stable_fraction
+        pair.motion == PairMotion::RotationOrPlanar
+            && pair.homography_inlier_fraction < t.min_stable_fraction
     });
     if !unstable.is_empty() {
         push(
@@ -763,6 +798,19 @@ fn issues(
         );
     }
 
+    if !sampling.seek_error_samples.is_empty() {
+        push(
+            IssueCode::TimingIrregular,
+            Severity::Warning,
+            sampling.seek_error_samples.clone(),
+            format!(
+                "{} decoded samples landed more than {:.0}% of the sampling interval from their requested time (max {:.3} s)",
+                sampling.seek_error_samples.len(),
+                t.max_seek_error_fraction * 100.0,
+                sampling.max_seek_error_seconds
+            ),
+        );
+    }
     if !sampling.non_advancing_samples.is_empty() {
         push(
             IssueCode::TimingIrregular,
