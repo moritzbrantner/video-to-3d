@@ -210,12 +210,16 @@ pub struct SceneResource {
     pub kind: ResourceKind,
     pub path: ProjectPath,
     pub content_hash: ContentHash,
-    pub provenance: SceneProvenance,
+    /// Every provenance class present in the payload. A fused resource whose
+    /// regions have different origins lists all of them; region-level detail
+    /// stays in the referenced payload.
+    pub provenance: Vec<SceneProvenance>,
     /// Aggregate acceptance confidence in `[0, 1]`, when the producer has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
-    /// Region-level confidence/provenance stays in the referenced payload; this
-    /// records the source frames that support the resource.
+    /// Accepted source frames supporting the camera-backed part of the
+    /// resource. Required for camera-backed classes, forbidden when every class
+    /// is camera-free (generative completion must stay camera-free).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_frames: Vec<usize>,
 }
@@ -355,14 +359,16 @@ pub struct AssembledScene {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetProvenance {
     pub visual: BTreeSet<SceneProvenance>,
-    pub collision: Option<SceneProvenance>,
+    pub collision: BTreeSet<SceneProvenance>,
 }
 
 impl AssetProvenance {
     /// True when any part of the asset is generative completion.
     pub fn contains_generative(&self) -> bool {
         self.visual.contains(&SceneProvenance::GenerativeCompletion)
-            || self.collision == Some(SceneProvenance::GenerativeCompletion)
+            || self
+                .collision
+                .contains(&SceneProvenance::GenerativeCompletion)
     }
 }
 
@@ -415,6 +421,7 @@ impl AssembledScene {
         self.cameras.sort_by(|a, b| a.id.cmp(&b.id));
         self.resources.sort_by(|a, b| a.id.cmp(&b.id));
         for resource in &mut self.resources {
+            resource.provenance.sort();
             resource.source_frames.sort_unstable();
         }
         self.materials.sort_by(|a, b| a.id.cmp(&b.id));
@@ -477,15 +484,36 @@ impl AssembledScene {
                 ));
             }
             validate_confidence(&resource.id, resource.confidence)?;
-            if resource.kind.is_geometry() && resource.provenance == SceneProvenance::Estimated {
+            if resource.provenance.is_empty() {
+                return invalid(format!("resource `{}` declares no provenance", resource.id));
+            }
+            let mut classes = BTreeSet::new();
+            for provenance in &resource.provenance {
+                if !classes.insert(*provenance) {
+                    return invalid(format!(
+                        "resource `{}` lists provenance {provenance:?} more than once",
+                        resource.id
+                    ));
+                }
+            }
+            if resource.kind.is_geometry() && classes.contains(&SceneProvenance::Estimated) {
                 return invalid(format!(
                     "geometry resource `{}` cannot have estimated provenance",
                     resource.id
                 ));
             }
-            if resource.provenance.requires_camera_evidence() && resource.source_frames.is_empty() {
+            let camera_backed = classes
+                .iter()
+                .any(|provenance| provenance.requires_camera_evidence());
+            if camera_backed && resource.source_frames.is_empty() {
                 return invalid(format!(
                     "camera-supported resource `{}` must list its supporting source frames",
+                    resource.id
+                ));
+            }
+            if !camera_backed && !resource.source_frames.is_empty() {
+                return invalid(format!(
+                    "resource `{}` has only camera-free provenance and must not cite source frames",
                     resource.id
                 ));
             }
@@ -597,11 +625,22 @@ impl AssembledScene {
                             asset.id
                         ));
                     }
-                    if asset.collision_provenance.is_none() {
-                        return invalid(format!(
-                            "asset `{}` primitive collision shape requires collision_provenance",
-                            asset.id
-                        ));
+                    match asset.collision_provenance {
+                        None => {
+                            return invalid(format!(
+                                "asset `{}` primitive collision shape requires collision_provenance",
+                                asset.id
+                            ))
+                        }
+                        // A primitive proxy has no evidence linkage of its own;
+                        // camera-backed proxies must be mesh resources instead.
+                        Some(provenance) if provenance.requires_camera_evidence() => {
+                            return invalid(format!(
+                                "asset `{}` primitive collision proxy cannot claim camera-backed provenance {provenance:?}",
+                                asset.id
+                            ))
+                        }
+                        Some(_) => {}
                     }
                 }
                 None if asset.collision_provenance.is_some() => {
@@ -738,7 +777,8 @@ impl AssembledScene {
             self.resources
                 .iter()
                 .find(|resource| resource.id == id)
-                .map(|resource| resource.provenance)
+                .map(|resource| resource.provenance.clone())
+                .unwrap_or_default()
         };
         let mut visual = BTreeSet::new();
         if let Some(representation) = &asset.visual {
@@ -752,7 +792,7 @@ impl AssembledScene {
                         .find(|candidate| candidate.id == material)
                         .and_then(|material| material.base_color_texture.as_deref())
                 });
-                visual.extend(texture.and_then(provenance_of));
+                visual.extend(texture.map(provenance_of).unwrap_or_default());
             }
             if let Some(splat) = &representation.splat {
                 visual.extend(provenance_of(splat));
@@ -762,9 +802,10 @@ impl AssembledScene {
             Some(CollisionShape::Mesh { mesh } | CollisionShape::ConvexHull { mesh }) => {
                 provenance_of(mesh)
             }
-            Some(_) => asset.collision_provenance,
-            None => None,
+            Some(_) => asset.collision_provenance.into_iter().collect(),
+            None => Vec::new(),
         };
+        let collision = collision.into_iter().collect();
         Some(AssetProvenance { visual, collision })
     }
 }

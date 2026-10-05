@@ -24,17 +24,17 @@ fn scene_document() -> Value {
         ],
         "resources": [
             { "id": "room-mesh", "kind": "mesh", "path": "scene/room.mesh", "content_hash": HASH_A,
-              "provenance": "geometric_multi_view", "confidence": 0.8, "source_frames": [4, 0] },
+              "provenance": ["geometric_multi_view"], "confidence": 0.8, "source_frames": [4, 0] },
             { "id": "room-splat", "kind": "splat_field", "path": "scene/room.splat", "content_hash": HASH_B,
-              "provenance": "learned_multi_view", "source_frames": [0, 4] },
+              "provenance": ["learned_multi_view"], "source_frames": [0, 4] },
             { "id": "room-albedo", "kind": "texture", "path": "scene/room.png", "content_hash": HASH_C,
-              "provenance": "geometric_multi_view", "source_frames": [0] },
+              "provenance": ["geometric_multi_view"], "source_frames": [0] },
             { "id": "chair-mesh", "kind": "mesh", "path": "objects/chair.glb", "content_hash": HASH_D,
-              "provenance": "generative_completion" },
+              "provenance": ["generative_completion"] },
             { "id": "sky", "kind": "environment_map", "path": "scene/sky.hdr", "content_hash": HASH_E,
-              "provenance": "estimated" },
+              "provenance": ["estimated"] },
             { "id": "hum", "kind": "audio_clip", "path": "audio/hum.ogg", "content_hash": HASH_F,
-              "provenance": "authored" }
+              "provenance": ["authored"] }
         ],
         "materials": [
             { "id": "room-material", "base_color": [1.0, 1.0, 1.0, 1.0], "base_color_texture": "room-albedo",
@@ -45,7 +45,7 @@ fn scene_document() -> Value {
               "visual": { "mesh": { "mesh": "room-mesh", "material": "room-material" }, "splat": "room-splat" },
               "collision": { "mesh": { "mesh": "room-mesh" } } },
             { "id": "floor-collider", "role": "environment", "parent": "environment", "transform": identity(),
-              "collision": { "box": { "half_extents": [2.0, 0.05, 2.0] } }, "collision_provenance": "geometric_multi_view" },
+              "collision": { "box": { "half_extents": [2.0, 0.05, 2.0] } }, "collision_provenance": "estimated" },
             { "id": "chair", "role": "editable_object", "parent": "environment",
               "transform": { "translation": [0.2, 0.0, 1.0], "rotation": [0.0, 0.6, 0.0, 0.8], "scale": [1.0, 1.0, 1.0] },
               "visual": { "mesh": { "mesh": "chair-mesh" } },
@@ -148,7 +148,7 @@ fn provenance_survives_serialization_and_cannot_be_relabeled() {
     );
     assert_eq!(
         environment.collision,
-        Some(SceneProvenance::GeometricMultiView)
+        BTreeSet::from([SceneProvenance::GeometricMultiView])
     );
 
     // An asset has no provenance field of its own, so it cannot relabel a
@@ -325,7 +325,7 @@ fn provenance_rules_fail_closed() {
         &with(
             scene_document(),
             "/resources/3/provenance",
-            json!("estimated"),
+            json!(["estimated"]),
         ),
         "cannot have estimated provenance",
     );
@@ -398,7 +398,7 @@ fn generated_textures_surface_in_asset_provenance() {
     let document = with(
         scene_document(),
         "/resources/2/provenance",
-        json!("generative_completion"),
+        json!(["generative_completion"]),
     );
     let document = without(document, "/resources/2/source_frames");
     let scene = parse(&document).unwrap();
@@ -407,4 +407,56 @@ fn generated_textures_surface_in_asset_provenance() {
     assert!(environment
         .visual
         .contains(&SceneProvenance::GenerativeCompletion));
+}
+
+#[test]
+fn mixed_provenance_resources_keep_every_origin() {
+    let document = with(
+        scene_document(),
+        "/resources/0/provenance",
+        json!(["generative_completion", "geometric_multi_view"]),
+    );
+    let scene = parse(&document).unwrap();
+    assert_eq!(
+        scene
+            .resources
+            .iter()
+            .find(|resource| resource.id == "room-mesh")
+            .unwrap()
+            .provenance,
+        [
+            SceneProvenance::GeometricMultiView,
+            SceneProvenance::GenerativeCompletion
+        ]
+    );
+    let environment = scene.asset_provenance("environment").unwrap();
+    assert!(environment.contains_generative());
+    expect_invalid(
+        &with(
+            scene_document(),
+            "/resources/0/provenance",
+            json!(["geometric_multi_view", "geometric_multi_view"]),
+        ),
+        "more than once",
+    );
+    expect_invalid(
+        &with(scene_document(), "/resources/0/provenance", json!([])),
+        "declares no provenance",
+    );
+}
+
+#[test]
+fn camera_free_resources_and_primitive_proxies_cannot_claim_camera_support() {
+    expect_invalid(
+        &with(scene_document(), "/resources/3/source_frames", json!([0])),
+        "must not cite source frames",
+    );
+    expect_invalid(
+        &with(
+            scene_document(),
+            "/assets/1/collision_provenance",
+            json!("geometric_multi_view"),
+        ),
+        "cannot claim camera-backed provenance",
+    );
 }
