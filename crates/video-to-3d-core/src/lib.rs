@@ -2,6 +2,7 @@
 
 pub mod colmap;
 pub mod feature_analysis;
+pub mod scene_model;
 pub mod scene_project;
 
 // Keep the established reconstruction API at crate root while the large kernel body

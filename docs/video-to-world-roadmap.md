@@ -100,6 +100,8 @@ Acceptance:
 - splat and mesh representations can coexist;
 - generative objects cannot be mistaken for observed surfaces.
 
+Status: schema v1 is implemented in `crates/video-to-3d-core/src/scene_model.rs` (`AssembledScene`). Every camera, asset, light, and audio anchor shares one right-handed, Y-up frame with an explicit unit policy (`arbitrary_monocular` or `meters`). Provenance lives on content resources (and on primitive collision proxies), so assets cannot relabel generative completion as observed geometry; `asset_provenance` derives an asset's provenance from what it references.
+
 ## 0.3 Product quality modes
 
 Add explicit modes rather than hidden heuristic bundles:
