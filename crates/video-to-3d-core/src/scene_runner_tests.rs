@@ -621,3 +621,29 @@ fn attempts_are_reserved_before_dispatch() {
         .collect();
     assert_eq!(learned, [1, 2, 3]);
 }
+
+#[test]
+fn unsupported_probes_release_their_reservation_immediately() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let executor = FakeExecutor::scripted(|request| {
+        (request.operation.id == "learned").then(|| AttemptOutcome::Unsupported("no GPU".into()))
+    });
+    let mut manifest = manifest();
+    run_observed(
+        &mut manifest,
+        &executor,
+        RunOptions::default(),
+        &CancellationToken::new(),
+        &mut Reservations(log.clone()),
+    )
+    .unwrap();
+    let learned: Vec<u32> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(operation, _)| operation == "learned")
+        .map(|(_, attempts)| *attempts)
+        .collect();
+    // Reserve, release, reserve (fallback provider), release.
+    assert_eq!(learned, [1, 0, 1, 0]);
+}

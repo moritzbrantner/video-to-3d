@@ -106,10 +106,12 @@ pub struct RecordedOutput {
 /// Returning an error from `wave_recorded` stops the run; the in-memory
 /// manifest stays valid.
 pub trait RunObserver: Send {
-    /// Durably reserve an attempt before it is dispatched. `attempts` is the
-    /// cumulative count for this operation identity including the attempt
-    /// about to start, so an interrupted process cannot spend it twice. A
-    /// rejection prevents the attempt.
+    /// Durably record the cumulative attempt count for an operation identity.
+    /// Called before each dispatch with the count including the attempt about
+    /// to start (so an interrupted process cannot spend it twice), and again
+    /// with the lower count when an unsupported outcome releases it. `0` means
+    /// no attempts are charged. A rejection before dispatch prevents the
+    /// attempt.
     fn reserve_attempt(
         &mut self,
         _operation: &str,
@@ -633,7 +635,12 @@ fn execute_operation(
             executor.execute(&request, cancel)
         }))
         .unwrap_or_else(|_| AttemptOutcome::Failed("executor panicked".into()));
-        if !matches!(outcome, AttemptOutcome::Unsupported(_)) {
+        if matches!(outcome, AttemptOutcome::Unsupported(_)) {
+            // Release the provisional reservation: nothing was performed.
+            // A failure to persist the release only over-counts, which is safe.
+            let _ =
+                lock().reserve_attempt(&base.operation.id, &base.identity, base.attempt + charged);
+        } else {
             charged += 1;
         }
         if let AttemptOutcome::Succeeded(produced) = &outcome {

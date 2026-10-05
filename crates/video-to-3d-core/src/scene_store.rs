@@ -383,6 +383,11 @@ impl ProjectStore {
         options: RunOptions,
         cancel: &CancellationToken,
     ) -> Result<BuildReport, SceneProjectError> {
+        // One build per project at a time: reservations and persistence are
+        // read-modify-write on the manifest.
+        let _lock = BuildLock::acquire(&self.root)?;
+        // Re-read under the lock so a build that finished meanwhile is seen.
+        *manifest = SceneProjectManifest::load(&self.manifest_path)?;
         let reconcile = self.reconcile(manifest, VerifyMode::Full)?;
         self.save_manifest(manifest)?;
         let mut persister = Persister {
@@ -460,6 +465,52 @@ fn verify_receipt_provenance(
     Ok(())
 }
 
+/// Exclusive per-project build lock (`.video-to-3d/build.lock`), created
+/// atomically and removed when dropped. A lock left behind by a crashed
+/// process must be removed by hand; the error names the file and owner.
+struct BuildLock {
+    path: PathBuf,
+}
+
+impl BuildLock {
+    fn acquire(root: &Path) -> Result<Self, SceneProjectError> {
+        let path = root.join(STATE_DIRECTORY).join("build.lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                SceneProjectError::Malformed(format!("cannot create {}: {error}", parent.display()))
+            })?;
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let _ = writeln!(file, "pid {}", std::process::id());
+                Ok(Self { path })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let owner = fs::read_to_string(&path).unwrap_or_default();
+                Err(SceneProjectError::Malformed(format!(
+                    "cannot build: project is locked by another build ({}); remove {} if that process is gone",
+                    owner.trim(),
+                    path.display()
+                )))
+            }
+            Err(error) => Err(SceneProjectError::Malformed(format!(
+                "cannot create {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 /// Persists reservations, receipts and the manifest. `snapshot` mirrors the
 /// last persisted manifest so reservations can be saved between waves.
 struct Persister<'a> {
@@ -476,11 +527,13 @@ impl RunObserver for Persister<'_> {
     ) -> Result<(), String> {
         let usage = &mut self.snapshot.attempt_usage;
         usage.retain(|usage| usage.operation != operation);
-        usage.push(AttemptUsage {
-            operation: operation.to_owned(),
-            operation_identity: identity.clone(),
-            attempts,
-        });
+        if attempts > 0 {
+            usage.push(AttemptUsage {
+                operation: operation.to_owned(),
+                operation_identity: identity.clone(),
+                attempts,
+            });
+        }
         self.store
             .save_manifest(&self.snapshot)
             .map_err(|error| error.to_string())

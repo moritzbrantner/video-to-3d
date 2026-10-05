@@ -515,3 +515,26 @@ fn receipts_must_name_the_recorded_provider() {
             if operation == "mesh" && message.contains("recorded with the artifact")
     ));
 }
+
+#[test]
+fn concurrent_builds_are_rejected_while_locked() {
+    let project = TempProject::new("lock");
+    let lock = project.file(".video-to-3d/build.lock");
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    fs::write(&lock, "pid 1").unwrap();
+    let executor = WritingExecutor::new(&project.root);
+    let (store, mut manifest) = project.open();
+    let error = store
+        .build(
+            &mut manifest,
+            &executor,
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("locked by another build"));
+    assert!(executor.executed().is_empty());
+    fs::remove_file(&lock).unwrap();
+    build(&project, &WritingExecutor::new(&project.root));
+    assert!(!lock.exists(), "lock is released after a build");
+}
