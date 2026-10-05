@@ -104,6 +104,12 @@ pub struct RecordedOutput {
 /// the manifest already containing those records. Returning an error stops the
 /// run; the in-memory manifest stays valid.
 pub trait RunObserver {
+    /// Check a produced output before it is recorded (for example by hashing
+    /// the written file). A rejection turns the attempt into a failure.
+    fn verify_output(&mut self, _produced: &ProducedArtifact) -> Result<(), String> {
+        Ok(())
+    }
+
     fn wave_recorded(
         &mut self,
         manifest: &SceneProjectManifest,
@@ -369,7 +375,13 @@ pub fn run_observed(
                 .attempt_usage
                 .retain(|usage| usage.operation != *id);
             let recorded = match produced {
-                Some(produced) => match record(manifest, id, &request.identity, produced.clone()) {
+                Some(produced) => match observer
+                    .verify_output(&produced)
+                    .map_err(|message| {
+                        SceneProjectError::Invalid(format!("output verification failed: {message}"))
+                    })
+                    .and_then(|()| record(manifest, id, &request.identity, produced.clone()))
+                {
                     Ok(()) => {
                         let provider = match &state {
                             OperationState::Succeeded {

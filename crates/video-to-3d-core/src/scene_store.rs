@@ -22,8 +22,8 @@ use crate::scene_project::{
     SceneProjectManifest, STATE_DIRECTORY,
 };
 use crate::scene_runner::{
-    run_observed, CancellationToken, OperationExecutor, RecordedOutput, RunObserver, RunOptions,
-    RunReport,
+    run_observed, CancellationToken, OperationExecutor, ProducedArtifact, RecordedOutput,
+    RunObserver, RunOptions, RunReport,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -263,11 +263,13 @@ impl ProjectStore {
             match cache.hash(&self.resolve(&media.path), media.path.as_str()) {
                 Some((hash, length))
                     if hash == media.content_hash && length == media.byte_length => {}
-                Some(_) => return Err(SceneProjectError::Invalid(format!(
+                Some(_) => {
+                    return Err(SceneProjectError::Invalid(format!(
                     "media input `{}` at `{}` does not match its declared content hash and size",
                     media.id,
                     media.path.as_str()
-                ))),
+                )))
+                }
                 None => {
                     return Err(SceneProjectError::Invalid(format!(
                         "media input `{}` at `{}` is missing or unreadable",
@@ -281,7 +283,7 @@ impl ProjectStore {
         let mut report = ReconcileReport::default();
         let mut keep = Vec::with_capacity(manifest.artifacts.len());
         for artifact in &manifest.artifacts {
-            match self.verify_artifact(artifact, &mut cache) {
+            match self.verify_artifact(manifest, artifact, &mut cache) {
                 Ok(()) => {
                     report.verified.push(artifact.produced_by.clone());
                     keep.push(artifact.clone());
@@ -329,6 +331,7 @@ impl ProjectStore {
 
     fn verify_artifact(
         &self,
+        manifest: &SceneProjectManifest,
         artifact: &ArtifactRecord,
         cache: &mut HashCache,
     ) -> Result<(), Invalidation> {
@@ -355,6 +358,7 @@ impl ProjectStore {
                 "output path or hash differs from the recorded artifact".into(),
             ));
         }
+        verify_receipt_provenance(manifest, artifact, &receipt)?;
         let Some((actual, length)) =
             cache.hash(&self.resolve(&artifact.path), artifact.path.as_str())
         else {
@@ -388,11 +392,91 @@ impl ProjectStore {
     }
 }
 
+/// Every receipt field derivable from the manifest must agree with it, so a
+/// copied or edited receipt cannot misstate kind, provider, or inputs.
+fn verify_receipt_provenance(
+    manifest: &SceneProjectManifest,
+    artifact: &ArtifactRecord,
+    receipt: &OperationReceipt,
+) -> Result<(), Invalidation> {
+    let mismatch = |message: &str| Err(Invalidation::ReceiptMismatch(message.into()));
+    let Some(operation) = manifest
+        .operations
+        .iter()
+        .find(|operation| operation.id == artifact.produced_by)
+    else {
+        return mismatch("operation is not declared");
+    };
+    if receipt.kind != operation.kind {
+        return mismatch("operation kind differs from the declaration");
+    }
+    let reachable = manifest.reachable_providers(operation);
+    match (&receipt.provider, reachable.is_empty()) {
+        (None, true) => {}
+        (Some(provider), false) => {
+            if !reachable.iter().any(|candidate| {
+                candidate.id == provider.id && candidate.revision == provider.revision
+            }) {
+                return mismatch("provider or revision is not reachable for this operation");
+            }
+        }
+        (None, false) => return mismatch("provider operation receipt names no provider"),
+        (Some(_), true) => return mismatch("built-in operation receipt names a provider"),
+    }
+    let mut expected = Vec::with_capacity(operation.inputs.len());
+    for input in &operation.inputs {
+        let content_hash = match input {
+            OperationInput::Media(id) => manifest
+                .inputs
+                .iter()
+                .find(|media| media.id == *id)
+                .map(|media| media.content_hash.clone()),
+            OperationInput::Operation(id) => manifest
+                .artifacts
+                .iter()
+                .find(|upstream| upstream.produced_by == *id)
+                .map(|upstream| upstream.content_hash.clone()),
+        };
+        let Some(content_hash) = content_hash else {
+            return mismatch("an input has no recorded content");
+        };
+        expected.push(ReceiptInput {
+            input: input.clone(),
+            content_hash,
+        });
+    }
+    let mut actual = receipt.inputs.clone();
+    actual.sort_by(|a, b| a.input.cmp(&b.input));
+    expected.sort_by(|a, b| a.input.cmp(&b.input));
+    if actual != expected {
+        return mismatch("input hashes differ from the recorded inputs");
+    }
+    Ok(())
+}
+
 struct Persister<'a> {
     store: &'a ProjectStore,
 }
 
 impl RunObserver for Persister<'_> {
+    fn verify_output(&mut self, produced: &ProducedArtifact) -> Result<(), String> {
+        let Some((hash, _)) = hash_file(&self.store.resolve(&produced.path)) else {
+            return Err(format!(
+                "output `{}` is missing or unreadable",
+                produced.path.as_str()
+            ));
+        };
+        if hash != produced.content_hash {
+            return Err(format!(
+                "output `{}` hashes to {}, not the reported {}",
+                produced.path.as_str(),
+                hash.as_str(),
+                produced.content_hash.as_str()
+            ));
+        }
+        Ok(())
+    }
+
     fn wave_recorded(
         &mut self,
         manifest: &SceneProjectManifest,

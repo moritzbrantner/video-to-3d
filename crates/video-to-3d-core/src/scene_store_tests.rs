@@ -210,7 +210,14 @@ fn changed_upstream_content_rebuilds_descendants() {
 
     let executor = WritingExecutor::new(&project.root);
     let report = build(&project, &executor);
-    assert!(report.reconcile.invalidated.is_empty());
+    // Receipts of direct consumers no longer match their inputs.
+    let invalidated: BTreeSet<&str> = report
+        .reconcile
+        .invalidated
+        .iter()
+        .map(|(operation, _)| operation.as_str())
+        .collect();
+    assert_eq!(invalidated, BTreeSet::from(["assemble", "dense"]));
     assert_eq!(
         executor.executed(),
         BTreeSet::from(["assemble".into(), "dense".into(), "mesh".into()])
@@ -377,4 +384,78 @@ fn manifest_paths_cannot_enter_the_state_directory() {
     document["inputs"][0]["path"] = json!(".video-to-3d/receipts/x.json");
     let error = SceneProjectManifest::from_json(&document.to_string()).unwrap_err();
     assert!(error.to_string().contains("reserved"));
+}
+
+#[test]
+fn receipts_with_wrong_provenance_are_rejected() {
+    let project = TempProject::new("provenance");
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, _) = project.open();
+    let mut receipt = store.read_receipt("mesh").unwrap().unwrap();
+    receipt.kind = OperationKind::GenerativeCompletion;
+    store.write_receipt(&receipt).unwrap();
+    let mut receipt = store.read_receipt("sparse").unwrap().unwrap();
+    receipt.provider = Some(ReceiptProvider {
+        id: "someone-else".into(),
+        revision: None,
+    });
+    store.write_receipt(&receipt).unwrap();
+    let mut receipt = store.read_receipt("dense").unwrap().unwrap();
+    receipt.inputs[0].content_hash = ContentHash::of_bytes(b"other");
+    store.write_receipt(&receipt).unwrap();
+
+    let executor = WritingExecutor::new(&project.root);
+    let report = build(&project, &executor);
+    let invalidated: BTreeSet<&str> = report
+        .reconcile
+        .invalidated
+        .iter()
+        .filter(|(_, reason)| matches!(reason, Invalidation::ReceiptMismatch(_)))
+        .map(|(operation, _)| operation.as_str())
+        .collect();
+    assert_eq!(invalidated, BTreeSet::from(["dense", "mesh", "sparse"]));
+    assert!(report.run.is_complete());
+}
+
+struct LyingExecutor(WritingExecutor);
+
+impl OperationExecutor for LyingExecutor {
+    fn execute(&self, request: &OperationRequest, cancel: &CancellationToken) -> AttemptOutcome {
+        match self.0.execute(request, cancel) {
+            AttemptOutcome::Succeeded(mut produced) if request.operation.id == "dense" => {
+                produced.content_hash = ContentHash::of_bytes(b"claimed");
+                AttemptOutcome::Succeeded(produced)
+            }
+            outcome => outcome,
+        }
+    }
+}
+
+#[test]
+fn outputs_are_verified_before_their_receipt_is_written() {
+    let project = TempProject::new("lying");
+    let (store, mut manifest) = project.open();
+    let report = store
+        .build(
+            &mut manifest,
+            &LyingExecutor(WritingExecutor::new(&project.root)),
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        &report.run.states["dense"],
+        crate::scene_runner::OperationState::Failed { message, .. }
+            if message.contains("output verification failed")
+    ));
+    assert!(matches!(
+        report.run.states["mesh"],
+        crate::scene_runner::OperationState::Blocked { .. }
+    ));
+    assert!(store.read_receipt("dense").unwrap().is_none());
+    let (_, persisted) = project.open();
+    assert!(!persisted
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.produced_by == "dense"));
 }
