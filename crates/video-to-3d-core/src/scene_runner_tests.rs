@@ -667,3 +667,19 @@ fn unsupported_primary_does_not_consume_a_single_attempt_budget() {
         OperationState::Succeeded { provider: Some(provider), .. } if provider == "depth-b"
     ));
 }
+
+#[test]
+fn unsupported_attempts_are_not_charged() {
+    let unsupported = FakeExecutor::scripted(|request| {
+        (request.operation.id == "ingest").then(|| AttemptOutcome::Unsupported("no decoder".into()))
+    });
+    let mut manifest = manifest();
+    let report = run_with(&mut manifest, &unsupported, 1);
+    assert!(matches!(
+        report.states["ingest"],
+        OperationState::Unsupported { .. }
+    ));
+    assert!(manifest.attempt_usage.is_empty());
+    let capable = FakeExecutor::new();
+    assert!(run_with(&mut manifest, &capable, 1).is_complete());
+}

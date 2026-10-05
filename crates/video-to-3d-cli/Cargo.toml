@@ -1,0 +1,16 @@
+[package]
+name = "video-to-3d-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "video-to-3d"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+video-to-3d-core = { path = "../video-to-3d-core" }
+
+[dev-dependencies]
+serde_json = "1"
