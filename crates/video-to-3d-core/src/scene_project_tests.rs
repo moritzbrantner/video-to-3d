@@ -126,6 +126,7 @@ fn manifest_survives_restart_through_a_file() {
         operation_identity: identities["sparse"].clone(),
         path: ProjectPath::new("artifacts/sparse.bin").unwrap(),
         content_hash: ContentHash::of_bytes(b"sparse"),
+        provider: None,
     });
     let directory =
         std::env::temp_dir().join(format!("video-to-3d-scene-project-{}", std::process::id()));
@@ -521,6 +522,7 @@ fn replaced_upstream_output_invalidates_recorded_descendants() {
         operation_identity: identities["mesh"].clone(),
         path: ProjectPath::new("artifacts/mesh.bin").unwrap(),
         content_hash: ContentHash::of_bytes(b"mesh v1"),
+        provider: None,
     });
     let identities = manifest.operation_identities().unwrap();
     manifest.artifacts.push(ArtifactRecord {
@@ -530,6 +532,7 @@ fn replaced_upstream_output_invalidates_recorded_descendants() {
         operation_identity: identities["complete"].clone(),
         path: ProjectPath::new("artifacts/completion.bin").unwrap(),
         content_hash: ContentHash::of_bytes(b"completion"),
+        provider: None,
     });
     assert!(manifest.stale_artifacts().unwrap().is_empty());
 

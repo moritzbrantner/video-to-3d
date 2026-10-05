@@ -149,6 +149,8 @@ Acceptance:
 - changed inputs invalidate only downstream work;
 - interrupted builds resume from the last verified boundary.
 
+Status: implemented in `crates/video-to-3d-core/src/scene_store.rs` (`ProjectStore`). Each recorded artifact has a receipt under `.video-to-3d/receipts/` (identity, provider/revision, input hashes, output hash and size, observations, reproducibility class). `reconcile` verifies media, outputs and receipts before every build and drops exactly the records that fail; `build` persists receipts, then the manifest, after each wave. The size/mtime hash cache is used only for read-only `VerifyMode::Cached` checks.
+
 ## 1.3 Provider policy and escalation
 
 Represent provider preference as data:

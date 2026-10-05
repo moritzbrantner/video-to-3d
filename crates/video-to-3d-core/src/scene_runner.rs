@@ -20,9 +20,10 @@ use crate::scene_project::{
     ArtifactRecord, AttemptUsage, ContentHash, MediaInput, OperationDeclaration, OperationInput,
     ProjectPath, ProviderDeclaration, SceneProjectError, SceneProjectManifest,
 };
+pub use crate::scene_store::Reproducibility;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Shared cancellation flag. Cancelling stops new attempts from starting;
 /// executors should also poll it to abandon long-running work.
@@ -69,6 +70,81 @@ pub struct OperationRequest {
 pub struct ProducedArtifact {
     pub path: ProjectPath,
     pub content_hash: ContentHash,
+    /// How reproducible this output is; recorded in the operation receipt.
+    pub reproducibility: Reproducibility,
+    /// Deterministic observations worth keeping with the receipt (counts,
+    /// acceptance diagnostics, seeds). Never secrets.
+    pub observations: BTreeMap<String, String>,
+}
+
+impl ProducedArtifact {
+    pub fn new(
+        path: ProjectPath,
+        content_hash: ContentHash,
+        reproducibility: Reproducibility,
+    ) -> Self {
+        Self {
+            path,
+            content_hash,
+            reproducibility,
+            observations: BTreeMap::new(),
+        }
+    }
+}
+
+/// An output recorded during a run, handed to a [`RunObserver`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedOutput {
+    pub artifact: ArtifactRecord,
+    pub produced: ProducedArtifact,
+    pub provider: Option<ProviderDeclaration>,
+}
+
+/// Persistence hooks. `reserve_attempt` and `verify_output` may be called from
+/// worker threads (serialized by the runner); `wave_recorded` is called after
+/// every wave with the manifest already containing that wave's records.
+/// Returning an error from `wave_recorded` stops the run; the in-memory
+/// manifest stays valid.
+pub trait RunObserver: Send {
+    /// Durably record the cumulative attempt count for an operation identity.
+    /// Called before each dispatch with the count including the attempt about
+    /// to start (so an interrupted process cannot spend it twice), and again
+    /// with the lower count when an unsupported outcome releases it. `0` means
+    /// no attempts are charged. A rejection before dispatch prevents the
+    /// attempt.
+    fn reserve_attempt(
+        &mut self,
+        _operation: &str,
+        _identity: &ContentHash,
+        _attempts: u32,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Check a produced output before it is accepted (for example by hashing
+    /// the written file). A rejection is a failed attempt for that provider,
+    /// so fallback providers still apply.
+    fn verify_output(&mut self, _produced: &ProducedArtifact) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn wave_recorded(
+        &mut self,
+        manifest: &SceneProjectManifest,
+        recorded: &[RecordedOutput],
+    ) -> Result<(), SceneProjectError>;
+}
+
+struct NoObserver;
+
+impl RunObserver for NoObserver {
+    fn wave_recorded(
+        &mut self,
+        _manifest: &SceneProjectManifest,
+        _recorded: &[RecordedOutput],
+    ) -> Result<(), SceneProjectError> {
+        Ok(())
+    }
 }
 
 /// Result of one attempt.
@@ -214,6 +290,17 @@ pub fn run(
     options: RunOptions,
     cancel: &CancellationToken,
 ) -> Result<RunReport, SceneProjectError> {
+    run_observed(manifest, executor, options, cancel, &mut NoObserver)
+}
+
+/// [`run`] with a persistence hook called after each recorded wave.
+pub fn run_observed(
+    manifest: &mut SceneProjectManifest,
+    executor: &dyn OperationExecutor,
+    options: RunOptions,
+    cancel: &CancellationToken,
+    observer: &mut dyn RunObserver,
+) -> Result<RunReport, SceneProjectError> {
     if options.max_concurrency == 0 {
         return Err(SceneProjectError::Invalid(
             "runner max_concurrency must be positive".into(),
@@ -293,10 +380,14 @@ pub fn run(
             break;
         }
 
-        let outcomes = execute_wave(manifest, executor, options, cancel, &wave);
+        let outcomes = {
+            let observer = Mutex::new(&mut *observer);
+            execute_wave(manifest, executor, options, cancel, &observer, &wave)
+        };
+        let mut recorded_outputs = Vec::new();
         // Record in operation-id order so the manifest is independent of
         // completion order.
-        for (request, (mut state, produced)) in wave.iter().zip(outcomes) {
+        for (request, (mut state, produced, charged)) in wave.iter().zip(outcomes) {
             let id = &request.operation.id;
             if state.attempts() > request.attempt {
                 executed.insert(id.clone());
@@ -304,9 +395,44 @@ pub fn run(
             manifest
                 .attempt_usage
                 .retain(|usage| usage.operation != *id);
+            let provider_id = match &state {
+                OperationState::Succeeded { provider, .. } => provider.clone(),
+                _ => None,
+            };
             let recorded = match produced {
-                Some(produced) => match record(manifest, id, &request.identity, produced) {
-                    Ok(()) => true,
+                Some(produced) => match record(
+                    manifest,
+                    id,
+                    &request.identity,
+                    produced.clone(),
+                    provider_id,
+                ) {
+                    Ok(()) => {
+                        let provider = match &state {
+                            OperationState::Succeeded {
+                                provider: Some(provider),
+                                ..
+                            } => manifest
+                                .provider_policy
+                                .providers
+                                .iter()
+                                .find(|candidate| candidate.id == *provider)
+                                .cloned(),
+                            _ => None,
+                        };
+                        let artifact = manifest
+                            .artifacts
+                            .iter()
+                            .find(|artifact| artifact.produced_by == *id)
+                            .expect("just recorded")
+                            .clone();
+                        recorded_outputs.push(RecordedOutput {
+                            artifact,
+                            produced,
+                            provider,
+                        });
+                        true
+                    }
                     Err(error) => {
                         // The attempt was spent even though its output was
                         // rejected; keep it in the budget.
@@ -319,15 +445,19 @@ pub fn run(
                 },
                 None => false,
             };
-            if !recorded && state.attempts() > 0 {
+            // Replace the reservations with the attempts that actually count.
+            let used = request.attempt + charged;
+            if !recorded && used > 0 {
                 manifest.attempt_usage.push(AttemptUsage {
                     operation: id.clone(),
                     operation_identity: request.identity.clone(),
-                    attempts: state.attempts(),
+                    attempts: used,
                 });
             }
             states.insert(id.clone(), state);
         }
+        manifest.canonicalize();
+        observer.wave_recorded(manifest, &recorded_outputs)?;
     }
 
     // Anything left unresolved was never reachable because of cancellation.
@@ -387,13 +517,16 @@ fn request_for(
     }
 }
 
+type OperationResult = (OperationState, Option<ProducedArtifact>, u32);
+
 fn execute_wave(
     manifest: &SceneProjectManifest,
     executor: &dyn OperationExecutor,
     options: RunOptions,
     cancel: &CancellationToken,
+    observer: &Mutex<&mut (dyn RunObserver + '_)>,
     wave: &[OperationRequest],
-) -> Vec<(OperationState, Option<ProducedArtifact>)> {
+) -> Vec<OperationResult> {
     let providers: Vec<Vec<ProviderDeclaration>> = wave
         .iter()
         .map(|request| {
@@ -408,11 +541,12 @@ fn execute_wave(
         return wave
             .iter()
             .zip(&providers)
-            .map(|(request, providers)| execute_operation(executor, cancel, request, providers))
+            .map(|(request, providers)| {
+                execute_operation(executor, cancel, observer, request, providers)
+            })
             .collect();
     }
-    let mut results: Vec<Option<(OperationState, Option<ProducedArtifact>)>> =
-        vec![None; wave.len()];
+    let mut results: Vec<Option<OperationResult>> = vec![None; wave.len()];
     let jobs: Vec<usize> = (0..wave.len()).collect();
     for chunk in jobs.chunks(options.max_concurrency) {
         std::thread::scope(|scope| {
@@ -423,8 +557,9 @@ fn execute_wave(
                     let providers = &providers[index];
                     (
                         index,
-                        scope
-                            .spawn(move || execute_operation(executor, cancel, request, providers)),
+                        scope.spawn(move || {
+                            execute_operation(executor, cancel, observer, request, providers)
+                        }),
                     )
                 })
                 .collect();
@@ -436,6 +571,7 @@ fn execute_wave(
                             message: "executor panicked".into(),
                         },
                         None,
+                        1,
                     )
                 }));
             }
@@ -448,21 +584,33 @@ fn execute_wave(
 }
 
 /// Run one operation within its attempt bound, walking reachable providers in
-/// order: retryable failures retry the same provider, permanent failures and
-/// unsupported outcomes advance to the next provider.
+/// order: retryable failures retry the same provider, permanent failures,
+/// rejected outputs and unsupported outcomes advance to the next provider.
+/// Returns the final state, the accepted output, and the number of attempts
+/// that count against the budget (unsupported outcomes do not: no provider or
+/// build performed work).
 fn execute_operation(
     executor: &dyn OperationExecutor,
     cancel: &CancellationToken,
+    observer: &Mutex<&mut (dyn RunObserver + '_)>,
     base: &OperationRequest,
     providers: &[ProviderDeclaration],
-) -> (OperationState, Option<ProducedArtifact>) {
+) -> OperationResult {
     let max_attempts = base.operation.max_attempts;
+    let lock = || {
+        observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
     let mut provider_index = 0;
     let mut attempts = base.attempt;
+    let mut charged = 0;
     let mut last: Option<AttemptOutcome> = None;
-    while attempts < max_attempts {
+    // The budget bounds charged attempts; unsupported probes advance the
+    // provider walk without consuming it.
+    while base.attempt + charged < max_attempts {
         if cancel.is_canceled() {
-            return (OperationState::Canceled { attempts }, None);
+            return (OperationState::Canceled { attempts }, None, charged);
         }
         let provider = if providers.is_empty() {
             None
@@ -471,14 +619,37 @@ fn execute_operation(
         } else {
             break;
         };
+        if let Err(message) = lock().reserve_attempt(
+            &base.operation.id,
+            &base.identity,
+            base.attempt + charged + 1,
+        ) {
+            last = Some(AttemptOutcome::Failed(format!(
+                "attempt could not be reserved: {message}"
+            )));
+            break;
+        }
         attempts += 1;
         let mut request = base.clone();
         request.provider = provider.clone();
         request.attempt = attempts;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             executor.execute(&request, cancel)
         }))
         .unwrap_or_else(|_| AttemptOutcome::Failed("executor panicked".into()));
+        if matches!(outcome, AttemptOutcome::Unsupported(_)) {
+            // Release the provisional reservation: nothing was performed.
+            // A failure to persist the release only over-counts, which is safe.
+            let _ =
+                lock().reserve_attempt(&base.operation.id, &base.identity, base.attempt + charged);
+        } else {
+            charged += 1;
+        }
+        if let AttemptOutcome::Succeeded(produced) = &outcome {
+            if let Err(message) = lock().verify_output(produced) {
+                outcome = AttemptOutcome::Failed(format!("output verification failed: {message}"));
+            }
+        }
         match &outcome {
             AttemptOutcome::Succeeded(produced) => {
                 return (
@@ -487,9 +658,12 @@ fn execute_operation(
                         provider: provider.map(|provider| provider.id),
                     },
                     Some(produced.clone()),
+                    charged,
                 );
             }
-            AttemptOutcome::Canceled => return (OperationState::Canceled { attempts }, None),
+            AttemptOutcome::Canceled => {
+                return (OperationState::Canceled { attempts }, None, charged)
+            }
             AttemptOutcome::RetryableFailure(_) => {}
             AttemptOutcome::Failed(_) | AttemptOutcome::Unsupported(_) => {
                 if providers.len() <= 1 {
@@ -514,7 +688,7 @@ fn execute_operation(
             message: "no attempt was possible".into(),
         },
     };
-    (state, None)
+    (state, None, charged)
 }
 
 fn record(
@@ -522,6 +696,7 @@ fn record(
     operation_id: &str,
     identity: &ContentHash,
     produced: ProducedArtifact,
+    provider: Option<String>,
 ) -> Result<(), SceneProjectError> {
     let kind = manifest
         .operations
@@ -547,6 +722,7 @@ fn record(
         operation_identity: identity.clone(),
         path: produced.path,
         content_hash: produced.content_hash,
+        provider,
     });
     candidate.validate().map_err(|error| {
         SceneProjectError::Invalid(format!(
@@ -558,7 +734,7 @@ fn record(
 }
 
 /// Deterministic, valid, collision-free artifact id for a new record.
-fn artifact_id(
+pub(crate) fn artifact_id(
     manifest: &SceneProjectManifest,
     operation_id: &str,
     identity: &ContentHash,
