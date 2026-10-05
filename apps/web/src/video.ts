@@ -30,8 +30,6 @@ export type SampledVideoInfo = {
   duration: number;
   displayWidth: number;
   displayHeight: number;
-  /** Whether presented times are decoder media timestamps or seek positions. */
-  presentedTimeSource: "decoded_frame" | "seek_position";
 };
 
 type FrameCallbackVideo = HTMLVideoElement & {
@@ -98,7 +96,6 @@ export async function sampleVideoWithInfo(
     }
 
     const frames: SampledFrame[] = [];
-    let allDecodedTimes = true;
     for (const time of plan.times) {
       let decodedTime: number | null = null;
       if (Math.abs(video.currentTime - time) > 0.001) {
@@ -107,7 +104,7 @@ export async function sampleVideoWithInfo(
         await waitFor(video, "seeked");
         decodedTime = await presented;
       }
-      if (decodedTime === null) allDecodedTimes = false;
+
       context.drawImage(video, 0, 0, plan.analysisWidth, plan.analysisHeight);
       const image = context.getImageData(0, 0, plan.analysisWidth, plan.analysisHeight);
       frames.push({
@@ -123,6 +120,7 @@ export async function sampleVideoWithInfo(
         // The decoded frame's media timestamp when the browser reports it;
         // otherwise only the seek position is known.
         presentedTime: decodedTime ?? video.currentTime,
+        presentedTimeDecoded: decodedTime !== null,
       });
     }
     return {
@@ -131,7 +129,6 @@ export async function sampleVideoWithInfo(
         duration: video.duration,
         displayWidth: video.videoWidth,
         displayHeight: video.videoHeight,
-        presentedTimeSource: allDecodedTimes ? "decoded_frame" : "seek_position",
       },
     };
   } finally {

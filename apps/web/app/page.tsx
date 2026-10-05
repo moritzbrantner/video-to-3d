@@ -685,10 +685,11 @@ export default function Home() {
               <p>
                 {activeRun.readiness
                   ? `Geometric reconstruction: ${activeRun.readiness.geometric_verdict}. ` +
-                    (activeRun.readiness.sampling.presented_time_source === "seek_position"
-                      ? "Sample timing uses seek positions (this browser does not report decoded frame times). "
-                      : `Max seek error ${activeRun.readiness.sampling.max_seek_error_seconds.toFixed(3)} s, ` +
-                        `median sample interval ${activeRun.readiness.sampling.median_interval_seconds.toFixed(2)} s. `) +
+                    (activeRun.readiness.sampling.decoded_time_samples < activeRun.readiness.pairs.length + 1
+                      ? `${activeRun.readiness.pairs.length + 1 - activeRun.readiness.sampling.decoded_time_samples} sample times are seek positions (no decoded frame time reported). `
+                      : "") +
+                    `Max seek error ${activeRun.readiness.sampling.max_seek_error_seconds.toFixed(3)} s, ` +
+                    `median sample interval ${activeRun.readiness.sampling.median_interval_seconds.toFixed(2)} s. ` +
                     "This is measured evidence about the sampled frames, not a confidence score; " +
                     "it never blocks reconstruction or generative paths."
                   : `Readiness could not be measured: ${activeRun.readinessError}`}
@@ -697,8 +698,8 @@ export default function Home() {
           </div>
           {activeRun.readiness && activeRun.readiness.issues.length > 0 ? (
             <ul className="warnings">
-              {activeRun.readiness.issues.map((issue) => (
-                <li key={issue.code} data-severity={issue.severity}>
+              {activeRun.readiness.issues.map((issue, index) => (
+                <li key={`${issue.code}-${index}`} data-severity={issue.severity}>
                   <strong>{issue.severity === "blocking" ? "Blocking" : "Warning"}:</strong>{" "}
                   {issue.message}
                   {issue.frames.length > 0

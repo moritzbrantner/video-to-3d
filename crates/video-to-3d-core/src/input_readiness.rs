@@ -95,9 +95,10 @@ pub struct SamplingMetadata {
     pub requested_times: Vec<f64>,
     /// Times the decoder actually presented, in seconds.
     pub presented_times: Vec<f64>,
-    /// Where `presented_times` came from.
+    /// Where each entry of `presented_times` came from. Empty means every
+    /// time is a seek position.
     #[serde(default)]
-    pub presented_time_source: PresentedTimeSource,
+    pub presented_time_sources: Vec<PresentedTimeSource>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +130,8 @@ pub struct NormalizedSampling {
     /// Decoded samples whose seek error exceeds the threshold (only with
     /// decoded-frame timestamps; seek positions cannot show seek error).
     pub seek_error_samples: Vec<usize>,
-    pub presented_time_source: PresentedTimeSource,
+    /// Number of samples whose presented time is a decoded-frame timestamp.
+    pub decoded_time_samples: usize,
     /// Pixels are sRGB as produced by a 2D canvas.
     pub color_space: &'static str,
 }
@@ -266,6 +268,14 @@ pub fn normalize_sampling(
             metadata.rotation_degrees
         ));
     }
+    if !metadata.presented_time_sources.is_empty()
+        && metadata.presented_time_sources.len() != frame_count
+    {
+        return Err(format!(
+            "sampling metadata lists {} presented-time sources for {frame_count} frames",
+            metadata.presented_time_sources.len()
+        ));
+    }
     if metadata.requested_times.len() != frame_count
         || metadata.presented_times.len() != frame_count
     {
@@ -314,23 +324,27 @@ pub fn normalize_sampling(
         .get(requested_intervals.len() / 2)
         .copied()
         .unwrap_or(0.0);
-    let seek_error_samples = if metadata.presented_time_source == PresentedTimeSource::DecodedFrame
-        && requested_interval > 0.0
-    {
+    let decoded = |index: usize| {
+        metadata.presented_time_sources.get(index) == Some(&PresentedTimeSource::DecodedFrame)
+    };
+    // Seek error is only measurable where the decoder reported its timestamp.
+    let seek_error_samples = if requested_interval > 0.0 {
         metadata
             .requested_times
             .iter()
             .zip(&metadata.presented_times)
             .enumerate()
-            .filter(|(_, (requested, presented))| {
-                (*requested - *presented).abs()
-                    > THRESHOLDS.max_seek_error_fraction * requested_interval
+            .filter(|(index, (requested, presented))| {
+                decoded(*index)
+                    && (*requested - *presented).abs()
+                        > THRESHOLDS.max_seek_error_fraction * requested_interval
             })
             .map(|(index, _)| index)
             .collect()
     } else {
         Vec::new()
     };
+    let decoded_time_samples = (0..frame_count).filter(|index| decoded(*index)).count();
     intervals.sort_by(f64::total_cmp);
     let median_interval_seconds = intervals.get(intervals.len() / 2).copied().unwrap_or(0.0);
     let max_interval_seconds = intervals.last().copied().unwrap_or(0.0);
@@ -345,7 +359,7 @@ pub fn normalize_sampling(
         max_seek_error_seconds,
         non_advancing_samples,
         seek_error_samples,
-        presented_time_source: metadata.presented_time_source,
+        decoded_time_samples,
         color_space: "srgb",
     })
 }
@@ -449,15 +463,26 @@ fn frame_evidence(index: usize, luma: &[u8], width: u32, height: u32) -> FrameEv
             }
         }
     }
+    // Block boundaries in both directions: vertical edges (x % 8 == 0)
+    // between horizontal neighbours, horizontal edges (y % 8 == 0) between
+    // vertical neighbours.
     for y in 0..h {
-        for x in 1..w {
-            let difference = f64::from((at(x, y) - at(x - 1, y)).abs());
-            if x % 8 == 0 {
-                boundary_diff += difference;
-                boundary_count += 1;
-            } else {
-                inner_diff += difference;
-                inner_count += 1;
+        for x in 0..w {
+            let mut add = |difference: i32, boundary: bool| {
+                let difference = f64::from(difference.abs());
+                if boundary {
+                    boundary_diff += difference;
+                    boundary_count += 1;
+                } else {
+                    inner_diff += difference;
+                    inner_count += 1;
+                }
+            };
+            if x > 0 {
+                add(at(x, y) - at(x - 1, y), x % 8 == 0);
+            }
+            if y > 0 {
+                add(at(x, y) - at(x, y - 1), y % 8 == 0);
             }
         }
     }

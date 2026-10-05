@@ -84,7 +84,7 @@ fn metadata(count: usize) -> SamplingMetadata {
         rotation_degrees: 0,
         requested_times: times.clone(),
         presented_times: times,
-        presented_time_source: PresentedTimeSource::DecodedFrame,
+        presented_time_sources: vec![PresentedTimeSource::DecodedFrame; count],
     }
 }
 
@@ -317,8 +317,26 @@ fn decoded_seek_errors_are_surfaced() {
     assert_eq!(report.sampling.seek_error_samples, [3]);
     assert!(codes(&report).contains(&IssueCode::TimingIrregular));
 
-    // Seek positions cannot reveal seek error.
-    sampling.presented_time_source = PresentedTimeSource::SeekPosition;
+    // Seek positions cannot reveal seek error, but other decoded samples
+    // remain measurable.
+    sampling.presented_time_sources[3] = PresentedTimeSource::SeekPosition;
+    sampling.presented_times[1] += 0.5;
     let report = assess_readiness(&frames, &sampling).unwrap();
-    assert!(report.sampling.seek_error_samples.is_empty());
+    assert_eq!(report.sampling.seek_error_samples, [1]);
+    assert_eq!(report.sampling.decoded_time_samples, frames.len() - 1);
+}
+
+#[test]
+fn blockiness_is_orientation_independent() {
+    // Horizontal-only 8-row banding.
+    let mut luma = render(0, None, 50);
+    for y in 0..H {
+        for x in 0..W {
+            let index = (y * W + x) as usize;
+            let band = ((y / 8) % 2) as u8 * 40;
+            luma[index] = luma[index] / 16 + 90 + band;
+        }
+    }
+    let banded = frame_evidence(0, &luma, W, H);
+    assert!(banded.blockiness > THRESHOLDS.max_blockiness, "{banded:?}");
 }

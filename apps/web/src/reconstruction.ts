@@ -7,6 +7,8 @@ export type SampledFrame = {
   time: number;
   /** Time the decoder actually presented after seeking, in seconds. */
   presentedTime: number;
+  /** True when `presentedTime` is the decoder's media timestamp, false for a seek position. */
+  presentedTimeDecoded: boolean;
 };
 
 export type CameraPose = {
