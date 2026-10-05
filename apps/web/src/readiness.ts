@@ -30,6 +30,7 @@ export type ReadinessReport = {
   sampling: {
     median_interval_seconds: number;
     max_seek_error_seconds: number;
+    presented_time_source: "decoded_frame" | "seek_position";
   };
 };
 
@@ -78,6 +79,7 @@ export async function assessReadiness(
         rotation_degrees: 0,
         requested_times: frames.map((frame) => frame.time),
         presented_times: frames.map((frame) => frame.presentedTime),
+        presented_time_source: info.presentedTimeSource,
       },
     }),
   ) as ReadinessReport;

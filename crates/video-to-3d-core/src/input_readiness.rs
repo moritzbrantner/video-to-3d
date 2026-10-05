@@ -16,6 +16,8 @@
 //! not replace or re-encode it.
 
 use crate::{detect_features, match_features, to_luma, FrameInput, ReconstructionOptions};
+// `MIN_TRACK_*` and `motion_guided_matches` are crate-private reconstruction
+// internals reused so readiness matches exactly what reconstruction matches.
 use nalgebra::{DMatrix, Matrix3, Vector3};
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +91,20 @@ pub struct SamplingMetadata {
     pub requested_times: Vec<f64>,
     /// Times the decoder actually presented, in seconds.
     pub presented_times: Vec<f64>,
+    /// Where `presented_times` came from.
+    #[serde(default)]
+    pub presented_time_source: PresentedTimeSource,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentedTimeSource {
+    /// Media timestamps of the decoded frames.
+    DecodedFrame,
+    /// Only the seek positions are known, so timing evidence cannot show a
+    /// decoder presenting the same frame for several positions.
+    #[default]
+    SeekPosition,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -106,6 +122,7 @@ pub struct NormalizedSampling {
     pub max_seek_error_seconds: f64,
     /// Pairs whose presented time did not advance.
     pub non_advancing_samples: Vec<usize>,
+    pub presented_time_source: PresentedTimeSource,
     /// Pixels are sRGB as produced by a 2D canvas.
     pub color_space: &'static str,
 }
@@ -142,6 +159,8 @@ pub struct PairEvidence {
     pub to_frame: usize,
     pub features: usize,
     pub matches: usize,
+    /// Matches came from the motion-guided fallback used by reconstruction.
+    pub motion_guided: bool,
     pub overlap: f32,
     pub median_motion_pixels: f32,
     pub homography_inlier_fraction: f32,
@@ -291,6 +310,7 @@ pub fn normalize_sampling(
         max_interval_seconds,
         max_seek_error_seconds,
         non_advancing_samples,
+        presented_time_source: metadata.presented_time_source,
         color_space: "srgb",
     })
 }
@@ -437,7 +457,24 @@ fn pair_evidence(
     options: ReconstructionOptions,
     frames: &[FrameEvidence],
 ) -> PairEvidence {
-    let matches = match_features(source, target, options);
+    // Same fallback as the authoritative reconstruction: when ordinary local
+    // matching is starved, recenter the search on the dominant displacement.
+    let ordinary = match_features(source, target, options);
+    let ordinary_overlap = if source.is_empty() || target.is_empty() {
+        0.0
+    } else {
+        ordinary.len() as f32 / source.len().min(target.len()) as f32
+    };
+    let (matches, motion_guided) = if ordinary.len() < crate::MIN_TRACK_MATCHES
+        || ordinary_overlap < crate::MIN_TRACK_OVERLAP
+    {
+        match crate::motion_guided_matches(source, target, options) {
+            Some(guided) if guided.len() > ordinary.len() => (guided, true),
+            _ => (ordinary, false),
+        }
+    } else {
+        (ordinary, false)
+    };
     let correspondences: Vec<([f32; 2], [f32; 2])> = matches
         .iter()
         .map(|feature_match| {
@@ -524,6 +561,7 @@ fn pair_evidence(
         to_frame: to,
         features,
         matches: correspondences.len(),
+        motion_guided,
         overlap,
         median_motion_pixels,
         homography_inlier_fraction,

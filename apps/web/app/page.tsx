@@ -685,6 +685,9 @@ export default function Home() {
               <p>
                 {activeRun.readiness
                   ? `Geometric reconstruction: ${activeRun.readiness.geometric_verdict}. ` +
+                    (activeRun.readiness.sampling.presented_time_source === "seek_position"
+                      ? "Sample timing uses seek positions (this browser does not report decoded frame times). "
+                      : "") +
                     "This is measured evidence about the sampled frames, not a confidence score; " +
                     "it never blocks reconstruction or generative paths."
                   : `Readiness could not be measured: ${activeRun.readinessError}`}
@@ -697,7 +700,9 @@ export default function Home() {
                 <li key={issue.code} data-severity={issue.severity}>
                   <strong>{issue.severity === "blocking" ? "Blocking" : "Warning"}:</strong>{" "}
                   {issue.message}
-                  {issue.frames.length > 0 ? ` (frames ${issue.frames.join(", ")})` : ""}
+                  {issue.frames.length > 0
+                    ? ` (frames ${issue.frames.map((frame) => frame + 1).join(", ")})`
+                    : ""}
                 </li>
               ))}
             </ul>

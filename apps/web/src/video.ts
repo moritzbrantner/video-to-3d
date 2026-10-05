@@ -30,7 +30,36 @@ export type SampledVideoInfo = {
   duration: number;
   displayWidth: number;
   displayHeight: number;
+  /** Whether presented times are decoder media timestamps or seek positions. */
+  presentedTimeSource: "decoded_frame" | "seek_position";
 };
+
+type FrameCallbackVideo = HTMLVideoElement & {
+  requestVideoFrameCallback?: (
+    callback: (now: number, metadata: { mediaTime: number }) => void,
+  ) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
+/**
+ * Resolve with the media timestamp of the next frame the decoder presents, or
+ * `null` when the browser lacks requestVideoFrameCallback or presents nothing
+ * within the timeout. Register before seeking so the seeked frame is caught.
+ */
+function nextPresentedMediaTime(video: FrameCallbackVideo): Promise<number | null> {
+  if (!video.requestVideoFrameCallback) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let handle = 0;
+    const timer = setTimeout(() => {
+      video.cancelVideoFrameCallback?.(handle);
+      resolve(null);
+    }, 500);
+    handle = video.requestVideoFrameCallback!((_, metadata) => {
+      clearTimeout(timer);
+      resolve(metadata.mediaTime);
+    });
+  });
+}
 
 export async function sampleVideo(
   file: File,
@@ -69,11 +98,16 @@ export async function sampleVideoWithInfo(
     }
 
     const frames: SampledFrame[] = [];
+    let allDecodedTimes = true;
     for (const time of plan.times) {
+      let decodedTime: number | null = null;
       if (Math.abs(video.currentTime - time) > 0.001) {
+        const presented = nextPresentedMediaTime(video as FrameCallbackVideo);
         video.currentTime = time;
         await waitFor(video, "seeked");
+        decodedTime = await presented;
       }
+      if (decodedTime === null) allDecodedTimes = false;
       context.drawImage(video, 0, 0, plan.analysisWidth, plan.analysisHeight);
       const image = context.getImageData(0, 0, plan.analysisWidth, plan.analysisHeight);
       frames.push({
@@ -86,7 +120,9 @@ export async function sampleVideoWithInfo(
         ),
         thumbnail: canvas.toDataURL("image/jpeg", 0.68),
         time,
-        presentedTime: video.currentTime,
+        // The decoded frame's media timestamp when the browser reports it;
+        // otherwise only the seek position is known.
+        presentedTime: decodedTime ?? video.currentTime,
       });
     }
     return {
@@ -95,6 +131,7 @@ export async function sampleVideoWithInfo(
         duration: video.duration,
         displayWidth: video.videoWidth,
         displayHeight: video.videoHeight,
+        presentedTimeSource: allDecodedTimes ? "decoded_frame" : "seek_position",
       },
     };
   } finally {

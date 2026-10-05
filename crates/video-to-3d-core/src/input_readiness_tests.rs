@@ -84,6 +84,7 @@ fn metadata(count: usize) -> SamplingMetadata {
         rotation_degrees: 0,
         requested_times: times.clone(),
         presented_times: times,
+        presented_time_source: PresentedTimeSource::DecodedFrame,
     }
 }
 
@@ -278,4 +279,29 @@ fn sampling_metadata_is_normalized_and_validated() {
     assert!(normalize_sampling(&sampling, 4).is_err());
     sampling.presented_times[1] = f64::NAN;
     assert!(normalize_sampling(&sampling, 3).is_err());
+}
+
+#[test]
+fn pair_matching_agrees_with_the_reconstruction_matcher() {
+    // Includes displacements beyond the local match radius, where
+    // reconstruction may switch to motion-guided matching.
+    for step in [2, 70] {
+        let lumas: Vec<Vec<u8>> = (0..4)
+            .map(|index| render(index * step, Some(index * (step + 6)), index as u32 + 40))
+            .collect();
+        let frames: Vec<FrameInput> = lumas.iter().map(|luma| frame(luma)).collect();
+        let report = assess_readiness(&frames, &metadata(frames.len())).unwrap();
+        let reconstruction = crate::reconstruct_once(&crate::ReconstructionRequest {
+            frames,
+            options: ReconstructionOptions::default(),
+        })
+        .unwrap();
+        let readiness: Vec<usize> = report.pairs.iter().map(|pair| pair.matches).collect();
+        let reconstructed: Vec<usize> = reconstruction
+            .pairs
+            .iter()
+            .map(|pair| pair.matches)
+            .collect();
+        assert_eq!(readiness, reconstructed, "step {step}");
+    }
 }
