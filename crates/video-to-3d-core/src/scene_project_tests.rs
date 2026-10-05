@@ -509,3 +509,89 @@ fn every_operation_kind_produces_a_distinct_artifact_kind() {
         .collect();
     assert_eq!(outputs.len(), OperationKind::ALL.len());
 }
+
+#[test]
+fn replaced_upstream_output_invalidates_recorded_descendants() {
+    let mut manifest = parse(&standard_document()).unwrap();
+    let identities = manifest.operation_identities().unwrap();
+    manifest.artifacts.push(ArtifactRecord {
+        id: "mesh-output".into(),
+        kind: ArtifactKind::SurfaceMesh,
+        produced_by: "mesh".into(),
+        operation_identity: identities["mesh"].clone(),
+        path: ProjectPath::new("artifacts/mesh.bin").unwrap(),
+        content_hash: ContentHash::of_bytes(b"mesh v1"),
+    });
+    let identities = manifest.operation_identities().unwrap();
+    manifest.artifacts.push(ArtifactRecord {
+        id: "completion-output".into(),
+        kind: ArtifactKind::GenerativeCompletion,
+        produced_by: "complete".into(),
+        operation_identity: identities["complete"].clone(),
+        path: ProjectPath::new("artifacts/completion.bin").unwrap(),
+        content_hash: ContentHash::of_bytes(b"completion"),
+    });
+    assert!(manifest.stale_artifacts().unwrap().is_empty());
+
+    // Re-running `mesh` with the same declaration produced different bytes.
+    manifest.artifacts[0].content_hash = ContentHash::of_bytes(b"mesh v2");
+    let stale: Vec<&str> = manifest
+        .stale_artifacts()
+        .unwrap()
+        .into_iter()
+        .map(|artifact| artifact.id.as_str())
+        .collect();
+    assert_eq!(stale, ["completion-output"]);
+}
+
+#[test]
+fn cloud_fallbacks_are_checked_for_uploads_and_cost() {
+    let mut document = standard_document();
+    document["provider_policy"]["providers"][1]["capabilities"] =
+        json!(["generative_completion", "learned_reconstruction"]);
+    // `learned` names the local provider but can fall back to the cloud one,
+    // which would upload the sparse reconstruction.
+    expect_invalid(&document, "can reach cloud provider `cloud-world`");
+
+    document["provider_policy"]["cloud_upload_allowlist"] =
+        json!(["keyframes", "sparse_reconstruction", "surface_mesh"]);
+    let manifest = parse(&document).expect("allowlisted fallback is valid");
+    let learned = manifest
+        .operations
+        .iter()
+        .find(|operation| operation.id == "learned")
+        .unwrap();
+    let reachable: Vec<&str> = manifest
+        .reachable_providers(learned)
+        .into_iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
+    assert_eq!(reachable, ["local-depth", "cloud-world"]);
+
+    // Worst case now includes the paid fallback: 2 x 40 + 1 x 40 = 120.
+    expect_invalid(
+        &with(document, "/provider_policy/max_total_cost", json!(119)),
+        "exceeds max_total_cost",
+    );
+}
+
+#[test]
+fn filesystem_aliases_are_rejected() {
+    for path in [
+        "media/clip.webm.",
+        "media/con.webm",
+        "LPT1",
+        "media/clip webm",
+    ] {
+        assert!(ProjectPath::new(path).is_err(), "{path} must be rejected");
+    }
+    assert!(ProjectPath::new("media/Clip.WEBM").is_ok());
+    expect_invalid(
+        &with(
+            standard_document(),
+            "/exports/0/path",
+            json!("MEDIA/Clip.webm"),
+        ),
+        "used more than once",
+    );
+}

@@ -269,6 +269,31 @@ impl ProjectPath {
                     "project path `{path}` must not contain empty, `.` or `..` components"
                 ));
             }
+            if !component
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return invalid(format!(
+                    "project path `{path}` components may only contain ASCII letters, digits, `-`, `_` and `.`"
+                ));
+            }
+            if component.ends_with('.') {
+                return invalid(format!(
+                    "project path `{path}` components must not end with `.`"
+                ));
+            }
+            let stem = component
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let reserved = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+                || ((stem.starts_with("com") || stem.starts_with("lpt"))
+                    && stem.len() == 4
+                    && stem.as_bytes()[3].is_ascii_digit());
+            if reserved {
+                return invalid(format!("project path `{path}` uses a reserved device name"));
+            }
         }
         Ok(Self(path))
     }
@@ -463,10 +488,11 @@ pub struct SceneProjectManifest {
 /// their identities and media contribute their content hashes, so a change to
 /// any input, provider, or revision changes exactly the affected descendants.
 #[derive(Serialize)]
-struct OperationIdentityInput<'a> {
+struct OperationIdentityInput {
     schema_version: u32,
     kind: OperationKind,
-    provider: Option<&'a ProviderDeclaration>,
+    /// Declared provider followed by reachable fallbacks, in order.
+    providers: Vec<ProviderDeclaration>,
     max_attempts: u32,
     inputs: Vec<String>,
 }
@@ -583,7 +609,7 @@ impl SceneProjectManifest {
             self.validate_operation(operation, &media, &operations, &providers)?;
         }
         topological_order(&self.operations)?;
-        self.validate_costs(&providers)?;
+        self.validate_costs()?;
 
         let produced: BTreeSet<ArtifactKind> = self
             .operations
@@ -874,16 +900,19 @@ impl SceneProjectManifest {
                         operation.id
                     ));
                 }
-                if provider.location == ProviderLocation::Cloud {
-                    for artifact in upstream_kinds {
+                for reachable in self.reachable_providers(operation) {
+                    if reachable.location != ProviderLocation::Cloud {
+                        continue;
+                    }
+                    for artifact in &upstream_kinds {
                         if !self
                             .provider_policy
                             .cloud_upload_allowlist
-                            .contains(&artifact)
+                            .contains(artifact)
                         {
                             return invalid(format!(
-                                "cloud operation `{}` would upload {artifact:?}, which the cloud upload allowlist does not permit",
-                                operation.id
+                                "operation `{}` can reach cloud provider `{}`, which would upload {artifact:?} not permitted by the cloud upload allowlist",
+                                operation.id, reachable.id
                             ));
                         }
                     }
@@ -893,22 +922,50 @@ impl SceneProjectManifest {
         }
     }
 
-    fn validate_costs(
+    /// Providers that may execute an operation: its declared provider first,
+    /// then every other provider in `fallback_order` that declares the
+    /// operation's capability. `max_attempts` bounds attempts across all of
+    /// them, so upload and cost rules are checked against every reachable one.
+    pub fn reachable_providers(
         &self,
-        providers: &BTreeMap<&str, &ProviderDeclaration>,
-    ) -> Result<(), SceneProjectError> {
+        operation: &OperationDeclaration,
+    ) -> Vec<&ProviderDeclaration> {
+        let Some(primary) = operation.provider.as_deref() else {
+            return Vec::new();
+        };
+        let find = |id: &str| {
+            self.provider_policy
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+        };
+        let mut reachable: Vec<&ProviderDeclaration> = find(primary).into_iter().collect();
+        for id in &self.provider_policy.fallback_order {
+            if id == primary {
+                continue;
+            }
+            if let Some(provider) = find(id) {
+                if provider.capabilities.contains(&operation.kind) {
+                    reachable.push(provider);
+                }
+            }
+        }
+        reachable
+    }
+
+    fn validate_costs(&self) -> Result<(), SceneProjectError> {
         let policy = &self.provider_policy;
         let mut total: u64 = 0;
         for operation in &self.operations {
-            let Some(provider) = operation
-                .provider
-                .as_deref()
-                .and_then(|id| providers.get(id))
-            else {
+            let reachable = self.reachable_providers(operation);
+            if reachable.is_empty() {
                 continue;
-            };
-            let worst_case = provider
-                .cost_per_attempt
+            }
+            let worst_case = reachable
+                .iter()
+                .map(|provider| provider.cost_per_attempt)
+                .max()
+                .unwrap_or(0)
                 .checked_mul(u64::from(operation.max_attempts))
                 .ok_or_else(|| {
                     SceneProjectError::Invalid(format!(
@@ -939,9 +996,11 @@ impl SceneProjectManifest {
     }
 
     /// Deterministic identity of every declared operation. Identities ignore
-    /// operation ids and declaration order and depend only on kind, provider
-    /// declaration (including revision and cost), attempt bound, and the
-    /// identities/hashes of their inputs.
+    /// operation ids and declaration order and depend only on kind, reachable
+    /// provider declarations (including revision and cost), attempt bound,
+    /// media hashes, and for each upstream operation its identity plus the
+    /// content hash of its current recorded artifact (`pending` when none).
+    /// Replacing an upstream artifact therefore invalidates its descendants.
     pub fn operation_identities(&self) -> Result<BTreeMap<String, ContentHash>, SceneProjectError> {
         self.validate()?;
         self.compute_operation_identities()
@@ -955,12 +1014,6 @@ impl SceneProjectManifest {
             .iter()
             .map(|input| (input.id.as_str(), input))
             .collect();
-        let providers: BTreeMap<&str, &ProviderDeclaration> = self
-            .provider_policy
-            .providers
-            .iter()
-            .map(|provider| (provider.id.as_str(), provider))
-            .collect();
         let mut identities: BTreeMap<String, ContentHash> = BTreeMap::new();
         for operation in topological_order(&self.operations)? {
             let mut inputs: Vec<String> = operation
@@ -973,26 +1026,39 @@ impl SceneProjectManifest {
                         media[id.as_str()].byte_length
                     ),
                     OperationInput::Operation(id) => {
-                        format!("operation:{}", identities[id].as_str())
+                        let identity = &identities[id];
+                        // Downstream work depends on the bytes actually
+                        // produced upstream, not only on how they were requested.
+                        let content = self
+                            .artifacts
+                            .iter()
+                            .find(|artifact| {
+                                artifact.produced_by == *id
+                                    && artifact.operation_identity == *identity
+                            })
+                            .map_or("pending", |artifact| artifact.content_hash.as_str());
+                        format!("operation:{}:{content}", identity.as_str())
                     }
                 })
                 .collect();
             inputs.sort();
-            let mut provider = operation
-                .provider
-                .as_deref()
-                .and_then(|id| providers.get(id).map(|provider| (*provider).clone()));
-            if let Some(provider) = &mut provider {
-                provider.capabilities.sort();
-                // The provider's local name is not semantic; its declaration is.
-                provider.id.clear();
-                // Credentials select an account, not a result.
-                provider.credential_capability = None;
-            }
+            let providers: Vec<ProviderDeclaration> = self
+                .reachable_providers(operation)
+                .into_iter()
+                .map(|provider| {
+                    let mut provider = provider.clone();
+                    provider.capabilities.sort();
+                    // The provider's local name is not semantic; its declaration is.
+                    provider.id.clear();
+                    // Credentials select an account, not a result.
+                    provider.credential_capability = None;
+                    provider
+                })
+                .collect();
             let identity_input = OperationIdentityInput {
                 schema_version: SCENE_PROJECT_SCHEMA_VERSION,
                 kind: operation.kind,
-                provider: provider.as_ref(),
+                providers,
                 max_attempts: operation.max_attempts,
                 inputs,
             };
@@ -1054,8 +1120,10 @@ fn validate_capability_name(provider: &str, capability: &str) -> Result<(), Scen
     Ok(())
 }
 
+/// Paths are compared case-insensitively so that two declarations cannot alias
+/// one file on case-insensitive filesystems.
 fn unique_path(paths: &mut BTreeSet<String>, path: &ProjectPath) -> Result<(), SceneProjectError> {
-    if !paths.insert(path.as_str().to_owned()) {
+    if !paths.insert(path.as_str().to_ascii_lowercase()) {
         return invalid(format!(
             "project path `{}` is used more than once",
             path.as_str()
