@@ -18,8 +18,8 @@
 //! changes a build result, and [`VerifyMode::Full`] ignores it.
 
 use crate::scene_project::{
-    ArtifactRecord, ContentHash, OperationInput, OperationKind, ProjectPath, SceneProjectError,
-    SceneProjectManifest, STATE_DIRECTORY,
+    ArtifactRecord, AttemptUsage, ContentHash, OperationInput, OperationKind, ProjectPath,
+    SceneProjectError, SceneProjectManifest, STATE_DIRECTORY,
 };
 use crate::scene_runner::{
     run_observed, CancellationToken, OperationExecutor, ProducedArtifact, RecordedOutput,
@@ -385,7 +385,10 @@ impl ProjectStore {
     ) -> Result<BuildReport, SceneProjectError> {
         let reconcile = self.reconcile(manifest, VerifyMode::Full)?;
         self.save_manifest(manifest)?;
-        let mut persister = Persister { store: self };
+        let mut persister = Persister {
+            store: self,
+            snapshot: manifest.clone(),
+        };
         let run = run_observed(manifest, executor, options, cancel, &mut persister)?;
         self.save_manifest(manifest)?;
         Ok(BuildReport { reconcile, run })
@@ -409,6 +412,9 @@ fn verify_receipt_provenance(
     };
     if receipt.kind != operation.kind {
         return mismatch("operation kind differs from the declaration");
+    }
+    if receipt.provider.as_ref().map(|provider| &provider.id) != artifact.provider.as_ref() {
+        return mismatch("provider differs from the provider recorded with the artifact");
     }
     let reachable = manifest.reachable_providers(operation);
     match (&receipt.provider, reachable.is_empty()) {
@@ -454,11 +460,32 @@ fn verify_receipt_provenance(
     Ok(())
 }
 
+/// Persists reservations, receipts and the manifest. `snapshot` mirrors the
+/// last persisted manifest so reservations can be saved between waves.
 struct Persister<'a> {
     store: &'a ProjectStore,
+    snapshot: SceneProjectManifest,
 }
 
 impl RunObserver for Persister<'_> {
+    fn reserve_attempt(
+        &mut self,
+        operation: &str,
+        identity: &ContentHash,
+        attempts: u32,
+    ) -> Result<(), String> {
+        let usage = &mut self.snapshot.attempt_usage;
+        usage.retain(|usage| usage.operation != operation);
+        usage.push(AttemptUsage {
+            operation: operation.to_owned(),
+            operation_identity: identity.clone(),
+            attempts,
+        });
+        self.store
+            .save_manifest(&self.snapshot)
+            .map_err(|error| error.to_string())
+    }
+
     fn verify_output(&mut self, produced: &ProducedArtifact) -> Result<(), String> {
         let Some((hash, _)) = hash_file(&self.store.resolve(&produced.path)) else {
             return Err(format!(
@@ -488,6 +515,7 @@ impl RunObserver for Persister<'_> {
             let receipt = receipt_for(self.store, manifest, output)?;
             self.store.write_receipt(&receipt)?;
         }
+        self.snapshot = manifest.clone();
         self.store.save_manifest(manifest)
     }
 }

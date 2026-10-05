@@ -459,3 +459,59 @@ fn outputs_are_verified_before_their_receipt_is_written() {
         .iter()
         .any(|artifact| artifact.produced_by == "dense"));
 }
+
+#[test]
+fn reservations_are_persisted_before_dispatch() {
+    let project = TempProject::new("reserve");
+    struct Checking(PathBuf, WritingExecutor);
+    impl OperationExecutor for Checking {
+        fn execute(
+            &self,
+            request: &OperationRequest,
+            cancel: &CancellationToken,
+        ) -> AttemptOutcome {
+            let manifest = SceneProjectManifest::load(&self.0).unwrap();
+            let usage = manifest
+                .attempt_usage
+                .iter()
+                .find(|usage| usage.operation == request.operation.id)
+                .expect("reservation persisted before dispatch");
+            assert_eq!(usage.attempts, request.attempt);
+            self.1.execute(request, cancel)
+        }
+    }
+    let (store, mut manifest) = project.open();
+    let report = store
+        .build(
+            &mut manifest,
+            &Checking(project.manifest_path(), WritingExecutor::new(&project.root)),
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(report.run.is_complete());
+    let (_, persisted) = project.open();
+    assert!(
+        persisted.attempt_usage.is_empty(),
+        "success clears reservations"
+    );
+}
+
+#[test]
+fn receipts_must_name_the_recorded_provider() {
+    let project = TempProject::new("bound-provider");
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, mut manifest) = project.open();
+    for artifact in &mut manifest.artifacts {
+        if artifact.produced_by == "mesh" {
+            artifact.provider = Some("someone".into());
+        }
+    }
+    store.save_manifest(&manifest).unwrap();
+    let report = build(&project, &WritingExecutor::new(&project.root));
+    assert!(matches!(
+        report.reconcile.invalidated.as_slice(),
+        [(operation, Invalidation::ReceiptMismatch(message))]
+            if operation == "mesh" && message.contains("recorded with the artifact")
+    ));
+}

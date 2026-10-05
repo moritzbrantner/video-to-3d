@@ -475,3 +475,149 @@ fn generated_artifact_ids_are_valid_and_unique() {
     assert!(ids.iter().all(|id| id.len() <= 64));
     assert!(!ids.contains("sparse.output"));
 }
+
+struct RejectProvider(&'static str);
+
+impl RunObserver for RejectProvider {
+    fn verify_output(&mut self, produced: &ProducedArtifact) -> Result<(), String> {
+        if produced.observations.get("provider").map(String::as_str) == Some(self.0) {
+            return Err("hash mismatch".into());
+        }
+        Ok(())
+    }
+
+    fn wave_recorded(
+        &mut self,
+        _manifest: &SceneProjectManifest,
+        _recorded: &[RecordedOutput],
+    ) -> Result<(), SceneProjectError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn rejected_outputs_fall_back_to_the_next_provider() {
+    let executor = FakeExecutor::scripted(|request| {
+        let provider = request.provider.as_ref()?.id.clone();
+        let mut produced = ProducedArtifact::new(
+            ProjectPath::new(format!("artifacts/{}.bin", request.operation.id)).unwrap(),
+            ContentHash::of_bytes(provider.as_bytes()),
+            Reproducibility::Deterministic,
+        );
+        produced.observations.insert("provider".into(), provider);
+        Some(AttemptOutcome::Succeeded(produced))
+    });
+    let mut manifest = manifest();
+    let report = run_observed(
+        &mut manifest,
+        &executor,
+        RunOptions::default(),
+        &CancellationToken::new(),
+        &mut RejectProvider("depth-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        report.states["learned"],
+        OperationState::Succeeded {
+            attempts: 2,
+            provider: Some("depth-b".into())
+        }
+    );
+    let learned = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.produced_by == "learned")
+        .unwrap();
+    assert_eq!(learned.provider.as_deref(), Some("depth-b"));
+}
+
+#[test]
+fn failed_attempts_stay_charged_when_the_chain_ends_unsupported() {
+    let executor = FakeExecutor::scripted(|request| {
+        match request
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.as_str())
+        {
+            Some("depth-a") if request.operation.id == "learned" => {
+                Some(AttemptOutcome::Failed("crashed".into()))
+            }
+            Some("depth-b") if request.operation.id == "learned" => {
+                Some(AttemptOutcome::Unsupported("no GPU".into()))
+            }
+            _ => None,
+        }
+    });
+    let mut manifest = manifest();
+    let report = run_with(&mut manifest, &executor, 1);
+    assert!(matches!(
+        report.states["learned"],
+        OperationState::Unsupported { attempts: 2, .. }
+    ));
+    let usage: Vec<(&str, u32)> = manifest
+        .attempt_usage
+        .iter()
+        .map(|usage| (usage.operation.as_str(), usage.attempts))
+        .collect();
+    assert_eq!(usage, [("learned", 1)]);
+}
+
+struct Reservations(Arc<Mutex<Vec<(String, u32)>>>);
+
+impl RunObserver for Reservations {
+    fn reserve_attempt(
+        &mut self,
+        operation: &str,
+        _identity: &ContentHash,
+        attempts: u32,
+    ) -> Result<(), String> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((operation.to_owned(), attempts));
+        Ok(())
+    }
+
+    fn wave_recorded(
+        &mut self,
+        _manifest: &SceneProjectManifest,
+        _recorded: &[RecordedOutput],
+    ) -> Result<(), SceneProjectError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn attempts_are_reserved_before_dispatch() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seen = log.clone();
+    // The executor observes that its own attempt was already reserved.
+    let executor = FakeExecutor::scripted(move |request| {
+        let reserved = seen.lock().unwrap().last().cloned();
+        assert_eq!(
+            reserved,
+            Some((request.operation.id.clone(), request.attempt)),
+            "attempt dispatched before being reserved"
+        );
+        (request.operation.id == "learned" && request.attempt < 3)
+            .then(|| AttemptOutcome::RetryableFailure("busy".into()))
+    });
+    let mut manifest = manifest();
+    let report = run_observed(
+        &mut manifest,
+        &executor,
+        RunOptions::default(),
+        &CancellationToken::new(),
+        &mut Reservations(log.clone()),
+    )
+    .unwrap();
+    assert!(report.is_complete());
+    let learned: Vec<u32> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(operation, _)| operation == "learned")
+        .map(|(_, attempts)| *attempts)
+        .collect();
+    assert_eq!(learned, [1, 2, 3]);
+}

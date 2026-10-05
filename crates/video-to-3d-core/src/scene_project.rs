@@ -470,6 +470,10 @@ pub struct ArtifactRecord {
     pub operation_identity: ContentHash,
     pub path: ProjectPath,
     pub content_hash: ContentHash,
+    /// Provider that actually produced the output (`None` for built-in
+    /// operations). Receipts must agree with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
