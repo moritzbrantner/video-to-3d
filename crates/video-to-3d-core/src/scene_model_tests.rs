@@ -38,7 +38,7 @@ fn scene_document() -> Value {
         ],
         "materials": [
             { "id": "room-material", "base_color": [1.0, 1.0, 1.0, 1.0], "base_color_texture": "room-albedo",
-              "metallic": 0.0, "roughness": 0.9 }
+              "metallic": 0.0, "roughness": 0.9, "provenance": "estimated" }
         ],
         "assets": [
             { "id": "environment", "role": "environment", "transform": identity(),
@@ -143,7 +143,8 @@ fn provenance_survives_serialization_and_cannot_be_relabeled() {
         environment.visual,
         BTreeSet::from([
             SceneProvenance::GeometricMultiView,
-            SceneProvenance::LearnedMultiView
+            SceneProvenance::LearnedMultiView,
+            SceneProvenance::Estimated
         ])
     );
     assert_eq!(
@@ -458,5 +459,32 @@ fn camera_free_resources_and_primitive_proxies_cannot_claim_camera_support() {
             json!("geometric_multi_view"),
         ),
         "cannot claim camera-backed provenance",
+    );
+}
+
+#[test]
+fn generated_material_factors_surface_in_asset_provenance() {
+    let document = with(
+        scene_document(),
+        "/materials/0/provenance",
+        json!("generative_completion"),
+    );
+    let scene = parse(&document).unwrap();
+    assert!(scene
+        .asset_provenance("environment")
+        .unwrap()
+        .contains_generative());
+}
+
+#[test]
+fn semantic_label_order_does_not_change_canonical_form() {
+    let labels = json!([{ "name": "seat" }, { "name": "chair", "confidence": 0.9 }]);
+    let reordered = with(scene_document(), "/assets/2/labels", labels.clone());
+    let mut reversed = labels;
+    reversed.as_array_mut().unwrap().reverse();
+    let original = with(scene_document(), "/assets/2/labels", reversed);
+    assert_eq!(
+        parse(&reordered).unwrap().to_canonical_json().unwrap(),
+        parse(&original).unwrap().to_canonical_json().unwrap()
     );
 }

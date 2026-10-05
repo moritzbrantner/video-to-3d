@@ -233,6 +233,9 @@ pub struct Material {
     pub base_color_texture: Option<String>,
     pub metallic: f32,
     pub roughness: f32,
+    /// Origin of the material factors themselves (texture provenance lives on
+    /// the texture resource).
+    pub provenance: SceneProvenance,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -426,6 +429,9 @@ impl AssembledScene {
         }
         self.materials.sort_by(|a, b| a.id.cmp(&b.id));
         self.assets.sort_by(|a, b| a.id.cmp(&b.id));
+        for asset in &mut self.assets {
+            asset.labels.sort_by(|a, b| a.name.cmp(&b.name));
+        }
         self.lights.sort_by(|a, b| a.id.cmp(&b.id));
         self.audio.sort_by(|a, b| a.id.cmp(&b.id));
     }
@@ -786,13 +792,17 @@ impl AssembledScene {
                 visual.extend(provenance_of(&mesh.mesh));
                 // Appearance is part of the visual: a generated texture on an
                 // observed mesh must still surface as generative content.
-                let texture = mesh.material.as_deref().and_then(|material| {
+                let material = mesh.material.as_deref().and_then(|material| {
                     self.materials
                         .iter()
                         .find(|candidate| candidate.id == material)
-                        .and_then(|material| material.base_color_texture.as_deref())
                 });
-                visual.extend(texture.map(provenance_of).unwrap_or_default());
+                if let Some(material) = material {
+                    visual.insert(material.provenance);
+                    if let Some(texture) = &material.base_color_texture {
+                        visual.extend(provenance_of(texture));
+                    }
+                }
             }
             if let Some(splat) = &representation.splat {
                 visual.extend(provenance_of(splat));
