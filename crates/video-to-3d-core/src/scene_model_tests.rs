@@ -258,7 +258,7 @@ fn invalid_cross_references_fail_closed() {
         &with(
             scene_document(),
             "/resources/1/path",
-            json!("scene/room.mesh"),
+            json!("Scene/Room.mesh"),
         ),
         "used more than once",
     );

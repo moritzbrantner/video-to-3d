@@ -464,7 +464,7 @@ impl AssembledScene {
         let mut paths = BTreeSet::new();
         for resource in &self.resources {
             declare(&resource.id)?;
-            if !paths.insert(resource.path.as_str()) {
+            if !paths.insert(resource.path.as_str().to_ascii_lowercase()) {
                 return invalid(format!(
                     "resource path `{}` is used more than once",
                     resource.path.as_str()
