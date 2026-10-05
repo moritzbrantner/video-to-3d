@@ -27,7 +27,7 @@ fn manifest_document() -> serde_json::Value {
             { "id": "ingest", "kind": "ingest_video", "inputs": [{ "media": "clip" }] },
             { "id": "sparse", "kind": "sparse_reconstruction", "inputs": [{ "operation": "ingest" }] },
             { "id": "learned", "kind": "learned_reconstruction", "inputs": [{ "operation": "sparse" }], "provider": "depth-a", "max_attempts": 3 },
-            { "id": "dense", "kind": "dense_reconstruction", "inputs": [{ "operation": "sparse" }, { "operation": "learned" }] },
+            { "id": "dense", "kind": "dense_reconstruction", "inputs": [{ "operation": "sparse" }, { "operation": "learned" }], "max_attempts": 2 },
             { "id": "mesh", "kind": "surface_mesh", "inputs": [{ "operation": "dense" }] },
             { "id": "decompose", "kind": "scene_decomposition", "inputs": [{ "operation": "ingest" }], "provider": "segmenter" },
             { "id": "assemble", "kind": "scene_assembly", "inputs": [{ "operation": "mesh" }, { "operation": "decompose" }] }
@@ -358,4 +358,91 @@ fn zero_concurrency_is_rejected() {
         &CancellationToken::new()
     )
     .is_err());
+}
+
+#[test]
+fn attempt_budget_persists_across_resumed_runs() {
+    let failing = || {
+        FakeExecutor::scripted(|request| {
+            (request.operation.id == "dense").then(|| AttemptOutcome::Failed("no texture".into()))
+        })
+    };
+    let mut manifest = manifest();
+    run_with(&mut manifest, &failing(), 1);
+    assert_eq!(manifest.attempt_usage.len(), 1);
+    assert_eq!(manifest.attempt_usage[0].attempts, 1);
+
+    // The usage survives persistence.
+    let mut manifest =
+        SceneProjectManifest::from_json(&manifest.to_canonical_json().unwrap()).unwrap();
+    let second = failing();
+    let report = run_with(&mut manifest, &second, 1);
+    assert_eq!(second.calls(), [("dense".into(), None, 2)]);
+    assert_eq!(report.states["dense"].attempts(), 2);
+
+    let third = failing();
+    let report = run_with(&mut manifest, &third, 1);
+    assert!(
+        third.calls().is_empty(),
+        "exhausted budget must not execute"
+    );
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|line| line.starts_with("dense: failed")
+                && line.contains("attempt budget exhausted"))
+    );
+
+    // Success clears the usage record.
+    let mut manifest = self::manifest();
+    run_with(&mut manifest, &failing(), 1);
+    run_with(&mut manifest, &FakeExecutor::new(), 1);
+    assert!(manifest.attempt_usage.is_empty());
+}
+
+#[test]
+fn rejected_records_leave_the_manifest_untouched() {
+    let mut manifest = manifest();
+    let before = manifest.clone();
+    let clashing = FakeExecutor::scripted(|request| {
+        (request.operation.id == "ingest").then(|| {
+            AttemptOutcome::Succeeded(ProducedArtifact {
+                path: ProjectPath::new("media/clip.webm").unwrap(),
+                content_hash: ContentHash::of_bytes(b"x"),
+            })
+        })
+    });
+    let error = run(
+        &mut manifest,
+        &clashing,
+        RunOptions::default(),
+        &CancellationToken::new(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("used more than once"));
+    assert_eq!(manifest, before);
+    manifest.validate().unwrap();
+}
+
+#[test]
+fn generated_artifact_ids_are_valid_and_unique() {
+    let mut document = manifest_document();
+    let long = "a".repeat(60);
+    document["operations"][0]["id"] = json!(long);
+    document["operations"][1]["inputs"] = json!([{ "operation": long }]);
+    document["operations"][5]["inputs"] = json!([{ "operation": long }]);
+    // An operation already named like the readable artifact id of `sparse`.
+    document["operations"][6]["id"] = json!("sparse.output");
+    let mut manifest = SceneProjectManifest::from_json(&document.to_string()).unwrap();
+    let report = run_with(&mut manifest, &FakeExecutor::new(), 1);
+    assert!(report.is_complete(), "{:?}", report.diagnostics());
+    let ids: BTreeSet<&str> = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.id.as_str())
+        .collect();
+    assert_eq!(ids.len(), 7);
+    assert!(ids.iter().all(|id| id.len() <= 64));
+    assert!(!ids.contains("sparse.output"));
 }

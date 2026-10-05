@@ -17,8 +17,8 @@
 //! job of receipt-backed reconciliation.
 
 use crate::scene_project::{
-    ArtifactRecord, ContentHash, MediaInput, OperationDeclaration, OperationInput, ProjectPath,
-    ProviderDeclaration, SceneProjectError, SceneProjectManifest,
+    ArtifactRecord, AttemptUsage, ContentHash, MediaInput, OperationDeclaration, OperationInput,
+    ProjectPath, ProviderDeclaration, SceneProjectError, SceneProjectManifest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,7 +58,7 @@ pub struct OperationRequest {
     pub identity: ContentHash,
     /// Provider for this attempt (`None` for built-in operations).
     pub provider: Option<ProviderDeclaration>,
-    /// 1-based attempt number across all providers.
+    /// 1-based attempt number across all providers and resumed runs.
     pub attempt: u32,
     /// Inputs in declaration order.
     pub inputs: Vec<ResolvedInput>,
@@ -120,6 +120,48 @@ impl OperationState {
     pub fn is_complete(&self) -> bool {
         matches!(self, Self::Reused | Self::Succeeded { .. })
     }
+
+    /// Attempts spent on the operation's current identity, including attempts
+    /// from earlier runs.
+    pub fn attempts(&self) -> u32 {
+        match self {
+            Self::Succeeded { attempts, .. }
+            | Self::RetryableFailure { attempts, .. }
+            | Self::Failed { attempts, .. }
+            | Self::Unsupported { attempts, .. }
+            | Self::Canceled { attempts } => *attempts,
+            Self::Reused | Self::Blocked { .. } => 0,
+        }
+    }
+
+    /// One-line human-readable diagnostic for status/inspect output.
+    pub fn diagnostic(&self, operation: &str) -> String {
+        match self {
+            Self::Reused => format!("{operation}: reused current artifact"),
+            Self::Succeeded { attempts, provider } => match provider {
+                Some(provider) => format!(
+                    "{operation}: succeeded via provider `{provider}` after {attempts} attempt(s)"
+                ),
+                None => format!("{operation}: succeeded after {attempts} attempt(s)"),
+            },
+            Self::RetryableFailure { attempts, message } => format!(
+                "{operation}: transient failure after {attempts} attempt(s): {message}"
+            ),
+            Self::Failed { attempts, message } => {
+                format!("{operation}: failed after {attempts} attempt(s): {message}")
+            }
+            Self::Unsupported { attempts, message } => format!(
+                "{operation}: unsupported by every reachable provider after {attempts} attempt(s): {message}"
+            ),
+            Self::Canceled { attempts } => {
+                format!("{operation}: canceled after {attempts} attempt(s)")
+            }
+            Self::Blocked { upstream } => format!(
+                "{operation}: blocked by incomplete upstream {}",
+                upstream.join(", ")
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +172,16 @@ pub struct RunReport {
 impl RunReport {
     pub fn is_complete(&self) -> bool {
         self.states.values().all(OperationState::is_complete)
+    }
+
+    /// Diagnostics for every operation that did not complete, in operation-id
+    /// order; empty when the build is complete.
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.states
+            .iter()
+            .filter(|(_, state)| !state.is_complete())
+            .map(|(operation, state)| state.diagnostic(operation))
+            .collect()
     }
 
     /// Number of operations that were actually executed (at least one attempt).
@@ -219,9 +271,26 @@ pub fn run(
                 continue;
             }
             if upstream.iter().all(|id| current.contains(id)) {
-                wave.push(request_for(manifest, operation, &identities));
+                let used = prior_attempts(manifest, &operation.id, &identities[&operation.id]);
+                if used >= operation.max_attempts {
+                    newly_resolved.push((
+                        operation.id.clone(),
+                        OperationState::Failed {
+                            attempts: used,
+                            message: format!(
+                                "attempt budget exhausted by earlier runs ({used} of {})",
+                                operation.max_attempts
+                            ),
+                        },
+                    ));
+                    continue;
+                }
+                let mut request = request_for(manifest, operation, &identities);
+                request.attempt = used;
+                wave.push(request);
             }
         }
+        wave.sort_by(|a, b| a.operation.id.cmp(&b.operation.id));
         let progressed = !newly_resolved.is_empty() || !wave.is_empty();
         states.extend(newly_resolved);
         if wave.is_empty() {
@@ -235,10 +304,23 @@ pub fn run(
         // Record in operation-id order so the manifest is independent of
         // completion order.
         for (request, (state, produced)) in wave.iter().zip(outcomes) {
+            let id = &request.operation.id;
+            manifest
+                .attempt_usage
+                .retain(|usage| usage.operation != *id);
             if let Some(produced) = produced {
-                record(manifest, &request.operation.id, &request.identity, produced)?;
+                record(manifest, id, &request.identity, produced)?;
+            } else {
+                let attempts = state.attempts();
+                if attempts > 0 {
+                    manifest.attempt_usage.push(AttemptUsage {
+                        operation: id.clone(),
+                        operation_identity: request.identity.clone(),
+                        attempts,
+                    });
+                }
             }
-            states.insert(request.operation.id.clone(), state);
+            states.insert(id.clone(), state);
         }
     }
 
@@ -251,6 +333,14 @@ pub fn run(
     manifest.canonicalize();
     manifest.validate()?;
     Ok(RunReport { states })
+}
+
+fn prior_attempts(manifest: &SceneProjectManifest, operation: &str, identity: &ContentHash) -> u32 {
+    manifest
+        .attempt_usage
+        .iter()
+        .find(|usage| usage.operation == operation && usage.operation_identity == *identity)
+        .map_or(0, |usage| usage.attempts)
 }
 
 fn request_for(
@@ -362,7 +452,7 @@ fn execute_operation(
 ) -> (OperationState, Option<ProducedArtifact>) {
     let max_attempts = base.operation.max_attempts;
     let mut provider_index = 0;
-    let mut attempts = 0;
+    let mut attempts = base.attempt;
     let mut last: Option<AttemptOutcome> = None;
     while attempts < max_attempts {
         if cancel.is_canceled() {
@@ -431,15 +521,17 @@ fn record(
         .expect("declared operation")
         .kind
         .output();
-    let previous = manifest
+    // Validate a candidate so a rejected record leaves the manifest untouched.
+    let mut candidate = manifest.clone();
+    let previous = candidate
         .artifacts
         .iter()
         .position(|artifact| artifact.produced_by == operation_id);
     let id = match previous {
-        Some(index) => manifest.artifacts.remove(index).id,
-        None => format!("{operation_id}.output"),
+        Some(index) => candidate.artifacts.remove(index).id,
+        None => artifact_id(&candidate, operation_id, identity),
     };
-    manifest.artifacts.push(ArtifactRecord {
+    candidate.artifacts.push(ArtifactRecord {
         id,
         kind,
         produced_by: operation_id.to_owned(),
@@ -447,11 +539,49 @@ fn record(
         path: produced.path,
         content_hash: produced.content_hash,
     });
-    manifest.validate().map_err(|error| {
+    candidate.validate().map_err(|error| {
         SceneProjectError::Invalid(format!(
             "recording the output of operation `{operation_id}` would make the manifest invalid: {error}"
         ))
-    })
+    })?;
+    *manifest = candidate;
+    Ok(())
+}
+
+/// Deterministic, valid, collision-free artifact id for a new record.
+fn artifact_id(
+    manifest: &SceneProjectManifest,
+    operation_id: &str,
+    identity: &ContentHash,
+) -> String {
+    let taken = |id: &str| {
+        manifest.inputs.iter().any(|item| item.id == id)
+            || manifest.operations.iter().any(|item| item.id == id)
+            || manifest
+                .provider_policy
+                .providers
+                .iter()
+                .any(|item| item.id == id)
+            || manifest.artifacts.iter().any(|item| item.id == id)
+            || manifest.exports.iter().any(|item| item.id == id)
+    };
+    let readable = format!("{operation_id}.output");
+    if readable.len() <= 64 && !taken(&readable) {
+        return readable;
+    }
+    let digest = &identity.as_str()["sha256:".len()..];
+    let mut suffix = 0usize;
+    loop {
+        let candidate = if suffix == 0 {
+            format!("artifact-{}", &digest[..16])
+        } else {
+            format!("artifact-{}-{suffix}", &digest[..16])
+        };
+        if !taken(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 #[cfg(test)]

@@ -492,6 +492,21 @@ pub struct SceneProjectManifest {
     pub artifacts: Vec<ArtifactRecord>,
     #[serde(default)]
     pub exports: Vec<ExportDeclaration>,
+    /// Attempts already spent on operations that have not produced a current
+    /// artifact. Persisting this keeps `max_attempts` (and therefore the
+    /// validated worst-case cost) binding across resumed runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempt_usage: Vec<AttemptUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptUsage {
+    pub operation: String,
+    /// Identity the attempts were spent on; a changed declaration or input
+    /// yields a new identity and a fresh budget.
+    pub operation_identity: ContentHash,
+    pub attempts: u32,
 }
 
 /// Canonical identity input for one operation. Upstream operations contribute
@@ -570,6 +585,8 @@ impl SceneProjectManifest {
         self.requested_outputs.sort();
         self.artifacts.sort_by(|a, b| a.id.cmp(&b.id));
         self.exports.sort_by(|a, b| a.id.cmp(&b.id));
+        self.attempt_usage
+            .sort_by(|a, b| a.operation.cmp(&b.operation));
         for export in &mut self.exports {
             export.includes.sort();
         }
@@ -695,6 +712,28 @@ impl SceneProjectManifest {
                         export.id
                     ));
                 }
+            }
+        }
+
+        let mut usage_operations = BTreeSet::new();
+        for usage in &self.attempt_usage {
+            let Some(operation) = operations.get(usage.operation.as_str()) else {
+                return invalid(format!(
+                    "attempt usage references unknown operation `{}`",
+                    usage.operation
+                ));
+            };
+            if !usage_operations.insert(usage.operation.as_str()) {
+                return invalid(format!(
+                    "attempt usage for operation `{}` is recorded more than once",
+                    usage.operation
+                ));
+            }
+            if usage.attempts == 0 || usage.attempts > MAX_OPERATION_ATTEMPTS {
+                return invalid(format!(
+                    "attempt usage for operation `{}` must be within 1..={MAX_OPERATION_ATTEMPTS}",
+                    operation.id
+                ));
             }
         }
         Ok(())
