@@ -148,6 +148,22 @@ impl SegmentationContext {
         self.quality.get(frame) == Some(&FrameDecision::Redundant)
     }
 
+    /// Whether the link `from → from + 1` may seed the calibrated solve: both frames pass
+    /// the quality gates and the link does not split the clip.
+    pub(crate) fn seed_eligible(
+        &self,
+        from: usize,
+        matches: usize,
+        overlap_ratio: f32,
+        median_motion: f32,
+    ) -> bool {
+        self.usable(from)
+            && self.usable(from + 1)
+            && self
+                .link_break(from, matches, overlap_ratio, median_motion)
+                .is_none()
+    }
+
     /// Whether the link `from → from + 1` splits the clip. Only links between two usable
     /// frames can: a blurred or badly exposed frame is rejected, not treated as a cut.
     pub(crate) fn link_break(
@@ -540,6 +556,19 @@ mod tests {
         // Reconstruction asks the same question before accepting a seed pair.
         assert_eq!(context.link_break(0, 200, 0.7, jump), Some(SegmentBreak::MotionJump));
         assert_eq!(context.link_break(0, 200, 0.7, 4.0), None);
+        assert!(!context.seed_eligible(0, 200, 0.7, jump));
+        assert!(context.seed_eligible(0, 200, 0.7, 4.0));
+    }
+
+    #[test]
+    fn rejected_frames_cannot_seed_even_when_their_link_matches() {
+        let mut evidence = frames(3);
+        evidence[1].sharpness_ratio = 0.3;
+        let context = SegmentationContext::new(&evidence, WIDTH, HEIGHT);
+
+        assert_eq!(context.link_break(0, 200, 0.7, 4.0), None);
+        assert!(!context.seed_eligible(0, 200, 0.7, 4.0));
+        assert!(!context.seed_eligible(1, 200, 0.7, 4.0));
     }
 
     #[test]

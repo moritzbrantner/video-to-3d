@@ -333,11 +333,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         let low_parallax =
             matches.len() < 6 || median_motion < 1.4 || median_parallax_residual < 0.55;
 
-        // A link that splits the clip cannot seed it: the seed would span two segments.
-        let splits_clip = segmentation
-            .link_break(pair_index, matches.len(), overlap_ratio, median_motion)
-            .is_some();
-        if !low_parallax && !splits_clip {
+        // The seed uses two frames that pass the quality gates, within one segment.
+        let seed_eligible =
+            segmentation.seed_eligible(pair_index, matches.len(), overlap_ratio, median_motion);
+        if !low_parallax && seed_eligible {
             if let Some(estimate) = two_view::estimate_two_view(
                 source_features,
                 target_features,
