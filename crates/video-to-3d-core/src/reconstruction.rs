@@ -270,7 +270,31 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         .enumerate()
         .map(|(index, luma)| crate::input_readiness::frame_evidence(index, luma, width, height))
         .collect();
-    let segmentation = keyframe_selection::SegmentationContext::new(&frame_evidence, width, height);
+    let mut segmentation =
+        keyframe_selection::SegmentationContext::new(&frame_evidence, width, height);
+    for (before, after) in segmentation.rejected_runs() {
+        let (source, target) = (&features[before], &features[after]);
+        let mut matches = match_features(source, target, options);
+        if let Some(guided) = motion_guided_matches(source, target, options) {
+            if guided.len() > matches.len() {
+                matches = guided;
+            }
+        }
+        let overlap = if source.is_empty() || target.is_empty() {
+            0.0
+        } else {
+            matches.len() as f32 / source.len().min(target.len()) as f32
+        };
+        let mut motion: Vec<f32> = matches
+            .iter()
+            .map(|m| {
+                let (a, b) = (&source[m.a], &target[m.b]);
+                (b.x as f32 - a.x as f32).hypot(b.y as f32 - a.y as f32)
+            })
+            .collect();
+        let median_motion = median(&mut motion);
+        segmentation.bridge(before, after, matches.len(), overlap, median_motion);
+    }
 
     let mut camera = CameraPose {
         frame_index: 0,
@@ -887,8 +911,13 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
             .map(|segment| format!("{}–{}", segment.first_frame + 1, segment.last_frame + 1))
             .collect::<Vec<_>>()
             .join(", ");
+        let solved = if calibrated_pair.is_some() {
+            "Only the segment containing the seed pair is solved; the others are reported, not forced into one geometric solve."
+        } else {
+            "No segment yielded a calibrated seed pair, so none is solved; the uncalibrated preview spans all segments."
+        };
         warnings.push(format!(
-            "The clip splits into {} segments at hard cuts or discontinuities (frames {spans}). Only the segment containing the seed pair is solved; the others are reported, not forced into one geometric solve.",
+            "The clip splits into {} segments at hard cuts or discontinuities (frames {spans}). {solved}",
             segments.len()
         ));
     }

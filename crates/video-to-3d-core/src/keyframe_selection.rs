@@ -101,6 +101,8 @@ pub(crate) struct SegmentationContext {
     quality: Vec<FrameDecision>,
     luma: Vec<f32>,
     diagonal: f32,
+    /// Breaks found across rejected runs, by the usable frame that ends the run.
+    bridge_breaks: std::collections::BTreeMap<usize, SegmentBreak>,
 }
 
 impl SegmentationContext {
@@ -141,6 +143,7 @@ impl SegmentationContext {
             quality,
             luma: frames.iter().map(|frame| frame.mean_luma).collect(),
             diagonal: (width as f32).hypot(height as f32),
+            bridge_breaks: std::collections::BTreeMap::new(),
         }
     }
 
@@ -173,11 +176,22 @@ impl SegmentationContext {
         overlap_ratio: f32,
         median_motion: f32,
     ) -> Option<SegmentBreak> {
-        if !self.usable(from) || !self.usable(from + 1) {
+        self.break_between(from, from + 1, matches, overlap_ratio, median_motion)
+    }
+
+    fn break_between(
+        &self,
+        from: usize,
+        to: usize,
+        matches: usize,
+        overlap_ratio: f32,
+        median_motion: f32,
+    ) -> Option<SegmentBreak> {
+        if !self.usable(from) || !self.usable(to) {
             return None;
         }
         if matches < MIN_KEYFRAME_MATCHES || overlap_ratio < MIN_KEYFRAME_OVERLAP {
-            let (a, b) = (self.luma[from], self.luma[from + 1]);
+            let (a, b) = (self.luma[from], self.luma[to]);
             let exposure_change = (a - b).abs() / a.max(b).max(1.0);
             return Some(if exposure_change > THRESHOLDS.max_exposure_change {
                 SegmentBreak::HardCut
@@ -188,7 +202,34 @@ impl SegmentationContext {
         (median_motion > MAX_LINK_MOTION_DIAGONAL_FRACTION * self.diagonal)
             .then_some(SegmentBreak::MotionJump)
     }
-}
+
+    /// Usable frame pairs `(before, after)` with only rejected frames between them. Links
+    /// touching rejected frames never split the clip, so these spans need their own match.
+    pub(crate) fn rejected_runs(&self) -> Vec<(usize, usize)> {
+        let usable: Vec<usize> = (0..self.quality.len()).filter(|&frame| self.usable(frame)).collect();
+        usable
+            .windows(2)
+            .filter(|pair| pair[1] > pair[0] + 1)
+            .map(|pair| (pair[0], pair[1]))
+            .collect()
+    }
+
+    /// Records the direct match across a rejected run: a cut hidden by a blurred or badly
+    /// exposed transition frame still splits the clip after the run.
+    pub(crate) fn bridge(
+        &mut self,
+        before: usize,
+        after: usize,
+        matches: usize,
+        overlap_ratio: f32,
+        median_motion: f32,
+    ) {
+        if let Some(reason) =
+            self.break_between(before, after, matches, overlap_ratio, median_motion)
+        {
+            self.bridge_breaks.insert(after, reason);
+        }
+    }}
 
 /// `pairs` are the adjacent links `(i, i + 1)`; `frames` has one entry per frame.
 pub(crate) fn select(
@@ -205,6 +246,9 @@ pub(crate) fn select(
         if let Some(reason) =
             context.link_break(pair.from_frame, pair.matches, pair.overlap_ratio, pair.median_motion)
         {
+            breaks.push(reason);
+        }
+        if let Some(&reason) = context.bridge_breaks.get(&pair.to_frame) {
             breaks.push(reason);
         }
         segment_of[pair.to_frame] = breaks.len();
@@ -379,6 +423,12 @@ mod tests {
 
     fn frames(count: usize) -> Vec<FrameEvidence> {
         (0..count).map(frame).collect()
+    }
+
+    fn frames_with_blur(count: usize, blurred: usize) -> Vec<FrameEvidence> {
+        let mut evidence = frames(count);
+        evidence[blurred].sharpness_ratio = 0.3;
+        evidence
     }
 
     fn run(pairs: &[PairStats], frames: &[FrameEvidence]) -> KeyframeSelection {
@@ -569,6 +619,38 @@ mod tests {
         assert_eq!(context.link_break(0, 200, 0.7, 4.0), None);
         assert!(!context.seed_eligible(0, 200, 0.7, 4.0));
         assert!(!context.seed_eligible(1, 200, 0.7, 4.0));
+    }
+
+    #[test]
+    fn a_cut_behind_a_blurred_transition_frame_still_splits_the_clip() {
+        let mut evidence = frames(5);
+        evidence[2].sharpness_ratio = 0.3;
+        for frame in &mut evidence[3..] {
+            frame.mean_luma = 60.0;
+        }
+        let weak = |from| {
+            let mut link = pair(from, 0.05, 0.0, true);
+            link.matches = 2;
+            link
+        };
+        let pairs = [pair(0, 0.8, 0.5, false), weak(1), weak(2), pair(3, 0.8, 0.5, false)];
+        let mut context = SegmentationContext::new(&evidence, WIDTH, HEIGHT);
+        assert_eq!(context.rejected_runs(), [(1, 3)]);
+
+        // Without a direct match across the blurred frame the shots would stay joined.
+        assert_eq!(select(&pairs, &evidence, &context).stats.segments.len(), 1);
+        context.bridge(1, 3, 1, 0.01, 0.0);
+        let selection = select(&pairs, &evidence, &context);
+
+        assert_eq!(selection.stats.segments.len(), 2);
+        assert_eq!(selection.stats.segments[0].ends_with, Some(SegmentBreak::HardCut));
+        assert_eq!(selection.stats.segments[1].first_frame, 3);
+        assert_eq!(selection.stats.frames[2].decision, FrameDecision::Blurred);
+
+        // The same blurred frame inside one shot matches across and stays one segment.
+        let mut same_shot = SegmentationContext::new(&frames_with_blur(5, 2), WIDTH, HEIGHT);
+        same_shot.bridge(1, 3, 80, 0.6, 3.0);
+        assert_eq!(select(&pairs, &frames_with_blur(5, 2), &same_shot).stats.segments.len(), 1);
     }
 
     #[test]
