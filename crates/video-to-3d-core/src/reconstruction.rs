@@ -265,6 +265,12 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     let mut warnings = Vec::new();
     let mut motion_guided_pairs = 0usize;
     let mut best_two_view: Option<(usize, two_view::TwoViewEstimate)> = None;
+    let frame_evidence: Vec<_> = luma_frames
+        .iter()
+        .enumerate()
+        .map(|(index, luma)| crate::input_readiness::frame_evidence(index, luma, width, height))
+        .collect();
+    let segmentation = keyframe_selection::SegmentationContext::new(&frame_evidence, width, height);
 
     let mut camera = CameraPose {
         frame_index: 0,
@@ -327,7 +333,11 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         let low_parallax =
             matches.len() < 6 || median_motion < 1.4 || median_parallax_residual < 0.55;
 
-        if !low_parallax {
+        // A link that splits the clip cannot seed it: the seed would span two segments.
+        let splits_clip = segmentation
+            .link_break(pair_index, matches.len(), overlap_ratio, median_motion)
+            .is_some();
+        if !low_parallax && !splits_clip {
             if let Some(estimate) = two_view::estimate_two_view(
                 source_features,
                 target_features,
@@ -426,12 +436,8 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
                 .collect::<Vec<_>>(),
         )
     });
-    let frame_evidence: Vec<_> = luma_frames
-        .iter()
-        .enumerate()
-        .map(|(index, luma)| crate::input_readiness::frame_evidence(index, luma, width, height))
-        .collect();
-    let keyframe_selection = keyframe_selection::select(&pairs, &frame_evidence, width, height);
+    let keyframe_selection =
+        keyframe_selection::select(&pairs, &frame_evidence, &segmentation);
     let mut multi_view_analysis = multi_view::analyze(
         &keyframe_selection,
         &adjacent_matches,
@@ -879,7 +885,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     if segments.len() > 1 {
         let spans = segments
             .iter()
-            .map(|segment| format!("{}–{}", segment.first_frame, segment.last_frame))
+            .map(|segment| format!("{}–{}", segment.first_frame + 1, segment.last_frame + 1))
             .collect::<Vec<_>>()
             .join(", ");
         warnings.push(format!(
