@@ -796,6 +796,9 @@ export default function Home() {
                     <td>
                       {(reconstruction.dense.working_set_estimate.total_bytes / (1024 * 1024)).toFixed(1)} MiB estimated
                       {` / ${(reconstruction.dense.working_set_budget_bytes / (1024 * 1024)).toFixed(0)} MiB budget`}
+                      {reconstruction.dense.reference_view_limit !== null
+                        ? ` · limited to ${reconstruction.dense.reference_view_limit} reference view(s); all views need ${(reconstruction.dense.full_working_set_bytes / (1024 * 1024)).toFixed(1)} MiB`
+                        : ""}
                     </td>
                   </tr>
                   <tr>

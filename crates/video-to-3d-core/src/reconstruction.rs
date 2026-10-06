@@ -879,6 +879,14 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         );
     }
 
+    if let Some(limit) = dense.reference_view_limit {
+        warnings.push(format!(
+            "The dense working set for every reference view ({} MiB) exceeds the {} MiB budget, so dense reconstruction kept the first {limit} reference view(s) in its usual order ({} MiB). Each kept view passed the same gates as a full run; the remaining views were not reconstructed.",
+            dense.full_working_set_bytes / (1024 * 1024),
+            dense.working_set_budget_bytes / (1024 * 1024),
+            dense.working_set_estimate.total_bytes / (1024 * 1024),
+        ));
+    }
     if let Some(dense_warning) = dense_warning(&dense) {
         warnings.push(dense_warning);
     }

@@ -225,8 +225,13 @@ export type DenseStats = {
   reference_frames: number[];
   reference_attempts: DenseReferenceAttemptStats[];
   reference_patches: DenseReferencePatchStats[];
+  /** The working set of the dense plan that ran. */
   working_set_estimate: DenseWorkingSetEstimate;
   working_set_budget_bytes: number;
+  /** The whole input's working set with every reference view. */
+  full_working_set_bytes: number;
+  /** Reference views the budget allowed when the whole input did not fit. */
+  reference_view_limit: number | null;
 };
 
 export type MeshTriangle = {
@@ -553,6 +558,20 @@ export function assertReconstructionContract(
   ) {
     throw new Error(
       "camera-state contract mismatch: over-budget dense reconstruction did not fail closed",
+    );
+  }
+  const limit = result.dense.reference_view_limit;
+  if (
+    !Number.isSafeInteger(result.dense.full_working_set_bytes) ||
+    result.dense.full_working_set_bytes < workingSet.total_bytes ||
+    (limit !== null &&
+      (!Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        result.dense.full_working_set_bytes <= result.dense.working_set_budget_bytes ||
+        result.dense.reference_patches.length > limit))
+  ) {
+    throw new Error(
+      "camera-state contract mismatch: a limited dense plan must be within budget and keep at most its reference views",
     );
   }
   if (
