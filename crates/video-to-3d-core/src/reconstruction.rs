@@ -141,6 +141,30 @@ pub struct RegisteredViewStats {
     pub recovered_from_revisit: bool,
 }
 
+/// The independent solve of one clip segment. Each segment with a usable seed pair is
+/// seeded, registered and bundle-adjusted on its own; its cameras live in that segment's
+/// arbitrary monocular frame and are never related to another segment's frame here.
+#[derive(Clone, Debug, Serialize)]
+pub struct SegmentSolveStats {
+    pub segment: usize,
+    pub first_frame: usize,
+    pub last_frame: usize,
+    /// This solve fills the top-level cameras, points, dense depth and mesh.
+    pub primary: bool,
+    /// The calibrated seed pair chosen inside this segment; `None` when no pair passed.
+    pub seed_pair: Option<CalibratedPairStats>,
+    pub registration_candidates: usize,
+    pub pnp_ready_candidates: usize,
+    /// Registered views beyond the seed pair.
+    pub registered_views: usize,
+    pub recovered_from_revisit: usize,
+    /// Seed points plus accepted new landmarks.
+    pub sparse_points: usize,
+    pub bundle_adjustment_accepted: bool,
+    /// Seed and registered camera centers in this segment's own frame.
+    pub cameras: Vec<CameraPose>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ReconstructionResult {
     pub cameras: Vec<CameraPose>,
@@ -264,7 +288,9 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     let mut adjacent_matches = Vec::with_capacity(request.frames.len() - 1);
     let mut warnings = Vec::new();
     let mut motion_guided_pairs = 0usize;
-    let mut best_two_view: Option<(usize, two_view::TwoViewEstimate)> = None;
+    // Every calibrated pair that passes the seed gates, in pair order. Each segment seeds
+    // from its own best candidate.
+    let mut seed_candidates: Vec<(usize, two_view::TwoViewEstimate)> = Vec::new();
     let frame_evidence: Vec<_> = luma_frames
         .iter()
         .enumerate()
@@ -369,12 +395,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
                 height,
                 focal as f64,
             ) {
-                let replace = best_two_view
-                    .as_ref()
-                    .is_none_or(|(_, current)| estimate.is_better_than(current));
-                if replace {
-                    best_two_view = Some((pair_index, estimate));
-                }
+                seed_candidates.push((pair_index, estimate));
             }
         }
 
@@ -445,319 +466,81 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         adjacent_matches.push(matches);
     }
 
-    let seed_landmarks = best_two_view.as_ref().map(|(pair_index, estimate)| {
-        (
-            *pair_index,
-            estimate
-                .points
-                .iter()
-                .enumerate()
-                .map(|(point_index, point)| multi_view::SeedLandmark {
-                    point_index,
-                    source_feature_index: point.source_feature_index,
-                })
-                .collect::<Vec<_>>(),
-        )
-    });
     let keyframe_selection =
         keyframe_selection::select(&pairs, &frame_evidence, &segmentation);
-    let mut multi_view_analysis = multi_view::analyze(
-        &keyframe_selection,
-        &adjacent_matches,
-        seed_landmarks
-            .as_ref()
-            .map(|(pair_index, landmarks)| (*pair_index, landmarks.as_slice())),
-    );
     let revisit_context =
         revisit::RevisitContext::new(&features, width, height, focal as f64, options);
-    let mut revisits = revisit::analyze(
-        &revisit_context,
-        &multi_view_analysis.stats.keyframes,
-        best_two_view.as_ref().map(|(pair_index, _)| *pair_index),
-        &best_two_view
-            .as_ref()
-            .map(|(pair_index, _)| keyframe_selection.segment_keyframes(*pair_index))
-            .unwrap_or_default(),
-    );
-
-    let mut registered_views = Vec::new();
-    let mut registered_cameras = Vec::new();
-    let mut registered_geometry = Vec::new();
-    if let Some((seed_pair_index, estimate)) = best_two_view.as_ref() {
-        registered_geometry.push(multi_view::RegisteredCamera {
-            frame_index: *seed_pair_index,
-            rotation: nalgebra::Matrix3::identity(),
-            translation: nalgebra::Vector3::zeros(),
-        });
-        registered_geometry.push(multi_view::RegisteredCamera {
-            frame_index: *seed_pair_index + 1,
-            rotation: estimate.rotation,
-            translation: estimate.translation,
-        });
-
-        for candidate in &multi_view_analysis.registration_candidates {
-            if candidate.correspondences.len() < 8 {
-                continue;
-            }
-            let pnp_correspondences: Vec<pnp::PnpCorrespondence> = candidate
-                .correspondences
-                .iter()
-                .filter_map(|correspondence| {
-                    let point = estimate.points.get(correspondence.seed_point_index)?;
-                    let feature = features
-                        .get(candidate.frame_index)?
-                        .get(correspondence.feature_index)?;
-                    Some(pnp::PnpCorrespondence {
-                        point: point.position,
-                        x_pixels: feature.x as f64,
-                        y_pixels: feature.y as f64,
-                    })
+    let segment_of_pair =
+        |pair_index: usize| keyframe_selection.stats.frames[pair_index].segment;
+    let primary_index = best_seed_index(&seed_candidates, |_| true);
+    let primary_segment = primary_index.map(|index| segment_of_pair(seed_candidates[index].0));
+    let clip_segments = &keyframe_selection.stats.segments;
+    // A split clip solves every segment that has a usable seed on its own, in its own
+    // arbitrary frame. The segment with the strongest seed fills the primary output.
+    let mut segment_solves: Vec<SegmentSolveStats> = if clip_segments.len() > 1 {
+        clip_segments
+            .iter()
+            .enumerate()
+            .filter(|(segment, _)| Some(*segment) != primary_segment)
+            .map(|(segment, span)| {
+                let seed = best_seed_index(&seed_candidates, |pair_index| {
+                    segment_of_pair(pair_index) == segment
                 })
-                .collect();
-            if pnp_correspondences.len() != candidate.correspondences.len() {
-                continue;
-            }
-            let Some(pose) = pnp::estimate_pose(&pnp_correspondences, width, height, focal as f64)
-            else {
-                continue;
-            };
-
-            registered_geometry.push(multi_view::RegisteredCamera {
-                frame_index: candidate.frame_index,
-                rotation: pose.rotation,
-                translation: pose.translation,
-            });
-            registered_cameras.push(CameraPose {
-                frame_index: candidate.frame_index,
-                x: pose.camera_center.x as f32,
-                y: pose.camera_center.y as f32,
-                z: pose.camera_center.z as f32,
-                matched_features: pose.inliers,
-            });
-            registered_views.push(RegisteredViewStats {
-                frame_index: candidate.frame_index,
-                correspondences: pnp_correspondences.len(),
-                inliers: pose.inliers,
-                inlier_ratio: pose.inliers as f32 / pnp_correspondences.len() as f32,
-                median_reprojection_error_pixels: pose.median_reprojection_error_pixels as f32,
-                rotation: [
-                    pose.rotation[(0, 0)] as f32,
-                    pose.rotation[(0, 1)] as f32,
-                    pose.rotation[(0, 2)] as f32,
-                    pose.rotation[(1, 0)] as f32,
-                    pose.rotation[(1, 1)] as f32,
-                    pose.rotation[(1, 2)] as f32,
-                    pose.rotation[(2, 0)] as f32,
-                    pose.rotation[(2, 1)] as f32,
-                    pose.rotation[(2, 2)] as f32,
-                ],
-                translation: [
-                    pose.translation.x as f32,
-                    pose.translation.y as f32,
-                    pose.translation.z as f32,
-                ],
-                recovered_from_revisit: false,
-            });
-        }
-
-        let registered_frames: HashSet<usize> = registered_geometry
-            .iter()
-            .map(|camera| camera.frame_index)
-            .collect();
-        let candidate_frames: Vec<usize> = multi_view_analysis
-            .registration_candidates
-            .iter()
-            .map(|candidate| candidate.frame_index)
-            .collect();
-        for recovered in revisit::recover_failed_registrations(
-            &mut revisits,
-            *seed_pair_index,
-            estimate,
-            &candidate_frames,
-            &registered_frames,
-            &revisit_context,
-        ) {
-            registered_geometry.push(multi_view::RegisteredCamera {
-                frame_index: recovered.frame_index,
-                rotation: recovered.rotation,
-                translation: recovered.translation,
-            });
-            registered_cameras.push(CameraPose {
-                frame_index: recovered.frame_index,
-                x: recovered.camera_center.x as f32,
-                y: recovered.camera_center.y as f32,
-                z: recovered.camera_center.z as f32,
-                matched_features: recovered.inliers,
-            });
-            registered_views.push(RegisteredViewStats {
-                frame_index: recovered.frame_index,
-                correspondences: recovered.correspondences,
-                inliers: recovered.inliers,
-                inlier_ratio: recovered.inliers as f32 / recovered.correspondences as f32,
-                median_reprojection_error_pixels: recovered.median_reprojection_error_pixels as f32,
-                rotation: [
-                    recovered.rotation[(0, 0)] as f32,
-                    recovered.rotation[(0, 1)] as f32,
-                    recovered.rotation[(0, 2)] as f32,
-                    recovered.rotation[(1, 0)] as f32,
-                    recovered.rotation[(1, 1)] as f32,
-                    recovered.rotation[(1, 2)] as f32,
-                    recovered.rotation[(2, 0)] as f32,
-                    recovered.rotation[(2, 1)] as f32,
-                    recovered.rotation[(2, 2)] as f32,
-                ],
-                translation: [
-                    recovered.translation.x as f32,
-                    recovered.translation.y as f32,
-                    recovered.translation.z as f32,
-                ],
-                recovered_from_revisit: true,
-            });
-        }
-    }
-    registered_views.sort_by_key(|view| view.frame_index);
-    registered_cameras.sort_by_key(|camera| camera.frame_index);
-    registered_geometry.sort_by_key(|camera| camera.frame_index);
-
-    let new_landmark_analysis = multi_view::triangulate_new_landmarks(
-        &multi_view_analysis,
-        &registered_geometry,
+                .map(|index| &seed_candidates[index]);
+                let solve = seed.map(|seed| {
+                    solve_segment(
+                        Some(seed),
+                        &keyframe_selection,
+                        &adjacent_matches,
+                        &features,
+                        &revisit_context,
+                        width,
+                        height,
+                        focal as f64,
+                        true,
+                    )
+                });
+                segment_solve_stats(segment, span, false, seed, solve.as_ref(), focal)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let best_two_view = primary_index.map(|index| seed_candidates.swap_remove(index));
+    drop(seed_candidates);
+    let primary_solve = solve_segment(
+        best_two_view.as_ref(),
+        &keyframe_selection,
+        &adjacent_matches,
         &features,
+        &revisit_context,
         width,
         height,
         focal as f64,
+        false,
     );
-    multi_view_analysis.stats.new_landmarks = new_landmark_analysis.stats.clone();
-    let mut new_landmarks = new_landmark_analysis.landmarks;
-
-    let mut optimized_seed_points = best_two_view
-        .as_ref()
-        .map(|(_, estimate)| {
-            estimate
-                .points
-                .iter()
-                .map(|point| point.position)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let mut optimized_new_landmark_positions: Vec<nalgebra::Vector3<f64>> = new_landmarks
-        .iter()
-        .map(|landmark| landmark.position)
-        .collect();
-    if let Some((seed_pair_index, estimate)) = best_two_view.as_ref() {
-        let adjustment = multi_view::bundle_adjust(
-            &multi_view_analysis,
-            &optimized_seed_points,
-            &new_landmarks,
-            &registered_geometry,
-            &features,
-            width,
-            height,
-            focal as f64,
-        );
-        multi_view_analysis.stats.bundle_adjustment = adjustment.stats.clone();
-        optimized_seed_points = adjustment.seed_points;
-        optimized_new_landmark_positions = adjustment.new_landmark_positions;
-        registered_geometry = adjustment.cameras;
-        for (landmark, position) in new_landmarks
-            .iter_mut()
-            .zip(&optimized_new_landmark_positions)
-        {
-            landmark.position = *position;
-        }
-
-        let pre_loop_geometry = registered_geometry.clone();
-        let pre_loop_seed_points = optimized_seed_points.clone();
-        let pre_loop_new_landmark_positions = optimized_new_landmark_positions.clone();
-        let pre_loop_adjustment = multi_view_analysis.stats.bundle_adjustment.clone();
-        let closures = revisit::close_registered_drift(
-            &mut revisits,
-            *seed_pair_index,
-            estimate,
-            &registered_geometry,
-            &revisit_context,
-        );
-
-        if !closures.is_empty() {
-            for closure in &closures {
-                if let Some(camera) = registered_geometry
-                    .iter_mut()
-                    .find(|camera| camera.frame_index == closure.frame_index)
-                {
-                    camera.rotation = closure.rotation;
-                    camera.translation = closure.translation;
-                }
-            }
-
-            let loop_adjustment = multi_view::bundle_adjust(
-                &multi_view_analysis,
-                &optimized_seed_points,
-                &new_landmarks,
-                &registered_geometry,
-                &features,
-                width,
-                height,
-                focal as f64,
-            );
-            let retained = loop_adjustment.stats.accepted
-                && revisit::closure_corrections_retained(
-                    &closures,
-                    &pre_loop_geometry,
-                    &loop_adjustment.cameras,
-                );
-
-            if retained {
-                multi_view_analysis.stats.bundle_adjustment = loop_adjustment.stats;
-                optimized_seed_points = loop_adjustment.seed_points;
-                optimized_new_landmark_positions = loop_adjustment.new_landmark_positions;
-                registered_geometry = loop_adjustment.cameras;
-                for (landmark, position) in new_landmarks
-                    .iter_mut()
-                    .zip(&optimized_new_landmark_positions)
-                {
-                    landmark.position = *position;
-                }
-            } else {
-                let closure_frames: HashSet<usize> =
-                    closures.iter().map(|closure| closure.frame_index).collect();
-                for closure in &mut revisits.closures {
-                    if closure_frames.contains(&closure.frame_index) {
-                        closure.accepted = false;
-                    }
-                }
-                registered_geometry = pre_loop_geometry;
-                optimized_seed_points = pre_loop_seed_points;
-                optimized_new_landmark_positions = pre_loop_new_landmark_positions;
-                multi_view_analysis.stats.bundle_adjustment = pre_loop_adjustment;
-                for (landmark, position) in new_landmarks
-                    .iter_mut()
-                    .zip(&optimized_new_landmark_positions)
-                {
-                    landmark.position = *position;
-                }
-            }
-        }
-
-        registered_cameras = registered_geometry
-            .iter()
-            .filter(|camera| {
-                camera.frame_index != *seed_pair_index && camera.frame_index != *seed_pair_index + 1
-            })
-            .filter_map(|camera| {
-                let view = registered_views
-                    .iter()
-                    .find(|view| view.frame_index == camera.frame_index)?;
-                let center = camera.camera_center();
-                Some(CameraPose {
-                    frame_index: camera.frame_index,
-                    x: center.x as f32,
-                    y: center.y as f32,
-                    z: center.z as f32,
-                    matched_features: view.inliers,
-                })
-            })
-            .collect();
+    if let Some(segment) = primary_segment.filter(|_| clip_segments.len() > 1) {
+        segment_solves.push(segment_solve_stats(
+            segment,
+            &clip_segments[segment],
+            true,
+            best_two_view.as_ref(),
+            Some(&primary_solve),
+            focal,
+        ));
+        segment_solves.sort_by_key(|solve| solve.segment);
     }
+    let SegmentSolve {
+        mut multi_view_analysis,
+        revisits,
+        registered_views,
+        registered_cameras,
+        registered_geometry,
+        new_landmarks,
+        optimized_seed_points,
+        optimized_new_landmark_positions,
+    } = primary_solve;
+    multi_view_analysis.stats.segment_solves = segment_solves;
 
     let dense_sparse_points: Vec<nalgebra::Vector3<f64>> = optimized_seed_points
         .iter()
@@ -792,22 +575,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     let calibrated_pair = best_two_view.map(|(pair_index, estimate)| {
         let source_features = &features[pair_index];
         let frame = &request.frames[pair_index];
-        cameras = vec![
-            CameraPose {
-                frame_index: pair_index,
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-                matched_features: 0,
-            },
-            CameraPose {
-                frame_index: pair_index + 1,
-                x: estimate.camera_center.x as f32,
-                y: estimate.camera_center.y as f32,
-                z: estimate.camera_center.z as f32,
-                matched_features: estimate.inliers,
-            },
-        ];
+        cameras = seed_pair_cameras(pair_index, &estimate);
         cameras.extend(registered_cameras.iter().copied());
         cameras.sort_by_key(|camera| camera.frame_index);
         points = estimate
@@ -873,33 +641,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
                 }),
         );
 
-        CalibratedPairStats {
-            from_frame: pair_index,
-            to_frame: pair_index + 1,
-            matches: estimate.matches,
-            inliers: estimate.inliers,
-            inlier_ratio: estimate.inliers as f32 / estimate.matches as f32,
-            focal_pixels: focal,
-            median_sampson_error_pixels: estimate.median_sampson_error_pixels as f32,
-            median_reprojection_error_pixels: estimate.median_reprojection_error_pixels as f32,
-            median_triangulation_angle_degrees: estimate.median_triangulation_angle_degrees as f32,
-            relative_rotation: [
-                estimate.rotation[(0, 0)] as f32,
-                estimate.rotation[(0, 1)] as f32,
-                estimate.rotation[(0, 2)] as f32,
-                estimate.rotation[(1, 0)] as f32,
-                estimate.rotation[(1, 1)] as f32,
-                estimate.rotation[(1, 2)] as f32,
-                estimate.rotation[(2, 0)] as f32,
-                estimate.rotation[(2, 1)] as f32,
-                estimate.rotation[(2, 2)] as f32,
-            ],
-            translation_direction: [
-                estimate.translation.x as f32,
-                estimate.translation.y as f32,
-                estimate.translation.z as f32,
-            ],
-        }
+        calibrated_pair_stats(pair_index, &estimate, focal)
     });
 
     if motion_guided_pairs > 0 {
@@ -915,10 +657,31 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
             .map(|segment| format!("{}–{}", segment.first_frame + 1, segment.last_frame + 1))
             .collect::<Vec<_>>()
             .join(", ");
-        let solved = if calibrated_pair.is_some() {
-            "Only the segment containing the seed pair is solved; the others are reported, not forced into one geometric solve."
-        } else {
-            "No segment yielded a calibrated seed pair, so none is solved; the uncalibrated preview spans all segments."
+        let solved = match multi_view
+            .segment_solves
+            .iter()
+            .find(|solve| solve.primary)
+        {
+            Some(primary) => {
+                let seeded = multi_view
+                    .segment_solves
+                    .iter()
+                    .filter(|solve| solve.seed_pair.is_some())
+                    .count();
+                let unseeded = segments.len() - seeded;
+                let unseeded_note = if unseeded > 0 {
+                    format!(" {unseeded} segment(s) had no calibrated seed pair and are reported, not solved.")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{seeded} segment(s) with a calibrated seed pair are each solved on their own, in their own arbitrary frame; no segment is forced into another's solve. The displayed geometry, dense depth and mesh come from segment {} (frames {}–{}), which has the strongest seed; per-segment seeds and registration counts are listed in the evidence.{unseeded_note}",
+                    primary.segment + 1,
+                    primary.first_frame + 1,
+                    primary.last_frame + 1,
+                )
+            }
+            None => "No segment yielded a calibrated seed pair, so none is solved; the uncalibrated preview spans all segments.".to_owned(),
         };
         warnings.push(format!(
             "The clip splits into {} segments at hard cuts or discontinuities (frames {spans}). {solved}",
@@ -1049,6 +812,476 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         registered_views,
         warnings,
     })
+}
+
+/// Seed, register, triangulate and bundle-adjust one clip segment in its own frame.
+struct SegmentSolve {
+    multi_view_analysis: multi_view::MultiViewAnalysis,
+    revisits: RevisitStats,
+    registered_views: Vec<RegisteredViewStats>,
+    registered_cameras: Vec<CameraPose>,
+    registered_geometry: Vec<multi_view::RegisteredCamera>,
+    new_landmarks: Vec<multi_view::NewLandmark>,
+    optimized_seed_points: Vec<nalgebra::Vector3<f64>>,
+    optimized_new_landmark_positions: Vec<nalgebra::Vector3<f64>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_segment(
+    seed: Option<&(usize, two_view::TwoViewEstimate)>,
+    keyframe_selection: &keyframe_selection::KeyframeSelection,
+    adjacent_matches: &[Vec<FeatureMatch>],
+    features: &[Vec<Feature>],
+    revisit_context: &revisit::RevisitContext<'_>,
+    width: u32,
+    height: u32,
+    focal: f64,
+    secondary: bool,
+) -> SegmentSolve {
+    let seed_landmarks = seed.map(|(pair_index, estimate)| {
+        (
+            *pair_index,
+            estimate
+                .points
+                .iter()
+                .enumerate()
+                .map(|(point_index, point)| multi_view::SeedLandmark {
+                    point_index,
+                    source_feature_index: point.source_feature_index,
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let mut multi_view_analysis = multi_view::analyze(
+        keyframe_selection,
+        adjacent_matches,
+        seed_landmarks
+            .as_ref()
+            .map(|(pair_index, landmarks)| (*pair_index, landmarks.as_slice())),
+    );
+    let seed_segment = seed
+        .map(|(pair_index, _)| keyframe_selection.segment_keyframes(*pair_index))
+        .unwrap_or_default();
+    // The primary solve screens the whole clip for its diagnostics; a secondary solve only
+    // screens its own segment, since only that segment can recover or close its cameras.
+    let revisit_keyframes = if secondary {
+        &seed_segment
+    } else {
+        &multi_view_analysis.stats.keyframes
+    };
+    let mut revisits = revisit::analyze(
+        revisit_context,
+        revisit_keyframes,
+        seed.map(|(pair_index, _)| *pair_index),
+        &seed_segment,
+    );
+
+    let mut registered_views = Vec::new();
+    let mut registered_cameras = Vec::new();
+    let mut registered_geometry = Vec::new();
+    if let Some((seed_pair_index, estimate)) = seed {
+        registered_geometry.push(multi_view::RegisteredCamera {
+            frame_index: *seed_pair_index,
+            rotation: nalgebra::Matrix3::identity(),
+            translation: nalgebra::Vector3::zeros(),
+        });
+        registered_geometry.push(multi_view::RegisteredCamera {
+            frame_index: *seed_pair_index + 1,
+            rotation: estimate.rotation,
+            translation: estimate.translation,
+        });
+
+        for candidate in &multi_view_analysis.registration_candidates {
+            if candidate.correspondences.len() < 8 {
+                continue;
+            }
+            let pnp_correspondences: Vec<pnp::PnpCorrespondence> = candidate
+                .correspondences
+                .iter()
+                .filter_map(|correspondence| {
+                    let point = estimate.points.get(correspondence.seed_point_index)?;
+                    let feature = features
+                        .get(candidate.frame_index)?
+                        .get(correspondence.feature_index)?;
+                    Some(pnp::PnpCorrespondence {
+                        point: point.position,
+                        x_pixels: feature.x as f64,
+                        y_pixels: feature.y as f64,
+                    })
+                })
+                .collect();
+            if pnp_correspondences.len() != candidate.correspondences.len() {
+                continue;
+            }
+            let Some(pose) = pnp::estimate_pose(&pnp_correspondences, width, height, focal)
+            else {
+                continue;
+            };
+
+            registered_geometry.push(multi_view::RegisteredCamera {
+                frame_index: candidate.frame_index,
+                rotation: pose.rotation,
+                translation: pose.translation,
+            });
+            registered_cameras.push(CameraPose {
+                frame_index: candidate.frame_index,
+                x: pose.camera_center.x as f32,
+                y: pose.camera_center.y as f32,
+                z: pose.camera_center.z as f32,
+                matched_features: pose.inliers,
+            });
+            registered_views.push(RegisteredViewStats {
+                frame_index: candidate.frame_index,
+                correspondences: pnp_correspondences.len(),
+                inliers: pose.inliers,
+                inlier_ratio: pose.inliers as f32 / pnp_correspondences.len() as f32,
+                median_reprojection_error_pixels: pose.median_reprojection_error_pixels as f32,
+                rotation: [
+                    pose.rotation[(0, 0)] as f32,
+                    pose.rotation[(0, 1)] as f32,
+                    pose.rotation[(0, 2)] as f32,
+                    pose.rotation[(1, 0)] as f32,
+                    pose.rotation[(1, 1)] as f32,
+                    pose.rotation[(1, 2)] as f32,
+                    pose.rotation[(2, 0)] as f32,
+                    pose.rotation[(2, 1)] as f32,
+                    pose.rotation[(2, 2)] as f32,
+                ],
+                translation: [
+                    pose.translation.x as f32,
+                    pose.translation.y as f32,
+                    pose.translation.z as f32,
+                ],
+                recovered_from_revisit: false,
+            });
+        }
+
+        let registered_frames: HashSet<usize> = registered_geometry
+            .iter()
+            .map(|camera| camera.frame_index)
+            .collect();
+        let candidate_frames: Vec<usize> = multi_view_analysis
+            .registration_candidates
+            .iter()
+            .map(|candidate| candidate.frame_index)
+            .collect();
+        for recovered in revisit::recover_failed_registrations(
+            &mut revisits,
+            *seed_pair_index,
+            estimate,
+            &candidate_frames,
+            &registered_frames,
+            revisit_context,
+        ) {
+            registered_geometry.push(multi_view::RegisteredCamera {
+                frame_index: recovered.frame_index,
+                rotation: recovered.rotation,
+                translation: recovered.translation,
+            });
+            registered_cameras.push(CameraPose {
+                frame_index: recovered.frame_index,
+                x: recovered.camera_center.x as f32,
+                y: recovered.camera_center.y as f32,
+                z: recovered.camera_center.z as f32,
+                matched_features: recovered.inliers,
+            });
+            registered_views.push(RegisteredViewStats {
+                frame_index: recovered.frame_index,
+                correspondences: recovered.correspondences,
+                inliers: recovered.inliers,
+                inlier_ratio: recovered.inliers as f32 / recovered.correspondences as f32,
+                median_reprojection_error_pixels: recovered.median_reprojection_error_pixels as f32,
+                rotation: [
+                    recovered.rotation[(0, 0)] as f32,
+                    recovered.rotation[(0, 1)] as f32,
+                    recovered.rotation[(0, 2)] as f32,
+                    recovered.rotation[(1, 0)] as f32,
+                    recovered.rotation[(1, 1)] as f32,
+                    recovered.rotation[(1, 2)] as f32,
+                    recovered.rotation[(2, 0)] as f32,
+                    recovered.rotation[(2, 1)] as f32,
+                    recovered.rotation[(2, 2)] as f32,
+                ],
+                translation: [
+                    recovered.translation.x as f32,
+                    recovered.translation.y as f32,
+                    recovered.translation.z as f32,
+                ],
+                recovered_from_revisit: true,
+            });
+        }
+    }
+    registered_views.sort_by_key(|view| view.frame_index);
+    registered_cameras.sort_by_key(|camera| camera.frame_index);
+    registered_geometry.sort_by_key(|camera| camera.frame_index);
+
+    let new_landmark_analysis = multi_view::triangulate_new_landmarks(
+        &multi_view_analysis,
+        &registered_geometry,
+        features,
+        width,
+        height,
+        focal,
+    );
+    multi_view_analysis.stats.new_landmarks = new_landmark_analysis.stats.clone();
+    let mut new_landmarks = new_landmark_analysis.landmarks;
+
+    let mut optimized_seed_points = seed
+        .map(|(_, estimate)| {
+            estimate
+                .points
+                .iter()
+                .map(|point| point.position)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut optimized_new_landmark_positions: Vec<nalgebra::Vector3<f64>> = new_landmarks
+        .iter()
+        .map(|landmark| landmark.position)
+        .collect();
+    if let Some((seed_pair_index, estimate)) = seed {
+        let adjustment = multi_view::bundle_adjust(
+            &multi_view_analysis,
+            &optimized_seed_points,
+            &new_landmarks,
+            &registered_geometry,
+            features,
+            width,
+            height,
+            focal,
+        );
+        multi_view_analysis.stats.bundle_adjustment = adjustment.stats.clone();
+        optimized_seed_points = adjustment.seed_points;
+        optimized_new_landmark_positions = adjustment.new_landmark_positions;
+        registered_geometry = adjustment.cameras;
+        for (landmark, position) in new_landmarks
+            .iter_mut()
+            .zip(&optimized_new_landmark_positions)
+        {
+            landmark.position = *position;
+        }
+
+        let pre_loop_geometry = registered_geometry.clone();
+        let pre_loop_seed_points = optimized_seed_points.clone();
+        let pre_loop_new_landmark_positions = optimized_new_landmark_positions.clone();
+        let pre_loop_adjustment = multi_view_analysis.stats.bundle_adjustment.clone();
+        let closures = revisit::close_registered_drift(
+            &mut revisits,
+            *seed_pair_index,
+            estimate,
+            &registered_geometry,
+            revisit_context,
+        );
+
+        if !closures.is_empty() {
+            for closure in &closures {
+                if let Some(camera) = registered_geometry
+                    .iter_mut()
+                    .find(|camera| camera.frame_index == closure.frame_index)
+                {
+                    camera.rotation = closure.rotation;
+                    camera.translation = closure.translation;
+                }
+            }
+
+            let loop_adjustment = multi_view::bundle_adjust(
+                &multi_view_analysis,
+                &optimized_seed_points,
+                &new_landmarks,
+                &registered_geometry,
+                features,
+                width,
+                height,
+                focal,
+            );
+            let retained = loop_adjustment.stats.accepted
+                && revisit::closure_corrections_retained(
+                    &closures,
+                    &pre_loop_geometry,
+                    &loop_adjustment.cameras,
+                );
+
+            if retained {
+                multi_view_analysis.stats.bundle_adjustment = loop_adjustment.stats;
+                optimized_seed_points = loop_adjustment.seed_points;
+                optimized_new_landmark_positions = loop_adjustment.new_landmark_positions;
+                registered_geometry = loop_adjustment.cameras;
+                for (landmark, position) in new_landmarks
+                    .iter_mut()
+                    .zip(&optimized_new_landmark_positions)
+                {
+                    landmark.position = *position;
+                }
+            } else {
+                let closure_frames: HashSet<usize> =
+                    closures.iter().map(|closure| closure.frame_index).collect();
+                for closure in &mut revisits.closures {
+                    if closure_frames.contains(&closure.frame_index) {
+                        closure.accepted = false;
+                    }
+                }
+                registered_geometry = pre_loop_geometry;
+                optimized_seed_points = pre_loop_seed_points;
+                optimized_new_landmark_positions = pre_loop_new_landmark_positions;
+                multi_view_analysis.stats.bundle_adjustment = pre_loop_adjustment;
+                for (landmark, position) in new_landmarks
+                    .iter_mut()
+                    .zip(&optimized_new_landmark_positions)
+                {
+                    landmark.position = *position;
+                }
+            }
+        }
+
+        registered_cameras = registered_geometry
+            .iter()
+            .filter(|camera| {
+                camera.frame_index != *seed_pair_index && camera.frame_index != *seed_pair_index + 1
+            })
+            .filter_map(|camera| {
+                let view = registered_views
+                    .iter()
+                    .find(|view| view.frame_index == camera.frame_index)?;
+                let center = camera.camera_center();
+                Some(CameraPose {
+                    frame_index: camera.frame_index,
+                    x: center.x as f32,
+                    y: center.y as f32,
+                    z: center.z as f32,
+                    matched_features: view.inliers,
+                })
+            })
+            .collect();
+    }
+
+
+    SegmentSolve {
+        multi_view_analysis,
+        revisits,
+        registered_views,
+        registered_cameras,
+        registered_geometry,
+        new_landmarks,
+        optimized_seed_points,
+        optimized_new_landmark_positions,
+    }
+}
+
+/// The best seed candidate among the pairs `include` accepts, using the same ordering
+/// and tie-break (earliest pair wins) as a single sequential scan.
+fn best_seed_index(
+    candidates: &[(usize, two_view::TwoViewEstimate)],
+    include: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (index, (pair_index, estimate)) in candidates.iter().enumerate() {
+        if include(*pair_index)
+            && best.is_none_or(|current| estimate.is_better_than(&candidates[current].1))
+        {
+            best = Some(index);
+        }
+    }
+    best
+}
+
+fn seed_pair_cameras(pair_index: usize, estimate: &two_view::TwoViewEstimate) -> Vec<CameraPose> {
+    vec![
+        CameraPose {
+            frame_index: pair_index,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            matched_features: 0,
+        },
+        CameraPose {
+            frame_index: pair_index + 1,
+            x: estimate.camera_center.x as f32,
+            y: estimate.camera_center.y as f32,
+            z: estimate.camera_center.z as f32,
+            matched_features: estimate.inliers,
+        },
+    ]
+}
+
+fn calibrated_pair_stats(
+    pair_index: usize,
+    estimate: &two_view::TwoViewEstimate,
+    focal: f32,
+) -> CalibratedPairStats {
+    CalibratedPairStats {
+        from_frame: pair_index,
+        to_frame: pair_index + 1,
+        matches: estimate.matches,
+        inliers: estimate.inliers,
+        inlier_ratio: estimate.inliers as f32 / estimate.matches as f32,
+        focal_pixels: focal,
+        median_sampson_error_pixels: estimate.median_sampson_error_pixels as f32,
+        median_reprojection_error_pixels: estimate.median_reprojection_error_pixels as f32,
+        median_triangulation_angle_degrees: estimate.median_triangulation_angle_degrees as f32,
+        relative_rotation: [
+            estimate.rotation[(0, 0)] as f32,
+            estimate.rotation[(0, 1)] as f32,
+            estimate.rotation[(0, 2)] as f32,
+            estimate.rotation[(1, 0)] as f32,
+            estimate.rotation[(1, 1)] as f32,
+            estimate.rotation[(1, 2)] as f32,
+            estimate.rotation[(2, 0)] as f32,
+            estimate.rotation[(2, 1)] as f32,
+            estimate.rotation[(2, 2)] as f32,
+        ],
+        translation_direction: [
+            estimate.translation.x as f32,
+            estimate.translation.y as f32,
+            estimate.translation.z as f32,
+        ],
+    }
+}
+
+fn segment_solve_stats(
+    segment: usize,
+    span: &ClipSegmentStats,
+    primary: bool,
+    seed: Option<&(usize, two_view::TwoViewEstimate)>,
+    solve: Option<&SegmentSolve>,
+    focal: f32,
+) -> SegmentSolveStats {
+    let stats = solve.map(|solve| &solve.multi_view_analysis.stats);
+    let cameras = match (seed, solve) {
+        (Some((pair_index, estimate)), Some(solve)) => {
+            let mut cameras = seed_pair_cameras(*pair_index, estimate);
+            cameras.extend(solve.registered_cameras.iter().copied());
+            cameras.sort_by_key(|camera| camera.frame_index);
+            cameras
+        }
+        _ => Vec::new(),
+    };
+    SegmentSolveStats {
+        segment,
+        first_frame: span.first_frame,
+        last_frame: span.last_frame,
+        primary,
+        seed_pair: seed.map(|(pair_index, estimate)| calibrated_pair_stats(*pair_index, estimate, focal)),
+        registration_candidates: stats.map_or(0, |stats| stats.registration_candidates.len()),
+        pnp_ready_candidates: stats.map_or(0, |stats| {
+            stats
+                .registration_candidates
+                .iter()
+                .filter(|candidate| candidate.pnp_ready)
+                .count()
+        }),
+        registered_views: solve.map_or(0, |solve| solve.registered_views.len()),
+        recovered_from_revisit: solve.map_or(0, |solve| {
+            solve
+                .registered_views
+                .iter()
+                .filter(|view| view.recovered_from_revisit)
+                .count()
+        }),
+        sparse_points: seed.map_or(0, |(_, estimate)| estimate.points.len())
+            + solve.map_or(0, |solve| solve.new_landmarks.len()),
+        bundle_adjustment_accepted: stats.is_some_and(|stats| stats.bundle_adjustment.accepted),
+        cameras,
+    }
 }
 
 fn mesh_warning(mesh: &MeshStats) -> Option<String> {
@@ -1971,5 +2204,147 @@ mod tests {
         };
 
         assert!(reconstruct(&request).is_err());
+    }
+
+    const SCENE_WIDTH: u32 = 640;
+    const SCENE_HEIGHT: u32 = 480;
+    const SCENE_FOCAL: f64 = 520.0;
+
+    /// Textured blobs scattered through a box in front of the camera, from a fixed seed.
+    fn scene_points(seed: u64) -> Vec<(nalgebra::Vector3<f64>, u8)> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) as f64) / ((1_u64 << 53) as f64)
+        };
+        (0..420)
+            .map(|index| {
+                let point = nalgebra::Vector3::new(
+                    (next() - 0.5) * 5.2,
+                    (next() - 0.5) * 3.5,
+                    4.0 + next() * 6.0,
+                );
+                (point, 35 + ((index * 47) % 190) as u8)
+            })
+            .collect()
+    }
+
+    /// One frame of a lateral camera move through `points`, on a flat `background`.
+    fn render_scene(
+        points: &[(nalgebra::Vector3<f64>, u8)],
+        camera_x: f64,
+        background: u8,
+    ) -> FrameInput {
+        let (width, height) = (SCENE_WIDTH, SCENE_HEIGHT);
+        let mut rgba = vec![background; (width * height * 4) as usize];
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+        for (index, (point, shade)) in points.iter().enumerate() {
+            let px = ((point.x - camera_x) / point.z * SCENE_FOCAL + width as f64 * 0.5).round()
+                as i32;
+            let py = (point.y / point.z * SCENE_FOCAL + height as f64 * 0.5).round() as i32;
+            let radius = 3 + (index % 2) as i32;
+            if px < radius + 1
+                || py < radius + 1
+                || px >= width as i32 - radius - 1
+                || py >= height as i32 - radius - 1
+            {
+                continue;
+            }
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let offset = (((py + dy) as u32 * width + (px + dx) as u32) * 4) as usize;
+                    let value = if ((dx + dy + index as i32) & 1) == 0 {
+                        *shade
+                    } else {
+                        255_u8.saturating_sub(shade / 2)
+                    };
+                    rgba[offset] = value;
+                    rgba[offset + 1] = value.saturating_add((index % 17) as u8);
+                    rgba[offset + 2] = value.saturating_sub((index % 13) as u8);
+                }
+            }
+        }
+        FrameInput {
+            width,
+            height,
+            rgba,
+        }
+    }
+
+    fn lateral_span(points: &[(nalgebra::Vector3<f64>, u8)], background: u8) -> Vec<FrameInput> {
+        (0..6)
+            .map(|frame| render_scene(points, -0.42 + frame as f64 * 0.12, background))
+            .collect()
+    }
+
+    fn scene_request(frames: Vec<FrameInput>) -> ReconstructionRequest {
+        ReconstructionRequest {
+            frames,
+            options: ReconstructionOptions {
+                min_feature_distance: 6,
+                match_radius: 80,
+                focal_length_pixels: Some(SCENE_FOCAL as f32),
+                ..ReconstructionOptions::default()
+            },
+        }
+    }
+
+    #[test]
+    fn hard_cut_clip_solves_each_segment_from_its_own_seed() {
+        let mut frames = lateral_span(&scene_points(0x5eed), 236);
+        frames.extend(lateral_span(&scene_points(0xc0ffee), 64));
+
+        let result = reconstruct(&scene_request(frames)).expect("reconstruction should succeed");
+        let segments = &result.multi_view.keyframe_selection.segments;
+        assert_eq!(segments.len(), 2, "segments: {segments:?}");
+        assert_eq!(segments[0].ends_with, Some(SegmentBreak::HardCut));
+
+        let solves = &result.multi_view.segment_solves;
+        assert_eq!(solves.len(), 2);
+        assert_eq!(solves.iter().filter(|solve| solve.primary).count(), 1);
+        for (segment, solve) in solves.iter().enumerate() {
+            assert_eq!(solve.segment, segment);
+            let span = &segments[segment];
+            let seed = solve
+                .seed_pair
+                .as_ref()
+                .unwrap_or_else(|| panic!("segment {segment} has no seed: {solve:?}"));
+            assert!(seed.from_frame >= span.first_frame && seed.to_frame <= span.last_frame);
+            assert!(
+                solve.registered_views > 0,
+                "segment {segment} registered no views: {solve:?}"
+            );
+            assert_eq!(solve.cameras.len(), 2 + solve.registered_views);
+            // Neither camera set reaches into the other segment's frames.
+            assert!(solve.cameras.iter().all(|camera| {
+                camera.frame_index >= span.first_frame && camera.frame_index <= span.last_frame
+            }));
+        }
+
+        // The primary solve is the top-level result.
+        let primary = solves.iter().find(|solve| solve.primary).unwrap();
+        let calibrated = result.calibrated_pair.as_ref().unwrap();
+        assert_eq!(primary.seed_pair.as_ref().unwrap().from_frame, calibrated.from_frame);
+        assert_eq!(primary.registered_views, result.registered_views.len());
+        assert_eq!(
+            primary.cameras.iter().map(|camera| camera.frame_index).collect::<Vec<_>>(),
+            result.cameras.iter().map(|camera| camera.frame_index).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn single_segment_clip_reports_no_segment_solves() {
+        let frames = lateral_span(&scene_points(0x5eed), 236);
+        let result = reconstruct(&scene_request(frames)).expect("reconstruction should succeed");
+
+        assert_eq!(result.multi_view.keyframe_selection.segments.len(), 1);
+        assert!(result.calibrated_pair.is_some());
+        assert!(result.multi_view.segment_solves.is_empty());
+        let serialized = serde_json::to_string(&result.multi_view).unwrap();
+        assert!(!serialized.contains("segment_solves"));
     }
 }
