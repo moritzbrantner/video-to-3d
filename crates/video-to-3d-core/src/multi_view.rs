@@ -142,31 +142,17 @@ pub(super) struct MultiViewAnalysis {
 }
 
 impl MultiViewAnalysis {
-    /// `[tracks_three_plus, longest_track, linked_pairs]` counting only observations and
-    /// adjacent pairs inside frames `first..=last`. Over the whole clip this equals the
-    /// clip-wide statistics.
-    pub(super) fn track_stats_within(
-        &self,
-        first: usize,
-        last: usize,
-        adjacent_matches: &[Vec<FeatureMatch>],
-    ) -> [usize; 3] {
-        let lengths = self.tracks.iter().map(|track| {
-            track
-                .observations
-                .iter()
-                .filter(|observation| (first..=last).contains(&observation.frame_index))
-                .count()
-        });
-        let (three_plus, longest) = lengths.fold((0, 0), |(three_plus, longest), length| {
-            (three_plus + usize::from(length >= 3), longest.max(length))
-        });
-        let linked_pairs = adjacent_matches
+    /// Each track's first and last frame. Tracks only extend from frame `i` to `i + 1`, so
+    /// a track observes every frame of its span exactly once.
+    pub(super) fn track_spans(&self) -> Vec<(usize, usize)> {
+        self.tracks
             .iter()
-            .enumerate()
-            .filter(|(pair, matches)| !matches.is_empty() && *pair >= first && *pair < last)
-            .count();
-        [three_plus, longest, linked_pairs]
+            .filter_map(|track| {
+                let first = track.observations.first()?.frame_index;
+                let last = track.observations.last()?.frame_index;
+                Some((first, last))
+            })
+            .collect()
     }
 }
 
