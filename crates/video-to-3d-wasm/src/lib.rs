@@ -4,12 +4,19 @@ use serde::{
 };
 use std::fmt;
 use video_to_3d_core::input_readiness::{assess_readiness, SamplingMetadata};
+use video_to_3d_core::surface_materials::{
+    bake_surface_materials, AppearanceInvalidation, RecordedAppearance, ReferenceImage,
+    SurfaceMaterialBake,
+};
+use video_to_3d_core::textured_glb::encode_textured_glb;
 use video_to_3d_core::{
-    evaluate_relative_depth, reconstruct_browser, BootstrapDiagnosis, CalibratedPairStats,
-    CameraPipelineState, CameraPose, DenseGridSite, DenseStats, EvidenceCamera, FrameInput,
+    classic_reference_patch_regions, evaluate_relative_depth, reconstruct_browser,
+    BootstrapDiagnosis, CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite,
+    DenseReferencePatchStats, DenseStats, EvidenceCamera, EvidenceScale, FrameInput,
     LearnedDepthCamera, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
-    ReconstructionEvidenceView, ReconstructionOptions, ReconstructionRequest, RegisteredViewStats,
-    RelativeDepthFrame, RevisitStats, SeedCandidateStats,
+    ReconstructionEvidenceView, ReconstructionOptions, ReconstructionProviderDescriptor,
+    ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame, RevisitStats,
+    SeedCandidateStats,
 };
 use wasm_bindgen::prelude::*;
 
@@ -480,4 +487,169 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
     payload
         .serialize(&serializer)
         .map_err(|error| JsValue::from_str(&format!("failed to serialize reconstruction: {error}")))
+}
+
+#[derive(Deserialize)]
+struct WasmReferencePatch {
+    reference_frame: usize,
+    source_frames: Vec<usize>,
+    primary_start: usize,
+    primary_points: usize,
+    completion_start: usize,
+    completed_points: usize,
+}
+
+#[derive(Deserialize)]
+struct WasmReferenceImage {
+    frame_index: usize,
+    width: u32,
+    height: u32,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    rgba: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct WasmSurfaceMaterialRequest {
+    dense_point_count: usize,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    dense_points_f32_le: Vec<u8>,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    dense_rgb: Vec<u8>,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    dense_grid_sites_u32_le: Vec<u8>,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    triangle_indices_u32_le: Vec<u8>,
+    #[serde(deserialize_with = "deserialize_byte_buffer")]
+    triangle_confidence_f32_le: Vec<u8>,
+    reference_patches: Vec<WasmReferencePatch>,
+    cameras: Vec<EvidenceCamera>,
+    reference_images: Vec<WasmReferenceImage>,
+    #[serde(default)]
+    previous_appearance: Vec<RecordedAppearance>,
+}
+
+#[derive(Serialize)]
+struct WasmSurfaceMaterialResult<'a> {
+    glb: ByteBuffer,
+    bake: &'a SurfaceMaterialBake,
+    invalidation: AppearanceInvalidation,
+    appearance: Vec<RecordedAppearance>,
+    diagnostic: String,
+}
+
+fn decode_u32_le(bytes: &[u8], label: &str) -> Result<Vec<u32>, JsValue> {
+    if !bytes.len().is_multiple_of(size_of::<u32>()) {
+        return Err(JsValue::from_str(&format!(
+            "invalid {label}: byte length is not divisible by four"
+        )));
+    }
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
+        .collect())
+}
+
+/// Bake accepted reference appearance into a self-contained textured GLB.
+/// Adapter only: the request carries the browser's packed copies of the
+/// accepted reconstruction, and the core rebuilds and validates the same
+/// provider-neutral evidence view before baking.
+#[wasm_bindgen]
+pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
+    let request: WasmSurfaceMaterialRequest =
+        serde_wasm_bindgen::from_value(value).map_err(|error| {
+            JsValue::from_str(&format!("invalid surface material request: {error}"))
+        })?;
+    let mut points = unpack_dense_points(&request.dense_points_f32_le, request.dense_point_count)?;
+    if request.dense_rgb.len() != points.len() * 3 {
+        return Err(JsValue::from_str(
+            "invalid surface material request: dense color buffer length is inconsistent",
+        ));
+    }
+    for (point, rgb) in points.iter_mut().zip(request.dense_rgb.as_chunks::<3>().0) {
+        (point.r, point.g, point.b) = (rgb[0], rgb[1], rgb[2]);
+    }
+    let sites = decode_u32_le(&request.dense_grid_sites_u32_le, "dense grid-site buffer")?
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|xy| DenseGridSite { x: xy[0], y: xy[1] })
+        .collect::<Vec<_>>();
+    let indices = decode_u32_le(&request.triangle_indices_u32_le, "mesh triangle buffer")?;
+    let confidence = decode_f32_le(
+        &request.triangle_confidence_f32_le,
+        "mesh confidence buffer",
+    )?;
+    if indices.len() != confidence.len() * 3 {
+        return Err(JsValue::from_str(
+            "invalid surface material request: triangle index and confidence buffers disagree",
+        ));
+    }
+    let triangles = indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(&confidence)
+        .map(|(corners, confidence)| MeshTriangle {
+            a: corners[0] as usize,
+            b: corners[1] as usize,
+            c: corners[2] as usize,
+            confidence: *confidence,
+        })
+        .collect::<Vec<_>>();
+    let patches = request
+        .reference_patches
+        .into_iter()
+        .map(|patch| DenseReferencePatchStats {
+            reference_frame: patch.reference_frame,
+            source_frames: patch.source_frames,
+            primary_start: patch.primary_start,
+            primary_points: patch.primary_points,
+            completion_start: patch.completion_start,
+            completed_points: patch.completed_points,
+            ..DenseReferencePatchStats::default()
+        })
+        .collect::<Vec<_>>();
+    let evidence = ReconstructionEvidenceView::new(
+        ReconstructionProviderDescriptor::classic(),
+        EvidenceScale::ArbitraryMonocular,
+        request.cameras,
+        classic_reference_patch_regions(&patches),
+        &points,
+        &triangles,
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
+    let images = request
+        .reference_images
+        .iter()
+        .map(|image| ReferenceImage {
+            frame_index: image.frame_index,
+            width: image.width,
+            height: image.height,
+            rgba: &image.rgba,
+        })
+        .collect::<Vec<_>>();
+    let bake = bake_surface_materials(&evidence, &sites, &images)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let glb = encode_textured_glb(&evidence, &bake).map_err(|error| JsValue::from_str(&error))?;
+    let invalidation = bake.invalidation_against(&request.previous_appearance);
+    let diagnostic = if request.previous_appearance.is_empty() {
+        bake.diagnostic()
+    } else {
+        format!("{} {}", bake.diagnostic(), invalidation.diagnostic())
+    };
+    let payload = WasmSurfaceMaterialResult {
+        glb: ByteBuffer(glb),
+        bake: &bake,
+        invalidation,
+        appearance: bake.recorded_appearance(),
+        diagnostic,
+    };
+    let serializer = browser_serializer();
+    payload.serialize(&serializer).map_err(|error| {
+        JsValue::from_str(&format!(
+            "failed to serialize surface material bake: {error}"
+        ))
+    })
 }

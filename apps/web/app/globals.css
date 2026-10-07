@@ -81,6 +81,10 @@ h2 { margin: 0; font-size: 1.25rem; letter-spacing: -0.02em; }
 .method-panel ol { margin: 18px 0; padding-left: 1.15rem; color: #c2d1d8; line-height: 1.55; }
 .method-panel li + li { margin-top: 11px; }
 .method-note { margin: 18px 0 0; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
+.material-export { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.material-export button { min-height: 40px; border: 1px solid rgba(111, 220, 255, 0.55); border-radius: 999px; padding: 0 18px; background: var(--accent-soft); cursor: pointer; font-weight: 700; }
+.material-export button:disabled { opacity: 0.5; cursor: not-allowed; }
+.material-export .method-note { margin-top: 12px; padding-top: 0; border-top: 0; }
 .notice { margin-top: 18px; padding: 14px 16px; }
 .notice-error { border-color: rgba(255, 141, 125, 0.35); color: var(--danger); }
 .section-block { margin-top: 18px; padding: 22px; }

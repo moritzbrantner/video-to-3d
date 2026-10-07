@@ -7,6 +7,8 @@ pub mod scene_model;
 pub mod scene_project;
 pub mod scene_runner;
 pub mod scene_store;
+pub mod surface_materials;
+pub mod textured_glb;
 
 // Keep the established reconstruction API at crate root while the large kernel body
 // remains isolated from format/interchange modules.
@@ -25,9 +27,9 @@ pub use learned_depth::{
     RelativeDepthFrame, RelativeDepthFrameDiagnostics,
 };
 pub use reconstruction_evidence::{
-    EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin, EvidenceRange, EvidenceScale,
-    ReconstructionEvidenceSummary, ReconstructionEvidenceView, ReconstructionProviderClass,
-    ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
+    EvidenceRange, EvidenceScale, ReconstructionEvidenceSummary, ReconstructionEvidenceView,
+    ReconstructionProviderClass, ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
     RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 

@@ -22,6 +22,12 @@ import {
   type SampledFrame,
 } from "../src/reconstruction";
 import { SceneCanvas } from "../src/SceneCanvas";
+import {
+  bakeTexturedSurface,
+  retainReferenceImages,
+  type RecordedAppearance,
+  type ReferenceImage,
+} from "../src/surfaceMaterials";
 import { assessReadiness, type ReadinessReport } from "../src/readiness";
 import { sampleVideoWithInfo } from "../src/video";
 
@@ -49,6 +55,16 @@ type VideoRun = {
   learnedBenchmark: LearnedBenchmarkSuite | null;
   readiness: ReadinessReport | null;
   readinessError: string;
+  /** RGBA of accepted dense reference frames only; kept for material export. */
+  referenceImages: ReferenceImage[];
+  materialExport: MaterialExportState | null;
+};
+
+type MaterialExportState = {
+  busy: boolean;
+  diagnostic: string;
+  error: string;
+  appearance: RecordedAppearance[];
 };
 
 const MIN_SAMPLING_FPS = 0.25;
@@ -212,6 +228,8 @@ export default function Home() {
       learnedBenchmark: null,
       readiness: null,
       readinessError: "",
+      referenceImages: [],
+      materialExport: null,
     }));
 
     setRuns(nextRuns);
@@ -242,6 +260,7 @@ export default function Home() {
           readinessError,
         });
         const result = await reconstructFrames(sampled);
+        updateRun(run.id, { referenceImages: retainReferenceImages(result, sampled) });
         let learnedBenchmark: LearnedBenchmarkSuite | null = null;
         const learnedIssues: string[] = [];
         if (run.mode !== "classic") {
@@ -278,6 +297,41 @@ export default function Home() {
           error: caught instanceof Error ? caught.message : String(caught),
         });
       }
+    }
+  }
+
+  async function exportTexturedSurface(run: VideoRun) {
+    if (!run.reconstruction || run.materialExport?.busy) return;
+    const previous = run.materialExport?.appearance ?? [];
+    updateRun(run.id, {
+      materialExport: { busy: true, diagnostic: "", error: "", appearance: previous },
+    });
+    try {
+      const baked = await bakeTexturedSurface(run.reconstruction, run.referenceImages, previous);
+      const blob = new Blob([baked.glb.slice().buffer], { type: "model/gltf-binary" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${run.fileName.replace(/\.[^.]+$/, "")}-textured-surface.glb`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      updateRun(run.id, {
+        materialExport: {
+          busy: false,
+          diagnostic: baked.diagnostic,
+          error: "",
+          appearance: baked.appearance,
+        },
+      });
+    } catch (caught) {
+      updateRun(run.id, {
+        materialExport: {
+          busy: false,
+          diagnostic: "",
+          error: caught instanceof Error ? caught.message : String(caught),
+          appearance: previous,
+        },
+      });
     }
   }
 
@@ -329,6 +383,8 @@ export default function Home() {
         frameCap: runFrameCap,
         mode,
         learnedBenchmark: null,
+        referenceImages: [],
+        materialExport: null,
         readiness: null,
         readinessError: "",
       };
@@ -597,6 +653,28 @@ export default function Home() {
             are only approximate motion samples. Dense-eligible cameras are tracked as a separate
             subset and never inferred from the display path.
           </p>
+          {activeRun?.reconstruction ? (
+            <div className="material-export">
+              <button
+                type="button"
+                disabled={
+                  activeRun.reconstruction.mesh_triangles.length === 0 ||
+                  activeRun.materialExport?.busy === true
+                }
+                onClick={() => void exportTexturedSurface(activeRun)}
+              >
+                {activeRun.materialExport?.busy ? "Baking materials…" : "Export textured GLB"}
+              </button>
+              <p className="method-note">
+                {activeRun.reconstruction.mesh_triangles.length === 0
+                  ? "Material export needs accepted surface triangles."
+                  : activeRun.materialExport?.error
+                    ? `Material export failed: ${activeRun.materialExport.error}`
+                    : activeRun.materialExport?.diagnostic ||
+                      "Bakes accepted reference-view appearance into a self-contained GLB; ambiguous triangles keep vertex colors and geometry is never changed."}
+              </p>
+            </div>
+          ) : null}
         </aside>
       </section>
 
