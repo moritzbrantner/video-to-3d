@@ -298,24 +298,14 @@ impl GeometryConfidenceField {
         self.regions.get(region)
     }
 
-    /// The region that owns an accepted point.
-    /// Whether this field was built from `evidence`: the same points and the same regions
-    /// (origin, reference, sources and point range) in the same order.
+    /// Whether this field is the one `evidence` yields. Confidence depends on cameras,
+    /// point positions and confidences, topology and regions, so the field is recomputed
+    /// and compared whole rather than trusted by matching metadata.
     pub fn describes(&self, evidence: &ReconstructionEvidenceView<'_>) -> bool {
-        self.point_count == evidence.points.len()
-            && self.regions.len() == evidence.regions.len()
-            && self
-                .regions
-                .iter()
-                .zip(&evidence.regions)
-                .all(|(field, region)| {
-                    field.origin == region.origin
-                        && field.reference_frame == region.reference_frame
-                        && field.source_frames == region.source_frames
-                        && field.points == region.points
-                })
+        *self == Self::from_evidence(evidence)
     }
 
+    /// The region that owns an accepted point.
     pub fn region_of_point(&self, point: usize) -> Option<&RegionConfidence> {
         let region = locate(&self.starts, point, |region| self.regions[region].points)?;
         Some(&self.regions[region])

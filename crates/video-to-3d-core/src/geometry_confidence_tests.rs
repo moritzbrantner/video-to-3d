@@ -554,6 +554,28 @@ fn collider_excludes_unobserved_and_low_confidence_evidence() {
         plane.triangles.len()
     );
     assert!(field.describes(&observed));
+
+    // Same regions and ranges, weaker points: the field no longer describes the evidence.
+    let mut weaker = plane.points.clone();
+    for point in &mut weaker {
+        point.confidence *= 0.1;
+    }
+    let weakened = ReconstructionEvidenceView::new(
+        observed.provider.clone(),
+        observed.scale,
+        observed.cameras.clone(),
+        observed.regions.clone(),
+        &weaker,
+        &plane.triangles,
+    )
+    .unwrap();
+    assert!(!field.describes(&weakened));
+    let collider =
+        CoarseCollider::from_evidence(&weakened, &field, CoarseColliderOptions::default());
+    assert_eq!(
+        collider.excluded.mismatched_confidence,
+        plane.triangles.len()
+    );
 }
 
 fn glb_json(glb: &[u8]) -> (Value, Vec<u8>) {
