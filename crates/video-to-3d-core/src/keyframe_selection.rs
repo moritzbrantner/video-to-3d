@@ -147,7 +147,7 @@ impl SegmentationContext {
         }
     }
 
-    fn usable(&self, frame: usize) -> bool {
+    pub(crate) fn usable(&self, frame: usize) -> bool {
         self.quality.get(frame) == Some(&FrameDecision::Redundant)
     }
 
