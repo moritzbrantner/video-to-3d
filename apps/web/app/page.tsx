@@ -13,6 +13,7 @@ import {
 import {
   describeClipSegments,
   describeFrameSelection,
+  describeSegmentSolves,
   reconstructFrames,
   type FrameCameraState,
   type ReconstructionResult,
@@ -507,8 +508,9 @@ export default function Home() {
 
       <section className="scene-status">
         <strong>Scene detection:</strong> the reconstruction splits a clip into segments at hard cuts,
-        lost overlap and motion jumps, and solves only the segment that holds the seed pair (see
-        Clip segments). The scenedetect-rs integration is not used yet.
+        lost overlap and motion jumps, and solves every segment with a usable seed pair on its own
+        (see Segment solves). The viewer shows the segment with the strongest seed; other segments
+        are not yet related to it. The scenedetect-rs integration is not used yet.
       </section>
 
       <section className="status-line" aria-live="polite">
@@ -737,6 +739,16 @@ export default function Home() {
                     <th>Clip segments</th>
                     <td>{describeClipSegments(reconstruction.multi_view.keyframe_selection)}</td>
                   </tr>
+                  {reconstruction.multi_view.segment_solves?.length ? (
+                    <tr>
+                      <th>Segment solves</th>
+                      <td>
+                        {describeSegmentSolves(reconstruction.multi_view.segment_solves).map((line) => (
+                          <div key={line}>{line}</div>
+                        ))}
+                      </td>
+                    </tr>
+                  ) : null}
                   <tr>
                     <th>Approximate motion samples</th>
                     <td>{reconstruction.camera_state.approximate_motion_samples.length}</td>

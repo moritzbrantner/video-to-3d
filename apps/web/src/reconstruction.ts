@@ -191,6 +191,37 @@ export function describeClipSegments(selection: KeyframeSelectionStats): string 
     .join(", ");
 }
 
+/** One clip segment's independent solve, in that segment's own arbitrary frame. */
+export type SegmentSolveStats = {
+  segment: number;
+  first_frame: number;
+  last_frame: number;
+  primary: boolean;
+  seed_pair: CalibratedPairStats | null;
+  registration_candidates: number;
+  pnp_ready_candidates: number;
+  registered_views: number;
+  recovered_from_revisit: number;
+  sparse_points: number;
+  bundle_adjustment_accepted: boolean;
+  cameras: CameraPose[];
+};
+
+/** Per-segment seed choice and registration counts; one line per segment of a split clip. */
+export function describeSegmentSolves(solves: SegmentSolveStats[]): string[] {
+  return solves.map((solve) => {
+    const span = `Segment ${solve.segment + 1} (frames ${solve.first_frame + 1}–${solve.last_frame + 1})`;
+    if (!solve.seed_pair) {
+      return `${span}: no calibrated seed pair, not solved`;
+    }
+    const seed = `seed ${solve.seed_pair.from_frame + 1} → ${solve.seed_pair.to_frame + 1}`;
+    const registered = `${solve.cameras.length} registered cameras (${solve.registered_views} beyond the seed)`;
+    const adjustment = solve.bundle_adjustment_accepted ? "bundle adjustment accepted" : "no accepted bundle adjustment";
+    const role = solve.primary ? " · displayed" : "";
+    return `${span}: ${seed}, ${registered}, ${solve.sparse_points} sparse points, ${adjustment}${role}`;
+  });
+}
+
 export type MultiViewStats = {
   keyframes: number[];
   keyframe_selection: KeyframeSelectionStats;
@@ -202,6 +233,8 @@ export type MultiViewStats = {
   registration_candidates: RegistrationCandidateStats[];
   new_landmarks: NewLandmarkStats;
   bundle_adjustment: BundleAdjustmentStats;
+  /** Present only when the clip splits into several segments. */
+  segment_solves?: SegmentSolveStats[];
 };
 
 export type DenseReferenceAttemptStats = {

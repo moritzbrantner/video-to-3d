@@ -57,6 +57,10 @@ pub struct MultiViewStats {
     pub registration_candidates: Vec<RegistrationCandidateStats>,
     pub new_landmarks: NewLandmarkStats,
     pub bundle_adjustment: BundleAdjustmentStats,
+    /// One independent solve per clip segment when the clip splits; empty (and omitted)
+    /// for a single-segment clip, whose solve is the top-level result.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub segment_solves: Vec<super::SegmentSolveStats>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -183,8 +187,8 @@ pub(super) fn analyze(
     let seed_track_indices = seed_tracks.iter().map(|seed| seed.track_index).collect();
     let registration_candidates = seed_pair
         .map(|(pair_index, seed_landmarks)| {
-            // Only the seed's segment shares its geometric solve; other segments are
-            // reported, not forced into it.
+            // Only the seed's segment shares its geometric solve; other segments get
+            // their own solve, never this one.
             registration_candidates(
                 &selection.segment_keyframes(pair_index),
                 &tracks,
@@ -225,6 +229,7 @@ pub(super) fn analyze(
             registration_candidates: registration_candidate_stats,
             new_landmarks: NewLandmarkStats::default(),
             bundle_adjustment: BundleAdjustmentStats::default(),
+            segment_solves: Vec::new(),
         },
         registration_candidates,
         tracks,
