@@ -15,6 +15,7 @@ import {
   describeFrameSelection,
   describeBootstrap,
   describeCollider,
+  describeConfidenceFactors,
   describeGeometryConfidence,
   describeSeedRejections,
   describeSegmentSolves,
@@ -874,6 +875,10 @@ export default function Home() {
                   <tr>
                     <th>Geometry confidence</th>
                     <td>{describeGeometryConfidence(reconstruction)}</td>
+                  </tr>
+                  <tr>
+                    <th>Confidence factors</th>
+                    <td>{describeConfidenceFactors(reconstruction)}</td>
                   </tr>
                   <tr>
                     <th>Coarse collider</th>

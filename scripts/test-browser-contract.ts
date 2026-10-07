@@ -6,6 +6,7 @@ import init, {
 import {
   assertReconstructionContract,
   describeCollider,
+  describeConfidenceFactors,
   describeGeometryConfidence,
   normalizeWasmReconstruction,
 } from "../apps/web/src/reconstruction";
@@ -61,11 +62,16 @@ if (
   !(result.dense_points.values instanceof Float32Array) ||
   !(result.dense_points.rgb instanceof Uint8Array) ||
   !(result.mesh_triangles.indices instanceof Uint32Array) ||
-  !(result.mesh_triangles.confidence instanceof Float32Array)
+  !(result.mesh_triangles.confidence instanceof Float32Array) ||
+  !(result.dense_point_attributes.values instanceof Float32Array)
 ) {
   throw new Error("WASM reconstruction did not expose packed typed geometry buffers");
 }
-if (result.dense_points.length !== 0 || result.mesh_triangles.length !== 0) {
+if (
+  result.dense_points.length !== 0 ||
+  result.dense_point_attributes.length !== 0 ||
+  result.mesh_triangles.length !== 0
+) {
   throw new Error("flat browser-contract fixture unexpectedly exposed reconstructed geometry");
 }
 
@@ -196,6 +202,11 @@ if (
   result.collision.role !== "collision" ||
   result.collision.box_count !== 0 ||
   !describeGeometryConfidence(result).includes("unsupported") ||
+  !describeConfidenceFactors(result).startsWith("No camera-backed regions") ||
+  result.geometry_confidence.schema_version !== 2 ||
+  !result.warnings.some((warning) =>
+    warning.includes("carries per-point reciprocal-consistency and depth-margin attributes"),
+  ) ||
   !describeCollider(result.collision).startsWith("No collider") ||
   !result.warnings.some((warning) => warning.startsWith("Geometry confidence")) ||
   !result.warnings.some((warning) => warning.startsWith("Coarse collider"))
@@ -214,6 +225,51 @@ try {
 }
 if (!contradictoryConfidenceRejected) {
   throw new Error("TypeScript accepted a confidence field for different dense points");
+}
+const staleConfidenceSchema = {
+  ...result,
+  geometry_confidence: { ...result.geometry_confidence, schema_version: 1 },
+};
+let staleConfidenceSchemaRejected = false;
+try {
+  assertReconstructionContract(staleConfidenceSchema, 2);
+} catch (error) {
+  staleConfidenceSchemaRejected = String(error).includes("geometry confidence schema v2");
+}
+if (!staleConfidenceSchemaRejected) {
+  throw new Error("TypeScript accepted a geometry confidence field from an older schema");
+}
+const misalignedAttributes = {
+  ...result,
+  dense_point_attributes: { values: new Float32Array([0.5, 0.5]), length: 1 },
+};
+let misalignedAttributesRejected = false;
+try {
+  assertReconstructionContract(misalignedAttributes, 2);
+} catch (error) {
+  misalignedAttributesRejected = String(error).includes("packed reconstruction geometry");
+}
+if (!misalignedAttributesRejected) {
+  throw new Error("TypeScript accepted dense-point attributes for different dense points");
+}
+
+// Factor diagnostics name both split factors, or say depth ambiguity is folded in.
+const factorSummary = (split: number, combined: number) => ({
+  ...result,
+  geometry_confidence_summary: {
+    ...result.geometry_confidence_summary,
+    split_agreement_regions: split,
+    combined_agreement_regions: combined,
+    reciprocal_agreement: { min: 0.4, max: 0.9 },
+    depth_ambiguity: split > 0 ? { min: 0.3, max: 1 } : null,
+  },
+});
+if (
+  describeConfidenceFactors(factorSummary(2, 0)) !==
+    "Reciprocal agreement 0.40–0.90, depth ambiguity 0.30–1.00 (2 regions from per-point attributes)" ||
+  !describeConfidenceFactors(factorSummary(0, 3)).includes("depth ambiguity folded in")
+) {
+  throw new Error("confidence factor diagnostics do not list reciprocal agreement and depth ambiguity");
 }
 
 if (!Array.isArray(result.accepted_camera_evidence)) {
@@ -324,6 +380,41 @@ const rebaked = normalizeSurfaceMaterialResult(
 );
 if (rebaked.invalidation.reused.join() !== "0,1" || rebaked.invalidation.invalidated.length !== 0) {
   throw new Error("unchanged reference appearance must be reused, not invalidated");
+}
+
+// Per-point reciprocal/depth-margin attributes cross the bake boundary: strong
+// attributes keep the collider, an ambiguous depth margin removes it, and
+// out-of-range attributes are refused by the Rust evidence validation.
+const withAttributes = (reciprocal: number, margin: number) => ({
+  ...materialSource,
+  dense_point_attributes: {
+    values: new Float32Array(Array.from({ length: 6 }, () => [reciprocal, margin]).flat()),
+    length: 6,
+  },
+});
+const strongAttributes = normalizeSurfaceMaterialResult(
+  bake_textured_surface(buildSurfaceMaterialRequest(withAttributes(1, 1), referenceImages)),
+);
+const ambiguousDepth = normalizeSurfaceMaterialResult(
+  bake_textured_surface(buildSurfaceMaterialRequest(withAttributes(1, 0), referenceImages)),
+);
+if (
+  strongAttributes.collision.box_count === 0 ||
+  ambiguousDepth.collision.box_count !== 0 ||
+  ambiguousDepth.collision.excluded.low_confidence !== 3
+) {
+  throw new Error(
+    `dense-point attributes did not reach the bake's confidence field: ${strongAttributes.diagnostic} / ${ambiguousDepth.diagnostic}`,
+  );
+}
+let invalidAttributesRejected = false;
+try {
+  bake_textured_surface(buildSurfaceMaterialRequest(withAttributes(1.5, 1), referenceImages));
+} catch (error) {
+  invalidAttributesRejected = String(error).includes("reciprocal/depth-margin");
+}
+if (!invalidAttributesRejected) {
+  throw new Error("bake accepted out-of-range dense-point attributes");
 }
 
 console.log(

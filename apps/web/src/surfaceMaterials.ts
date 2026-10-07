@@ -61,7 +61,8 @@ export type SurfaceMaterialBakeResult = {
 export type SurfaceMaterialSource = Pick<
   ReconstructionResult,
   "dense_points" | "dense_grid_sites" | "mesh_triangles" | "accepted_camera_evidence"
-> & {
+> &
+  Partial<Pick<ReconstructionResult, "dense_point_attributes">> & {
   dense: { reference_patches: DenseReferencePatchStats[] };
 };
 
@@ -110,6 +111,10 @@ export function buildSurfaceMaterialRequest(
     dense_points_f32_le: littleEndianBytes(source.dense_points.values),
     dense_rgb: source.dense_points.rgb,
     dense_grid_sites_u32_le: littleEndianBytes(source.dense_grid_sites.xy),
+    // Without attributes the bake's confidence field keeps the combined point-confidence factor.
+    dense_point_attributes_f32_le: source.dense_point_attributes
+      ? littleEndianBytes(source.dense_point_attributes.values)
+      : new Uint8Array(0),
     triangle_indices_u32_le: littleEndianBytes(source.mesh_triangles.indices),
     triangle_confidence_f32_le: littleEndianBytes(source.mesh_triangles.confidence),
     reference_patches: source.dense.reference_patches.map((patch) => ({
