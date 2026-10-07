@@ -141,6 +141,21 @@ pub(super) struct MultiViewAnalysis {
     seed_pair_index: Option<usize>,
 }
 
+impl MultiViewAnalysis {
+    /// Each track's first and last frame. Tracks only extend from frame `i` to `i + 1`, so
+    /// a track observes every frame of its span exactly once.
+    pub(super) fn track_spans(&self) -> Vec<(usize, usize)> {
+        self.tracks
+            .iter()
+            .filter_map(|track| {
+                let first = track.observations.first()?.frame_index;
+                let last = track.observations.last()?.frame_index;
+                Some((first, last))
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Observation {
     frame_index: usize,

@@ -180,6 +180,41 @@ pub struct ReconstructionResult {
     pub revisits: RevisitStats,
     pub registered_views: Vec<RegisteredViewStats>,
     pub warnings: Vec<String>,
+    /// Track evidence for recovery ranking, which compares candidates over one frame range.
+    #[serde(skip)]
+    pub(crate) track_scope: TrackScope,
+}
+
+/// Per-frame track evidence of one reconstruction, kept out of the serialized result.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TrackScope {
+    /// First and last frame of every feature track.
+    spans: Vec<(usize, usize)>,
+    /// Whether adjacent pair `i` (frames `i`, `i + 1`) has matches.
+    linked: Vec<bool>,
+    /// The primary segment's frames; the whole clip when it is not split.
+    primary: (usize, usize),
+}
+
+impl TrackScope {
+    /// `[tracks_three_plus, longest_track, linked_pairs]` within frames `first..=last`.
+    /// Over the whole clip these equal the clip-wide `MultiViewStats` values.
+    fn stats(&self, (first, last): (usize, usize)) -> [usize; 3] {
+        let (three_plus, longest) =
+            self.spans
+                .iter()
+                .fold((0, 0), |(three_plus, longest), &(start, end)| {
+                    let observed = (end.min(last) + 1).saturating_sub(start.max(first));
+                    (three_plus + usize::from(observed >= 3), longest.max(observed))
+                });
+        let linked = self
+            .linked
+            .iter()
+            .enumerate()
+            .filter(|&(pair, &linked)| linked && pair >= first && pair < last)
+            .count();
+        [three_plus, longest, linked]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +243,10 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     };
     let retry_radius =
         pan_recovery_radius(first_frame.width, request.options.match_radius, &initial);
+    // Every candidate's track evidence is compared over the first solve's primary frames,
+    // even when a retry segments the clip differently.
+    let scope = initial.track_scope.primary;
+    let score = |result: &ReconstructionResult| reconstruction_score(result, scope);
     let mut best = initial;
     let mut selected_recovery = None;
 
@@ -219,13 +258,13 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .ratio_threshold
             .min(PAN_RECOVERY_RATIO_THRESHOLD);
         let pan_retry = reconstruct_once(&pan_request)?;
-        if reconstruction_score(&pan_retry) > reconstruction_score(&best) {
+        if score(&pan_retry) > score(&best) {
             best = pan_retry;
             selected_recovery = Some("bounded displacement-informed match-radius recovery");
         }
     }
 
-    if needs_registration_recovery(request, &best) {
+    let registration_request = needs_registration_recovery(request, &best).then(|| {
         let mut registration_request = request.clone();
         registration_request.options.match_radius = retry_radius;
         registration_request.options.max_features = registration_request
@@ -240,9 +279,18 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
             .options
             .ratio_threshold
             .min(REGISTRATION_RECOVERY_RATIO_THRESHOLD);
+        registration_request
+    });
 
+    // A request already at the recovery settings would rerun the same deterministic solve.
+    if let Some(registration_request) = registration_request.filter(|retry| {
+        let (a, b) = (&retry.options, &request.options);
+        (a.match_radius, a.max_features, a.min_feature_distance)
+            != (b.match_radius, b.max_features, b.min_feature_distance)
+            || a.ratio_threshold != b.ratio_threshold
+    }) {
         let registration_retry = reconstruct_once(&registration_request)?;
-        if reconstruction_score(&registration_retry) > reconstruction_score(&best) {
+        if score(&registration_retry) > score(&best) {
             best = registration_retry;
             selected_recovery = Some(
                 "bounded registration recovery with denser features and stricter descriptor ambiguity filtering",
@@ -530,6 +578,16 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         ));
         segment_solves.sort_by_key(|solve| solve.segment);
     }
+    let (primary_first, primary_last) = primary_segment
+        .filter(|_| clip_segments.len() > 1)
+        .map_or((0, request.frames.len() - 1), |segment| {
+            (clip_segments[segment].first_frame, clip_segments[segment].last_frame)
+        });
+    let track_scope = TrackScope {
+        spans: primary_solve.multi_view_analysis.track_spans(),
+        linked: adjacent_matches.iter().map(|matches| !matches.is_empty()).collect(),
+        primary: (primary_first, primary_last),
+    };
     let SegmentSolve {
         mut multi_view_analysis,
         revisits,
@@ -811,6 +869,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         revisits,
         registered_views,
         warnings,
+        track_scope,
     })
 }
 
@@ -1364,7 +1423,29 @@ fn needs_registration_recovery(
     let missing_selected_view = result.calibrated_pair.is_some()
         && result.multi_view.registration_candidates.len() > result.registered_views.len();
     let tracks_end_early = request.frames.len() >= 4 && result.multi_view.longest_track < 4;
-    missing_seed || starved_adjacent_pair || missing_selected_view || tracks_end_early
+    // A split clip solves its other segments on their own, so a retry can also help them.
+    // A one-frame segment has no pair to seed. Views recovered from revisit evidence need
+    // not be PnP-ready candidates, so they cannot cover a failed one.
+    let secondary_segment_short = secondary_segment_solves(result).any(|solve| {
+        (solve.seed_pair.is_none() && solve.last_frame > solve.first_frame)
+            || solve.pnp_ready_candidates
+                > solve.registered_views.saturating_sub(solve.recovered_from_revisit)
+    });
+    missing_seed
+        || starved_adjacent_pair
+        || missing_selected_view
+        || tracks_end_early
+        || secondary_segment_short
+}
+
+fn secondary_segment_solves(
+    result: &ReconstructionResult,
+) -> impl Iterator<Item = &SegmentSolveStats> {
+    result
+        .multi_view
+        .segment_solves
+        .iter()
+        .filter(|solve| !solve.primary)
 }
 
 fn pan_recovery_radius(
@@ -1396,19 +1477,30 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult) -> [usize; 8] {
+fn reconstruction_score(result: &ReconstructionResult, scope: (usize, usize)) -> [usize; 10] {
     // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
     // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
-    // camera/point solution survives.
+    // camera/point solution survives. Every field up to the sparse points describes the primary
+    // solve, with track statistics counted only within `scope`, the frames every compared
+    // candidate shares; the other segments of a split clip only break ties, so a retry never
+    // trades primary quality for secondary gains.
+    let secondary = |measure: fn(&SegmentSolveStats) -> usize| {
+        secondary_segment_solves(result).map(measure).sum::<usize>()
+    };
+    let [tracks_three_plus, longest_track, linked_pairs] = result.track_scope.stats(scope);
     [
         usize::from(result.calibrated_pair.is_some()),
         accepted_registered_camera_count(result),
         result.registered_views.len(),
         usize::from(result.multi_view.bundle_adjustment.accepted),
-        result.multi_view.tracks_three_plus,
-        result.multi_view.longest_track,
-        result.multi_view.linked_pairs,
+        tracks_three_plus,
+        longest_track,
+        linked_pairs,
         result.points.len(),
+        // Cameras rather than seeded-segment counts: a retry may segment the clip differently,
+        // and fragmenting one range into more seeded segments must not win by itself.
+        secondary(|solve| solve.cameras.len()),
+        secondary(|solve| solve.sparse_points),
     ]
 }
 
@@ -2076,8 +2168,8 @@ mod tests {
         });
 
         assert_eq!(
-            reconstruction_score(&without_dense),
-            reconstruction_score(&with_dense)
+            reconstruction_score(&without_dense, without_dense.track_scope.primary),
+            reconstruction_score(&with_dense, with_dense.track_scope.primary)
         );
     }
 
@@ -2346,5 +2438,165 @@ mod tests {
         assert!(result.multi_view.segment_solves.is_empty());
         let serialized = serde_json::to_string(&result.multi_view).unwrap();
         assert!(!serialized.contains("segment_solves"));
+    }
+
+
+    /// A split clip whose second segment pans too far for the first pass to seed it.
+    fn wide_pan_split_request() -> ReconstructionRequest {
+        let mut frames = lateral_span(&scene_points(0x5eed), 236);
+        let wide = scene_points(0xc0ffee);
+        frames.extend((0..6).map(|frame| render_scene(&wide, -0.42 + frame as f64 * 1.2, 64)));
+        scene_request(frames)
+    }
+
+    #[test]
+    fn recovery_keeps_a_secondary_segment_only_the_retry_solves() {
+        let request = wide_pan_split_request();
+        let initial = reconstruct_once(&request).expect("first pass should succeed");
+        let initial_secondary: Vec<_> = secondary_segment_solves(&initial).collect();
+        assert_eq!(initial_secondary.len(), 1);
+        assert!(initial_secondary[0].seed_pair.is_none());
+
+        let result = reconstruct(&request).expect("reconstruction should succeed");
+        let secondary: Vec<_> = secondary_segment_solves(&result).collect();
+        assert_eq!(secondary.len(), 1);
+        assert!(secondary[0].seed_pair.is_some(), "{:?}", secondary[0]);
+        assert!(secondary[0].registered_views > 0);
+        assert!(reconstruction_score(&result, initial.track_scope.primary) > reconstruction_score(&initial, initial.track_scope.primary));
+    }
+
+    #[test]
+    fn track_scope_counts_only_frames_inside_the_scope() {
+        let single = reconstruct_once(&scene_request(lateral_span(&scene_points(0x5eed), 236)))
+            .expect("single segment should reconstruct");
+        let stats = &single.multi_view;
+        assert_eq!(single.track_scope.primary, (0, 5));
+        assert_eq!(
+            single.track_scope.stats(single.track_scope.primary),
+            [stats.tracks_three_plus, stats.longest_track, stats.linked_pairs]
+        );
+
+        let split = reconstruct_once(&wide_pan_split_request()).expect("split should reconstruct");
+        let stats = &split.multi_view;
+        let primary = split.track_scope.primary;
+        assert!(stats.keyframe_selection.segments.len() > 1);
+        assert!(primary.1 - primary.0 < 11, "the primary scope is one segment");
+        let [three_plus, longest, linked] = split.track_scope.stats(primary);
+        assert!(linked < stats.linked_pairs, "the other segment's pairs are excluded");
+        assert!(three_plus <= stats.tracks_three_plus && longest <= stats.longest_track);
+        // Over the whole clip, the scope reproduces the clip-wide statistics.
+        assert_eq!(
+            split.track_scope.stats((0, 11)),
+            [stats.tracks_three_plus, stats.longest_track, stats.linked_pairs]
+        );
+
+        let scope = TrackScope {
+            spans: vec![(0, 4), (3, 5), (6, 6)],
+            linked: vec![true, true, false, true, true],
+            primary: (0, 5),
+        };
+        // Spans observe 5, 3 and 1 frames; within 2..=4 they observe 3, 2 and 0.
+        assert_eq!(scope.stats((0, 5)), [2, 5, 4]);
+        assert_eq!(scope.stats((2, 4)), [1, 3, 1]);
+    }
+
+    #[test]
+    fn a_short_secondary_segment_alone_triggers_recovery() {
+        let request = scene_request(lateral_span(&scene_points(0x5eed), 236));
+        let mut result = reconstruct_once(&request).expect("fixture should reconstruct");
+        assert!(!needs_registration_recovery(&request, &result));
+
+        let solve = SegmentSolveStats {
+            segment: 1,
+            first_frame: 6,
+            last_frame: 11,
+            primary: false,
+            seed_pair: result.calibrated_pair.clone(),
+            registration_candidates: 3,
+            pnp_ready_candidates: 3,
+            registered_views: 3,
+            recovered_from_revisit: 0,
+            sparse_points: 100,
+            bundle_adjustment_accepted: true,
+            cameras: Vec::new(),
+        };
+        result.multi_view.segment_solves = vec![solve.clone()];
+        assert!(!needs_registration_recovery(&request, &result));
+
+        result.multi_view.segment_solves[0].registered_views = 2;
+        assert!(needs_registration_recovery(&request, &result));
+        result.multi_view.segment_solves[0] = SegmentSolveStats {
+            seed_pair: None,
+            ..solve.clone()
+        };
+        assert!(needs_registration_recovery(&request, &result));
+
+        // A one-frame segment cannot be seeded, so it never asks for a retry.
+        result.multi_view.segment_solves[0] = SegmentSolveStats {
+            seed_pair: None,
+            first_frame: 6,
+            last_frame: 6,
+            registration_candidates: 0,
+            pnp_ready_candidates: 0,
+            registered_views: 0,
+            ..solve.clone()
+        };
+        assert!(!needs_registration_recovery(&request, &result));
+
+        // A revisit-recovered view does not cover a PnP-ready candidate that failed.
+        result.multi_view.segment_solves[0] = SegmentSolveStats {
+            registered_views: 3,
+            recovered_from_revisit: 1,
+            ..solve
+        };
+        assert!(needs_registration_recovery(&request, &result));
+    }
+
+    #[test]
+    fn secondary_segments_never_outrank_the_primary_solve() {
+        let request = scene_request(lateral_span(&scene_points(0x5eed), 236));
+        let base = reconstruct_once(&request).expect("fixture should reconstruct");
+        let solve = |seeded: bool, registered_views: usize| SegmentSolveStats {
+            segment: 1,
+            first_frame: 6,
+            last_frame: 11,
+            primary: false,
+            seed_pair: base.calibrated_pair.clone().filter(|_| seeded),
+            registration_candidates: 4,
+            pnp_ready_candidates: 4,
+            registered_views,
+            recovered_from_revisit: 0,
+            sparse_points: registered_views * 50,
+            bundle_adjustment_accepted: seeded,
+            cameras: if seeded {
+                base.cameras.iter().copied().take(2 + registered_views).collect()
+            } else {
+                Vec::new()
+            },
+        };
+        let mut unseeded = base.clone();
+        unseeded.multi_view.segment_solves = vec![solve(false, 0)];
+        let mut seeded = base.clone();
+        seeded.multi_view.segment_solves = vec![solve(true, 3)];
+        assert!(reconstruction_score(&seeded, seeded.track_scope.primary) > reconstruction_score(&unseeded, unseeded.track_scope.primary));
+
+        let mut stronger_primary = unseeded.clone();
+        stronger_primary.points.push(base.points[0]);
+        assert!(reconstruction_score(&stronger_primary, stronger_primary.track_scope.primary) > reconstruction_score(&seeded, seeded.track_scope.primary));
+
+        // Ranking reads the primary segment's track statistics, not the clip-wide ones.
+        let mut clip_wide = seeded.clone();
+        clip_wide.multi_view.tracks_three_plus += 100;
+        clip_wide.multi_view.longest_track += 10;
+        clip_wide.multi_view.linked_pairs += 10;
+        assert_eq!(reconstruction_score(&clip_wide, clip_wide.track_scope.primary), reconstruction_score(&seeded, seeded.track_scope.primary));
+
+        // Two seeded fragments with fewer cameras lose to one segment with more.
+        let mut fragmented = base.clone();
+        fragmented.multi_view.segment_solves = vec![solve(true, 0), solve(true, 0)];
+        let mut merged = base.clone();
+        merged.multi_view.segment_solves = vec![solve(true, 3)];
+        let scope = base.track_scope.primary;
+        assert!(reconstruction_score(&merged, scope) > reconstruction_score(&fragmented, scope));
     }
 }
