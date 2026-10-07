@@ -497,6 +497,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
                         width,
                         height,
                         focal as f64,
+                        true,
                     )
                 });
                 segment_solve_stats(segment, span, false, seed, solve.as_ref(), focal)
@@ -516,6 +517,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         width,
         height,
         focal as f64,
+        false,
     );
     if let Some(segment) = primary_segment.filter(|_| clip_segments.len() > 1) {
         segment_solves.push(segment_solve_stats(
@@ -834,6 +836,7 @@ fn solve_segment(
     width: u32,
     height: u32,
     focal: f64,
+    secondary: bool,
 ) -> SegmentSolve {
     let seed_landmarks = seed.map(|(pair_index, estimate)| {
         (
@@ -856,13 +859,21 @@ fn solve_segment(
             .as_ref()
             .map(|(pair_index, landmarks)| (*pair_index, landmarks.as_slice())),
     );
+    let seed_segment = seed
+        .map(|(pair_index, _)| keyframe_selection.segment_keyframes(*pair_index))
+        .unwrap_or_default();
+    // The primary solve screens the whole clip for its diagnostics; a secondary solve only
+    // screens its own segment, since only that segment can recover or close its cameras.
+    let revisit_keyframes = if secondary {
+        &seed_segment
+    } else {
+        &multi_view_analysis.stats.keyframes
+    };
     let mut revisits = revisit::analyze(
         revisit_context,
-        &multi_view_analysis.stats.keyframes,
+        revisit_keyframes,
         seed.map(|(pair_index, _)| *pair_index),
-        &seed
-            .map(|(pair_index, _)| keyframe_selection.segment_keyframes(*pair_index))
-            .unwrap_or_default(),
+        &seed_segment,
     );
 
     let mut registered_views = Vec::new();
