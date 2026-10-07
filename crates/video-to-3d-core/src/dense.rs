@@ -160,32 +160,39 @@ pub(super) fn estimate_depth_points(
     sparse_points: &[Vector3<f64>],
     focal: f64,
 ) -> DenseAnalysis {
-    estimate_depth_points_limited(frames, cameras, sparse_points, focal, MAX_REFERENCE_VIEWS)
+    estimate_depth_points_limited(frames, cameras, sparse_points, focal, MAX_REFERENCE_VIEWS).0
 }
 
 /// Like [`estimate_depth_points`], keeping at most `reference_views` accepted patches. Each
 /// reference is reconstructed and accepted from its own inputs in the same deterministic
-/// order, so a limited run keeps exactly the leading patches of the unlimited one.
+/// order, so a limited run keeps exactly the leading patches of the unlimited one. The flag
+/// is true when the limit stopped the run while further reference candidates remained.
 fn estimate_depth_points_limited(
     frames: &[FrameInput],
     cameras: &[RegisteredCamera],
     sparse_points: &[Vector3<f64>],
     focal: f64,
     reference_views: usize,
-) -> DenseAnalysis {
+) -> (DenseAnalysis, bool) {
     let reference_order = reference_candidate_order(frames, cameras, sparse_points, focal);
     if reference_order.is_empty() {
-        return from_legacy(legacy::estimate_depth_points(
+        let legacy = from_legacy(legacy::estimate_depth_points(
             frames,
             cameras,
             sparse_points,
             focal,
         ));
+        return (legacy, false);
     }
 
     let mut patches = Vec::new();
     let mut attempts = Vec::new();
-    for camera_index in reference_order.into_iter().take(MAX_REFERENCE_ATTEMPTS) {
+    let mut omitted_references = false;
+    let mut candidates = reference_order
+        .into_iter()
+        .take(MAX_REFERENCE_ATTEMPTS)
+        .peekable();
+    while let Some(camera_index) = candidates.next() {
         let Some(analysis) =
             reconstruct_reference_patch(frames, cameras, sparse_points, focal, camera_index)
         else {
@@ -207,6 +214,7 @@ fn estimate_depth_points_limited(
 
         patches.push(split_patch(reference_frame, analysis));
         if patches.len() >= reference_views {
+            omitted_references = candidates.peek().is_some();
             break;
         }
     }
@@ -220,10 +228,10 @@ fn estimate_depth_points_limited(
         ));
         let fallback_attempts = std::mem::take(&mut fallback.stats.reference_attempts);
         fallback.stats.reference_attempts = merge_fallback_attempts(attempts, fallback_attempts);
-        return fallback;
+        return (fallback, false);
     }
 
-    combine_patches(patches, attempts)
+    (combine_patches(patches, attempts), omitted_references)
 }
 
 pub(super) fn estimate_depth_points_with_budget(
@@ -260,13 +268,14 @@ pub(super) fn estimate_depth_points_with_budget(
         };
     };
 
-    let mut analysis =
+    let (mut analysis, omitted_references) =
         estimate_depth_points_limited(frames, cameras, sparse_points, focal, reference_views);
     analysis.stats.working_set_estimate = working_set_estimate;
     analysis.stats.working_set_budget_bytes = working_set_budget_bytes;
     analysis.stats.full_working_set_bytes = full.total_bytes;
+    // Report the limit only when it actually left a reference candidate unreconstructed.
     analysis.stats.reference_view_limit =
-        (reference_views < MAX_REFERENCE_VIEWS).then_some(reference_views);
+        (reference_views < MAX_REFERENCE_VIEWS && omitted_references).then_some(reference_views);
     analysis
 }
 
@@ -291,15 +300,15 @@ fn estimate_working_set(
         .max()
         .unwrap_or_default();
 
-    let max_grid_samples = frames
+    let grid_samples_per_reference = frames
         .first()
         .map(|frame| {
             let stride = (frame.width.min(frame.height) / 48).clamp(4, 12) as usize;
             grid_axis_samples(frame.width as usize, stride)
                 .saturating_mul(grid_axis_samples(frame.height as usize, stride))
         })
-        .unwrap_or_default()
-        .saturating_mul(reference_views);
+        .unwrap_or_default();
+    let max_grid_samples = grid_samples_per_reference.saturating_mul(reference_views);
     // Ordinary cells contribute two triangles, while bounded horizontal/vertical gap bridges can
     // add more candidates. Eight candidates per retained sample is a conservative upper bound for
     // all current mesh passes.
@@ -416,11 +425,16 @@ fn estimate_working_set(
         .saturating_add(max_mesh_triangles.saturating_mul(per_triangle_fusion_bytes));
     // Recovery retains the previous best result while reconstructing a retry. Charge its final
     // dense point/site and mesh buffers even on the initial attempt so the same budget applies to
-    // every candidate and remains fail-closed when recovery is needed.
-    let retained_candidate_bytes = max_grid_samples
+    // every candidate and remains fail-closed when recovery is needed. The retained result may
+    // come from an earlier plan that kept more reference views than this one (a recovery retry
+    // with more features fits fewer views), so charge it at the largest plan, not this one.
+    let retained_grid_samples = grid_samples_per_reference.saturating_mul(MAX_REFERENCE_VIEWS);
+    let retained_candidate_bytes = retained_grid_samples
         .saturating_mul(size_of::<Point3>() + size_of::<DenseGridSite>())
         .saturating_add(
-            max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
+            retained_grid_samples
+                .saturating_mul(8)
+                .saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
         );
     // Packed WASM output: xyzw, RGB, original grid site, triangle indices and confidence.
     let packed_output_bytes = max_grid_samples
@@ -1187,6 +1201,48 @@ mod multi_reference_tests {
         assert!(budgeted.stats.working_set_estimate.mesh_builder_bytes > 0);
         assert!(budgeted.stats.working_set_estimate.surface_fusion_bytes > 0);
         assert!(budgeted.stats.working_set_estimate.sparse_pipeline_bytes > 0);
+    }
+
+    #[test]
+    fn the_retained_candidate_is_charged_at_the_largest_prior_plan() {
+        let frames = vec![
+            plane_frame(68, 48, 60.0, 0.0, 4.0),
+            plane_frame(68, 48, 60.0, 0.24, 4.0),
+            plane_frame(68, 48, 60.0, -0.22, 4.0),
+        ];
+        // The ordinary run may keep every reference view; a registration retry with more
+        // features may fit only one. The retry must still charge the larger retained result.
+        let ordinary = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS);
+        let retry = estimate_working_set(&frames, 1200, 3, 1);
+
+        assert!(retry.sparse_pipeline_bytes > ordinary.sparse_pipeline_bytes);
+        assert!(retry.dense_sample_bytes < ordinary.dense_sample_bytes);
+        assert_eq!(retry.retained_candidate_bytes, ordinary.retained_candidate_bytes);
+        // The allowance covers the full plan's final point/site and mesh buffers.
+        assert!(ordinary.retained_candidate_bytes >= ordinary.topology_bytes);
+    }
+
+    #[test]
+    fn a_limit_that_omits_no_reference_is_not_reported() {
+        let width = 68;
+        let height = 48;
+        let focal = 60.0;
+        let depth = 4.0;
+        // Two registered views: at most two reference candidates, so a two-view limit
+        // leaves nothing out even though the three-view plan does not fit.
+        let frames = vec![
+            plane_frame(width, height, focal, 0.0, depth),
+            plane_frame(width, height, focal, 0.24, depth),
+        ];
+        let cameras = vec![camera(0, 0.0), camera(1, 0.24)];
+        let sparse = sparse_plane(width, height, focal, depth);
+        let two_views = estimate_working_set(&frames, 320, 3, 2).total_bytes;
+
+        let limited =
+            estimate_depth_points_with_budget(&frames, &cameras, &sparse, focal, two_views, 320, 3);
+
+        assert!(limited.stats.full_working_set_bytes > two_views);
+        assert_eq!(limited.stats.reference_view_limit, None);
     }
 
     #[test]
