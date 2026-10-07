@@ -165,6 +165,162 @@ pub struct SegmentSolveStats {
     pub cameras: Vec<CameraPose>,
 }
 
+/// The gate that rejected a calibrated seed-pair candidate, in pipeline order. The
+/// first two are frame-selection gates; the rest are calibrated two-view gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedGate {
+    /// A frame of the pair failed the blur or exposure quality gate.
+    FrameQuality,
+    /// The link between the frames splits the clip (hard cut, lost overlap, motion jump).
+    SegmentBreak,
+    /// Too few matches, too little image motion, or too little residual parallax after
+    /// compensating the dominant translation and rotation.
+    Parallax,
+    /// Fewer matches than the minimal eight-point essential-matrix sample.
+    Matches,
+    /// The essential-matrix RANSAC consensus is below the inlier count or ratio gate.
+    EssentialInliers,
+    /// A pure rotation explains the inliers: no measurable translation baseline.
+    Baseline,
+    /// Too few inliers triangulate in front of both cameras.
+    Cheirality,
+    /// Triangulated inliers exceed the reprojection-error gate.
+    Reprojection,
+    /// The median triangulation angle is too small for trustworthy depth.
+    TriangulationAngle,
+}
+
+impl SeedGate {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FrameQuality => "frame quality",
+            Self::SegmentBreak => "segment break",
+            Self::Parallax => "residual parallax",
+            Self::Matches => "feature matches",
+            Self::EssentialInliers => "essential-matrix inliers",
+            Self::Baseline => "translation baseline",
+            Self::Cheirality => "cheirality",
+            Self::Reprojection => "reprojection error",
+            Self::TriangulationAngle => "triangulation angle",
+        }
+    }
+
+    fn from_two_view(rejection: two_view::TwoViewRejection) -> Self {
+        use two_view::TwoViewRejection as Rejection;
+        match rejection {
+            Rejection::Matches => Self::Matches,
+            Rejection::Inliers => Self::EssentialInliers,
+            Rejection::Baseline => Self::Baseline,
+            Rejection::Cheirality => Self::Cheirality,
+            Rejection::Reprojection => Self::Reprojection,
+            Rejection::TriangulationAngle => Self::TriangulationAngle,
+        }
+    }
+
+    /// Pipeline depth; cheirality and reprojection are the same triangulation stage.
+    fn stage(self) -> u8 {
+        match self {
+            Self::FrameQuality => 0,
+            Self::SegmentBreak => 1,
+            Self::Parallax => 2,
+            Self::Matches => 3,
+            Self::EssentialInliers => 4,
+            Self::Baseline => 5,
+            Self::Cheirality | Self::Reprojection => 6,
+            Self::TriangulationAngle => 7,
+        }
+    }
+}
+
+/// Machine-readable evidence of one adjacent pair as a calibrated seed-pair candidate.
+/// Calibrated measurements are `None` when an earlier gate stopped the attempt.
+#[derive(Clone, Debug, Serialize)]
+pub struct SeedCandidateStats {
+    pub from_frame: usize,
+    pub to_frame: usize,
+    pub matches: usize,
+    pub median_motion: f32,
+    pub median_parallax_residual: f32,
+    /// `None` when every gate passed.
+    pub rejected_gate: Option<SeedGate>,
+    /// This candidate seeded the primary or a segment solve.
+    pub selected: bool,
+    pub inliers: Option<usize>,
+    pub inlier_ratio: Option<f32>,
+    /// Median residual of the best pure-rotation fit; at or below the baseline gate the
+    /// pair has no measurable translation.
+    pub rotation_only_residual_pixels: Option<f32>,
+    /// Inliers that must triangulate in front of both cameras within the reprojection gate.
+    pub required_points: Option<usize>,
+    pub triangulated_points: Option<usize>,
+    pub behind_camera: Option<usize>,
+    pub high_reprojection: Option<usize>,
+    pub median_reprojection_error_pixels: Option<f32>,
+    pub median_triangulation_angle_degrees: Option<f32>,
+}
+
+impl SeedCandidateStats {
+    fn rank(&self) -> (u8, usize, usize) {
+        (
+            self.rejected_gate.map_or(u8::MAX, SeedGate::stage),
+            self.inliers.unwrap_or(0),
+            self.triangulated_points.unwrap_or(0),
+        )
+    }
+}
+
+/// The gate that decided the bootstrap: why no calibrated seed pair, or no camera beyond
+/// it, was accepted. Serialized as one flat string: a [`SeedGate`] name or `registration`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootstrapGate {
+    Seed(SeedGate),
+    /// A seed pair was accepted, but no other selected keyframe passed PnP registration.
+    Registration,
+}
+
+impl Serialize for BootstrapGate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Seed(gate) => gate.serialize(serializer),
+            Self::Registration => serializer.serialize_str("registration"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SeedGateCount {
+    pub gate: SeedGate,
+    pub candidates: usize,
+}
+
+/// Which kind of evidence could lift a bootstrap failure. Reported only; never invoked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapEscalation {
+    /// Correspondences are the limit: learned matching may supply more consistent matches.
+    LearnedMatching,
+    /// Correspondences agree on an essential matrix but not on a calibrated pose: learned
+    /// calibration (intrinsics) may resolve it.
+    LearnedCalibration,
+    /// Consistent correspondences carry too little translation for classical triangulation
+    /// (pan-dominant or distant footage): only learned multi-view depth priors can add
+    /// geometry, and their output must still pass the Rust gates.
+    LearnedMultiView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BootstrapDiagnosis {
+    /// `None` when a seed pair and at least one further camera were accepted.
+    pub decisive_gate: Option<BootstrapGate>,
+    /// The seed candidate that advanced furthest before its gate, for a seed failure.
+    pub decisive_pair: Option<SeedCandidateStats>,
+    pub escalation: Option<BootstrapEscalation>,
+    /// Rejected seed candidates per gate, in pipeline order.
+    pub rejections: Vec<SeedGateCount>,
+    pub summary: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ReconstructionResult {
     pub cameras: Vec<CameraPose>,
@@ -179,6 +335,9 @@ pub struct ReconstructionResult {
     pub multi_view: MultiViewStats,
     pub revisits: RevisitStats,
     pub registered_views: Vec<RegisteredViewStats>,
+    /// Every adjacent pair as a calibrated seed-pair candidate, with its rejection gate.
+    pub seed_candidates: Vec<SeedCandidateStats>,
+    pub bootstrap: BootstrapDiagnosis,
     pub warnings: Vec<String>,
     /// Track evidence for recovery ranking, which compares candidates over one frame range.
     #[serde(skip)]
@@ -339,6 +498,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     // Every calibrated pair that passes the seed gates, in pair order. Each segment seeds
     // from its own best candidate.
     let mut seed_candidates: Vec<(usize, two_view::TwoViewEstimate)> = Vec::new();
+    let mut seed_evidence: Vec<SeedCandidateStats> = Vec::with_capacity(request.frames.len() - 1);
     let frame_evidence: Vec<_> = luma_frames
         .iter()
         .enumerate()
@@ -434,18 +594,46 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         // The seed uses two frames that pass the quality gates, within one segment.
         let seed_eligible =
             segmentation.seed_eligible(pair_index, matches.len(), overlap_ratio, median_motion);
-        if !low_parallax && seed_eligible {
-            if let Some(estimate) = two_view::estimate_two_view(
+        let mut seed = SeedCandidateStats {
+            from_frame: pair_index,
+            to_frame: pair_index + 1,
+            matches: matches.len(),
+            median_motion,
+            median_parallax_residual,
+            rejected_gate: None,
+            selected: false,
+            inliers: None,
+            inlier_ratio: None,
+            rotation_only_residual_pixels: None,
+            required_points: None,
+            triangulated_points: None,
+            behind_camera: None,
+            high_reprojection: None,
+            median_reprojection_error_pixels: None,
+            median_triangulation_angle_degrees: None,
+        };
+        if !segmentation.usable(pair_index) || !segmentation.usable(pair_index + 1) {
+            seed.rejected_gate = Some(SeedGate::FrameQuality);
+        } else if !seed_eligible {
+            seed.rejected_gate = Some(SeedGate::SegmentBreak);
+        } else if low_parallax {
+            seed.rejected_gate = Some(SeedGate::Parallax);
+        } else {
+            let outcome = two_view::evaluate_two_view(
                 source_features,
                 target_features,
                 &matches,
                 width,
                 height,
                 focal as f64,
-            ) {
-                seed_candidates.push((pair_index, estimate));
+            );
+            record_two_view_evidence(&mut seed, &outcome.evidence);
+            match outcome.result {
+                Ok(estimate) => seed_candidates.push((pair_index, estimate)),
+                Err(rejection) => seed.rejected_gate = Some(SeedGate::from_two_view(rejection)),
             }
         }
+        seed_evidence.push(seed);
 
         let observed_baseline = if low_parallax {
             0.0
@@ -554,6 +742,14 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     } else {
         Vec::new()
     };
+    for solve in &segment_solves {
+        if let Some(seed) = &solve.seed_pair {
+            seed_evidence[seed.from_frame].selected = true;
+        }
+    }
+    if let Some(index) = primary_index {
+        seed_evidence[seed_candidates[index].0].selected = true;
+    }
     let best_two_view = primary_index.map(|index| seed_candidates.swap_remove(index));
     drop(seed_candidates);
     let primary_solve = solve_segment(
@@ -805,6 +1001,16 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         }
     }
 
+    let bootstrap = diagnose_bootstrap(
+        &seed_evidence,
+        calibrated_pair.is_some(),
+        registered_views.len(),
+        multi_view
+            .registration_candidates
+            .iter()
+            .filter(|candidate| candidate.pnp_ready)
+            .count(),
+    );
     if calibrated_pair.is_some() {
         let pnp_ready = multi_view
             .registration_candidates
@@ -849,10 +1055,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
             ));
         }
     } else {
-        warnings.push(
-            "No adjacent pair passed the calibrated epipolar, cheirality, reprojection, and triangulation-angle gates, so this result retains the conservative uncalibrated MVP preview."
-                .into(),
-        );
+        warnings.push(format!(
+            "{} This result retains the conservative uncalibrated MVP preview.",
+            bootstrap.summary
+        ));
     }
 
     Ok(ReconstructionResult {
@@ -868,9 +1074,175 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         multi_view,
         revisits,
         registered_views,
+        seed_candidates: seed_evidence,
+        bootstrap,
         warnings,
         track_scope,
     })
+}
+
+fn record_two_view_evidence(seed: &mut SeedCandidateStats, evidence: &two_view::TwoViewEvidence) {
+    if evidence.matches < two_view::MIN_SEED_INLIERS {
+        return;
+    }
+    seed.inliers = Some(evidence.inliers);
+    seed.inlier_ratio = Some(evidence.inliers as f32 / evidence.matches as f32);
+    seed.rotation_only_residual_pixels = evidence
+        .rotation_only_residual_pixels
+        .map(|value| value as f32);
+    if let Some(pose) = evidence.pose {
+        seed.required_points = Some(pose.required_points);
+        seed.triangulated_points = Some(pose.accepted_points);
+        seed.behind_camera = Some(pose.behind_camera);
+        seed.high_reprojection = Some(pose.high_reprojection);
+        seed.median_reprojection_error_pixels = pose
+            .median_reprojection_error_pixels
+            .map(|value| value as f32);
+        seed.median_triangulation_angle_degrees = pose
+            .median_triangulation_angle_degrees
+            .map(|value| value as f32);
+    }
+}
+
+/// What the decisive seed candidate measured against the gate that rejected it.
+fn seed_gate_measurement(seed: &SeedCandidateStats, gate: SeedGate) -> String {
+    let optional =
+        |value: Option<f32>| value.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.2}"));
+    match gate {
+        SeedGate::FrameQuality => "a frame failed the blur or exposure quality gate".to_owned(),
+        SeedGate::SegmentBreak => "the link between the frames splits the clip".to_owned(),
+        SeedGate::Parallax => format!(
+            "{} matches, median motion {:.2} px and residual parallax {:.2} px (requires at least 6 matches, 1.40 px motion and 0.55 px parallax)",
+            seed.matches, seed.median_motion, seed.median_parallax_residual
+        ),
+        SeedGate::Matches => format!(
+            "{} matches (requires {})",
+            seed.matches,
+            two_view::MIN_SEED_INLIERS
+        ),
+        SeedGate::EssentialInliers => format!(
+            "{} of {} matches are essential-matrix inliers, ratio {} (requires {} inliers and ratio {:.2})",
+            seed.inliers.unwrap_or(0),
+            seed.matches,
+            optional(seed.inlier_ratio),
+            two_view::MIN_SEED_INLIERS,
+            two_view::MIN_SEED_INLIER_RATIO
+        ),
+        SeedGate::Baseline => format!(
+            "a pure rotation explains the inliers to {} px (requires more than {:.2} px)",
+            optional(seed.rotation_only_residual_pixels),
+            two_view::MIN_SEED_ROTATION_RESIDUAL_PIXELS
+        ),
+        SeedGate::Cheirality | SeedGate::Reprojection => format!(
+            "{} of {} inliers triangulate in front of both cameras within {:.1} px ({} behind a camera, {} above the reprojection gate; requires {})",
+            seed.triangulated_points.unwrap_or(0),
+            seed.inliers.unwrap_or(0),
+            two_view::MAX_SEED_REPROJECTION_ERROR_PIXELS,
+            seed.behind_camera.unwrap_or(0),
+            seed.high_reprojection.unwrap_or(0),
+            seed.required_points.unwrap_or(0)
+        ),
+        SeedGate::TriangulationAngle => format!(
+            "median triangulation angle {}° (requires {:.2}°)",
+            optional(seed.median_triangulation_angle_degrees),
+            two_view::MIN_SEED_TRIANGULATION_ANGLE_DEGREES
+        ),
+    }
+}
+
+/// Name the gate that decided the bootstrap. Without a seed pair, that is the gate of the
+/// candidate that advanced furthest through the pipeline: every earlier gate passed for
+/// it, so the clip's limit is the gate it failed.
+fn diagnose_bootstrap(
+    seeds: &[SeedCandidateStats],
+    seeded: bool,
+    registered_views: usize,
+    pnp_ready: usize,
+) -> BootstrapDiagnosis {
+    let mut rejections: Vec<SeedGateCount> = Vec::new();
+    for gate in seeds.iter().filter_map(|seed| seed.rejected_gate) {
+        match rejections.iter_mut().find(|known| known.gate == gate) {
+            Some(known) => known.candidates += 1,
+            None => rejections.push(SeedGateCount {
+                gate,
+                candidates: 1,
+            }),
+        }
+    }
+    rejections.sort_by_key(|known| known.gate);
+
+    if seeded {
+        if registered_views > 0 {
+            return BootstrapDiagnosis {
+                decisive_gate: None,
+                decisive_pair: None,
+                escalation: None,
+                rejections,
+                summary: format!(
+                    "A calibrated seed pair and {registered_views} further camera(s) were accepted."
+                ),
+            };
+        }
+        return BootstrapDiagnosis {
+            decisive_gate: Some(BootstrapGate::Registration),
+            decisive_pair: None,
+            escalation: Some(BootstrapEscalation::LearnedMatching),
+            rejections,
+            summary: format!(
+                "A calibrated seed pair was accepted, but registration failed: {pnp_ready} other selected keyframe(s) tracked enough seed landmarks for PnP and none passed the inlier and reprojection gates."
+            ),
+        };
+    }
+
+    // Furthest stage first; then more inliers and triangulated points; then the earliest pair.
+    let decisive = seeds
+        .iter()
+        .filter(|seed| seed.rejected_gate.is_some())
+        .reduce(|best, seed| {
+            if seed.rank() > best.rank() {
+                seed
+            } else {
+                best
+            }
+        });
+    let Some(decisive) = decisive else {
+        return BootstrapDiagnosis {
+            decisive_gate: None,
+            decisive_pair: None,
+            escalation: None,
+            rejections,
+            summary: "No adjacent frame pair was available as a seed-pair candidate.".to_owned(),
+        };
+    };
+    let gate = decisive
+        .rejected_gate
+        .expect("decisive candidate was rejected");
+    let escalation = match gate {
+        SeedGate::Matches | SeedGate::EssentialInliers => {
+            Some(BootstrapEscalation::LearnedMatching)
+        }
+        SeedGate::Cheirality | SeedGate::Reprojection => {
+            Some(BootstrapEscalation::LearnedCalibration)
+        }
+        SeedGate::Parallax | SeedGate::Baseline | SeedGate::TriangulationAngle => {
+            Some(BootstrapEscalation::LearnedMultiView)
+        }
+        // Frame selection already reports unusable frames and clip breaks.
+        SeedGate::FrameQuality | SeedGate::SegmentBreak => None,
+    };
+    BootstrapDiagnosis {
+        decisive_gate: Some(BootstrapGate::Seed(gate)),
+        summary: format!(
+            "No calibrated seed pair was accepted. The decisive gate is {}: the furthest candidate, frames {}–{}, passed every earlier gate, but {}.",
+            gate.label(),
+            decisive.from_frame + 1,
+            decisive.to_frame + 1,
+            seed_gate_measurement(decisive, gate)
+        ),
+        decisive_pair: Some(decisive.clone()),
+        escalation,
+        rejections,
+    }
 }
 
 /// Seed, register, triangulate and bundle-adjust one clip segment in its own frame.
@@ -2329,15 +2701,30 @@ mod tests {
         camera_x: f64,
         background: u8,
     ) -> FrameInput {
+        render_scene_posed(points, camera_x, 0.0, background)
+    }
+
+    /// One frame from a camera at `camera_x` turned by `yaw` radians about the vertical axis.
+    fn render_scene_posed(
+        points: &[(nalgebra::Vector3<f64>, u8)],
+        camera_x: f64,
+        yaw: f64,
+        background: u8,
+    ) -> FrameInput {
         let (width, height) = (SCENE_WIDTH, SCENE_HEIGHT);
         let mut rgba = vec![background; (width * height * 4) as usize];
         for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
+        let (sin, cos) = yaw.sin_cos();
         for (index, (point, shade)) in points.iter().enumerate() {
-            let px = ((point.x - camera_x) / point.z * SCENE_FOCAL + width as f64 * 0.5).round()
-                as i32;
-            let py = (point.y / point.z * SCENE_FOCAL + height as f64 * 0.5).round() as i32;
+            let (x, z) = (point.x - camera_x, point.z);
+            let (x, z) = (cos * x - sin * z, sin * x + cos * z);
+            if z <= 0.5 {
+                continue;
+            }
+            let px = (x / z * SCENE_FOCAL + width as f64 * 0.5).round() as i32;
+            let py = (point.y / z * SCENE_FOCAL + height as f64 * 0.5).round() as i32;
             let radius = 3 + (index % 2) as i32;
             if px < radius + 1
                 || py < radius + 1
@@ -2440,6 +2827,179 @@ mod tests {
         assert!(!serialized.contains("segment_solves"));
     }
 
+
+    #[test]
+    fn accepted_lateral_clip_records_its_seed_candidates() {
+        let frames = lateral_span(&scene_points(0x5eed), 236);
+        let result = reconstruct(&scene_request(frames)).expect("reconstruction should succeed");
+
+        let pair = result.calibrated_pair.as_ref().expect("lateral clip seeds");
+        assert!(!result.registered_views.is_empty());
+        assert_eq!(result.seed_candidates.len(), 5);
+        let seed = &result.seed_candidates[pair.from_frame];
+        assert!(seed.selected && seed.rejected_gate.is_none());
+        assert_eq!(seed.inliers, Some(pair.inliers));
+        assert!(seed.rotation_only_residual_pixels.unwrap() > 1.25);
+        assert_eq!(result.bootstrap.decisive_gate, None);
+        assert_eq!(result.bootstrap.escalation, None);
+        assert_eq!(
+            result
+                .seed_candidates
+                .iter()
+                .filter(|seed| seed.selected)
+                .count(),
+            1
+        );
+    }
+
+    /// The Trevi canary's measured limitation in isolation: a camera that only turns.
+    /// Every adjacent pair has abundant consistent matches, but a pure rotation explains
+    /// them, so no seed pair and therefore no camera may be accepted.
+    #[test]
+    fn pure_pan_clip_names_the_baseline_gate_instead_of_inventing_cameras() {
+        let points = scene_points(0x7e71);
+        let frames = (0..6)
+            .map(|frame| render_scene_posed(&points, 0.0, frame as f64 * 0.02, 236))
+            .collect();
+        let result = reconstruct(&scene_request(frames)).expect("reconstruction should succeed");
+
+        assert!(result.calibrated_pair.is_none());
+        assert!(result.registered_views.is_empty());
+        assert!(!result.dense.attempted);
+        assert_eq!(result.seed_candidates.len(), 5);
+        for seed in &result.seed_candidates {
+            assert!(!seed.selected);
+            assert!(seed.rejected_gate.is_some(), "accepted pan pair: {seed:?}");
+        }
+        assert_eq!(
+            result.bootstrap.decisive_gate,
+            Some(BootstrapGate::Seed(SeedGate::Baseline)),
+            "bootstrap: {:?}",
+            result.bootstrap
+        );
+        assert_eq!(
+            result.bootstrap.escalation,
+            Some(BootstrapEscalation::LearnedMultiView)
+        );
+        let decisive = result.bootstrap.decisive_pair.as_ref().unwrap();
+        assert!(decisive.inliers.unwrap() >= 8);
+        assert!(decisive.rotation_only_residual_pixels.unwrap() <= 1.25);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("decisive gate is translation baseline")));
+
+        let serialized = serde_json::to_value(&result.bootstrap).unwrap();
+        assert_eq!(serialized["decisive_gate"], "baseline");
+        assert_eq!(serialized["escalation"], "learned_multi_view");
+    }
+
+    fn seed_stats(
+        from_frame: usize,
+        gate: Option<SeedGate>,
+        inliers: Option<usize>,
+    ) -> SeedCandidateStats {
+        SeedCandidateStats {
+            from_frame,
+            to_frame: from_frame + 1,
+            matches: 40,
+            median_motion: 6.0,
+            median_parallax_residual: 1.0,
+            rejected_gate: gate,
+            selected: false,
+            inliers,
+            inlier_ratio: inliers.map(|inliers| inliers as f32 / 40.0),
+            rotation_only_residual_pixels: None,
+            required_points: None,
+            triangulated_points: None,
+            behind_camera: None,
+            high_reprojection: None,
+            median_reprojection_error_pixels: None,
+            median_triangulation_angle_degrees: None,
+        }
+    }
+
+    #[test]
+    fn bootstrap_names_the_gate_of_the_furthest_candidate() {
+        let seeds = vec![
+            seed_stats(0, Some(SeedGate::Parallax), None),
+            seed_stats(1, Some(SeedGate::Baseline), Some(30)),
+            seed_stats(2, Some(SeedGate::TriangulationAngle), Some(20)),
+            seed_stats(3, Some(SeedGate::Baseline), Some(36)),
+            seed_stats(4, Some(SeedGate::TriangulationAngle), Some(25)),
+        ];
+        let diagnosis = diagnose_bootstrap(&seeds, false, 0, 0);
+        // The furthest stage wins over more inliers at an earlier gate; inliers break ties.
+        assert_eq!(
+            diagnosis.decisive_gate,
+            Some(BootstrapGate::Seed(SeedGate::TriangulationAngle))
+        );
+        assert_eq!(diagnosis.decisive_pair.as_ref().unwrap().from_frame, 4);
+        assert_eq!(
+            diagnosis.escalation,
+            Some(BootstrapEscalation::LearnedMultiView)
+        );
+        assert_eq!(
+            diagnosis.rejections,
+            vec![
+                SeedGateCount {
+                    gate: SeedGate::Parallax,
+                    candidates: 1
+                },
+                SeedGateCount {
+                    gate: SeedGate::Baseline,
+                    candidates: 2
+                },
+                SeedGateCount {
+                    gate: SeedGate::TriangulationAngle,
+                    candidates: 2
+                },
+            ]
+        );
+        assert!(
+            diagnosis.summary.contains("frames 5–6"),
+            "{}",
+            diagnosis.summary
+        );
+
+        let correspondence_limited = diagnose_bootstrap(
+            &[seed_stats(0, Some(SeedGate::EssentialInliers), Some(9))],
+            false,
+            0,
+            0,
+        );
+        assert_eq!(
+            correspondence_limited.escalation,
+            Some(BootstrapEscalation::LearnedMatching)
+        );
+        let unusable = diagnose_bootstrap(
+            &[seed_stats(0, Some(SeedGate::FrameQuality), None)],
+            false,
+            0,
+            0,
+        );
+        assert_eq!(unusable.escalation, None);
+    }
+
+    #[test]
+    fn bootstrap_reports_registration_after_an_accepted_seed() {
+        let seeds = vec![
+            seed_stats(0, None, Some(40)),
+            seed_stats(1, Some(SeedGate::Baseline), Some(30)),
+        ];
+        let stalled = diagnose_bootstrap(&seeds, true, 0, 3);
+        assert_eq!(stalled.decisive_gate, Some(BootstrapGate::Registration));
+        assert!(stalled.decisive_pair.is_none());
+        assert!(stalled.summary.contains("3 other selected keyframe(s)"));
+        assert_eq!(
+            serde_json::to_value(stalled.decisive_gate).unwrap(),
+            "registration"
+        );
+
+        let registered = diagnose_bootstrap(&seeds, true, 2, 3);
+        assert_eq!(registered.decisive_gate, None);
+        assert_eq!(registered.escalation, None);
+    }
 
     /// A split clip whose second segment pans too far for the first pass to seed it.
     fn wide_pan_split_request() -> ReconstructionRequest {
