@@ -63,7 +63,7 @@ async function benchmarkProvider(
       finiteEvidenceRatio: null,
       confidenceCoverage: null,
       geometricAgreement: null,
-      diagnostic: "Skipped because the classical reconstruction exposed no accepted registered cameras.",
+      diagnostic: `Skipped because the classical reconstruction exposed no accepted registered cameras. ${reconstruction.bootstrap.summary}`,
     };
   }
 

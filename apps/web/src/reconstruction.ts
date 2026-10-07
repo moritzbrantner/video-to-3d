@@ -222,6 +222,87 @@ export function describeSegmentSolves(solves: SegmentSolveStats[]): string[] {
   });
 }
 
+/** The gate that rejected a calibrated seed-pair candidate, in pipeline order. */
+export type SeedGate =
+  | "frame_quality"
+  | "segment_break"
+  | "parallax"
+  | "matches"
+  | "essential_inliers"
+  | "baseline"
+  | "cheirality"
+  | "reprojection"
+  | "triangulation_angle";
+
+export type BootstrapGate = SeedGate | "registration";
+
+/** Evidence that could lift a bootstrap failure; reported only, never invoked. */
+export type BootstrapEscalation = "learned_matching" | "learned_calibration" | "learned_multi_view";
+
+/** One adjacent pair as a calibrated seed-pair candidate; null fields were not reached. */
+export type SeedCandidateStats = {
+  from_frame: number;
+  to_frame: number;
+  matches: number;
+  median_motion: number;
+  median_parallax_residual: number;
+  rejected_gate: SeedGate | null;
+  selected: boolean;
+  inliers: number | null;
+  inlier_ratio: number | null;
+  rotation_only_residual_pixels: number | null;
+  required_points: number | null;
+  triangulated_points: number | null;
+  behind_camera: number | null;
+  /** Inliers whose rays gave no finite point; not counted as behind a camera. */
+  failed_triangulations: number | null;
+  high_reprojection: number | null;
+  median_reprojection_error_pixels: number | null;
+  median_triangulation_angle_degrees: number | null;
+};
+
+export type BootstrapDiagnosis = {
+  decisive_gate: BootstrapGate | null;
+  decisive_pair: SeedCandidateStats | null;
+  escalation: BootstrapEscalation | null;
+  rejections: { gate: SeedGate; candidates: number }[];
+  summary: string;
+};
+
+const SEED_GATE_LABELS: Record<SeedGate, string> = {
+  frame_quality: "frame quality",
+  segment_break: "segment break",
+  parallax: "residual parallax",
+  matches: "feature matches",
+  essential_inliers: "essential-matrix inliers",
+  baseline: "translation baseline",
+  cheirality: "cheirality",
+  reprojection: "reprojection error",
+  triangulation_angle: "triangulation angle",
+};
+
+const ESCALATION_LABELS: Record<BootstrapEscalation, string> = {
+  learned_matching: "learned matching",
+  learned_calibration: "learned calibration",
+  learned_multi_view: "learned multi-view depth",
+};
+
+/** Seed-candidate rejections per gate, e.g. "translation baseline ×15, triangulation angle ×1". */
+export function describeSeedRejections(bootstrap: BootstrapDiagnosis): string {
+  if (bootstrap.rejections.length === 0) return "None rejected";
+  return bootstrap.rejections
+    .map(({ gate, candidates }) => `${SEED_GATE_LABELS[gate]} ×${candidates}`)
+    .join(", ");
+}
+
+/** The decisive bootstrap gate and the escalation its evidence supports. */
+export function describeBootstrap(bootstrap: BootstrapDiagnosis): string {
+  const escalation = bootstrap.escalation
+    ? ` Evidence suits ${ESCALATION_LABELS[bootstrap.escalation]} escalation (not run automatically).`
+    : "";
+  return `${bootstrap.summary}${escalation}`;
+}
+
 export type MultiViewStats = {
   keyframes: number[];
   keyframe_selection: KeyframeSelectionStats;
@@ -435,6 +516,8 @@ export type ReconstructionResult = {
   multi_view: MultiViewStats;
   revisits: RevisitStats;
   registered_views: RegisteredViewStats[];
+  seed_candidates: SeedCandidateStats[];
+  bootstrap: BootstrapDiagnosis;
   warnings: string[];
   camera_state: CameraPipelineState;
   accepted_camera_evidence: EvidenceCamera[];
@@ -617,6 +700,50 @@ function frameIndexSet(cameras: CameraPose[]): Set<number> {
 
 function sameFrameSet(left: Set<number>, right: Set<number>): boolean {
   return left.size === right.size && [...left].every((frameIndex) => right.has(frameIndex));
+}
+
+/**
+ * Every adjacent pair is a seed candidate with a rejection gate or acceptance, and the
+ * bootstrap names a decisive gate exactly when no seed pair or no further camera was accepted.
+ */
+/** Whether the seed pair spans its whole segment, the only one its solve may register. */
+function seedCoversSegment(result: ReconstructionResult, pairCount: number): boolean {
+  const pair = result.calibrated_pair;
+  if (!pair) return false;
+  const segment = result.multi_view.keyframe_selection.segments.find(
+    (candidate) => candidate.first_frame <= pair.from_frame && pair.to_frame <= candidate.last_frame,
+  );
+  return segment ? segment.last_frame - segment.first_frame <= 1 : pairCount <= 1;
+}
+
+function assertBootstrapContract(result: ReconstructionResult, expectedFrameCount: number): void {
+  const candidates = result.seed_candidates;
+  const bootstrap = result.bootstrap;
+  if (
+    !Array.isArray(candidates) ||
+    candidates.length !== Math.max(0, expectedFrameCount - 1) ||
+    !candidates.every((candidate, index) => candidate.from_frame === index) ||
+    !bootstrap ||
+    typeof bootstrap.summary !== "string"
+  ) {
+    throw new Error("bootstrap contract mismatch: seed candidates do not cover every adjacent pair");
+  }
+  const pair = result.calibrated_pair;
+  const seed = pair ? candidates[pair.from_frame] : null;
+  if (pair && (!seed || seed.rejected_gate !== null || !seed.selected)) {
+    throw new Error("bootstrap contract mismatch: the calibrated seed pair is not an accepted candidate");
+  }
+  const expectedGate = !pair
+    ? bootstrap.decisive_gate !== null && bootstrap.decisive_gate !== "registration"
+    : result.registered_views.length === 0 && !seedCoversSegment(result, candidates.length)
+      ? bootstrap.decisive_gate === "registration"
+      : // Registered views, or a two-frame segment that the seed pair covers.
+        bootstrap.decisive_gate === null;
+  if (candidates.length > 0 && !expectedGate) {
+    throw new Error(
+      `bootstrap contract mismatch: decisive gate ${String(bootstrap.decisive_gate)} contradicts the accepted cameras`,
+    );
+  }
 }
 
 export function assertReconstructionContract(
@@ -824,6 +951,7 @@ export function assertReconstructionContract(
       "camera-state contract mismatch: skipped dense reconstruction exposed dense-eligible cameras",
     );
   }
+  assertBootstrapContract(result, expectedFrameCount);
 }
 
 export async function reconstructFrames(frames: SampledFrame[]): Promise<ReconstructionResult> {

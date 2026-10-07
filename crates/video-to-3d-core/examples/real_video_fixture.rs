@@ -227,7 +227,18 @@ fn run() -> Result<(), String> {
         result.warnings.len(),
     );
     fs::write(output_directory.join("metrics.json"), metrics).map_err(|error| error.to_string())?;
+    let bootstrap = serde_json::json!({
+        "schema_version": "video-to-3d/real-video-bootstrap/v1",
+        "bootstrap": result.bootstrap,
+        "seed_candidates": result.seed_candidates,
+    });
+    fs::write(
+        output_directory.join("bootstrap.json"),
+        serde_json::to_string_pretty(&bootstrap).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
 
+    println!("{}", result.bootstrap.summary);
     println!(
         "real-video-reconstruction frames={} accepted-cameras={} sparse={} dense={} triangles={}",
         paths.len(),

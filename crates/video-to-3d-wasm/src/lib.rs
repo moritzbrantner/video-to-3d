@@ -11,11 +11,12 @@ use video_to_3d_core::surface_materials::{
 use video_to_3d_core::textured_glb::encode_textured_glb;
 use video_to_3d_core::{
     classic_reference_patch_regions, evaluate_relative_depth, reconstruct_browser,
-    CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite, DenseReferencePatchStats,
-    DenseStats, EvidenceCamera, EvidenceScale, FrameInput, LearnedDepthCamera, MeshStats,
-    MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionEvidenceView,
-    ReconstructionOptions, ReconstructionProviderDescriptor, ReconstructionRequest,
-    RegisteredViewStats, RelativeDepthFrame, RevisitStats,
+    BootstrapDiagnosis, CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite,
+    DenseReferencePatchStats, DenseStats, EvidenceCamera, EvidenceScale, FrameInput,
+    LearnedDepthCamera, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
+    ReconstructionEvidenceView, ReconstructionOptions, ReconstructionProviderDescriptor,
+    ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame, RevisitStats,
+    SeedCandidateStats,
 };
 use wasm_bindgen::prelude::*;
 
@@ -105,6 +106,8 @@ struct WasmBrowserReconstructionResult<'a> {
     multi_view: &'a MultiViewStats,
     revisits: &'a RevisitStats,
     registered_views: &'a [RegisteredViewStats],
+    seed_candidates: &'a [SeedCandidateStats],
+    bootstrap: &'a BootstrapDiagnosis,
     warnings: &'a [String],
     camera_state: &'a CameraPipelineState,
     accepted_camera_evidence: &'a [EvidenceCamera],
@@ -474,6 +477,8 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         multi_view: &reconstruction.multi_view,
         revisits: &reconstruction.revisits,
         registered_views: &reconstruction.registered_views,
+        seed_candidates: &reconstruction.seed_candidates,
+        bootstrap: &reconstruction.bootstrap,
         warnings: &reconstruction.warnings,
         camera_state: &result.camera_state,
         accepted_camera_evidence: &evidence.cameras,
