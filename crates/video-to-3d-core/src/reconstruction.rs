@@ -1364,7 +1364,25 @@ fn needs_registration_recovery(
     let missing_selected_view = result.calibrated_pair.is_some()
         && result.multi_view.registration_candidates.len() > result.registered_views.len();
     let tracks_end_early = request.frames.len() >= 4 && result.multi_view.longest_track < 4;
-    missing_seed || starved_adjacent_pair || missing_selected_view || tracks_end_early
+    // A split clip solves its other segments on their own, so a retry can also help them.
+    let secondary_segment_short = secondary_segment_solves(result).any(|solve| {
+        solve.seed_pair.is_none() || solve.pnp_ready_candidates > solve.registered_views
+    });
+    missing_seed
+        || starved_adjacent_pair
+        || missing_selected_view
+        || tracks_end_early
+        || secondary_segment_short
+}
+
+fn secondary_segment_solves(
+    result: &ReconstructionResult,
+) -> impl Iterator<Item = &SegmentSolveStats> {
+    result
+        .multi_view
+        .segment_solves
+        .iter()
+        .filter(|solve| !solve.primary)
 }
 
 fn pan_recovery_radius(
@@ -1396,10 +1414,14 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult) -> [usize; 8] {
+fn reconstruction_score(result: &ReconstructionResult) -> [usize; 11] {
     // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
     // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
-    // camera/point solution survives.
+    // camera/point solution survives. The primary solve ranks first; the other segments of a
+    // split clip only break ties, so a retry never trades primary quality for secondary gains.
+    let secondary = |measure: fn(&SegmentSolveStats) -> usize| {
+        secondary_segment_solves(result).map(measure).sum::<usize>()
+    };
     [
         usize::from(result.calibrated_pair.is_some()),
         accepted_registered_camera_count(result),
@@ -1409,6 +1431,9 @@ fn reconstruction_score(result: &ReconstructionResult) -> [usize; 8] {
         result.multi_view.longest_track,
         result.multi_view.linked_pairs,
         result.points.len(),
+        secondary(|solve| usize::from(solve.seed_pair.is_some())),
+        secondary(|solve| solve.registered_views),
+        secondary(|solve| solve.sparse_points),
     ]
 }
 
@@ -2346,5 +2371,91 @@ mod tests {
         assert!(result.multi_view.segment_solves.is_empty());
         let serialized = serde_json::to_string(&result.multi_view).unwrap();
         assert!(!serialized.contains("segment_solves"));
+    }
+
+
+    /// A split clip whose second segment pans too far for the first pass to seed it.
+    fn wide_pan_split_request() -> ReconstructionRequest {
+        let mut frames = lateral_span(&scene_points(0x5eed), 236);
+        let wide = scene_points(0xc0ffee);
+        frames.extend((0..6).map(|frame| render_scene(&wide, -0.42 + frame as f64 * 1.2, 64)));
+        scene_request(frames)
+    }
+
+    #[test]
+    fn recovery_keeps_a_secondary_segment_only_the_retry_solves() {
+        let request = wide_pan_split_request();
+        let initial = reconstruct_once(&request).expect("first pass should succeed");
+        let initial_secondary: Vec<_> = secondary_segment_solves(&initial).collect();
+        assert_eq!(initial_secondary.len(), 1);
+        assert!(initial_secondary[0].seed_pair.is_none());
+
+        let result = reconstruct(&request).expect("reconstruction should succeed");
+        let secondary: Vec<_> = secondary_segment_solves(&result).collect();
+        assert_eq!(secondary.len(), 1);
+        assert!(secondary[0].seed_pair.is_some(), "{:?}", secondary[0]);
+        assert!(secondary[0].registered_views > 0);
+        assert!(reconstruction_score(&result) > reconstruction_score(&initial));
+    }
+
+    #[test]
+    fn a_short_secondary_segment_alone_triggers_recovery() {
+        let request = scene_request(lateral_span(&scene_points(0x5eed), 236));
+        let mut result = reconstruct_once(&request).expect("fixture should reconstruct");
+        assert!(!needs_registration_recovery(&request, &result));
+
+        let solve = SegmentSolveStats {
+            segment: 1,
+            first_frame: 6,
+            last_frame: 11,
+            primary: false,
+            seed_pair: result.calibrated_pair.clone(),
+            registration_candidates: 3,
+            pnp_ready_candidates: 3,
+            registered_views: 3,
+            recovered_from_revisit: 0,
+            sparse_points: 100,
+            bundle_adjustment_accepted: true,
+            cameras: Vec::new(),
+        };
+        result.multi_view.segment_solves = vec![solve.clone()];
+        assert!(!needs_registration_recovery(&request, &result));
+
+        result.multi_view.segment_solves[0].registered_views = 2;
+        assert!(needs_registration_recovery(&request, &result));
+        result.multi_view.segment_solves[0] = SegmentSolveStats {
+            seed_pair: None,
+            ..solve
+        };
+        assert!(needs_registration_recovery(&request, &result));
+    }
+
+    #[test]
+    fn secondary_segments_never_outrank_the_primary_solve() {
+        let request = scene_request(lateral_span(&scene_points(0x5eed), 236));
+        let base = reconstruct_once(&request).expect("fixture should reconstruct");
+        let solve = |seeded: bool, registered_views: usize| SegmentSolveStats {
+            segment: 1,
+            first_frame: 6,
+            last_frame: 11,
+            primary: false,
+            seed_pair: base.calibrated_pair.clone().filter(|_| seeded),
+            registration_candidates: 4,
+            pnp_ready_candidates: 4,
+            registered_views,
+            recovered_from_revisit: 0,
+            sparse_points: registered_views * 50,
+            bundle_adjustment_accepted: seeded,
+            cameras: Vec::new(),
+        };
+        let mut unseeded = base.clone();
+        unseeded.multi_view.segment_solves = vec![solve(false, 0)];
+        let mut seeded = base.clone();
+        seeded.multi_view.segment_solves = vec![solve(true, 3)];
+        assert!(reconstruction_score(&seeded) > reconstruction_score(&unseeded));
+
+        let mut stronger_primary = unseeded.clone();
+        stronger_primary.points.push(base.points[0]);
+        assert!(reconstruction_score(&stronger_primary) > reconstruction_score(&seeded));
     }
 }
