@@ -1,5 +1,5 @@
 use crate::{MeshTriangle, Point3, ReconstructionResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION: u32 = 1;
@@ -50,7 +50,7 @@ pub enum EvidenceScale {
     ProviderLocal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceCameraAuthority {
     CalibratedSeed,
@@ -58,7 +58,7 @@ pub enum EvidenceCameraAuthority {
     ProviderEstimated,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvidenceCamera {
     pub frame_index: usize,
     pub authority: EvidenceCameraAuthority,
@@ -154,7 +154,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
 
     pub fn from_classic(reconstruction: &'a ReconstructionResult) -> Result<Self, String> {
         let cameras = classic_camera_evidence(reconstruction)?;
-        let regions = classic_surface_regions(reconstruction);
+        let regions = classic_reference_patch_regions(&reconstruction.dense.reference_patches);
         Self::new(
             ReconstructionProviderDescriptor::classic(),
             EvidenceScale::ArbitraryMonocular,
@@ -305,9 +305,15 @@ fn classic_camera_evidence(
     Ok(cameras)
 }
 
-fn classic_surface_regions(reconstruction: &ReconstructionResult) -> Vec<SurfaceEvidenceRegion> {
-    let mut regions = Vec::with_capacity(reconstruction.dense.reference_patches.len() * 2);
-    for patch in &reconstruction.dense.reference_patches {
+/// Provenance regions of the built-in reconstruction: each accepted reference
+/// patch contributes its geometric primary range and its revalidated completion
+/// range. Adapters that only hold the serialized patch ranges (for example the
+/// browser asking for a material bake) rebuild the same regions through this.
+pub fn classic_reference_patch_regions(
+    patches: &[crate::DenseReferencePatchStats],
+) -> Vec<SurfaceEvidenceRegion> {
+    let mut regions = Vec::with_capacity(patches.len() * 2);
+    for patch in patches {
         if patch.primary_points > 0 {
             regions.push(SurfaceEvidenceRegion {
                 origin: EvidenceOrigin::GeometricMultiView,

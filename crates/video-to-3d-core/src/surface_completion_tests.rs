@@ -111,3 +111,94 @@ fn verified_surface_completion_adds_expected_plane_geometry() {
         assert!(point.confidence >= 0.05 && point.confidence <= 0.9);
     }
 }
+
+#[test]
+fn accepted_plane_mesh_bakes_into_a_textured_glb_without_changing_geometry() {
+    use crate::surface_materials::{bake_surface_materials, ReferenceImage};
+    use crate::textured_glb::encode_textured_glb;
+    use crate::{
+        classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceScale,
+        ReconstructionEvidenceView, ReconstructionProviderDescriptor,
+    };
+
+    let width = 68;
+    let height = 48;
+    let focal = 60.0;
+    let depth = 4.0;
+    let frames = vec![
+        plane_frame(width, height, focal, 0.0, depth),
+        plane_frame(width, height, focal, 0.25, depth),
+        plane_frame(width, height, focal, -0.22, depth),
+    ];
+    let cameras = vec![camera(0, 0.0), camera(1, 0.25), camera(2, -0.22)];
+    let sparse = plane_sparse_points(width, height, focal, depth);
+    let dense = estimate_depth_points(&frames, &cameras, &sparse, focal);
+    let mesh = crate::mesh::reconstruct_dense_mesh(
+        &dense.points,
+        &dense.grid_sites,
+        &dense.stats,
+        &cameras,
+        width,
+        height,
+        focal,
+    );
+    assert!(
+        !mesh.triangles.is_empty(),
+        "fixture must produce accepted topology"
+    );
+
+    let evidence_cameras = cameras
+        .iter()
+        .map(|camera| EvidenceCamera {
+            frame_index: camera.frame_index,
+            authority: EvidenceCameraAuthority::RegisteredGeometry,
+            rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            translation: [camera.translation.x as f32, 0.0, 0.0],
+            confidence: Some(0.9),
+            median_reprojection_error_pixels: Some(0.5),
+        })
+        .collect();
+    let evidence = ReconstructionEvidenceView::new(
+        ReconstructionProviderDescriptor::classic(),
+        EvidenceScale::ArbitraryMonocular,
+        evidence_cameras,
+        classic_reference_patch_regions(&dense.stats.reference_patches),
+        &dense.points,
+        &mesh.triangles,
+    )
+    .expect("accepted reconstruction is valid evidence");
+    let images = frames
+        .iter()
+        .enumerate()
+        .map(|(frame_index, frame)| ReferenceImage {
+            frame_index,
+            width: frame.width,
+            height: frame.height,
+            rgba: &frame.rgba,
+        })
+        .collect::<Vec<_>>();
+    let points_before = dense
+        .points
+        .iter()
+        .map(|point| [point.x, point.y, point.z])
+        .collect::<Vec<_>>();
+
+    let bake = bake_surface_materials(&evidence, &dense.grid_sites, &images).unwrap();
+    assert!(bake.textured_triangles() > 0, "{}", bake.diagnostic());
+    assert_eq!(
+        bake.textured_triangles() + bake.fallback.triangles.len(),
+        mesh.triangles.len()
+    );
+    // Each triangle of a single reference patch is textured from that patch.
+    assert_eq!(bake.fallback.reasons.mixed_reference, 0);
+    let glb = encode_textured_glb(&evidence, &bake).unwrap();
+    assert_eq!(&glb[..4], b"glTF");
+    assert_eq!(
+        points_before,
+        dense
+            .points
+            .iter()
+            .map(|point| [point.x, point.y, point.z])
+            .collect::<Vec<_>>()
+    );
+}

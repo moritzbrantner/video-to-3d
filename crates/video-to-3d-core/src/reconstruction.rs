@@ -6,7 +6,7 @@ mod pnp;
 mod revisit;
 mod two_view;
 
-pub use dense::{DenseGridSite, DenseStats, DenseWorkingSetEstimate};
+pub use dense::{DenseGridSite, DenseReferencePatchStats, DenseStats, DenseWorkingSetEstimate};
 pub use keyframe_selection::{
     ClipSegmentStats, FrameDecision, FrameSelectionStats, KeyframeSelectionStats, SegmentBreak,
 };
