@@ -132,19 +132,63 @@ impl PoseCandidate {
             || (self.points.len() == other.points.len()
                 && self.median_reprojection_error_pixels < other.median_reprojection_error_pixels)
     }
+
+    /// The candidate's ranking and evidence, without its triangulated points.
+    fn summary(&self, required_points: usize) -> PoseSummary {
+        PoseSummary {
+            accepted_points: self.points.len(),
+            median_reprojection_error_pixels: self.median_reprojection_error_pixels,
+            evidence: self.evidence(required_points),
+            rejection: pose_rejection(self, required_points),
+        }
+    }
+}
+
+/// What a pose hypothesis contributes as evidence once it is not selected.
+struct PoseSummary {
+    accepted_points: usize,
+    median_reprojection_error_pixels: f64,
+    evidence: PoseEvidence,
+    rejection: Option<TwoViewRejection>,
+}
+
+impl PoseSummary {
+    fn outranks(&self, other: &Self) -> bool {
+        self.accepted_points > other.accepted_points
+            || (self.accepted_points == other.accepted_points
+                && self.median_reprojection_error_pixels < other.median_reprojection_error_pixels)
+    }
 }
 
 /// The pose gates of [`recover_pose`]: enough points in front of both cameras within the
 /// reprojection gate, at a sufficient median triangulation angle.
 fn pose_rejection(candidate: &PoseCandidate, required_points: usize) -> Option<TwoViewRejection> {
-    if candidate.points.len() < required_points {
-        return Some(if candidate.behind_camera >= candidate.high_reprojection {
+    pose_rejection_from_counts(
+        candidate.points.len(),
+        candidate.behind_camera,
+        candidate.high_reprojection,
+        candidate.median_triangulation_angle_degrees,
+        required_points,
+    )
+}
+
+/// Too few accepted points blame whichever loss was larger: points behind a camera
+/// (cheirality, also on a tie) or points over the reprojection gate.
+fn pose_rejection_from_counts(
+    accepted_points: usize,
+    behind_camera: usize,
+    high_reprojection: usize,
+    median_triangulation_angle_degrees: f64,
+    required_points: usize,
+) -> Option<TwoViewRejection> {
+    if accepted_points < required_points {
+        return Some(if behind_camera >= high_reprojection {
             TwoViewRejection::Cheirality
         } else {
             TwoViewRejection::Reprojection
         });
     }
-    (candidate.median_triangulation_angle_degrees < MIN_TRIANGULATION_ANGLE_DEGREES)
+    (median_triangulation_angle_degrees < MIN_TRIANGULATION_ANGLE_DEGREES)
         .then_some(TwoViewRejection::TriangulationAngle)
 }
 
@@ -277,17 +321,19 @@ pub(super) fn evaluate_two_view(
     };
     let required_points = (best_inliers.len() * 3 / 5).max(8);
     // The strongest pose hypothesis of either model, kept as evidence when both fail.
-    let mut strongest: Option<PoseCandidate> = None;
+    // Only its ranking and scalar evidence are kept, never its triangulated points.
+    let mut strongest: Option<PoseSummary> = None;
     let mut gated = |candidate: Option<PoseCandidate>| {
         let candidate = candidate?;
-        let rejected = pose_rejection(&candidate, required_points);
+        let summary = candidate.summary(required_points);
+        let rejected = summary.rejection.is_some();
         if strongest
             .as_ref()
-            .is_none_or(|current| candidate.outranks(current))
+            .is_none_or(|current| summary.outranks(current))
         {
-            strongest = Some(candidate.clone());
+            strongest = Some(summary);
         }
-        rejected.is_none().then_some(candidate)
+        (!rejected).then_some(candidate)
     };
     let ransac_pose = gated(best_pose(
         &ransac_essential,
@@ -305,9 +351,7 @@ pub(super) fn evaluate_two_view(
             ))
             .map(|pose| (refined_essential, pose))
         });
-    evidence.pose = strongest
-        .as_ref()
-        .map(|candidate| candidate.evidence(required_points));
+    evidence.pose = strongest.as_ref().map(|summary| summary.evidence);
 
     let (essential, pose) = match (refined_model, ransac_pose) {
         (Some((refined_essential, refined_pose)), Some(ransac_pose)) => {
@@ -326,7 +370,7 @@ pub(super) fn evaluate_two_view(
         (None, None) => {
             let gate = strongest
                 .as_ref()
-                .and_then(|candidate| pose_rejection(candidate, required_points))
+                .and_then(|summary| summary.rejection)
                 .unwrap_or(TwoViewRejection::Cheirality);
             return reject(evidence, gate);
         }
@@ -725,6 +769,32 @@ fn median_f64(values: &mut [f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn too_few_pose_points_blame_the_larger_loss() {
+        let angle = MIN_TRIANGULATION_ANGLE_DEGREES * 4.0;
+        // 20 inliers need 12; 6 survive. More points behind a camera: cheirality.
+        assert_eq!(
+            pose_rejection_from_counts(6, 10, 4, angle, 12),
+            Some(TwoViewRejection::Cheirality)
+        );
+        // More points over the reprojection gate: reprojection.
+        assert_eq!(
+            pose_rejection_from_counts(6, 4, 10, angle, 12),
+            Some(TwoViewRejection::Reprojection)
+        );
+        // A tie blames cheirality.
+        assert_eq!(
+            pose_rejection_from_counts(6, 7, 7, angle, 12),
+            Some(TwoViewRejection::Cheirality)
+        );
+        // Enough points: only the triangulation angle can still reject.
+        assert_eq!(pose_rejection_from_counts(12, 7, 1, angle, 12), None);
+        assert_eq!(
+            pose_rejection_from_counts(12, 0, 0, MIN_TRIANGULATION_ANGLE_DEGREES * 0.5, 12),
+            Some(TwoViewRejection::TriangulationAngle)
+        );
+    }
 
     fn project(
         point: Vector3<f64>,

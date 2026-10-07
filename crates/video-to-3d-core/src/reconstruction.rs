@@ -1183,14 +1183,29 @@ fn diagnose_bootstrap(
                 ),
             };
         }
+        // One adjacent pair means two frames: the seed pair already covers the clip.
+        if seeds.len() <= 1 {
+            return BootstrapDiagnosis {
+                decisive_gate: None,
+                decisive_pair: None,
+                escalation: None,
+                rejections,
+                summary: "A calibrated seed pair was accepted and covers every frame.".into(),
+            };
+        }
+        let summary = if pnp_ready == 0 {
+            "A calibrated seed pair was accepted, but no other selected keyframe tracked enough seed landmarks to attempt PnP, so no registration was tried.".to_string()
+        } else {
+            format!(
+                "A calibrated seed pair was accepted, but registration failed: {pnp_ready} other selected keyframe(s) tracked enough seed landmarks for PnP and none passed the inlier and reprojection gates."
+            )
+        };
         return BootstrapDiagnosis {
             decisive_gate: Some(BootstrapGate::Registration),
             decisive_pair: None,
             escalation: Some(BootstrapEscalation::LearnedMatching),
             rejections,
-            summary: format!(
-                "A calibrated seed pair was accepted, but registration failed: {pnp_ready} other selected keyframe(s) tracked enough seed landmarks for PnP and none passed the inlier and reprojection gates."
-            ),
+            summary,
         };
     }
 
@@ -2999,6 +3014,17 @@ mod tests {
         let registered = diagnose_bootstrap(&seeds, true, 2, 3);
         assert_eq!(registered.decisive_gate, None);
         assert_eq!(registered.escalation, None);
+
+        // No keyframe reached PnP: the limit is correspondence, not a rejected pose.
+        let untried = diagnose_bootstrap(&seeds, true, 0, 0);
+        assert_eq!(untried.decisive_gate, Some(BootstrapGate::Registration));
+        assert!(untried.summary.contains("no registration was tried"), "{}", untried.summary);
+        assert!(!untried.summary.contains("inlier and reprojection gates"));
+
+        // A two-frame clip is fully covered by its seed pair.
+        let two_frames = diagnose_bootstrap(&seeds[..1], true, 0, 0);
+        assert_eq!(two_frames.decisive_gate, None);
+        assert_eq!(two_frames.escalation, None);
     }
 
     /// A split clip whose second segment pans too far for the first pass to seed it.
