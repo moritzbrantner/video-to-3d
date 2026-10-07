@@ -303,6 +303,27 @@ export function describeGeometryConfidence(result: ReconstructionResult): string
   return `Regions: ${bands(summary.regions)}${range}; triangles: ${bands(summary.triangles)}`;
 }
 
+/** Reciprocal-agreement and depth-ambiguity factor ranges over camera-backed regions. */
+export function describeConfidenceFactors(result: ReconstructionResult): string {
+  const summary = result.geometry_confidence_summary;
+  const range = (value: FactorRange | null) =>
+    value === null ? "n/a" : `${value.min.toFixed(2)}–${value.max.toFixed(2)}`;
+  const parts: string[] = [];
+  if (summary.split_agreement_regions > 0) {
+    parts.push(
+      `Reciprocal agreement ${range(summary.reciprocal_agreement)}, depth ambiguity ${range(summary.depth_ambiguity)} (${summary.split_agreement_regions} regions from per-point attributes)`,
+    );
+  }
+  if (summary.combined_agreement_regions > 0) {
+    parts.push(
+      summary.split_agreement_regions === 0
+        ? `Reciprocal agreement ${range(summary.reciprocal_agreement)} from combined point confidence; depth ambiguity folded in (${summary.combined_agreement_regions} regions)`
+        : `${summary.combined_agreement_regions} regions fold depth ambiguity into combined point confidence`,
+    );
+  }
+  return parts.length === 0 ? "No camera-backed regions report reciprocal or depth evidence" : parts.join("; ");
+}
+
 export function describeCollider(collider: CoarseCollider): string {
   const excluded = `${collider.excluded.unobserved_provenance} learned/generative and ${collider.excluded.low_confidence} low-confidence triangles excluded`;
   if (collider.cell_size === null || collider.box_count === 0) {
@@ -511,6 +532,12 @@ export type DenseGridSiteBuffer = {
   length: number;
 };
 
+/** Per-point `(reciprocal_consistency, depth_margin)` pairs, parallel to the dense points. */
+export type DensePointAttributeBuffer = {
+  values: Float32Array;
+  length: number;
+};
+
 export type MeshTriangleBuffer = {
   indices: Uint32Array;
   confidence: Float32Array;
@@ -542,8 +569,11 @@ export type RegionConfidence = {
     camera_support: number;
     reprojection: number;
     reciprocal_agreement: number;
+    /** Null when the provider records no depth margin; it is then part of reciprocal_agreement. */
+    depth_ambiguity: number | null;
     triangulation: number;
     reference_exclusivity: number;
+    agreement_source: "combined_point_confidence" | "point_attributes";
   };
   provenance_weight: number;
   confidence: number;
@@ -555,6 +585,11 @@ export type RegionConfidence = {
 };
 
 export type BandCounts = Record<ConfidenceBand, number>;
+
+export type FactorRange = { min: number; max: number };
+
+/** Geometry confidence schema this browser build understands. */
+export const GEOMETRY_CONFIDENCE_SCHEMA_VERSION = 2;
 
 export type GeometryConfidenceField = {
   schema_version: number;
@@ -569,6 +604,10 @@ export type GeometryConfidenceSummary = {
   triangles: BandCounts;
   min_region_confidence: number | null;
   max_region_confidence: number | null;
+  split_agreement_regions: number;
+  combined_agreement_regions: number;
+  reciprocal_agreement: FactorRange | null;
+  depth_ambiguity: FactorRange | null;
 };
 
 /** Coarse collision geometry; kept separate from the visual mesh. */
@@ -590,6 +629,7 @@ export type ReconstructionResult = {
   points: Point3[];
   dense_points: DensePointBuffer;
   dense_grid_sites: DenseGridSiteBuffer;
+  dense_point_attributes: DensePointAttributeBuffer;
   dense: DenseStats;
   mesh_triangles: MeshTriangleBuffer;
   mesh: MeshStats;
@@ -625,6 +665,11 @@ type RawDenseGridSiteBuffer = {
   length: number;
 };
 
+type RawDensePointAttributeBuffer = {
+  values_f32_le: Uint8Array;
+  length: number;
+};
+
 type RawMeshTriangleBuffer = {
   indices_u32_le: Uint8Array;
   confidence_f32_le: Uint8Array;
@@ -633,10 +678,11 @@ type RawMeshTriangleBuffer = {
 
 type RawReconstructionResult = Omit<
   ReconstructionResult,
-  "dense_points" | "dense_grid_sites" | "mesh_triangles"
+  "dense_points" | "dense_grid_sites" | "dense_point_attributes" | "mesh_triangles"
 > & {
   dense_points: RawDensePointBuffer;
   dense_grid_sites: RawDenseGridSiteBuffer;
+  dense_point_attributes: RawDensePointAttributeBuffer;
   mesh_triangles: RawMeshTriangleBuffer;
 };
 
@@ -752,6 +798,19 @@ function normalizeDenseGridSiteBuffer(value: unknown): DenseGridSiteBuffer {
   return { xy, length };
 }
 
+function normalizeDensePointAttributeBuffer(value: unknown): DensePointAttributeBuffer {
+  const raw = objectRecord(value, "dense-point attribute buffer") as RawDensePointAttributeBuffer;
+  const length = packedLength(raw.length, "dense-point attribute count");
+  const values = float32LittleEndian(
+    byteBuffer(raw.values_f32_le, "dense-point attribute buffer"),
+    "dense-point attribute buffer",
+  );
+  if (values.length !== length * 2) {
+    throw new Error("camera-state contract mismatch: dense-point attribute buffer lengths are inconsistent");
+  }
+  return { values, length };
+}
+
 function normalizeMeshTriangleBuffer(value: unknown): MeshTriangleBuffer {
   const raw = objectRecord(value, "mesh-triangle buffer") as RawMeshTriangleBuffer;
   const length = packedLength(raw.length, "mesh-triangle count");
@@ -775,6 +834,7 @@ export function normalizeWasmReconstruction(value: unknown): ReconstructionResul
     ...normalized,
     dense_points: normalizeDensePointBuffer(normalized.dense_points),
     dense_grid_sites: normalizeDenseGridSiteBuffer(normalized.dense_grid_sites),
+    dense_point_attributes: normalizeDensePointAttributeBuffer(normalized.dense_point_attributes),
     mesh_triangles: normalizeMeshTriangleBuffer(normalized.mesh_triangles),
   };
 }
@@ -908,6 +968,8 @@ export function assertReconstructionContract(
     result.dense_points.rgb.length !== result.dense_points.length * 3 ||
     result.dense_grid_sites.xy.length !== result.dense_grid_sites.length * 2 ||
     result.dense_grid_sites.length !== result.dense_points.length ||
+    result.dense_point_attributes.values.length !== result.dense_point_attributes.length * 2 ||
+    result.dense_point_attributes.length !== result.dense_points.length ||
     result.mesh_triangles.indices.length !== result.mesh_triangles.length * 3 ||
     result.mesh_triangles.confidence.length !== result.mesh_triangles.length
   ) {
@@ -1051,8 +1113,35 @@ function assertConfidenceContract(result: ReconstructionResult): void {
   if (!field || !Array.isArray(field.regions) || !result.geometry_confidence_summary || !collider) {
     throw new Error("confidence contract mismatch: WASM result has no geometry confidence or collider");
   }
+  if (
+    field.schema_version !== GEOMETRY_CONFIDENCE_SCHEMA_VERSION ||
+    result.geometry_confidence_summary.schema_version !== GEOMETRY_CONFIDENCE_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      `confidence contract mismatch: expected geometry confidence schema v${GEOMETRY_CONFIDENCE_SCHEMA_VERSION}, got v${field.schema_version}`,
+    );
+  }
   if (field.point_count !== result.dense_points.length) {
     throw new Error("confidence contract mismatch: confidence field covers different dense points");
+  }
+  if (!result.dense_point_attributes.values.every((value) => value >= 0 && value <= 1)) {
+    throw new Error("confidence contract mismatch: dense-point attributes are outside [0, 1]");
+  }
+  // The built-in provider records per-point attributes, so every region must score
+  // reciprocal agreement and depth ambiguity separately.
+  const unit = (value: number) => value >= 0 && value <= 1;
+  if (
+    field.regions.some(({ factors }) =>
+      factors.agreement_source === "point_attributes"
+        ? factors.depth_ambiguity === null ||
+          !unit(factors.depth_ambiguity) ||
+          !unit(factors.reciprocal_agreement)
+        : true,
+    )
+  ) {
+    throw new Error(
+      "confidence contract mismatch: regions do not score reciprocal agreement and depth ambiguity from the dense-point attributes",
+    );
   }
   // An exact partition: sorted by start, each non-empty range begins where the last ended.
   const ranges = field.regions.map((region) => region.points).sort((a, b) => a.start - b.start);

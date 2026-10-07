@@ -2,7 +2,8 @@ use crate::{MeshTriangle, Point3, ReconstructionResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub const RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+/// Version 2 adds the optional per-point [`EvidencePointAttributes`].
+pub const RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION: u32 = 2;
 const CLASSIC_PROVIDER_ID: &str = "video-to-3d-core/classic";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -99,6 +100,20 @@ impl EvidenceRange {
     }
 }
 
+/// Per-point dense evidence a provider may record next to its points, each in `[0, 1]`.
+///
+/// Kept as an optional attribute slice parallel to the shared point buffer, so each region
+/// reads it through its own point range; it is never a second geometry buffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct EvidencePointAttributes {
+    /// Fraction of the supporting source views whose reciprocal depth agreed with the point.
+    pub reciprocal_consistency: f32,
+    /// Normalized gap between the chosen depth hypothesis and its closest comparable rival;
+    /// `1` is unambiguous, values near `0` mean another depth explained the pixels almost
+    /// as well.
+    pub depth_margin: f32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SurfaceEvidenceRegion {
     pub origin: EvidenceOrigin,
@@ -117,6 +132,8 @@ pub struct ReconstructionEvidenceSummary {
     pub generative_completion_points: usize,
     pub total_points: usize,
     pub triangles: usize,
+    /// Whether the provider recorded per-point reciprocal/depth-margin attributes.
+    pub point_attributes: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +145,9 @@ pub struct ReconstructionEvidenceView<'a> {
     pub regions: Vec<SurfaceEvidenceRegion>,
     pub points: &'a [Point3],
     pub triangles: &'a [MeshTriangle],
+    /// Optional per-point attributes parallel to `points`; providers without them leave
+    /// `None` and the confidence field keeps the combined point-confidence factor.
+    pub point_attributes: Option<&'a [EvidencePointAttributes]>,
 }
 
 impl<'a> ReconstructionEvidenceView<'a> {
@@ -147,9 +167,20 @@ impl<'a> ReconstructionEvidenceView<'a> {
             regions,
             points,
             triangles,
+            point_attributes: None,
         };
         evidence.validate()?;
         Ok(evidence)
+    }
+
+    /// Attach borrowed per-point attributes, validating them against the shared points.
+    pub fn with_point_attributes(
+        mut self,
+        attributes: &'a [EvidencePointAttributes],
+    ) -> Result<Self, String> {
+        self.point_attributes = Some(attributes);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn from_classic(reconstruction: &'a ReconstructionResult) -> Result<Self, String> {
@@ -162,7 +193,8 @@ impl<'a> ReconstructionEvidenceView<'a> {
             regions,
             &reconstruction.dense_points,
             &reconstruction.mesh_triangles,
-        )
+        )?
+        .with_point_attributes(&reconstruction.dense_point_attributes)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -181,6 +213,9 @@ impl<'a> ReconstructionEvidenceView<'a> {
         validate_provider_origins(&self.provider, &self.regions)?;
         validate_regions(&self.regions, self.points.len(), &self.cameras)?;
         validate_triangles(self.triangles, self.points.len())?;
+        if let Some(attributes) = self.point_attributes {
+            validate_point_attributes(&self.provider, attributes, self.points.len())?;
+        }
         Ok(())
     }
 
@@ -190,6 +225,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
             regions: self.regions.len(),
             total_points: self.points.len(),
             triangles: self.triangles.len(),
+            point_attributes: self.point_attributes.is_some(),
             ..ReconstructionEvidenceSummary::default()
         };
         for region in &self.regions {
@@ -213,8 +249,13 @@ impl<'a> ReconstructionEvidenceView<'a> {
 
     pub fn diagnostic(&self) -> String {
         let summary = self.summary();
+        let attributes = if summary.point_attributes {
+            "carries per-point reciprocal-consistency and depth-margin attributes"
+        } else {
+            "carries no per-point reciprocal or depth-margin attributes"
+        };
         format!(
-            "Provider-neutral reconstruction evidence v{} validated for {}: {} accepted cameras, {} provenance regions, {} shared dense points ({} geometric, {} revalidated completion, {} learned, {} generative completion), and {} accepted triangles. The evidence view borrows the existing geometry buffers instead of materializing a second point cloud or mesh.",
+            "Provider-neutral reconstruction evidence v{} validated for {}: {} accepted cameras, {} provenance regions, {} shared dense points ({} geometric, {} revalidated completion, {} learned, {} generative completion), and {} accepted triangles; it {attributes}. The evidence view borrows the existing geometry buffers instead of materializing a second point cloud or mesh.",
             self.schema_version,
             self.provider.id,
             summary.cameras,
@@ -399,6 +440,39 @@ fn validate_points(points: &[Point3]) -> Result<(), String> {
         {
             return Err(format!(
                 "reconstruction evidence point {index} contains invalid geometry/confidence"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_point_attributes(
+    provider: &ReconstructionProviderDescriptor,
+    attributes: &[EvidencePointAttributes],
+    point_count: usize,
+) -> Result<(), String> {
+    if matches!(
+        provider.class,
+        ReconstructionProviderClass::GenerativeCompletion
+    ) {
+        return Err(format!(
+            "reconstruction evidence provider {} ({:?}) cannot claim reciprocal or depth-margin point attributes",
+            provider.id, provider.class
+        ));
+    }
+    if attributes.len() != point_count {
+        return Err(format!(
+            "reconstruction evidence point attributes cover {} of {point_count} dense points",
+            attributes.len()
+        ));
+    }
+    for (index, attribute) in attributes.iter().enumerate() {
+        if [attribute.reciprocal_consistency, attribute.depth_margin]
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return Err(format!(
+                "reconstruction evidence point {index} has invalid reciprocal/depth-margin attributes"
             ));
         }
     }
@@ -633,6 +707,94 @@ mod tests {
         assert_eq!(evidence.summary().learned_points, 3);
     }
 
+    fn learned_view<'a>(
+        points: &'a [Point3],
+        attributes: &'a [EvidencePointAttributes],
+    ) -> Result<ReconstructionEvidenceView<'a>, String> {
+        ReconstructionEvidenceView::new(
+            learned_provider(),
+            EvidenceScale::ProviderLocal,
+            vec![camera(0), camera(1)],
+            vec![SurfaceEvidenceRegion {
+                origin: EvidenceOrigin::LearnedMultiView,
+                reference_frame: Some(0),
+                source_frames: vec![1],
+                points: EvidenceRange::new(0, points.len()),
+            }],
+            points,
+            &[],
+        )?
+        .with_point_attributes(attributes)
+    }
+
+    #[test]
+    fn point_attributes_are_borrowed_and_validated() {
+        let points = vec![point(0.0, 0.0, 1.0), point(1.0, 0.0, 1.0)];
+        let attribute = EvidencePointAttributes {
+            reciprocal_consistency: 0.5,
+            depth_margin: 1.0,
+        };
+        let attributes = vec![attribute; 2];
+        let evidence = learned_view(&points, &attributes).expect("valid attributes");
+        assert_eq!(evidence.schema_version, 2);
+        assert!(std::ptr::eq(
+            evidence.point_attributes.unwrap().as_ptr(),
+            attributes.as_ptr()
+        ));
+        assert!(evidence.summary().point_attributes);
+        assert!(evidence
+            .diagnostic()
+            .contains("carries per-point reciprocal-consistency and depth-margin attributes"));
+
+        let error = learned_view(&points, &attributes[..1]).expect_err("short attributes");
+        assert!(error.contains("cover 1 of 2 dense points"), "{error}");
+        for invalid in [-0.1, 1.5, f32::NAN, f32::INFINITY] {
+            for attribute in [
+                EvidencePointAttributes {
+                    reciprocal_consistency: invalid,
+                    ..attribute
+                },
+                EvidencePointAttributes {
+                    depth_margin: invalid,
+                    ..attribute
+                },
+            ] {
+                let error = learned_view(&points, &[attribute, attribute])
+                    .expect_err("out-of-range attribute must fail closed");
+                assert!(error.contains("invalid reciprocal/depth-margin"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn generative_completion_cannot_claim_point_attributes() {
+        let points = vec![point(0.0, 0.0, 1.0)];
+        let attributes = vec![EvidencePointAttributes {
+            reciprocal_consistency: 1.0,
+            depth_margin: 1.0,
+        }];
+        let error = ReconstructionEvidenceView::new(
+            generative_provider(),
+            EvidenceScale::ProviderLocal,
+            Vec::new(),
+            vec![SurfaceEvidenceRegion {
+                origin: EvidenceOrigin::GenerativeCompletion,
+                reference_frame: None,
+                source_frames: Vec::new(),
+                points: EvidenceRange::new(0, 1),
+            }],
+            &points,
+            &[],
+        )
+        .expect("camera-free generative evidence")
+        .with_point_attributes(&attributes)
+        .expect_err("generative completion has no reciprocal or depth evidence");
+        assert!(
+            error.contains("cannot claim reciprocal or depth-margin"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn provenance_must_partition_the_shared_point_buffer() {
         let points = vec![point(0.0, 0.0, 1.0), point(1.0, 0.0, 1.0)];
@@ -799,6 +961,7 @@ mod tests {
 
         assert!(evidence.cameras.is_empty());
         assert!(evidence.regions.is_empty());
+        assert_eq!(evidence.point_attributes.map(<[_]>::len), Some(0));
         assert!(std::ptr::eq(
             evidence.points.as_ptr(),
             reconstruction.dense_points.as_ptr()

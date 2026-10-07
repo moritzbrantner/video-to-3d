@@ -14,8 +14,8 @@ use video_to_3d_core::textured_glb::encode_textured_glb_with_collider;
 use video_to_3d_core::{
     classic_reference_patch_regions, evaluate_relative_depth, reconstruct_browser,
     BootstrapDiagnosis, CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite,
-    DenseReferencePatchStats, DenseStats, EvidenceCamera, EvidenceScale, FrameInput,
-    LearnedDepthCamera, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
+    DenseReferencePatchStats, DenseStats, EvidenceCamera, EvidencePointAttributes, EvidenceScale,
+    FrameInput, LearnedDepthCamera, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
     ReconstructionEvidenceView, ReconstructionOptions, ReconstructionProviderDescriptor,
     ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame, RevisitStats,
     SeedCandidateStats,
@@ -87,6 +87,13 @@ struct PackedDenseGridSiteBuffer {
     length: usize,
 }
 
+/// Per-point `(reciprocal_consistency, depth_margin)` pairs, parallel to the dense points.
+#[derive(Serialize)]
+struct PackedDensePointAttributeBuffer {
+    values_f32_le: ByteBuffer,
+    length: usize,
+}
+
 #[derive(Serialize)]
 struct PackedMeshTriangleBuffer {
     indices_u32_le: ByteBuffer,
@@ -100,6 +107,7 @@ struct WasmBrowserReconstructionResult<'a> {
     points: &'a [Point3],
     dense_points: PackedDensePointBuffer,
     dense_grid_sites: PackedDenseGridSiteBuffer,
+    dense_point_attributes: PackedDensePointAttributeBuffer,
     dense: &'a DenseStats,
     mesh_triangles: PackedMeshTriangleBuffer,
     mesh: &'a MeshStats,
@@ -228,6 +236,20 @@ fn pack_dense_grid_sites(sites: &[DenseGridSite]) -> PackedDenseGridSiteBuffer {
     PackedDenseGridSiteBuffer {
         xy_u32_le: ByteBuffer(xy_u32_le),
         length: sites.len(),
+    }
+}
+
+fn pack_dense_point_attributes(
+    attributes: &[EvidencePointAttributes],
+) -> PackedDensePointAttributeBuffer {
+    let mut values_f32_le = Vec::with_capacity(attributes.len() * 2 * size_of::<f32>());
+    for attribute in attributes {
+        values_f32_le.extend_from_slice(&attribute.reciprocal_consistency.to_le_bytes());
+        values_f32_le.extend_from_slice(&attribute.depth_margin.to_le_bytes());
+    }
+    PackedDensePointAttributeBuffer {
+        values_f32_le: ByteBuffer(values_f32_le),
+        length: attributes.len(),
     }
 }
 
@@ -471,6 +493,7 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         points: &reconstruction.points,
         dense_points: pack_dense_points(&reconstruction.dense_points),
         dense_grid_sites: pack_dense_grid_sites(&reconstruction.dense_grid_sites),
+        dense_point_attributes: pack_dense_point_attributes(&reconstruction.dense_point_attributes),
         dense: &reconstruction.dense,
         mesh_triangles: pack_mesh_triangles(
             &reconstruction.mesh_triangles,
@@ -525,6 +548,10 @@ struct WasmSurfaceMaterialRequest {
     dense_rgb: Vec<u8>,
     #[serde(deserialize_with = "deserialize_byte_buffer")]
     dense_grid_sites_u32_le: Vec<u8>,
+    /// Optional `(reciprocal_consistency, depth_margin)` pairs per dense point. Empty or
+    /// absent leaves the confidence field on the combined point-confidence factor.
+    #[serde(default, deserialize_with = "deserialize_byte_buffer")]
+    dense_point_attributes_f32_le: Vec<u8>,
     #[serde(deserialize_with = "deserialize_byte_buffer")]
     triangle_indices_u32_le: Vec<u8>,
     #[serde(deserialize_with = "deserialize_byte_buffer")]
@@ -620,7 +647,24 @@ pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
             ..DenseReferencePatchStats::default()
         })
         .collect::<Vec<_>>();
-    let evidence = ReconstructionEvidenceView::new(
+    let attributes = decode_f32_le(
+        &request.dense_point_attributes_f32_le,
+        "dense point attribute buffer",
+    )?
+    .as_chunks::<2>()
+    .0
+    .iter()
+    .map(|pair| EvidencePointAttributes {
+        reciprocal_consistency: pair[0],
+        depth_margin: pair[1],
+    })
+    .collect::<Vec<_>>();
+    if request.dense_point_attributes_f32_le.len() != attributes.len() * 2 * size_of::<f32>() {
+        return Err(JsValue::from_str(
+            "invalid surface material request: dense point attribute buffer holds an incomplete pair",
+        ));
+    }
+    let mut evidence = ReconstructionEvidenceView::new(
         ReconstructionProviderDescriptor::classic(),
         EvidenceScale::ArbitraryMonocular,
         request.cameras,
@@ -629,6 +673,12 @@ pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
         &triangles,
     )
     .map_err(|error| JsValue::from_str(&error))?;
+    if !request.dense_point_attributes_f32_le.is_empty() {
+        // The core validates the count and range against the shared points.
+        evidence = evidence
+            .with_point_attributes(&attributes)
+            .map_err(|error| JsValue::from_str(&error))?;
+    }
     let images = request
         .reference_images
         .iter()
