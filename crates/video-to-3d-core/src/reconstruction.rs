@@ -1414,7 +1414,7 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult) -> [usize; 11] {
+fn reconstruction_score(result: &ReconstructionResult) -> [usize; 14] {
     // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
     // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
     // camera/point solution survives. The primary solve ranks first; the other segments of a
@@ -1422,15 +1422,28 @@ fn reconstruction_score(result: &ReconstructionResult) -> [usize; 11] {
     let secondary = |measure: fn(&SegmentSolveStats) -> usize| {
         secondary_segment_solves(result).map(measure).sum::<usize>()
     };
+    // Track statistics span every adjacent pair. On a split clip that includes the other
+    // segments, so they rank after the primary sparse points there; a single-segment clip
+    // keeps its original order.
+    let stats = &result.multi_view;
+    let tracks = [stats.tracks_three_plus, stats.longest_track, stats.linked_pairs];
+    let (primary_tracks, split_tracks) = if stats.segment_solves.is_empty() {
+        (tracks, [0; 3])
+    } else {
+        ([0; 3], tracks)
+    };
     [
         usize::from(result.calibrated_pair.is_some()),
         accepted_registered_camera_count(result),
         result.registered_views.len(),
-        usize::from(result.multi_view.bundle_adjustment.accepted),
-        result.multi_view.tracks_three_plus,
-        result.multi_view.longest_track,
-        result.multi_view.linked_pairs,
+        usize::from(stats.bundle_adjustment.accepted),
+        primary_tracks[0],
+        primary_tracks[1],
+        primary_tracks[2],
         result.points.len(),
+        split_tracks[0],
+        split_tracks[1],
+        split_tracks[2],
         secondary(|solve| usize::from(solve.seed_pair.is_some())),
         secondary(|solve| solve.registered_views),
         secondary(|solve| solve.sparse_points),
@@ -2457,5 +2470,23 @@ mod tests {
         let mut stronger_primary = unseeded.clone();
         stronger_primary.points.push(base.points[0]);
         assert!(reconstruction_score(&stronger_primary) > reconstruction_score(&seeded));
+
+        // Clip-wide track statistics include the other segments, so on a split clip they
+        // never outrank the primary sparse points.
+        let mut longer_tracks = seeded.clone();
+        longer_tracks.multi_view.tracks_three_plus += 100;
+        longer_tracks.multi_view.longest_track += 10;
+        longer_tracks.multi_view.linked_pairs += 10;
+        let mut more_points = seeded.clone();
+        more_points.points.push(base.points[0]);
+        assert!(reconstruction_score(&more_points) > reconstruction_score(&longer_tracks));
+        assert!(reconstruction_score(&longer_tracks) > reconstruction_score(&seeded));
+
+        // A single-segment clip keeps tracks ahead of points, as before split solves.
+        let mut single_tracks = base.clone();
+        single_tracks.multi_view.tracks_three_plus += 100;
+        let mut single_points = base.clone();
+        single_points.points.push(base.points[0]);
+        assert!(reconstruction_score(&single_tracks) > reconstruction_score(&single_points));
     }
 }
