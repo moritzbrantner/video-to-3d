@@ -281,7 +281,9 @@ fn accepted_plane_reconstruction_has_confidence_and_a_containing_collider() {
     assert!(!collider.boxes.is_empty(), "{}", collider.diagnostic());
     assert!(collider.boxes.len() < mesh.triangles.len());
     for triangle in &mesh.triangles {
-        if field.triangle_confidence(triangle) < collider.options.min_confidence {
+        if field.triangle_confidence(triangle).min(triangle.confidence)
+            < collider.options.min_confidence
+        {
             continue;
         }
         for index in [triangle.a, triangle.b, triangle.c] {

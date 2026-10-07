@@ -118,7 +118,13 @@ impl CoarseCollider {
                 excluded.mismatched_confidence += 1;
             } else if !observed {
                 excluded.unobserved_provenance += 1;
-            } else if confidence.triangle_confidence(triangle) < options.min_confidence {
+            } else if confidence
+                .triangle_confidence(triangle)
+                // The triangle's own vertex minimum: a few weak points do not move the
+                // region's lower median, but they still keep their triangles out.
+                .min(triangle.confidence)
+                < options.min_confidence
+            {
                 excluded.low_confidence += 1;
             } else {
                 eligible.push(corners.map(|index| {

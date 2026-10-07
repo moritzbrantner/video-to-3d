@@ -22,6 +22,7 @@
 //! engines and tools can load the collider by scene, node name or role.
 
 use crate::coarse_collision::CoarseCollider;
+use crate::geometry_confidence::GeometryConfidenceField;
 use crate::surface_materials::{SurfaceMaterialBake, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION};
 use crate::ReconstructionEvidenceView;
 use serde_json::{json, Value};
@@ -157,6 +158,14 @@ pub fn encode_textured_glb_with_collider(
     bake: &SurfaceMaterialBake,
     collider: Option<&CoarseCollider>,
 ) -> Result<Vec<u8>, String> {
+    // A collider is exported only when it is exactly what this evidence yields, so stale
+    // or foreign collision geometry can never be paired with this surface.
+    if let Some(collider) = collider {
+        let field = GeometryConfidenceField::from_evidence(evidence);
+        if CoarseCollider::from_evidence(evidence, &field, collider.options) != *collider {
+            return Err("the coarse collider was not built from this evidence".into());
+        }
+    }
     let points = evidence.points;
     let triangles = evidence.triangles;
     if bake.point_count != points.len() || bake.triangle_count != triangles.len() {

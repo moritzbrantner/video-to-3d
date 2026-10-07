@@ -555,6 +555,27 @@ fn collider_excludes_unobserved_and_low_confidence_evidence() {
     );
     assert!(field.describes(&observed));
 
+    // A locally weak triangle stays out even when its region scores well.
+    let mut local = plane.triangles.clone();
+    local[0].confidence = 0.0;
+    let locally_weak = ReconstructionEvidenceView::new(
+        observed.provider.clone(),
+        observed.scale,
+        observed.cameras.clone(),
+        observed.regions.clone(),
+        &plane.points,
+        &local,
+    )
+    .unwrap();
+    let local_field = GeometryConfidenceField::from_evidence(&locally_weak);
+    let collider = CoarseCollider::from_evidence(
+        &locally_weak,
+        &local_field,
+        CoarseColliderOptions::default(),
+    );
+    assert_eq!(collider.excluded.low_confidence, 1);
+    assert_eq!(collider.source_triangles, plane.triangles.len() - 1);
+
     // Same regions and ranges, weaker points: the field no longer describes the evidence.
     let mut weaker = plane.points.clone();
     for point in &mut weaker {
@@ -594,6 +615,14 @@ fn glb_carries_the_collider_as_a_separate_collision_scene() {
         CoarseCollider::from_evidence(&evidence, &field, CoarseColliderOptions::default());
     assert!(!collider.boxes.is_empty());
     let bake = bake_surface_materials(&evidence, &plane.sites, &[]).unwrap();
+
+    // A collider built from other evidence is refused rather than paired with this surface.
+    let other_plane = self::plane(9, [0.0, 0.0], 0.9, |_, _| true);
+    let other = single_reference_evidence(&other_plane);
+    let other_field = GeometryConfidenceField::from_evidence(&other);
+    let foreign =
+        CoarseCollider::from_evidence(&other, &other_field, CoarseColliderOptions::default());
+    assert!(encode_textured_glb_with_collider(&evidence, &bake, Some(&foreign)).is_err());
 
     let visual_only = encode_textured_glb(&evidence, &bake).unwrap();
     let with_collider =
