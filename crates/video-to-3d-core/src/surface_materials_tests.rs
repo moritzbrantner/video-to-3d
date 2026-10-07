@@ -178,6 +178,8 @@ fn single_reference_triangles_are_textured_and_mixed_ones_fall_back() {
 
     assert_eq!(bake.fallback.triangles, vec![3]);
     assert_eq!(bake.fallback.reasons.mixed_reference, 1);
+    // Without intrinsics the seam rule has no camera to project through.
+    assert_eq!(bake.fallback.reasons.seam.no_candidate_camera, 1);
     assert_eq!(bake.fallback.reasons.total(), 1);
     assert_eq!(bake.textured_triangles() + bake.fallback.triangles.len(), 5);
     assert!(bake
@@ -292,6 +294,16 @@ fn malformed_or_duplicate_reference_images_fail_closed() {
     assert!(bake_surface_materials(&evidence, &fixture.sites, &duplicate).is_err());
 }
 
+fn frames(artifacts: &[AppearanceArtifact]) -> Vec<usize> {
+    assert!(artifacts
+        .iter()
+        .all(|artifact| artifact.rule == MaterialRule::SameReferenceGrid));
+    artifacts
+        .iter()
+        .map(|artifact| artifact.reference_frame)
+        .collect()
+}
+
 #[test]
 fn cancellation_interrupts_evidence_validation_before_traversal_finishes() {
     let mut small = Fixture::new();
@@ -388,21 +400,27 @@ fn reprojection_and_framing_changes_invalidate_only_the_affected_reference() {
     let baseline = fixture.bake();
     let recorded = baseline.recorded_appearance();
     let unchanged = fixture.bake().invalidation_against(&recorded);
-    assert_eq!(unchanged.reused, vec![0, 1]);
+    assert_eq!(frames(&unchanged.reused), vec![0, 1]);
     assert!(unchanged.invalidated.is_empty());
 
     // Reprojecting reference 1 (new camera pose) leaves reference 0 valid.
     let mut moved = Fixture::new();
     moved.cameras[1].translation = [0.31, 0.0, 0.0];
     let diff = moved.bake().invalidation_against(&recorded);
-    assert_eq!((diff.reused, diff.invalidated), (vec![0], vec![1]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.invalidated)),
+        (vec![0], vec![1])
+    );
 
     // Re-sampling pixels inside reference 0's crop invalidates only it.
     let mut reframed = Fixture::new();
     let pixel = ((3 * WIDTH + 3) * 4) as usize;
     reframed.images[0].1[pixel] ^= 0xff;
     let diff = reframed.bake().invalidation_against(&recorded);
-    assert_eq!((diff.reused, diff.invalidated), (vec![1], vec![0]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.invalidated)),
+        (vec![1], vec![0])
+    );
 
     // Pixels outside every crop and point positions do not affect appearance.
     let mut unrelated = Fixture::new();
@@ -410,20 +428,26 @@ fn reprojection_and_framing_changes_invalidate_only_the_affected_reference() {
     unrelated.images[0].1[outside] ^= 0xff;
     unrelated.points[4].z += 0.5;
     let diff = unrelated.bake().invalidation_against(&recorded);
-    assert_eq!(diff.reused, vec![0, 1]);
+    assert_eq!(frames(&diff.reused), vec![0, 1]);
 
     // Changing reference 1's footprint shifts nothing in reference 0.
     let mut regridded = Fixture::new();
     regridded.sites[7] = site(10, 10);
     let diff = regridded.bake().invalidation_against(&recorded);
-    assert_eq!((diff.reused, diff.invalidated), (vec![0], vec![1]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.invalidated)),
+        (vec![0], vec![1])
+    );
 
     // Losing a reference image removes only that artifact.
     let mut dropped = Fixture::new();
     dropped.images.truncate(1);
     let diff = dropped.bake().invalidation_against(&recorded);
     assert!(diff.diagnostic().contains("removed 1"));
-    assert_eq!((diff.reused, diff.removed), (vec![0], vec![1]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.removed)),
+        (vec![0], vec![1])
+    );
 }
 
 fn glb_parts(glb: &[u8]) -> (Value, &[u8]) {

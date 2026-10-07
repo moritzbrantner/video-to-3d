@@ -1,0 +1,447 @@
+//! Single-camera projection rule for mixed-reference seam triangles.
+//!
+//! A seam triangle has observed vertices that belong to different reference
+//! views, so no single reference grid addresses all three corners. The rule
+//! admits such a triangle into a texture only when one accepted camera, with a
+//! supplied reference image, provably sees all three vertices:
+//!
+//! 1. The camera is a seam candidate: its accepted pose and the supplied
+//!    pinhole intrinsics reproduce the camera's own accepted grid sites (median
+//!    residual at most [`POSE_CONSISTENCY_PIXELS`]). A camera without own
+//!    observed points has no such evidence and is never a candidate.
+//! 2. Every vertex lies in front of the camera.
+//! 3. Every vertex projects inside the reference image.
+//! 4. The projected footprint is non-degenerate and the triangle is not seen
+//!    at a grazing angle.
+//! 5. Depth test against all accepted triangles: every vertex, edge midpoint
+//!    and the centroid is the closest accepted surface along its pixel ray.
+//!    A sample is occluded when accepted geometry is clearly in front of it,
+//!    and ambiguous when the depth difference falls inside the tolerance band
+//!    or an occluding depth lies in its one-pixel neighbourhood.
+//!
+//! The rule never blends cameras and never creates, moves or repairs
+//! geometry. Among passing cameras the one owning most vertices wins, then the
+//! larger projected footprint, then the lower frame index. A triangle no
+//! camera admits keeps the vertex-color fallback; it is counted under the
+//! furthest check any candidate reached.
+
+use super::{Ownership, ReferenceImage};
+use crate::{DenseGridSite, EvidenceCamera, Point3, ReconstructionEvidenceView};
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+/// Revision of the seam rule; part of every seam appearance key.
+pub(super) const SEAM_RULE_REVISION: u32 = 1;
+const NEAR_DEPTH: f64 = 1.0e-4;
+/// Maximum median distance between the projection of a camera's own observed
+/// points and their accepted grid sites.
+pub const POSE_CONSISTENCY_PIXELS: f64 = 2.0;
+/// Relative depth difference still treated as the same surface.
+const VISIBLE_DEPTH_TOLERANCE: f64 = 0.02;
+/// Relative depth difference from which accepted geometry clearly occludes.
+const OCCLUDED_DEPTH_TOLERANCE: f64 = 0.05;
+/// Minimum |cos| between the triangle normal and the viewing ray.
+const MIN_VIEW_COSINE: f64 = 0.2;
+/// Minimum projected double area, in square pixels.
+const MIN_FOOTPRINT_DOUBLE_AREA: f64 = 1.0;
+
+/// Pinhole intrinsics shared by the accepted reconstruction cameras: the
+/// principal point is the image center, as everywhere in the core.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct SeamProjection {
+    pub focal_pixels: f32,
+}
+
+/// Why no accepted camera admitted a seam triangle, ordered by how far the
+/// rule progressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum SeamRejection {
+    NoCandidateCamera,
+    PoseInconsistent,
+    BehindCamera,
+    OutOfFrame,
+    GrazingView,
+    Occluded,
+    Ambiguous,
+}
+
+/// A seam triangle admitted by one accepted camera.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct SeamAdmission {
+    pub camera_frame: usize,
+    /// Continuous pixel coordinates of corners `[a, b, c]` in the camera's
+    /// reference image (pixel `x` is centered at coordinate `x`).
+    pub corner_pixels: [[f64; 2]; 3],
+}
+
+#[derive(Clone, Copy)]
+struct Candidate {
+    owned: usize,
+    double_area: f64,
+    admission: SeamAdmission,
+}
+
+/// Evaluate the rule for every triangle in `seams` (indices into the evidence
+/// triangles). Results are in the order of `seams`.
+pub(super) fn evaluate_seams(
+    evidence: &ReconstructionEvidenceView<'_>,
+    ownership: &[Ownership],
+    grid_sites: Option<&[DenseGridSite]>,
+    images: &BTreeMap<usize, ReferenceImage<'_>>,
+    projection: Option<SeamProjection>,
+    seams: &[usize],
+    check_canceled: &mut impl FnMut() -> Result<(), String>,
+) -> Result<Vec<Result<SeamAdmission, SeamRejection>>, String> {
+    let mut rejection = vec![SeamRejection::NoCandidateCamera; seams.len()];
+    let mut best: Vec<Option<Candidate>> = vec![None; seams.len()];
+    let (Some(projection), Some(grid_sites)) = (projection, grid_sites) else {
+        return Ok(rejection.into_iter().map(Err).collect());
+    };
+    if seams.is_empty() {
+        return Ok(Vec::new());
+    }
+    let focal = projection.focal_pixels as f64;
+    let mut cameras = evidence.cameras.iter().collect::<Vec<_>>();
+    cameras.sort_by_key(|camera| camera.frame_index);
+    for camera in cameras {
+        check_canceled()?;
+        let Some(image) = images.get(&camera.frame_index) else {
+            continue;
+        };
+        let view = CameraView::new(camera, focal, image.width, image.height);
+        let Some(consistent) = view.reproduces_own_grid(evidence.points, ownership, grid_sites)
+        else {
+            continue;
+        };
+        if !consistent {
+            for reason in &mut rejection {
+                *reason = (*reason).max(SeamRejection::PoseInconsistent);
+            }
+            continue;
+        }
+        let depth = DepthBuffer::rasterize(&view, evidence, check_canceled)?;
+        for (slot, triangle_index) in seams.iter().enumerate() {
+            if slot % 1024 == 0 {
+                check_canceled()?;
+            }
+            let triangle = &evidence.triangles[*triangle_index];
+            let corners = [triangle.a, triangle.b, triangle.c];
+            match view.admit(evidence, &depth, corners) {
+                Ok((corner_pixels, double_area)) => {
+                    let owned = corners
+                        .iter()
+                        .filter(|index| {
+                            matches!(ownership[**index], Ownership::Observed { reference, .. } if reference == camera.frame_index)
+                        })
+                        .count();
+                    let candidate = Candidate {
+                        owned,
+                        double_area,
+                        admission: SeamAdmission {
+                            camera_frame: camera.frame_index,
+                            corner_pixels,
+                        },
+                    };
+                    // Cameras are visited in ascending frame order, so only a
+                    // strictly better candidate replaces the current one.
+                    let better = best[slot].is_none_or(|current| {
+                        (owned, double_area) > (current.owned, current.double_area)
+                    });
+                    if better {
+                        best[slot] = Some(candidate);
+                    }
+                }
+                Err(reason) => rejection[slot] = rejection[slot].max(reason),
+            }
+        }
+    }
+    Ok(best
+        .into_iter()
+        .zip(rejection)
+        .map(|(best, reason)| best.map(|candidate| candidate.admission).ok_or(reason))
+        .collect())
+}
+
+struct CameraView<'a> {
+    camera: &'a EvidenceCamera,
+    focal: f64,
+    width: u32,
+    height: u32,
+}
+
+impl<'a> CameraView<'a> {
+    fn new(camera: &'a EvidenceCamera, focal: f64, width: u32, height: u32) -> Self {
+        Self {
+            camera,
+            focal,
+            width,
+            height,
+        }
+    }
+
+    fn to_camera(&self, point: [f64; 3]) -> [f64; 3] {
+        let r = self.camera.rotation.map(f64::from);
+        let t = self.camera.translation.map(f64::from);
+        [0, 1, 2].map(|row| {
+            r[row * 3] * point[0] + r[row * 3 + 1] * point[1] + r[row * 3 + 2] * point[2] + t[row]
+        })
+    }
+
+    /// Pixel coordinates of a camera-space point in front of the camera.
+    fn pixel(&self, camera_point: [f64; 3]) -> [f64; 2] {
+        [
+            self.focal * camera_point[0] / camera_point[2] + self.width as f64 * 0.5,
+            self.focal * camera_point[1] / camera_point[2] + self.height as f64 * 0.5,
+        ]
+    }
+
+    fn in_front(camera_point: [f64; 3]) -> bool {
+        camera_point.iter().all(|value| value.is_finite()) && camera_point[2] > NEAR_DEPTH
+    }
+
+    /// `None` when the camera owns no observed point to check against.
+    fn reproduces_own_grid(
+        &self,
+        points: &[Point3],
+        ownership: &[Ownership],
+        grid_sites: &[DenseGridSite],
+    ) -> Option<bool> {
+        let frame = self.camera.frame_index;
+        let mut residuals = Vec::new();
+        for (index, owner) in ownership.iter().enumerate() {
+            if !matches!(owner, Ownership::Observed { reference, .. } if *reference == frame) {
+                continue;
+            }
+            let site = grid_sites[index];
+            let camera_point = self.to_camera(position(&points[index]));
+            let residual = if Self::in_front(camera_point) {
+                let [u, v] = self.pixel(camera_point);
+                (u - site.x as f64).hypot(v - site.y as f64)
+            } else {
+                f64::INFINITY
+            };
+            residuals.push(if residual.is_nan() {
+                f64::INFINITY
+            } else {
+                residual
+            });
+        }
+        if residuals.is_empty() {
+            return None;
+        }
+        residuals.sort_by(f64::total_cmp);
+        Some(residuals[residuals.len() / 2] <= POSE_CONSISTENCY_PIXELS)
+    }
+
+    /// Apply checks 2-5 of the rule for one camera.
+    fn admit(
+        &self,
+        evidence: &ReconstructionEvidenceView<'_>,
+        depth: &DepthBuffer,
+        corners: [usize; 3],
+    ) -> Result<([[f64; 2]; 3], f64), SeamRejection> {
+        let camera = corners.map(|index| self.to_camera(position(&evidence.points[index])));
+        if !camera.iter().all(|point| Self::in_front(*point)) {
+            return Err(SeamRejection::BehindCamera);
+        }
+        let pixels = camera.map(|point| self.pixel(point));
+        let (max_x, max_y) = ((self.width - 1) as f64, (self.height - 1) as f64);
+        if pixels
+            .iter()
+            .any(|[u, v]| !(0.0..=max_x).contains(u) || !(0.0..=max_y).contains(v))
+        {
+            return Err(SeamRejection::OutOfFrame);
+        }
+        let double_area = ((pixels[1][0] - pixels[0][0]) * (pixels[2][1] - pixels[0][1])
+            - (pixels[1][1] - pixels[0][1]) * (pixels[2][0] - pixels[0][0]))
+            .abs();
+        let normal = cross(sub(camera[1], camera[0]), sub(camera[2], camera[0]));
+        let centroid =
+            [0, 1, 2].map(|axis| (camera[0][axis] + camera[1][axis] + camera[2][axis]) / 3.0);
+        let cosine = dot(normal, centroid).abs() / (norm(normal) * norm(centroid));
+        if !(double_area >= MIN_FOOTPRINT_DOUBLE_AREA && cosine >= MIN_VIEW_COSINE) {
+            return Err(SeamRejection::GrazingView);
+        }
+        let mid = |a: [f64; 3], b: [f64; 3]| [0, 1, 2].map(|axis| (a[axis] + b[axis]) * 0.5);
+        let samples = [
+            camera[0],
+            camera[1],
+            camera[2],
+            mid(camera[0], camera[1]),
+            mid(camera[1], camera[2]),
+            mid(camera[2], camera[0]),
+            centroid,
+        ];
+        let mut ambiguous = false;
+        for sample in samples {
+            let [u, v] = self.pixel(sample);
+            match depth.classify(u, v, sample[2]) {
+                Visibility::Visible => {}
+                Visibility::Ambiguous => ambiguous = true,
+                Visibility::Occluded => return Err(SeamRejection::Occluded),
+            }
+        }
+        if ambiguous {
+            return Err(SeamRejection::Ambiguous);
+        }
+        Ok((pixels, double_area))
+    }
+}
+
+fn position(point: &Point3) -> [f64; 3] {
+    [point.x as f64, point.y as f64, point.z as f64]
+}
+
+enum Visibility {
+    Visible,
+    Ambiguous,
+    Occluded,
+}
+
+/// Closest accepted surface depth per pixel center; `INFINITY` is empty.
+struct DepthBuffer {
+    width: usize,
+    height: usize,
+    depth: Vec<f64>,
+}
+
+impl DepthBuffer {
+    fn rasterize(
+        view: &CameraView<'_>,
+        evidence: &ReconstructionEvidenceView<'_>,
+        check_canceled: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let (width, height) = (view.width as usize, view.height as usize);
+        let mut buffer = Self {
+            width,
+            height,
+            depth: vec![f64::INFINITY; width * height],
+        };
+        for (ordinal, triangle) in evidence.triangles.iter().enumerate() {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
+            let camera = [triangle.a, triangle.b, triangle.c]
+                .map(|index| view.to_camera(position(&evidence.points[index])));
+            let polygon = clip_near(&camera);
+            for fan in 1..polygon.len().saturating_sub(1) {
+                buffer.fill(view, [polygon[0], polygon[fan], polygon[fan + 1]]);
+            }
+        }
+        Ok(buffer)
+    }
+
+    fn fill(&mut self, view: &CameraView<'_>, corners: [[f64; 3]; 3]) {
+        let pixels = corners.map(|point| view.pixel(point));
+        let inverse_depth = corners.map(|point| 1.0 / point[2]);
+        let edge = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
+            (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+        };
+        let area = edge(pixels[0], pixels[1], pixels[2]);
+        if !area.is_finite() || area.abs() < 1.0e-12 {
+            return;
+        }
+        let bound = |axis: usize, limit: usize| {
+            let low = pixels.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
+            let high = pixels
+                .iter()
+                .map(|p| p[axis])
+                .fold(f64::NEG_INFINITY, f64::max);
+            let low = low.ceil().max(0.0);
+            let high = high.floor().min(limit as f64 - 1.0);
+            (low <= high).then_some((low as usize, high as usize))
+        };
+        let (Some((x0, x1)), Some((y0, y1))) = (bound(0, self.width), bound(1, self.height)) else {
+            return;
+        };
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let p = [x as f64, y as f64];
+                let weights = [
+                    edge(pixels[1], pixels[2], p) / area,
+                    edge(pixels[2], pixels[0], p) / area,
+                    edge(pixels[0], pixels[1], p) / area,
+                ];
+                if weights.iter().any(|weight| *weight < -1.0e-9) {
+                    continue;
+                }
+                let inverse = weights[0] * inverse_depth[0]
+                    + weights[1] * inverse_depth[1]
+                    + weights[2] * inverse_depth[2];
+                if inverse <= 0.0 {
+                    continue;
+                }
+                let slot = &mut self.depth[y * self.width + x];
+                *slot = slot.min(1.0 / inverse);
+            }
+        }
+    }
+
+    fn at(&self, x: isize, y: isize) -> f64 {
+        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
+            return f64::INFINITY;
+        }
+        self.depth[y as usize * self.width + x as usize]
+    }
+
+    fn classify(&self, u: f64, v: f64, depth: f64) -> Visibility {
+        let (x, y) = (u.round() as isize, v.round() as isize);
+        let occluding = depth * (1.0 - OCCLUDED_DEPTH_TOLERANCE);
+        let center = self.at(x, y);
+        if center < occluding {
+            return Visibility::Occluded;
+        }
+        if center < depth * (1.0 - VISIBLE_DEPTH_TOLERANCE) {
+            return Visibility::Ambiguous;
+        }
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if self.at(x + dx, y + dy) < occluding {
+                    return Visibility::Ambiguous;
+                }
+            }
+        }
+        Visibility::Visible
+    }
+}
+
+/// Clip a camera-space triangle against the near plane (Sutherland-Hodgman).
+fn clip_near(triangle: &[[f64; 3]; 3]) -> Vec<[f64; 3]> {
+    if !triangle.iter().flatten().all(|value| value.is_finite()) {
+        return Vec::new();
+    }
+    let mut polygon = Vec::with_capacity(4);
+    for index in 0..3 {
+        let current = triangle[index];
+        let next = triangle[(index + 1) % 3];
+        let (current_in, next_in) = (current[2] > NEAR_DEPTH, next[2] > NEAR_DEPTH);
+        if current_in {
+            polygon.push(current);
+        }
+        if current_in != next_in {
+            let t = (NEAR_DEPTH - current[2]) / (next[2] - current[2]);
+            polygon.push([0, 1, 2].map(|axis| current[axis] + (next[axis] - current[axis]) * t));
+        }
+    }
+    polygon
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn norm(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
