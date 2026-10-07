@@ -14,6 +14,8 @@ import {
   describeClipSegments,
   describeFrameSelection,
   describeBootstrap,
+  describeCollider,
+  describeGeometryConfidence,
   describeSeedRejections,
   describeSegmentSolves,
   reconstructFrames,
@@ -868,6 +870,14 @@ export default function Home() {
                   <tr>
                     <th>Mesh triangles</th>
                     <td>{reconstruction.mesh_triangles.length}</td>
+                  </tr>
+                  <tr>
+                    <th>Geometry confidence</th>
+                    <td>{describeGeometryConfidence(reconstruction)}</td>
+                  </tr>
+                  <tr>
+                    <th>Coarse collider</th>
+                    <td>{describeCollider(reconstruction.collision)}</td>
                   </tr>
                   <tr>
                     <th>Seed pair</th>
