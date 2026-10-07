@@ -13,6 +13,8 @@ import {
 import {
   describeClipSegments,
   describeFrameSelection,
+  describeBootstrap,
+  describeSeedRejections,
   describeSegmentSolves,
   reconstructFrames,
   type FrameCameraState,
@@ -796,6 +798,14 @@ export default function Home() {
                         ? `Frame ${reconstruction.calibrated_pair.from_frame + 1} → Frame ${reconstruction.calibrated_pair.to_frame + 1}`
                         : "No calibrated seed pair"}
                     </td>
+                  </tr>
+                  <tr>
+                    <th>Bootstrap</th>
+                    <td>{describeBootstrap(reconstruction.bootstrap)}</td>
+                  </tr>
+                  <tr>
+                    <th>Rejected seed candidates</th>
+                    <td>{describeSeedRejections(reconstruction.bootstrap)}</td>
                   </tr>
                   <tr>
                     <th>Dense camera set</th>

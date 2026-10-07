@@ -128,6 +128,34 @@ if (!contradictionRejected) {
   );
 }
 
+// Every adjacent pair crosses the boundary as a seed candidate, and an uncalibrated
+// result names the decisive seed gate rather than only "no registered cameras".
+if (
+  result.seed_candidates.length !== 1 ||
+  result.seed_candidates[0].rejected_gate === null ||
+  result.bootstrap.decisive_gate !== result.seed_candidates[0].rejected_gate ||
+  !result.bootstrap.summary.includes("decisive gate")
+) {
+  throw new Error(
+    `bootstrap contract mismatch: ${JSON.stringify(result.bootstrap)} / ${JSON.stringify(result.seed_candidates)}`,
+  );
+}
+const silentBootstrap = structuredClone(result);
+silentBootstrap.bootstrap = { ...silentBootstrap.bootstrap, decisive_gate: null };
+let silentBootstrapRejected = false;
+try {
+  assertReconstructionContract(silentBootstrap, 2);
+} catch (error) {
+  if (String(error).includes("bootstrap contract mismatch")) {
+    silentBootstrapRejected = true;
+  } else {
+    throw error;
+  }
+}
+if (!silentBootstrapRejected) {
+  throw new Error("TypeScript accepted an uncalibrated result without a decisive bootstrap gate");
+}
+
 // Readiness evidence crosses the same boundary; flat duplicate frames must be
 // reported as unsuitable for geometry while generative paths stay allowed.
 const readinessValue = assess_input_readiness({

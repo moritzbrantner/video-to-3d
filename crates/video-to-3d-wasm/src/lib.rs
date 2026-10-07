@@ -5,11 +5,11 @@ use serde::{
 use std::fmt;
 use video_to_3d_core::input_readiness::{assess_readiness, SamplingMetadata};
 use video_to_3d_core::{
-    evaluate_relative_depth, reconstruct_browser, CalibratedPairStats, CameraPipelineState,
-    CameraPose, DenseGridSite, DenseStats, EvidenceCamera, FrameInput, LearnedDepthCamera,
-    MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionEvidenceView,
-    ReconstructionOptions, ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame,
-    RevisitStats,
+    evaluate_relative_depth, reconstruct_browser, BootstrapDiagnosis, CalibratedPairStats,
+    CameraPipelineState, CameraPose, DenseGridSite, DenseStats, EvidenceCamera, FrameInput,
+    LearnedDepthCamera, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
+    ReconstructionEvidenceView, ReconstructionOptions, ReconstructionRequest, RegisteredViewStats,
+    RelativeDepthFrame, RevisitStats, SeedCandidateStats,
 };
 use wasm_bindgen::prelude::*;
 
@@ -99,6 +99,8 @@ struct WasmBrowserReconstructionResult<'a> {
     multi_view: &'a MultiViewStats,
     revisits: &'a RevisitStats,
     registered_views: &'a [RegisteredViewStats],
+    seed_candidates: &'a [SeedCandidateStats],
+    bootstrap: &'a BootstrapDiagnosis,
     warnings: &'a [String],
     camera_state: &'a CameraPipelineState,
     accepted_camera_evidence: &'a [EvidenceCamera],
@@ -468,6 +470,8 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         multi_view: &reconstruction.multi_view,
         revisits: &reconstruction.revisits,
         registered_views: &reconstruction.registered_views,
+        seed_candidates: &reconstruction.seed_candidates,
+        bootstrap: &reconstruction.bootstrap,
         warnings: &reconstruction.warnings,
         camera_state: &result.camera_state,
         accepted_camera_evidence: &evidence.cameras,
