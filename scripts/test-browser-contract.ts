@@ -1,11 +1,18 @@
 import init, {
   assess_input_readiness,
+  bake_textured_surface,
   reconstruct_sequence,
 } from "../apps/web/public/wasm/video_to_3d_wasm.js";
 import {
   assertReconstructionContract,
   normalizeWasmReconstruction,
 } from "../apps/web/src/reconstruction";
+import {
+  buildSurfaceMaterialRequest,
+  normalizeSurfaceMaterialResult,
+  retainReferenceImages,
+  type SurfaceMaterialSource,
+} from "../apps/web/src/surfaceMaterials";
 
 const width = 48;
 const height = 32;
@@ -152,4 +159,102 @@ if (readiness.geometric_verdict !== "unsuitable" || readiness.generative_paths_a
   );
 }
 
-console.log("Rust -> WASM -> TypeScript camera-state and readiness contracts passed");
+if (!Array.isArray(result.accepted_camera_evidence)) {
+  throw new Error("WASM reconstruction did not expose accepted camera evidence for material export");
+}
+
+// Surface material export: two reference patches (frames 0 and 1) share one
+// mixed triangle that must fall back; the GLB must load without browser state.
+const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+const patch = (reference_frame: number, source: number, start: number) => ({
+  reference_frame,
+  source_frames: [source],
+  primary_start: start,
+  primary_points: 3,
+  completion_start: start + 3,
+  completed_points: 0,
+  sampled_pixels: 0,
+  accepted_points: 3,
+  reciprocal_consistent_points: 3,
+  grid_stride: 4,
+  grid_border: 0,
+  search_min_depth: null,
+  search_max_depth: null,
+});
+const materialSource: SurfaceMaterialSource = {
+  dense_points: {
+    values: new Float32Array([
+      0, 0, 2, 0.9, 1, 0, 2, 0.9, 0, 1, 2, 0.9,
+      2, 0, 2, 0.9, 3, 0, 2, 0.9, 2, 1, 2, 0.9,
+    ]),
+    rgb: new Uint8Array(18).fill(140),
+    length: 6,
+  },
+  dense_grid_sites: {
+    xy: new Uint32Array([2, 2, 8, 2, 2, 8, 3, 3, 9, 3, 3, 9]),
+    length: 6,
+  },
+  mesh_triangles: {
+    indices: new Uint32Array([0, 1, 2, 3, 4, 5, 1, 3, 2]),
+    confidence: new Float32Array([0.8, 0.8, 0.8]),
+    length: 3,
+  },
+  accepted_camera_evidence: [0, 1].map((frame_index) => ({
+    frame_index,
+    authority: "calibrated_seed" as const,
+    rotation: identity,
+    translation: [frame_index * 0.2, 0, 0],
+    confidence: 0.9,
+    median_reprojection_error_pixels: 0.4,
+  })),
+  dense: { reference_patches: [patch(0, 1, 0), patch(1, 0, 3)] },
+};
+const referenceImages = retainReferenceImages(materialSource, [
+  { width, height, rgba },
+  { width, height, rgba },
+  { width, height, rgba },
+]);
+if (referenceImages.map((image) => image.frame_index).join() !== "0,1") {
+  throw new Error("material export must retain exactly the accepted reference frames");
+}
+const baked = normalizeSurfaceMaterialResult(
+  bake_textured_surface(buildSurfaceMaterialRequest(materialSource, referenceImages)),
+);
+if (
+  baked.bake.materials.length !== 2 ||
+  baked.bake.fallback.reasons.mixed_reference !== 1 ||
+  !baked.diagnostic.includes("2 of 3 accepted triangles textured")
+) {
+  throw new Error(`surface material bake mismatch: ${baked.diagnostic}`);
+}
+const glb = new DataView(baked.glb.buffer, baked.glb.byteOffset, baked.glb.byteLength);
+if (glb.getUint32(0, true) !== 0x46546c67 || glb.getUint32(8, true) !== baked.glb.byteLength) {
+  throw new Error("textured surface export is not a well-formed GLB");
+}
+const jsonLength = glb.getUint32(12, true);
+const gltf = JSON.parse(new TextDecoder().decode(baked.glb.subarray(20, 20 + jsonLength)));
+const binOffset = 20 + jsonLength + 8;
+const pngView = gltf.bufferViews[gltf.images[0].bufferView];
+const pngSignature = baked.glb.subarray(binOffset + pngView.byteOffset, binOffset + pngView.byteOffset + 4);
+if (
+  gltf.images.length !== 2 ||
+  gltf.images.some((image: { mimeType: string; uri?: string }) => image.mimeType !== "image/png" || image.uri) ||
+  pngSignature[1] !== 0x50 ||
+  gltf.materials[0].extras.video_to_3d.reference_frame !== 0 ||
+  gltf.materials[0].extras.video_to_3d.appearance_key !== baked.appearance[0].appearance_key ||
+  gltf.materials[2].extras.video_to_3d.fallback !== "vertex_color"
+) {
+  throw new Error("textured GLB does not carry embedded textures and reference provenance");
+}
+const rebaked = normalizeSurfaceMaterialResult(
+  bake_textured_surface(
+    buildSurfaceMaterialRequest(materialSource, referenceImages, baked.appearance),
+  ),
+);
+if (rebaked.invalidation.reused.join() !== "0,1" || rebaked.invalidation.invalidated.length !== 0) {
+  throw new Error("unchanged reference appearance must be reused, not invalidated");
+}
+
+console.log(
+  "Rust -> WASM -> TypeScript camera-state, readiness, and surface-material contracts passed",
+);

@@ -413,6 +413,15 @@ export type MeshTriangleBuffer = {
   length: number;
 };
 
+export type EvidenceCamera = {
+  frame_index: number;
+  authority: "calibrated_seed" | "registered_geometry" | "provider_estimated";
+  rotation: number[];
+  translation: number[];
+  confidence: number | null;
+  median_reprojection_error_pixels: number | null;
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
@@ -428,11 +437,13 @@ export type ReconstructionResult = {
   registered_views: RegisteredViewStats[];
   warnings: string[];
   camera_state: CameraPipelineState;
+  accepted_camera_evidence: EvidenceCamera[];
 };
 
 type WasmModule = {
   default: () => Promise<unknown>;
   reconstruct_sequence: (request: unknown) => unknown;
+  bake_textured_surface: (request: unknown) => unknown;
 };
 
 type RawDensePointBuffer = {
@@ -469,7 +480,7 @@ const NATIVE_LITTLE_ENDIAN =
 
 let wasmPromise: Promise<WasmModule> | null = null;
 
-async function loadWasm(): Promise<WasmModule> {
+export async function loadReconstructionWasm(): Promise<WasmModule> {
   if (!wasmPromise) {
     const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
     const moduleUrl = `${basePath}/wasm/video_to_3d_wasm.js`;
@@ -695,7 +706,8 @@ export function assertReconstructionContract(
     !Array.isArray(result.dense.reference_attempts) ||
     !Array.isArray(result.dense.reference_patches) ||
     !Array.isArray(result.mesh.reference_frames) ||
-    !Array.isArray(result.mesh.reference_patches)
+    !Array.isArray(result.mesh.reference_patches) ||
+    !Array.isArray(result.accepted_camera_evidence)
   ) {
     throw new Error(
       "camera-state contract mismatch: WASM result has no explicit multi-reference reconstruction evidence",
@@ -815,7 +827,7 @@ export function assertReconstructionContract(
 }
 
 export async function reconstructFrames(frames: SampledFrame[]): Promise<ReconstructionResult> {
-  const wasm = await loadWasm();
+  const wasm = await loadReconstructionWasm();
   const result = normalizeWasmReconstruction(
     wasm.reconstruct_sequence({
       frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
