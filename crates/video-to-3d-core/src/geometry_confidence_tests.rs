@@ -1,11 +1,14 @@
 use crate::coarse_collision::{CoarseCollider, CoarseColliderOptions, ColliderBox};
-use crate::geometry_confidence::{ConfidenceBand, GeometryConfidenceField, RegionConfidence};
+use crate::geometry_confidence::{
+    AgreementSource, ConfidenceBand, GeometryConfidenceField, RegionConfidence,
+};
 use crate::surface_materials::bake_surface_materials;
 use crate::textured_glb::{encode_textured_glb, encode_textured_glb_with_collider};
 use crate::{
-    DenseGridSite, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin, EvidenceRange,
-    EvidenceScale, MeshTriangle, Point3, ReconstructionEvidenceView, ReconstructionProviderClass,
-    ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    DenseGridSite, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
+    EvidencePointAttributes, EvidenceRange, EvidenceScale, MeshTriangle, Point3,
+    ReconstructionEvidenceView, ReconstructionProviderClass, ReconstructionProviderDescriptor,
+    SurfaceEvidenceRegion,
 };
 use serde_json::Value;
 
@@ -112,6 +115,8 @@ struct Scenario {
     sources: Vec<(f32, Option<f32>)>,
     reference_error: Option<f32>,
     point_confidence: f32,
+    /// Per-point reciprocal/depth-margin attributes, uniform over the region.
+    attributes: Option<EvidencePointAttributes>,
 }
 
 impl Scenario {
@@ -121,6 +126,17 @@ impl Scenario {
             sources: vec![(0.6, Some(0.4)), (-0.6, Some(0.4)), (0.7, Some(0.4))],
             reference_error: Some(0.4),
             point_confidence: 0.9,
+            attributes: None,
+        }
+    }
+
+    fn strong_with_attributes() -> Self {
+        Self {
+            attributes: Some(EvidencePointAttributes {
+                reciprocal_consistency: 0.9,
+                depth_margin: 0.9,
+            }),
+            ..Self::strong()
         }
     }
 
@@ -164,7 +180,10 @@ impl Scenario {
                 EvidenceRange::new(0, plane.points.len()),
             )
         }];
-        let evidence = ReconstructionEvidenceView::new(
+        let attributes = self
+            .attributes
+            .map(|attribute| vec![attribute; plane.points.len()]);
+        let mut evidence = ReconstructionEvidenceView::new(
             provider(class),
             EvidenceScale::ArbitraryMonocular,
             cameras,
@@ -173,6 +192,11 @@ impl Scenario {
             &plane.triangles,
         )
         .expect("valid scenario evidence");
+        if let Some(attributes) = &attributes {
+            evidence = evidence
+                .with_point_attributes(attributes)
+                .expect("valid scenario attributes");
+        }
         GeometryConfidenceField::from_evidence(&evidence).regions[0].clone()
     }
 }
@@ -233,6 +257,151 @@ fn confidence_orders_each_evidence_factor() {
     let generative = generative.evaluate();
     assert_eq!(generative.confidence, 0.0);
     assert_eq!(generative.band, ConfidenceBand::Unsupported);
+}
+
+#[test]
+fn providers_without_point_attributes_keep_the_combined_factor() {
+    let strong = Scenario::strong().evaluate();
+    let factors = strong.factors;
+    assert_eq!(
+        factors.agreement_source,
+        AgreementSource::CombinedPointConfidence
+    );
+    assert_eq!(factors.depth_ambiguity, None);
+    assert_eq!(factors.reciprocal_agreement, 0.9);
+    // The geometric mean still runs over the five factors of schema v1.
+    let five = [
+        factors.camera_support,
+        factors.reprojection,
+        factors.reciprocal_agreement,
+        factors.triangulation,
+        factors.reference_exclusivity,
+    ];
+    let expected = (five.iter().map(|f| f64::from(*f).ln()).sum::<f64>() / 5.0).exp() as f32;
+    assert_eq!(strong.confidence.to_bits(), expected.to_bits());
+}
+
+#[test]
+fn reciprocal_and_depth_ambiguity_order_confidence_on_their_own() {
+    let strong = Scenario::strong_with_attributes().evaluate();
+    assert_eq!(
+        strong.factors.agreement_source,
+        AgreementSource::PointAttributes
+    );
+    assert_eq!(strong.factors.reciprocal_agreement, 0.9);
+    assert_eq!(strong.factors.depth_ambiguity, Some(0.9));
+    assert_eq!(strong.band, ConfidenceBand::High, "{strong:?}");
+
+    // The combined point confidence no longer stands in for either factor.
+    let mut weak_points = Scenario::strong_with_attributes();
+    weak_points.point_confidence = 0.2;
+    let weak_points = weak_points.evaluate();
+    assert_eq!(
+        weak_points.confidence.to_bits(),
+        strong.confidence.to_bits()
+    );
+
+    // Only reciprocal consistency drops: only the reciprocal factor follows.
+    let mut previous = strong.clone();
+    for reciprocal in [0.6, 0.35, 0.1] {
+        let mut scenario = Scenario::strong_with_attributes();
+        scenario.attributes.as_mut().unwrap().reciprocal_consistency = reciprocal;
+        let region = scenario.evaluate();
+        assert_eq!(region.factors.reciprocal_agreement, reciprocal);
+        assert_eq!(region.factors.depth_ambiguity, Some(0.9));
+        assert!(
+            region.confidence < previous.confidence && region.confidence > 0.0,
+            "reciprocal {reciprocal}: {} vs {}",
+            region.confidence,
+            previous.confidence
+        );
+        previous = region;
+    }
+
+    // Only the depth margin drops: only the depth-ambiguity factor follows.
+    let mut previous = strong.clone();
+    for margin in [0.6, 0.35, 0.1] {
+        let mut scenario = Scenario::strong_with_attributes();
+        scenario.attributes.as_mut().unwrap().depth_margin = margin;
+        let region = scenario.evaluate();
+        assert_eq!(region.factors.reciprocal_agreement, 0.9);
+        assert_eq!(region.factors.depth_ambiguity, Some(margin));
+        assert!(
+            region.confidence < previous.confidence && region.confidence > 0.0,
+            "depth margin {margin}: {} vs {}",
+            region.confidence,
+            previous.confidence
+        );
+        previous = region;
+    }
+
+    // Either factor at zero leaves the region unsupported.
+    for attributes in [
+        EvidencePointAttributes {
+            reciprocal_consistency: 0.0,
+            depth_margin: 0.9,
+        },
+        EvidencePointAttributes {
+            reciprocal_consistency: 0.9,
+            depth_margin: 0.0,
+        },
+    ] {
+        let mut scenario = Scenario::strong_with_attributes();
+        scenario.attributes = Some(attributes);
+        assert_eq!(scenario.evaluate().band, ConfidenceBand::Unsupported);
+    }
+}
+
+#[test]
+fn split_factors_reach_the_summary_and_diagnostic() {
+    let plane = plane(5, [0.0, 0.0], 0.8, |_, _| true);
+    let attributes: Vec<EvidencePointAttributes> = (0..plane.points.len())
+        .map(|index| EvidencePointAttributes {
+            reciprocal_consistency: 0.75,
+            depth_margin: if index % 2 == 0 { 0.4 } else { 0.8 },
+        })
+        .collect();
+    let combined = single_reference_evidence(&plane);
+    let combined_field = GeometryConfidenceField::from_evidence(&combined);
+    let combined_summary = combined_field.summary(combined.triangles);
+    assert_eq!(combined_summary.combined_agreement_regions, 1);
+    assert_eq!(combined_summary.split_agreement_regions, 0);
+    assert_eq!(combined_summary.depth_ambiguity, None);
+    let diagnostic = combined_field.diagnostic(combined.triangles);
+    assert!(
+        diagnostic.contains("with depth ambiguity folded in"),
+        "{diagnostic}"
+    );
+
+    let split = single_reference_evidence(&plane)
+        .with_point_attributes(&attributes)
+        .unwrap();
+    let field = GeometryConfidenceField::from_evidence(&split);
+    let summary = field.summary(split.triangles);
+    assert_eq!(field.schema_version, 2);
+    assert_eq!(summary.split_agreement_regions, 1);
+    assert_eq!(summary.combined_agreement_regions, 0);
+    assert_eq!(summary.reciprocal_agreement.unwrap().min, 0.75);
+    // 13 of 25 points carry the 0.4 margin, so the lower median is 0.4.
+    assert_eq!(summary.depth_ambiguity.unwrap().min, 0.4);
+    let diagnostic = field.diagnostic(split.triangles);
+    assert!(
+        diagnostic.contains("reciprocal agreement 0.75-0.75 and depth ambiguity 0.40-0.40"),
+        "{diagnostic}"
+    );
+
+    // A field from the combined evidence does not describe the split evidence, and a
+    // changed attribute is a changed field, so a stale collider fails closed.
+    assert!(!combined_field.describes(&split));
+    let mut changed = attributes.clone();
+    for attribute in &mut changed {
+        attribute.reciprocal_consistency = 0.5;
+    }
+    let changed_evidence = single_reference_evidence(&plane)
+        .with_point_attributes(&changed)
+        .unwrap();
+    assert!(!field.describes(&changed_evidence));
+    assert!(field.describes(&split));
 }
 
 /// Points `0..split` belong to reference 0 and the rest to reference 1; the
@@ -335,7 +504,7 @@ fn reference_ambiguity_lowers_confidence_and_queries_resolve_by_region() {
     );
     assert!(field
         .diagnostic(&plane_with_seam.triangles)
-        .starts_with("Geometry confidence v1: 2 regions"));
+        .starts_with("Geometry confidence v2: 2 regions"));
 }
 
 #[test]

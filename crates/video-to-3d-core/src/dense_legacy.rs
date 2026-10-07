@@ -1,4 +1,4 @@
-use crate::{multi_view::RegisteredCamera, FrameInput, Point3};
+use crate::{multi_view::RegisteredCamera, EvidencePointAttributes, FrameInput, Point3};
 use nalgebra::Vector3;
 use serde::Serialize;
 use std::{cmp::Ordering, collections::BTreeMap};
@@ -17,6 +17,8 @@ const SURFACE_COMPLETION_PASSES: usize = 2;
 const MIN_SURFACE_NEIGHBORS: usize = 3;
 const MAX_SURFACE_NEIGHBOR_RELATIVE_DEPTH_SPREAD: f64 = 0.06;
 const SURFACE_COMPLETION_CONFIDENCE_SCALE: f64 = 0.85;
+/// Depth-hypothesis margin (photometric error units) at which a depth is unambiguous.
+const DEPTH_MARGIN_SATURATION: f64 = 6.0;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DenseStats {
@@ -61,6 +63,8 @@ pub(super) struct DenseAnalysis {
     pub stats: DenseStats,
     pub points: Vec<Point3>,
     pub grid_sites: Vec<DenseGridSite>,
+    /// Per-point reciprocal-consistency and depth-margin evidence, parallel to `points`.
+    pub point_attributes: Vec<EvidencePointAttributes>,
 }
 
 impl DenseAnalysis {
@@ -72,6 +76,7 @@ impl DenseAnalysis {
             },
             points: Vec::new(),
             grid_sites: Vec::new(),
+            point_attributes: Vec::new(),
         }
     }
 }
@@ -233,6 +238,7 @@ pub(super) fn estimate_depth_points(
     let border = (PATCH_RADIUS + 2) as u32;
     let mut points = Vec::new();
     let mut grid_sites = Vec::new();
+    let mut point_attributes = Vec::new();
     let mut errors = Vec::new();
     let mut supports = Vec::new();
     let mut sampled_pixels = 0usize;
@@ -364,11 +370,8 @@ pub(super) fn estimate_depth_points(
             let reciprocal_confidence =
                 ((fused.observations - 1) as f64 / source_views.len() as f64).clamp(0.0, 1.0);
             let error_confidence = 1.0 / (1.0 + best.error / 8.0);
-            let margin_confidence = if ambiguity_margin.is_finite() {
-                (ambiguity_margin / 6.0).clamp(0.2, 1.0)
-            } else {
-                1.0
-            };
+            let depth_margin = depth_margin_score(ambiguity_margin);
+            let margin_confidence = depth_margin.max(0.2);
             let confidence = (support_confidence
                 * reciprocal_confidence
                 * error_confidence
@@ -385,6 +388,10 @@ pub(super) fn estimate_depth_points(
                 b,
             });
             grid_sites.push(DenseGridSite { x, y });
+            point_attributes.push(EvidencePointAttributes {
+                reciprocal_consistency: reciprocal_confidence as f32,
+                depth_margin: depth_margin as f32,
+            });
             errors.push(best.error);
             supports.push(best.support as f64);
         }
@@ -397,6 +404,7 @@ pub(super) fn estimate_depth_points(
         &source_views,
         &mut points,
         &mut grid_sites,
+        &mut point_attributes,
         &mut errors,
         &mut supports,
         width,
@@ -440,6 +448,16 @@ pub(super) fn estimate_depth_points(
         },
         points,
         grid_sites,
+        point_attributes,
+    }
+}
+
+/// Normalized depth-hypothesis margin: `1` without a comparable rival hypothesis.
+fn depth_margin_score(ambiguity_margin: f64) -> f64 {
+    if ambiguity_margin.is_finite() {
+        (ambiguity_margin / DEPTH_MARGIN_SATURATION).clamp(0.0, 1.0)
+    } else {
+        1.0
     }
 }
 
@@ -451,6 +469,7 @@ fn complete_surface_samples(
     source_views: &[SourceView<'_>],
     points: &mut Vec<Point3>,
     grid_sites: &mut Vec<DenseGridSite>,
+    point_attributes: &mut Vec<EvidencePointAttributes>,
     errors: &mut Vec<f64>,
     supports: &mut Vec<f64>,
     width: u32,
@@ -481,6 +500,7 @@ fn complete_surface_samples(
 
                 let mut neighbor_depths = Vec::with_capacity(8);
                 let mut neighbor_confidences = Vec::with_capacity(8);
+                let mut neighbor_margins = Vec::with_capacity(8);
                 for offset_y in -1i64..=1 {
                     for offset_x in -1i64..=1 {
                         if offset_x == 0 && offset_y == 0 {
@@ -511,6 +531,13 @@ fn complete_surface_samples(
                         };
                         neighbor_depths.push(depth);
                         neighbor_confidences.push(point.confidence as f64);
+                        // A completed depth is predicted from its neighbors, so it inherits
+                        // their depth-hypothesis ambiguity.
+                        neighbor_margins.push(
+                            point_attributes
+                                .get(point_index)
+                                .map_or(0.0, |attribute| attribute.depth_margin as f64),
+                        );
                     }
                 }
 
@@ -611,6 +638,8 @@ fn complete_surface_samples(
                     * error_confidence
                     * SURFACE_COMPLETION_CONFIDENCE_SCALE)
                     .clamp(0.05, 0.9) as f32;
+                let depth_margin =
+                    neighbor_margins.iter().sum::<f64>() / neighbor_margins.len() as f64;
                 let (r, g, b) = sample_rgb(reference_frame, x, y);
                 additions.push((
                     Point3 {
@@ -623,6 +652,10 @@ fn complete_surface_samples(
                         b,
                     },
                     DenseGridSite { x, y },
+                    EvidencePointAttributes {
+                        reciprocal_consistency: reciprocal_confidence as f32,
+                        depth_margin: depth_margin.clamp(0.0, 1.0) as f32,
+                    },
                     direct_error,
                     direct_errors.len() as f64,
                 ));
@@ -633,9 +666,10 @@ fn complete_surface_samples(
             break;
         }
         stats.accepted += additions.len();
-        for (point, site, error, support) in additions {
+        for (point, site, attributes, error, support) in additions {
             points.push(point);
             grid_sites.push(site);
+            point_attributes.push(attributes);
             errors.push(error);
             supports.push(support);
         }
@@ -1257,6 +1291,7 @@ mod tests {
             DenseGridSite { x: 7, y: 3 },
             DenseGridSite { x: 3, y: 7 },
         ];
+        let mut point_attributes = vec![EvidencePointAttributes::default(); 3];
         let mut errors = Vec::new();
         let mut supports = Vec::new();
 
@@ -1267,6 +1302,7 @@ mod tests {
             &source_views,
             &mut points,
             &mut grid_sites,
+            &mut point_attributes,
             &mut errors,
             &mut supports,
             width,

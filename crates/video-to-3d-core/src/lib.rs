@@ -30,9 +30,9 @@ pub use learned_depth::{
 };
 pub use reconstruction_evidence::{
     classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
-    EvidenceRange, EvidenceScale, ReconstructionEvidenceSummary, ReconstructionEvidenceView,
-    ReconstructionProviderClass, ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
-    RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+    EvidencePointAttributes, EvidenceRange, EvidenceScale, ReconstructionEvidenceSummary,
+    ReconstructionEvidenceView, ReconstructionProviderClass, ReconstructionProviderDescriptor,
+    SurfaceEvidenceRegion, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 
 pub fn reconstruct_browser(

@@ -206,7 +206,7 @@ fn accepted_plane_mesh_bakes_into_a_textured_glb_without_changing_geometry() {
 #[test]
 fn accepted_plane_reconstruction_has_confidence_and_a_containing_collider() {
     use crate::coarse_collision::{CoarseCollider, CoarseColliderOptions};
-    use crate::geometry_confidence::{ConfidenceBand, GeometryConfidenceField};
+    use crate::geometry_confidence::{AgreementSource, ConfidenceBand, GeometryConfidenceField};
     use crate::{
         classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
         EvidenceScale, ReconstructionEvidenceView, ReconstructionProviderDescriptor,
@@ -253,12 +253,20 @@ fn accepted_plane_reconstruction_has_confidence_and_a_containing_collider() {
         &dense.points,
         &mesh.triangles,
     )
-    .expect("accepted reconstruction is valid evidence");
+    .expect("accepted reconstruction is valid evidence")
+    .with_point_attributes(&dense.point_attributes)
+    .expect("dense reciprocal/depth-margin attributes are valid evidence");
 
     let field = GeometryConfidenceField::from_evidence(&evidence);
     assert_eq!(field.regions.len(), evidence.regions.len());
     for region in &field.regions {
         assert_ne!(region.band, ConfidenceBand::Unsupported, "{region:?}");
+        assert_eq!(
+            region.factors.agreement_source,
+            AgreementSource::PointAttributes
+        );
+        assert!(region.factors.depth_ambiguity.is_some_and(|f| f > 0.0));
+        assert!(region.factors.reciprocal_agreement > 0.0);
         // Baselines of 0.22-0.47 at depth 4 span about 3 to 7 degrees.
         let angle = region.median_triangulation_angle_degrees.unwrap();
         assert!((2.5..7.5).contains(&angle), "triangulation angle {angle}");

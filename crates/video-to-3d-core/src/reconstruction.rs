@@ -329,6 +329,8 @@ pub struct ReconstructionResult {
     pub points: Vec<Point3>,
     pub dense_points: Vec<Point3>,
     pub dense_grid_sites: Vec<DenseGridSite>,
+    /// Per-point reciprocal-consistency and depth-margin evidence, parallel to `dense_points`.
+    pub dense_point_attributes: Vec<EvidencePointAttributes>,
     pub dense: DenseStats,
     pub mesh_triangles: Vec<MeshTriangle>,
     pub mesh: MeshStats,
@@ -829,6 +831,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     let mesh_triangles = mesh_analysis.triangles;
     let dense = dense_analysis.stats;
     let dense_grid_sites = dense_analysis.grid_sites;
+    let dense_point_attributes = dense_analysis.point_attributes;
     let dense_points = dense_analysis.points;
     let multi_view = multi_view_analysis.stats;
 
@@ -1082,6 +1085,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         points,
         dense_points,
         dense_grid_sites,
+        dense_point_attributes,
         dense,
         mesh_triangles,
         mesh,

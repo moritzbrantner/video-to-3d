@@ -1,4 +1,4 @@
-use crate::{multi_view::RegisteredCamera, FrameInput, Point3};
+use crate::{multi_view::RegisteredCamera, EvidencePointAttributes, FrameInput, Point3};
 use nalgebra::Vector3;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -141,6 +141,8 @@ pub(super) struct DenseAnalysis {
     pub stats: DenseStats,
     pub points: Vec<Point3>,
     pub grid_sites: Vec<DenseGridSite>,
+    /// Per-point reciprocal-consistency and depth-margin evidence, parallel to `points`.
+    pub point_attributes: Vec<EvidencePointAttributes>,
 }
 
 struct AcceptedPatch {
@@ -148,8 +150,10 @@ struct AcceptedPatch {
     stats: legacy::DenseStats,
     primary_points: Vec<Point3>,
     primary_sites: Vec<DenseGridSite>,
+    primary_attributes: Vec<EvidencePointAttributes>,
     completion_points: Vec<Point3>,
     completion_sites: Vec<DenseGridSite>,
+    completion_attributes: Vec<EvidencePointAttributes>,
 }
 
 /// The unlimited dense run; production enters through the budgeted plan.
@@ -265,6 +269,7 @@ pub(super) fn estimate_depth_points_with_budget(
             },
             points: Vec::new(),
             grid_sites: Vec::new(),
+            point_attributes: Vec::new(),
         };
     };
 
@@ -367,6 +372,7 @@ fn estimate_working_set(
     // storage, plus error/support vectors and the occupied-grid index used by completion.
     let retained_sample_bytes = size_of::<Point3>()
         + size_of::<DenseGridSite>()
+        + size_of::<EvidencePointAttributes>()
         + 2 * size_of::<f64>()
         + 3 * size_of::<usize>();
     let dense_sample_bytes = max_grid_samples
@@ -430,15 +436,18 @@ fn estimate_working_set(
     // with more features fits fewer views), so charge it at the largest plan, not this one.
     let retained_grid_samples = grid_samples_per_reference.saturating_mul(MAX_REFERENCE_VIEWS);
     let retained_candidate_bytes = retained_grid_samples
-        .saturating_mul(size_of::<Point3>() + size_of::<DenseGridSite>())
+        .saturating_mul(
+            size_of::<Point3>() + size_of::<DenseGridSite>() + size_of::<EvidencePointAttributes>(),
+        )
         .saturating_add(
             retained_grid_samples
                 .saturating_mul(8)
                 .saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
         );
-    // Packed WASM output: xyzw, RGB, original grid site, triangle indices and confidence.
+    // Packed WASM output: xyzw, RGB, original grid site, reciprocal/depth-margin attributes,
+    // triangle indices and confidence.
     let packed_output_bytes = max_grid_samples
-        .saturating_mul(4 * size_of::<f32>() + 3 * size_of::<u8>() + 2 * size_of::<u32>())
+        .saturating_mul(6 * size_of::<f32>() + 3 * size_of::<u8>() + 2 * size_of::<u32>())
         .saturating_add(
             max_mesh_triangles.saturating_mul(4 * size_of::<u32>()),
         );
@@ -677,20 +686,24 @@ fn split_patch(reference_frame: usize, analysis: legacy::DenseAnalysis) -> Accep
         stats,
         mut points,
         grid_sites,
+        mut point_attributes,
     } = analysis;
     let mut grid_sites = convert_grid_sites(grid_sites);
     let completion_count = stats.surface_completed_points.min(points.len());
     let primary_count = points.len() - completion_count;
     let completion_points = points.split_off(primary_count);
     let completion_sites = grid_sites.split_off(primary_count);
+    let completion_attributes = point_attributes.split_off(primary_count);
 
     AcceptedPatch {
         reference_frame,
         stats,
         primary_points: points,
         primary_sites: grid_sites,
+        primary_attributes: point_attributes,
         completion_points,
         completion_sites,
+        completion_attributes,
     }
 }
 
@@ -708,17 +721,20 @@ fn combine_patches(
         .sum::<usize>();
     let mut points = Vec::with_capacity(total_primary + total_completion);
     let mut grid_sites = Vec::with_capacity(total_primary + total_completion);
+    let mut point_attributes = Vec::with_capacity(total_primary + total_completion);
     let mut primary_starts = Vec::with_capacity(patches.len());
     for patch in &patches {
         primary_starts.push(points.len());
         points.extend_from_slice(&patch.primary_points);
         grid_sites.extend_from_slice(&patch.primary_sites);
+        point_attributes.extend_from_slice(&patch.primary_attributes);
     }
     let mut completion_starts = Vec::with_capacity(patches.len());
     for patch in &patches {
         completion_starts.push(points.len());
         points.extend_from_slice(&patch.completion_points);
         grid_sites.extend_from_slice(&patch.completion_sites);
+        point_attributes.extend_from_slice(&patch.completion_attributes);
     }
 
     let reference_frames = patches
@@ -842,6 +858,7 @@ fn combine_patches(
         },
         points,
         grid_sites,
+        point_attributes,
     }
 }
 
@@ -850,6 +867,7 @@ fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
         stats,
         points,
         grid_sites,
+        point_attributes,
     } = analysis;
     let completion_count = stats.surface_completed_points.min(points.len());
     let primary_count = points.len() - completion_count;
@@ -927,6 +945,7 @@ fn from_legacy(analysis: legacy::DenseAnalysis) -> DenseAnalysis {
         },
         points,
         grid_sites: convert_grid_sites(grid_sites),
+        point_attributes,
     }
 }
 
@@ -1023,6 +1042,11 @@ mod multi_reference_tests {
             .iter()
             .all(|attempt| attempt.accepted || attempt.skip_reason.is_some()));
         assert_eq!(result.points.len(), result.grid_sites.len());
+        assert_eq!(result.points.len(), result.point_attributes.len());
+        assert!(result.point_attributes.iter().all(|attribute| {
+            (0.0..=1.0).contains(&attribute.reciprocal_consistency)
+                && (0.0..=1.0).contains(&attribute.depth_margin)
+        }));
         assert_eq!(result.points.len(), result.stats.accepted_points);
         assert_eq!(
             result.stats.surface_completion_proposals,
@@ -1167,6 +1191,7 @@ mod multi_reference_tests {
         for (left, right) in baseline.grid_sites.iter().zip(&budgeted.grid_sites) {
             assert_eq!((left.x, left.y), (right.x, right.y));
         }
+        assert_eq!(baseline.point_attributes, budgeted.point_attributes);
         assert_eq!(
             budgeted.stats.working_set_estimate.total_bytes,
             budgeted

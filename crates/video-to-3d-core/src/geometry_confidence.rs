@@ -1,16 +1,22 @@
 //! Per-region geometry confidence over validated reconstruction evidence.
 //!
 //! The field scores every provenance region of a [`ReconstructionEvidenceView`]
-//! from five explicit factors, each in `[0, 1]`:
+//! from five or six explicit factors, each in `[0, 1]`:
 //! - **camera support**: distinct accepted supporting source cameras,
 //!   saturating at [`SUPPORT_SATURATION_VIEWS`];
 //! - **reprojection**: the worst median reprojection error among the
 //!   reference and supporting cameras, `1 / (1 + error / 1 px)`; a camera
 //!   without a reprojection estimate scores [`UNKNOWN_FACTOR`];
-//! - **reciprocal agreement**: the lower median of the provider-recorded point
-//!   confidence (for the built-in provider the product of source support,
-//!   reciprocal depth consistency, photometric error and depth-margin
-//!   evidence);
+//! - **reciprocal agreement**: with per-point evidence attributes, the lower
+//!   median of the reciprocal-consistency fraction; without them, the lower
+//!   median of the provider-recorded point confidence (for the built-in
+//!   provider the product of source support, reciprocal depth consistency,
+//!   photometric error and depth-margin evidence);
+//! - **depth ambiguity** (only with per-point evidence attributes): the lower
+//!   median of the normalized depth-hypothesis margin, so `1` means the chosen
+//!   depth had no close rival. Without attributes it stays folded into the
+//!   combined reciprocal-agreement factor, which keeps such providers' scores
+//!   unchanged;
 //! - **triangulation strength**: the lower median, over the region's points, of
 //!   the widest reference/source ray angle, saturating at
 //!   [`TRIANGULATION_SATURATION_DEGREES`];
@@ -29,12 +35,15 @@
 //! space without accepted points: holes stay unsupported.
 
 use crate::{
-    EvidenceCamera, EvidenceOrigin, EvidenceRange, MeshTriangle, ReconstructionEvidenceView,
+    EvidenceCamera, EvidenceOrigin, EvidencePointAttributes, EvidenceRange, MeshTriangle,
+    ReconstructionEvidenceView,
 };
 use serde::Serialize;
 use std::collections::HashMap;
 
-pub const GEOMETRY_CONFIDENCE_SCHEMA_VERSION: u32 = 1;
+/// Version 2 splits reciprocal agreement and depth ambiguity when the evidence carries
+/// per-point attributes.
+pub const GEOMETRY_CONFIDENCE_SCHEMA_VERSION: u32 = 2;
 /// Supporting source cameras at which camera support saturates.
 pub const SUPPORT_SATURATION_VIEWS: usize = 3;
 /// Median reprojection error (pixels) that halves the reprojection factor.
@@ -70,32 +79,56 @@ impl ConfidenceBand {
     }
 }
 
+/// What the reciprocal-agreement factor was computed from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgreementSource {
+    /// The provider's combined per-point confidence; depth ambiguity is folded in.
+    CombinedPointConfidence,
+    /// Separate per-point reciprocal-consistency and depth-margin attributes.
+    PointAttributes,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct ConfidenceFactors {
     pub camera_support: f32,
     pub reprojection: f32,
     pub reciprocal_agreement: f32,
+    /// `None` when the provider records no depth margin; it is then part of
+    /// `reciprocal_agreement`.
+    pub depth_ambiguity: Option<f32>,
     pub triangulation: f32,
     pub reference_exclusivity: f32,
+    pub agreement_source: AgreementSource,
 }
 
 impl ConfidenceFactors {
-    const ZERO: Self = Self {
-        camera_support: 0.0,
-        reprojection: 0.0,
-        reciprocal_agreement: 0.0,
-        triangulation: 0.0,
-        reference_exclusivity: 0.0,
-    };
+    fn zero(agreement_source: AgreementSource) -> Self {
+        Self {
+            camera_support: 0.0,
+            reprojection: 0.0,
+            reciprocal_agreement: 0.0,
+            depth_ambiguity: match agreement_source {
+                AgreementSource::CombinedPointConfidence => None,
+                AgreementSource::PointAttributes => Some(0.0),
+            },
+            triangulation: 0.0,
+            reference_exclusivity: 0.0,
+            agreement_source,
+        }
+    }
 
     fn geometric_mean(&self) -> f32 {
-        let factors = [
+        let factors: Vec<f32> = [
             self.camera_support,
             self.reprojection,
             self.reciprocal_agreement,
             self.triangulation,
             self.reference_exclusivity,
-        ];
+        ]
+        .into_iter()
+        .chain(self.depth_ambiguity)
+        .collect();
         if factors.iter().any(|factor| *factor <= 0.0) {
             return 0.0;
         }
@@ -143,6 +176,28 @@ impl BandCounts {
     }
 }
 
+/// Smallest and largest value of one factor over the camera-backed regions.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct FactorRange {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl FactorRange {
+    fn include(range: Option<Self>, value: f32) -> Option<Self> {
+        Some(range.map_or(
+            Self {
+                min: value,
+                max: value,
+            },
+            |range| Self {
+                min: range.min.min(value),
+                max: range.max.max(value),
+            },
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct GeometryConfidenceSummary {
     pub schema_version: u32,
@@ -151,6 +206,12 @@ pub struct GeometryConfidenceSummary {
     pub triangles: BandCounts,
     pub min_region_confidence: Option<f32>,
     pub max_region_confidence: Option<f32>,
+    /// Camera-backed regions scored from separate reciprocal and depth-ambiguity factors.
+    pub split_agreement_regions: usize,
+    /// Camera-backed regions whose reciprocal agreement is the combined point confidence.
+    pub combined_agreement_regions: usize,
+    pub reciprocal_agreement: Option<FactorRange>,
+    pub depth_ambiguity: Option<FactorRange>,
 }
 
 /// Region confidences plus a point-to-region index over the borrowed evidence.
@@ -180,6 +241,11 @@ impl GeometryConfidenceField {
         starts.sort_unstable();
         let region_of =
             |point: usize| locate(&starts, point, |region| evidence.regions[region].points);
+        let agreement_source = if evidence.point_attributes.is_some() {
+            AgreementSource::PointAttributes
+        } else {
+            AgreementSource::CombinedPointConfidence
+        };
 
         let mut touching = vec![0usize; evidence.regions.len()];
         let mut mixed = vec![0usize; evidence.regions.len()];
@@ -206,8 +272,11 @@ impl GeometryConfidenceField {
             .iter()
             .enumerate()
             .map(|(index, region)| {
-                let points = &evidence.points
-                    [region.points.start..region.points.start + region.points.count];
+                let range = region.points.start..region.points.start + region.points.count;
+                let points = &evidence.points[range.clone()];
+                let attributes: Option<&[EvidencePointAttributes]> = evidence
+                    .point_attributes
+                    .map(|attributes| &attributes[range]);
                 let reference = region.reference_frame.and_then(|frame| cameras.get(&frame));
                 let sources: Vec<&EvidenceCamera> = region
                     .source_frames
@@ -232,8 +301,27 @@ impl GeometryConfidenceField {
                             };
                             reprojection = reprojection.min(score);
                         }
-                        let agreement = lower_median(points.iter().map(|point| point.confidence))
-                            .unwrap_or(0.0);
+                        let (agreement, depth_ambiguity) = match attributes {
+                            Some(attributes) => (
+                                lower_median(
+                                    attributes
+                                        .iter()
+                                        .map(|attribute| attribute.reciprocal_consistency),
+                                ),
+                                Some(
+                                    lower_median(
+                                        attributes.iter().map(|attribute| attribute.depth_margin),
+                                    )
+                                    .unwrap_or(0.0)
+                                    .clamp(0.0, 1.0),
+                                ),
+                            ),
+                            None => (
+                                lower_median(points.iter().map(|point| point.confidence)),
+                                None,
+                            ),
+                        };
+                        let agreement = agreement.unwrap_or(0.0);
                         let reference_center = camera_center(reference);
                         let source_centers: Vec<[f64; 3]> =
                             sources.iter().map(|camera| camera_center(camera)).collect();
@@ -257,14 +345,16 @@ impl GeometryConfidenceField {
                                 camera_support: support,
                                 reprojection,
                                 reciprocal_agreement: agreement.clamp(0.0, 1.0),
+                                depth_ambiguity,
                                 triangulation,
                                 reference_exclusivity: exclusivity,
+                                agreement_source,
                             },
                             worst_error,
                             median_angle,
                         )
                     }
-                    _ => (ConfidenceFactors::ZERO, None, None),
+                    _ => (ConfidenceFactors::zero(agreement_source), None, None),
                 };
                 let confidence = factors.geometric_mean() * provenance_weight;
                 RegionConfidence {
@@ -358,6 +448,22 @@ impl GeometryConfidenceField {
                     .max_region_confidence
                     .map_or(region.confidence, |value| value.max(region.confidence)),
             );
+            if region.provenance_weight <= 0.0 {
+                // Generative completion has no reciprocal or depth evidence to report.
+                continue;
+            }
+            match region.factors.agreement_source {
+                AgreementSource::PointAttributes => summary.split_agreement_regions += 1,
+                AgreementSource::CombinedPointConfidence => summary.combined_agreement_regions += 1,
+            }
+            summary.reciprocal_agreement = FactorRange::include(
+                summary.reciprocal_agreement,
+                region.factors.reciprocal_agreement,
+            );
+            if let Some(depth_ambiguity) = region.factors.depth_ambiguity {
+                summary.depth_ambiguity =
+                    FactorRange::include(summary.depth_ambiguity, depth_ambiguity);
+            }
         }
         for triangle in triangles {
             summary.triangles.add(
@@ -375,7 +481,7 @@ impl GeometryConfidenceField {
                 .into();
         }
         format!(
-            "Geometry confidence v{}: {} regions ({} high, {} medium, {} low, {} unsupported) from camera support, reprojection, reciprocal agreement, triangulation and reference exclusivity; confidence {:.2}-{:.2}; triangles {} high, {} medium, {} low, {} unsupported. Areas without accepted points carry no confidence.",
+            "Geometry confidence v{}: {} regions ({} high, {} medium, {} low, {} unsupported) from camera support, reprojection, reciprocal agreement, depth ambiguity, triangulation and reference exclusivity; confidence {:.2}-{:.2}; {}; triangles {} high, {} medium, {} low, {} unsupported. Areas without accepted points carry no confidence.",
             summary.schema_version,
             self.regions.len(),
             summary.regions.high,
@@ -384,11 +490,49 @@ impl GeometryConfidenceField {
             summary.regions.unsupported,
             summary.min_region_confidence.unwrap_or(0.0),
             summary.max_region_confidence.unwrap_or(0.0),
+            describe_agreement(&summary),
             summary.triangles.high,
             summary.triangles.medium,
             summary.triangles.low,
             summary.triangles.unsupported,
         )
+    }
+}
+
+/// The reciprocal and depth-ambiguity part of the diagnostic.
+fn describe_agreement(summary: &GeometryConfidenceSummary) -> String {
+    let range = |range: Option<FactorRange>| {
+        range.map_or("n/a".into(), |range| {
+            format!("{:.2}-{:.2}", range.min, range.max)
+        })
+    };
+    let mut parts = Vec::new();
+    if summary.split_agreement_regions > 0 {
+        parts.push(format!(
+            "{} regions score reciprocal agreement {} and depth ambiguity {} separately from per-point attributes",
+            summary.split_agreement_regions,
+            range(summary.reciprocal_agreement),
+            range(summary.depth_ambiguity),
+        ));
+    }
+    if summary.combined_agreement_regions > 0 {
+        parts.push(if summary.split_agreement_regions == 0 {
+            format!(
+                "{} regions score reciprocal agreement {} from the provider's combined point confidence, with depth ambiguity folded in",
+                summary.combined_agreement_regions,
+                range(summary.reciprocal_agreement),
+            )
+        } else {
+            format!(
+                "{} regions fold depth ambiguity into the provider's combined point confidence",
+                summary.combined_agreement_regions
+            )
+        });
+    }
+    if parts.is_empty() {
+        "no camera-backed regions report reciprocal or depth evidence".into()
+    } else {
+        parts.join(", ")
     }
 }
 
