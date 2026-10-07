@@ -540,6 +540,20 @@ fn collider_excludes_unobserved_and_low_confidence_evidence() {
     let collider = CoarseCollider::from_evidence(&observed, &field, strict);
     assert!(collider.boxes.is_empty());
     assert_eq!(collider.excluded.low_confidence, plane.triangles.len());
+
+    // A field built from geometric evidence never admits the learned evidence it is paired
+    // with: the mismatch excludes everything rather than trusting the stale origins.
+    let stale = GeometryConfidenceField::from_evidence(&observed);
+    assert!(!stale.describes(&learned));
+    let collider =
+        CoarseCollider::from_evidence(&learned, &stale, CoarseColliderOptions::default());
+    assert!(collider.boxes.is_empty());
+    assert_eq!(collider.source_triangles, 0);
+    assert_eq!(
+        collider.excluded.mismatched_confidence,
+        plane.triangles.len()
+    );
+    assert!(field.describes(&observed));
 }
 
 fn glb_json(glb: &[u8]) -> (Value, Vec<u8>) {

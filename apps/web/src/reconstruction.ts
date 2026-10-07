@@ -578,7 +578,7 @@ export type CoarseCollider = {
   options: { min_confidence: number; cell_edge_multiple: number; max_cells_per_axis: number };
   accepted_triangles: number;
   source_triangles: number;
-  excluded: { unobserved_provenance: number; low_confidence: number };
+  excluded: { unobserved_provenance: number; low_confidence: number; mismatched_confidence: number };
   cell_size: number | null;
   occupied_cells: number;
   box_count: number;
@@ -1072,7 +1072,8 @@ function assertConfidenceContract(result: ReconstructionResult): void {
     collider.accepted_triangles !== result.mesh_triangles.length ||
     collider.source_triangles +
       collider.excluded.unobserved_provenance +
-      collider.excluded.low_confidence !==
+      collider.excluded.low_confidence +
+      collider.excluded.mismatched_confidence !==
       collider.accepted_triangles ||
     (collider.box_count > 0) !== (collider.cell_size !== null)
   ) {

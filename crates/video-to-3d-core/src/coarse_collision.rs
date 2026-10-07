@@ -65,6 +65,9 @@ pub struct ColliderExclusions {
     pub unobserved_provenance: usize,
     /// Observed, but below `min_confidence`.
     pub low_confidence: usize,
+    /// The confidence field does not describe the supplied evidence, so no confidence
+    /// could be trusted: every triangle is excluded (fail closed).
+    pub mismatched_confidence: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -95,17 +98,25 @@ impl CoarseCollider {
         let points = evidence.points;
         let mut excluded = ColliderExclusions::default();
         let mut eligible = Vec::new();
+        // The field must have been built from this evidence; provenance is read from the
+        // evidence itself either way, so a stale field can never admit unobserved geometry.
+        let field_matches = confidence.describes(evidence);
         for triangle in evidence.triangles {
             let corners = [triangle.a, triangle.b, triangle.c];
-            let observed = corners.iter().all(|point| {
-                confidence.region_of_point(*point).is_some_and(|region| {
-                    matches!(
-                        region.origin,
-                        EvidenceOrigin::GeometricMultiView | EvidenceOrigin::RevalidatedCompletion
-                    )
+            let observed = corners.iter().all(|&point| {
+                evidence.regions.iter().any(|region| {
+                    region.points.start <= point
+                        && point < region.points.start + region.points.count
+                        && matches!(
+                            region.origin,
+                            EvidenceOrigin::GeometricMultiView
+                                | EvidenceOrigin::RevalidatedCompletion
+                        )
                 })
             });
-            if !observed {
+            if !field_matches {
+                excluded.mismatched_confidence += 1;
+            } else if !observed {
                 excluded.unobserved_provenance += 1;
             } else if confidence.triangle_confidence(triangle) < options.min_confidence {
                 excluded.low_confidence += 1;
@@ -147,6 +158,12 @@ impl CoarseCollider {
     }
 
     pub fn diagnostic(&self) -> String {
+        if self.excluded.mismatched_confidence > 0 {
+            return format!(
+                "Coarse collider: none. The geometry-confidence field does not describe this evidence, so all {} accepted triangles were excluded (fail closed).",
+                self.accepted_triangles
+            );
+        }
         let Some(cell) = self.cell_size else {
             return format!(
                 "Coarse collider: none. {} accepted triangles, {} learned/generative and {} below confidence {:.2}; no collision geometry is invented.",
