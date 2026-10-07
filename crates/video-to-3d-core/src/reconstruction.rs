@@ -1477,7 +1477,7 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult, scope: (usize, usize)) -> [usize; 11] {
+fn reconstruction_score(result: &ReconstructionResult, scope: (usize, usize)) -> [usize; 10] {
     // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
     // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
     // camera/point solution survives. Every field up to the sparse points describes the primary
@@ -1497,8 +1497,9 @@ fn reconstruction_score(result: &ReconstructionResult, scope: (usize, usize)) ->
         longest_track,
         linked_pairs,
         result.points.len(),
-        secondary(|solve| usize::from(solve.seed_pair.is_some())),
-        secondary(|solve| solve.registered_views),
+        // Cameras rather than seeded-segment counts: a retry may segment the clip differently,
+        // and fragmenting one range into more seeded segments must not win by itself.
+        secondary(|solve| solve.cameras.len()),
         secondary(|solve| solve.sparse_points),
     ]
 }
@@ -2567,7 +2568,11 @@ mod tests {
             recovered_from_revisit: 0,
             sparse_points: registered_views * 50,
             bundle_adjustment_accepted: seeded,
-            cameras: Vec::new(),
+            cameras: if seeded {
+                base.cameras.iter().copied().take(2 + registered_views).collect()
+            } else {
+                Vec::new()
+            },
         };
         let mut unseeded = base.clone();
         unseeded.multi_view.segment_solves = vec![solve(false, 0)];
@@ -2585,5 +2590,13 @@ mod tests {
         clip_wide.multi_view.longest_track += 10;
         clip_wide.multi_view.linked_pairs += 10;
         assert_eq!(reconstruction_score(&clip_wide, clip_wide.track_scope.primary), reconstruction_score(&seeded, seeded.track_scope.primary));
+
+        // Two seeded fragments with fewer cameras lose to one segment with more.
+        let mut fragmented = base.clone();
+        fragmented.multi_view.segment_solves = vec![solve(true, 0), solve(true, 0)];
+        let mut merged = base.clone();
+        merged.multi_view.segment_solves = vec![solve(true, 3)];
+        let scope = base.track_scope.primary;
+        assert!(reconstruction_score(&merged, scope) > reconstruction_score(&fragmented, scope));
     }
 }
