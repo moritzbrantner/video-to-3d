@@ -712,9 +712,10 @@ function assertBootstrapContract(result: ReconstructionResult, expectedFrameCoun
   }
   const expectedGate = !pair
     ? bootstrap.decisive_gate !== null && bootstrap.decisive_gate !== "registration"
-    : result.registered_views.length === 0
+    : result.registered_views.length === 0 && candidates.length > 1
       ? bootstrap.decisive_gate === "registration"
-      : bootstrap.decisive_gate === null;
+      : // Registered views, or a two-frame clip that the seed pair covers.
+        bootstrap.decisive_gate === null;
   if (candidates.length > 0 && !expectedGate) {
     throw new Error(
       `bootstrap contract mismatch: decisive gate ${String(bootstrap.decisive_gate)} contradicts the accepted cameras`,
