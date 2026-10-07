@@ -288,6 +288,29 @@ const ESCALATION_LABELS: Record<BootstrapEscalation, string> = {
 };
 
 /** Seed-candidate rejections per gate, e.g. "translation baseline ×15, triangulation angle ×1". */
+/** Region and triangle confidence bands, for the result summary. */
+export function describeGeometryConfidence(result: ReconstructionResult): string {
+  const summary = result.geometry_confidence_summary;
+  if (result.geometry_confidence.regions.length === 0) {
+    return "No accepted surface regions; everything is unsupported";
+  }
+  const bands = (counts: BandCounts) =>
+    `${counts.high} high, ${counts.medium} medium, ${counts.low} low, ${counts.unsupported} unsupported`;
+  const range =
+    summary.min_region_confidence === null || summary.max_region_confidence === null
+      ? ""
+      : ` (${summary.min_region_confidence.toFixed(2)}–${summary.max_region_confidence.toFixed(2)})`;
+  return `Regions: ${bands(summary.regions)}${range}; triangles: ${bands(summary.triangles)}`;
+}
+
+export function describeCollider(collider: CoarseCollider): string {
+  const excluded = `${collider.excluded.unobserved_provenance} learned/generative and ${collider.excluded.low_confidence} low-confidence triangles excluded`;
+  if (collider.cell_size === null || collider.box_count === 0) {
+    return `No collider; ${excluded}`;
+  }
+  return `${collider.box_count} boxes from ${collider.source_triangles} of ${collider.accepted_triangles} triangles (cell ${collider.cell_size.toFixed(3)}); ${excluded}`;
+}
+
 export function describeSeedRejections(bootstrap: BootstrapDiagnosis): string {
   if (bootstrap.rejections.length === 0) return "None rejected";
   return bootstrap.rejections
@@ -503,6 +526,65 @@ export type EvidenceCamera = {
   median_reprojection_error_pixels: number | null;
 };
 
+export type ConfidenceBand = "high" | "medium" | "low" | "unsupported";
+
+export type RegionConfidence = {
+  region: number;
+  origin:
+    | "geometric_multi_view"
+    | "revalidated_completion"
+    | "learned_multi_view"
+    | "generative_completion";
+  reference_frame: number | null;
+  source_frames: number[];
+  points: { start: number; count: number };
+  factors: {
+    camera_support: number;
+    reprojection: number;
+    reciprocal_agreement: number;
+    triangulation: number;
+    reference_exclusivity: number;
+  };
+  provenance_weight: number;
+  confidence: number;
+  band: ConfidenceBand;
+  worst_reprojection_error_pixels: number | null;
+  median_triangulation_angle_degrees: number | null;
+  triangles: number;
+  mixed_reference_triangles: number;
+};
+
+export type BandCounts = Record<ConfidenceBand, number>;
+
+export type GeometryConfidenceField = {
+  schema_version: number;
+  point_count: number;
+  regions: RegionConfidence[];
+};
+
+export type GeometryConfidenceSummary = {
+  schema_version: number;
+  regions: BandCounts;
+  points: BandCounts;
+  triangles: BandCounts;
+  min_region_confidence: number | null;
+  max_region_confidence: number | null;
+};
+
+/** Coarse collision geometry; kept separate from the visual mesh. */
+export type CoarseCollider = {
+  schema_version: number;
+  role: "collision";
+  options: { min_confidence: number; cell_edge_multiple: number; max_cells_per_axis: number };
+  accepted_triangles: number;
+  source_triangles: number;
+  excluded: { unobserved_provenance: number; low_confidence: number; mismatched_confidence: number };
+  cell_size: number | null;
+  occupied_cells: number;
+  box_count: number;
+  max_surface_offset: number | null;
+};
+
 export type ReconstructionResult = {
   cameras: CameraPose[];
   points: Point3[];
@@ -521,6 +603,9 @@ export type ReconstructionResult = {
   warnings: string[];
   camera_state: CameraPipelineState;
   accepted_camera_evidence: EvidenceCamera[];
+  geometry_confidence: GeometryConfidenceField;
+  geometry_confidence_summary: GeometryConfidenceSummary;
+  collision: CoarseCollider;
 };
 
 type WasmModule = {
@@ -952,6 +1037,56 @@ export function assertReconstructionContract(
     );
   }
   assertBootstrapContract(result, expectedFrameCount);
+  assertConfidenceContract(result);
+}
+
+/**
+ * Confidence regions partition the accepted dense points, stay in [0, 1] and
+ * keep generative completion unsupported; the collider is a separate,
+ * collision-only representation whose triangle accounting adds up.
+ */
+function assertConfidenceContract(result: ReconstructionResult): void {
+  const field = result.geometry_confidence;
+  const collider = result.collision;
+  if (!field || !Array.isArray(field.regions) || !result.geometry_confidence_summary || !collider) {
+    throw new Error("confidence contract mismatch: WASM result has no geometry confidence or collider");
+  }
+  if (field.point_count !== result.dense_points.length) {
+    throw new Error("confidence contract mismatch: confidence field covers different dense points");
+  }
+  // An exact partition: sorted by start, each non-empty range begins where the last ended.
+  const ranges = field.regions.map((region) => region.points).sort((a, b) => a.start - b.start);
+  let next = 0;
+  for (const range of ranges) {
+    if (range.count <= 0 || range.start !== next) {
+      throw new Error("confidence contract mismatch: regions do not partition the dense points");
+    }
+    next = range.start + range.count;
+  }
+  if (next !== result.dense_points.length) {
+    throw new Error("confidence contract mismatch: regions do not partition the dense points");
+  }
+  if (
+    field.regions.some(
+      (region) =>
+        !(region.confidence >= 0 && region.confidence <= 1) ||
+        (region.origin === "generative_completion" && region.band !== "unsupported"),
+    )
+  ) {
+    throw new Error("confidence contract mismatch: region confidence is out of range or fabricated");
+  }
+  if (
+    collider.role !== "collision" ||
+    collider.accepted_triangles !== result.mesh_triangles.length ||
+    collider.source_triangles +
+      collider.excluded.unobserved_provenance +
+      collider.excluded.low_confidence +
+      collider.excluded.mismatched_confidence !==
+      collider.accepted_triangles ||
+    (collider.box_count > 0) !== (collider.cell_size !== null)
+  ) {
+    throw new Error("confidence contract mismatch: collider accounting is inconsistent");
+  }
 }
 
 export async function reconstructFrames(frames: SampledFrame[]): Promise<ReconstructionResult> {

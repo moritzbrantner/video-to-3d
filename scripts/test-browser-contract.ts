@@ -5,6 +5,8 @@ import init, {
 } from "../apps/web/public/wasm/video_to_3d_wasm.js";
 import {
   assertReconstructionContract,
+  describeCollider,
+  describeGeometryConfidence,
   normalizeWasmReconstruction,
 } from "../apps/web/src/reconstruction";
 import {
@@ -187,6 +189,33 @@ if (readiness.geometric_verdict !== "unsuitable" || readiness.generative_paths_a
   );
 }
 
+// Flat frames accept no surface: confidence must not be fabricated and no
+// collider may be invented.
+if (
+  result.geometry_confidence.regions.length !== 0 ||
+  result.collision.role !== "collision" ||
+  result.collision.box_count !== 0 ||
+  !describeGeometryConfidence(result).includes("unsupported") ||
+  !describeCollider(result.collision).startsWith("No collider") ||
+  !result.warnings.some((warning) => warning.startsWith("Geometry confidence")) ||
+  !result.warnings.some((warning) => warning.startsWith("Coarse collider"))
+) {
+  throw new Error("geometry confidence / collider diagnostics did not cross the WASM boundary");
+}
+const contradictoryConfidence = {
+  ...result,
+  geometry_confidence: { ...result.geometry_confidence, point_count: result.dense_points.length + 1 },
+};
+let contradictoryConfidenceRejected = false;
+try {
+  assertReconstructionContract(contradictoryConfidence, 2);
+} catch {
+  contradictoryConfidenceRejected = true;
+}
+if (!contradictoryConfidenceRejected) {
+  throw new Error("TypeScript accepted a confidence field for different dense points");
+}
+
 if (!Array.isArray(result.accepted_camera_evidence)) {
   throw new Error("WASM reconstruction did not expose accepted camera evidence for material export");
 }
@@ -274,6 +303,20 @@ if (
 ) {
   throw new Error("textured GLB does not carry embedded textures and reference provenance");
 }
+// The collider is exported separately from the visual surface: the default
+// scene renders only the accepted surface, the "collision" scene the boxes.
+const colliderNode = gltf.nodes[gltf.scenes[1]?.nodes?.[0]];
+if (
+  gltf.scene !== 0 ||
+  gltf.scenes[0].nodes.join() !== "0" ||
+  gltf.scenes[1]?.name !== "collision" ||
+  colliderNode?.extras?.video_to_3d?.role !== "collision" ||
+  baked.collision.box_count === 0 ||
+  gltf.meshes[colliderNode.mesh].primitives[0].material !== undefined ||
+  !baked.diagnostic.includes("Coarse collider")
+) {
+  throw new Error("textured GLB does not carry a separately identified collider");
+}
 const rebaked = normalizeSurfaceMaterialResult(
   bake_textured_surface(
     buildSurfaceMaterialRequest(materialSource, referenceImages, baked.appearance),
@@ -284,5 +327,5 @@ if (rebaked.invalidation.reused.join() !== "0,1" || rebaked.invalidation.invalid
 }
 
 console.log(
-  "Rust -> WASM -> TypeScript camera-state, readiness, and surface-material contracts passed",
+  "Rust -> WASM -> TypeScript camera-state, readiness, confidence/collider, and surface-material contracts passed",
 );

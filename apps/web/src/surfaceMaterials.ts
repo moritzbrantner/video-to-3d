@@ -1,4 +1,5 @@
 import {
+  type CoarseCollider,
   loadReconstructionWasm,
   type DenseReferencePatchStats,
   type ReconstructionResult,
@@ -52,6 +53,8 @@ export type SurfaceMaterialBakeResult = {
   };
   invalidation: AppearanceInvalidation;
   appearance: RecordedAppearance[];
+  /** The collider written to the GLB's separate "collision" scene. */
+  collision: CoarseCollider;
   diagnostic: string;
 };
 
@@ -138,6 +141,7 @@ export function normalizeSurfaceMaterialResult(value: unknown): SurfaceMaterialB
     !(result.glb instanceof Uint8Array) ||
     typeof result.diagnostic !== "string" ||
     !Array.isArray(result.appearance) ||
+    result.collision?.role !== "collision" ||
     !Array.isArray(result.bake?.materials) ||
     !Array.isArray(result.bake?.fallback?.triangles)
   ) {

@@ -202,3 +202,96 @@ fn accepted_plane_mesh_bakes_into_a_textured_glb_without_changing_geometry() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn accepted_plane_reconstruction_has_confidence_and_a_containing_collider() {
+    use crate::coarse_collision::{CoarseCollider, CoarseColliderOptions};
+    use crate::geometry_confidence::{ConfidenceBand, GeometryConfidenceField};
+    use crate::{
+        classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
+        EvidenceScale, ReconstructionEvidenceView, ReconstructionProviderDescriptor,
+    };
+
+    let width = 68;
+    let height = 48;
+    let focal = 60.0;
+    let depth = 4.0;
+    let frames = vec![
+        plane_frame(width, height, focal, 0.0, depth),
+        plane_frame(width, height, focal, 0.25, depth),
+        plane_frame(width, height, focal, -0.22, depth),
+    ];
+    let cameras = vec![camera(0, 0.0), camera(1, 0.25), camera(2, -0.22)];
+    let sparse = plane_sparse_points(width, height, focal, depth);
+    let dense = estimate_depth_points(&frames, &cameras, &sparse, focal);
+    let mesh = crate::mesh::reconstruct_dense_mesh(
+        &dense.points,
+        &dense.grid_sites,
+        &dense.stats,
+        &cameras,
+        width,
+        height,
+        focal,
+    );
+    assert!(!mesh.triangles.is_empty());
+    let evidence_cameras = cameras
+        .iter()
+        .map(|camera| EvidenceCamera {
+            frame_index: camera.frame_index,
+            authority: EvidenceCameraAuthority::RegisteredGeometry,
+            rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            translation: [camera.translation.x as f32, 0.0, 0.0],
+            confidence: Some(0.9),
+            median_reprojection_error_pixels: Some(0.5),
+        })
+        .collect();
+    let evidence = ReconstructionEvidenceView::new(
+        ReconstructionProviderDescriptor::classic(),
+        EvidenceScale::ArbitraryMonocular,
+        evidence_cameras,
+        classic_reference_patch_regions(&dense.stats.reference_patches),
+        &dense.points,
+        &mesh.triangles,
+    )
+    .expect("accepted reconstruction is valid evidence");
+
+    let field = GeometryConfidenceField::from_evidence(&evidence);
+    assert_eq!(field.regions.len(), evidence.regions.len());
+    for region in &field.regions {
+        assert_ne!(region.band, ConfidenceBand::Unsupported, "{region:?}");
+        // Baselines of 0.22-0.47 at depth 4 span about 3 to 7 degrees.
+        let angle = region.median_triangulation_angle_degrees.unwrap();
+        assert!((2.5..7.5).contains(&angle), "triangulation angle {angle}");
+    }
+    let geometric = field
+        .regions
+        .iter()
+        .find(|region| region.origin == EvidenceOrigin::GeometricMultiView)
+        .unwrap();
+    if let Some(completion) = field
+        .regions
+        .iter()
+        .find(|region| region.origin == EvidenceOrigin::RevalidatedCompletion)
+    {
+        assert!(completion.confidence < geometric.confidence);
+    }
+
+    let collider =
+        CoarseCollider::from_evidence(&evidence, &field, CoarseColliderOptions::default());
+    assert!(!collider.boxes.is_empty(), "{}", collider.diagnostic());
+    assert!(collider.boxes.len() < mesh.triangles.len());
+    for triangle in &mesh.triangles {
+        if field.triangle_confidence(triangle).min(triangle.confidence)
+            < collider.options.min_confidence
+        {
+            continue;
+        }
+        for index in [triangle.a, triangle.b, triangle.c] {
+            let point = &dense.points[index];
+            assert!(collider
+                .boxes
+                .iter()
+                .any(|collider_box| collider_box.contains([point.x, point.y, point.z])));
+        }
+    }
+}

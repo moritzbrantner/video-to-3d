@@ -250,9 +250,13 @@ Expose per-region confidence derived from:
 
 This later controls whether learned/generative systems may fill or replace missing regions.
 
+Status: integrated in `geometry_confidence` (`GeometryConfidenceField`). Every evidence region gets the five factors, a provenance-weighted confidence and a band; completion policies query by region, point, or triangle (`regions_below`). Learned/generative fill policies that consume it remain open.
+
 ## 3.5 Coarse collision mesh from accepted geometry
 
 Produce a conservative low-complexity collision representation without changing visual geometry.
+
+Status: integrated in `coarse_collision` (`CoarseCollider`): merged axis-aligned boxes over grid cells intersected by confident observed triangles, exported as a separate glTF `collision` scene. Per-object colliders and scene-model collision proxies remain Milestone 10 work.
 
 ---
 

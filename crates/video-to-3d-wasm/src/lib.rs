@@ -3,12 +3,14 @@ use serde::{
     Deserialize, Serialize,
 };
 use std::fmt;
+use video_to_3d_core::coarse_collision::{CoarseCollider, CoarseColliderOptions};
+use video_to_3d_core::geometry_confidence::{GeometryConfidenceField, GeometryConfidenceSummary};
 use video_to_3d_core::input_readiness::{assess_readiness, SamplingMetadata};
 use video_to_3d_core::surface_materials::{
     bake_surface_materials, AppearanceInvalidation, RecordedAppearance, ReferenceImage,
     SurfaceMaterialBake,
 };
-use video_to_3d_core::textured_glb::encode_textured_glb;
+use video_to_3d_core::textured_glb::encode_textured_glb_with_collider;
 use video_to_3d_core::{
     classic_reference_patch_regions, evaluate_relative_depth, reconstruct_browser,
     BootstrapDiagnosis, CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite,
@@ -111,6 +113,9 @@ struct WasmBrowserReconstructionResult<'a> {
     warnings: &'a [String],
     camera_state: &'a CameraPipelineState,
     accepted_camera_evidence: &'a [EvidenceCamera],
+    geometry_confidence: &'a GeometryConfidenceField,
+    geometry_confidence_summary: &'a GeometryConfidenceSummary,
+    collision: &'a CoarseCollider,
 }
 
 #[cfg(feature = "boundary-benchmark")]
@@ -482,6 +487,9 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         warnings: &reconstruction.warnings,
         camera_state: &result.camera_state,
         accepted_camera_evidence: &evidence.cameras,
+        geometry_confidence: &result.geometry_confidence,
+        geometry_confidence_summary: &result.geometry_confidence_summary,
+        collision: &result.collision,
     };
     let serializer = browser_serializer();
     payload
@@ -534,6 +542,7 @@ struct WasmSurfaceMaterialResult<'a> {
     bake: &'a SurfaceMaterialBake,
     invalidation: AppearanceInvalidation,
     appearance: Vec<RecordedAppearance>,
+    collision: &'a CoarseCollider,
     diagnostic: String,
 }
 
@@ -632,18 +641,23 @@ pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
         .collect::<Vec<_>>();
     let bake = bake_surface_materials(&evidence, &sites, &images)
         .map_err(|error| JsValue::from_str(&error))?;
-    let glb = encode_textured_glb(&evidence, &bake).map_err(|error| JsValue::from_str(&error))?;
+    let confidence = GeometryConfidenceField::from_evidence(&evidence);
+    let collider =
+        CoarseCollider::from_evidence(&evidence, &confidence, CoarseColliderOptions::default());
+    let glb = encode_textured_glb_with_collider(&evidence, &bake, Some(&collider))
+        .map_err(|error| JsValue::from_str(&error))?;
     let invalidation = bake.invalidation_against(&request.previous_appearance);
-    let diagnostic = if request.previous_appearance.is_empty() {
-        bake.diagnostic()
-    } else {
-        format!("{} {}", bake.diagnostic(), invalidation.diagnostic())
-    };
+    let mut diagnostic = bake.diagnostic();
+    if !request.previous_appearance.is_empty() {
+        diagnostic = format!("{diagnostic} {}", invalidation.diagnostic());
+    }
+    let diagnostic = format!("{diagnostic} {}", collider.diagnostic());
     let payload = WasmSurfaceMaterialResult {
         glb: ByteBuffer(glb),
         bake: &bake,
         invalidation,
         appearance: bake.recorded_appearance(),
+        collision: &collider,
         diagnostic,
     };
     let serializer = browser_serializer();

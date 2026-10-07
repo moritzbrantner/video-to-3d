@@ -14,7 +14,15 @@
 //! positive signed area in their (y-down) reference image, i.e. they are
 //! clockwise as seen from the reference camera, so corners are emitted as
 //! `(a, c, b)` to face that camera under the glTF counter-clockwise rule.
+//!
+//! Collision: when a [`CoarseCollider`] is supplied it is written as its own
+//! mesh and node (`coarse-collider`, `extras.video_to_3d.role = "collision"`)
+//! in a second glTF scene named `collision`. The default scene stays the
+//! visual surface, so viewers render exactly the accepted geometry while
+//! engines and tools can load the collider by scene, node name or role.
 
+use crate::coarse_collision::CoarseCollider;
+use crate::geometry_confidence::GeometryConfidenceField;
 use crate::surface_materials::{SurfaceMaterialBake, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION};
 use crate::ReconstructionEvidenceView;
 use serde_json::{json, Value};
@@ -140,6 +148,24 @@ pub fn encode_textured_glb(
     evidence: &ReconstructionEvidenceView<'_>,
     bake: &SurfaceMaterialBake,
 ) -> Result<Vec<u8>, String> {
+    encode_textured_glb_with_collider(evidence, bake, None)
+}
+
+/// Like [`encode_textured_glb`], plus an optional separately identified
+/// collision scene.
+pub fn encode_textured_glb_with_collider(
+    evidence: &ReconstructionEvidenceView<'_>,
+    bake: &SurfaceMaterialBake,
+    collider: Option<&CoarseCollider>,
+) -> Result<Vec<u8>, String> {
+    // A collider is exported only when it is exactly what this evidence yields, so stale
+    // or foreign collision geometry can never be paired with this surface.
+    if let Some(collider) = collider {
+        let field = GeometryConfidenceField::from_evidence(evidence);
+        if CoarseCollider::from_evidence(evidence, &field, collider.options) != *collider {
+            return Err("the coarse collider was not built from this evidence".into());
+        }
+    }
     let points = evidence.points;
     let triangles = evidence.triangles;
     if bake.point_count != points.len() || bake.triangle_count != triangles.len() {
@@ -307,6 +333,39 @@ pub fn encode_textured_glb(
         }));
     }
 
+    let mut meshes = vec![json!({ "name": "accepted-surface", "primitives": primitives })];
+    let mut nodes = vec![json!({ "name": "accepted-surface", "mesh": 0 })];
+    let mut scenes = vec![json!({ "name": "visual", "nodes": [0] })];
+    let collision = collider.map(|collider| {
+        json!({
+            "role": collider.role,
+            "schema_version": collider.schema_version,
+            "scene": (!collider.boxes.is_empty()).then_some("collision"),
+            "boxes": collider.box_count,
+            "source_triangles": collider.source_triangles,
+            "cell_size": collider.cell_size,
+            "max_surface_offset": collider.max_surface_offset,
+            "min_confidence": collider.options.min_confidence,
+            "excluded": collider.excluded,
+        })
+    });
+    if let Some(collider) = collider.filter(|collider| !collider.boxes.is_empty()) {
+        let (positions, indices) = collider_mesh(collider);
+        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true);
+        let index_accessor = gltf.index_accessor(&indices);
+        let extras = json!({ "video_to_3d": collision });
+        meshes.push(json!({
+            "name": "coarse-collider",
+            "primitives": [{
+                "attributes": { "POSITION": position_accessor },
+                "indices": index_accessor,
+            }],
+            "extras": extras,
+        }));
+        nodes.push(json!({ "name": "coarse-collider", "mesh": 1, "extras": extras }));
+        scenes.push(json!({ "name": "collision", "nodes": [1] }));
+    }
+
     let mut document = json!({
         "asset": {
             "version": "2.0",
@@ -321,13 +380,14 @@ pub fn encode_textured_glb(
                 "triangles": triangles.len(),
                 "textured_triangles": bake.textured_triangles(),
                 "fallback_triangles": bake.fallback.triangles.len(),
+                "collision": collision,
             }},
         },
         "extensionsUsed": ["KHR_materials_unlit"],
         "scene": 0,
-        "scenes": [{ "nodes": [0] }],
-        "nodes": [{ "name": "accepted-surface", "mesh": 0 }],
-        "meshes": [{ "name": "accepted-surface", "primitives": primitives }],
+        "scenes": scenes,
+        "nodes": nodes,
+        "meshes": meshes,
         "materials": materials,
         "accessors": gltf.accessors,
         "bufferViews": gltf.buffer_views,
@@ -365,6 +425,50 @@ pub fn encode_textured_glb(
     glb.extend_from_slice(&CHUNK_BIN.to_le_bytes());
     glb.extend_from_slice(&bin);
     Ok(glb)
+}
+
+/// Box corners and outward counter-clockwise faces in the glTF frame.
+fn collider_mesh(collider: &CoarseCollider) -> (Vec<f32>, Vec<u32>) {
+    const FACES: [[u32; 4]; 6] = [
+        [0, 2, 3, 1], // -Z
+        [4, 5, 7, 6], // +Z
+        [0, 1, 5, 4], // -Y
+        [2, 6, 7, 3], // +Y
+        [0, 4, 6, 2], // -X
+        [1, 3, 7, 5], // +X
+    ];
+    let mut positions = Vec::with_capacity(collider.boxes.len() * 24);
+    let mut indices = Vec::with_capacity(collider.boxes.len() * 36);
+    for collider_box in &collider.boxes {
+        // (x, y, z) -> (x, -y, -z) swaps the min/max of Y and Z.
+        let low = [
+            collider_box.min[0],
+            -collider_box.max[1],
+            -collider_box.max[2],
+        ];
+        let high = [
+            collider_box.max[0],
+            -collider_box.min[1],
+            -collider_box.min[2],
+        ];
+        let base = (positions.len() / 3) as u32;
+        for corner in 0..8 {
+            positions.push(if corner & 1 == 0 { low[0] } else { high[0] });
+            positions.push(if corner & 2 == 0 { low[1] } else { high[1] });
+            positions.push(if corner & 4 == 0 { low[2] } else { high[2] });
+        }
+        for [a, b, c, d] in FACES {
+            indices.extend_from_slice(&[
+                base + a,
+                base + b,
+                base + c,
+                base + a,
+                base + c,
+                base + d,
+            ]);
+        }
+    }
+    (positions, indices)
 }
 
 /// Deterministic 8-bit RGB PNG (alpha dropped; reference frames are opaque).

@@ -1,4 +1,8 @@
-use crate::{CameraPose, DenseStats, ReconstructionRequest, ReconstructionResult};
+use crate::coarse_collision::{CoarseCollider, CoarseColliderOptions};
+use crate::geometry_confidence::{GeometryConfidenceField, GeometryConfidenceSummary};
+use crate::{
+    CameraPose, DenseStats, ReconstructionEvidenceView, ReconstructionRequest, ReconstructionResult,
+};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -69,6 +73,11 @@ pub struct BrowserReconstructionResult {
     #[serde(flatten)]
     pub reconstruction: ReconstructionResult,
     pub camera_state: CameraPipelineState,
+    /// Per-region confidence of the accepted surface evidence.
+    pub geometry_confidence: GeometryConfidenceField,
+    pub geometry_confidence_summary: GeometryConfidenceSummary,
+    /// Coarse collision geometry, separate from the visual mesh.
+    pub collision: CoarseCollider,
 }
 
 pub fn reconstruct_browser(
@@ -78,9 +87,20 @@ pub fn reconstruct_browser(
     let camera_state =
         CameraPipelineState::from_reconstruction(&reconstruction, request.frames.len());
     validate_browser_contract(&reconstruction, &camera_state, request.frames.len())?;
+    let evidence = ReconstructionEvidenceView::from_classic(&reconstruction)?;
+    let geometry_confidence = GeometryConfidenceField::from_evidence(&evidence);
+    let geometry_confidence_summary = geometry_confidence.summary(evidence.triangles);
+    let collision = CoarseCollider::from_evidence(
+        &evidence,
+        &geometry_confidence,
+        CoarseColliderOptions::default(),
+    );
     Ok(BrowserReconstructionResult {
         reconstruction,
         camera_state,
+        geometry_confidence,
+        geometry_confidence_summary,
+        collision,
     })
 }
 
@@ -456,6 +476,9 @@ mod tests {
             .frames
             .iter()
             .all(|frame| frame.camera_kind == CameraKind::ApproximateMotion));
+        assert!(result.geometry_confidence.regions.is_empty());
+        assert_eq!(result.collision.box_count, 0);
+        assert_eq!(result.collision.role, "collision");
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Reusable reconstruction semantics and interchange contracts.
 
+pub mod coarse_collision;
 pub mod colmap;
 pub mod feature_analysis;
+pub mod geometry_confidence;
 pub mod input_readiness;
 pub mod scene_model;
 pub mod scene_project;
@@ -39,8 +41,18 @@ pub fn reconstruct_browser(
     let mut result = browser_contract::reconstruct_browser(request)?;
     let evidence = ReconstructionEvidenceView::from_classic(&result.reconstruction)?;
     result.reconstruction.warnings.push(evidence.diagnostic());
+    let confidence = result
+        .geometry_confidence
+        .diagnostic(&result.reconstruction.mesh_triangles);
+    result.reconstruction.warnings.push(confidence);
+    result
+        .reconstruction
+        .warnings
+        .push(result.collision.diagnostic());
     Ok(result)
 }
 
+#[cfg(test)]
+mod geometry_confidence_tests;
 #[cfg(test)]
 mod surface_completion_tests;
