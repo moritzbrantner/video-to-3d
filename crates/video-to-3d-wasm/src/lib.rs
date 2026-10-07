@@ -3,13 +3,13 @@ use serde::{
     Deserialize, Serialize,
 };
 use std::fmt;
+use video_to_3d_core::coarse_collision::{CoarseCollider, CoarseColliderOptions};
+use video_to_3d_core::geometry_confidence::{GeometryConfidenceField, GeometryConfidenceSummary};
 use video_to_3d_core::input_readiness::{assess_readiness, SamplingMetadata};
 use video_to_3d_core::surface_materials::{
     bake_surface_materials, AppearanceInvalidation, RecordedAppearance, ReferenceImage,
     SurfaceMaterialBake,
 };
-use video_to_3d_core::coarse_collision::{CoarseCollider, CoarseColliderOptions};
-use video_to_3d_core::geometry_confidence::{GeometryConfidenceField, GeometryConfidenceSummary};
 use video_to_3d_core::textured_glb::encode_textured_glb_with_collider;
 use video_to_3d_core::{
     classic_reference_patch_regions, evaluate_relative_depth, reconstruct_browser,
