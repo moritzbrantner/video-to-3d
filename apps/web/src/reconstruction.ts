@@ -254,6 +254,8 @@ export type SeedCandidateStats = {
   required_points: number | null;
   triangulated_points: number | null;
   behind_camera: number | null;
+  /** Inliers whose rays gave no finite point; not counted as behind a camera. */
+  failed_triangulations: number | null;
   high_reprojection: number | null;
   median_reprojection_error_pixels: number | null;
   median_triangulation_angle_degrees: number | null;
@@ -693,6 +695,16 @@ function sameFrameSet(left: Set<number>, right: Set<number>): boolean {
  * Every adjacent pair is a seed candidate with a rejection gate or acceptance, and the
  * bootstrap names a decisive gate exactly when no seed pair or no further camera was accepted.
  */
+/** Whether the seed pair spans its whole segment, the only one its solve may register. */
+function seedCoversSegment(result: ReconstructionResult, pairCount: number): boolean {
+  const pair = result.calibrated_pair;
+  if (!pair) return false;
+  const segment = result.multi_view.keyframe_selection.segments.find(
+    (candidate) => candidate.first_frame <= pair.from_frame && pair.to_frame <= candidate.last_frame,
+  );
+  return segment ? segment.last_frame - segment.first_frame <= 1 : pairCount <= 1;
+}
+
 function assertBootstrapContract(result: ReconstructionResult, expectedFrameCount: number): void {
   const candidates = result.seed_candidates;
   const bootstrap = result.bootstrap;
@@ -712,9 +724,9 @@ function assertBootstrapContract(result: ReconstructionResult, expectedFrameCoun
   }
   const expectedGate = !pair
     ? bootstrap.decisive_gate !== null && bootstrap.decisive_gate !== "registration"
-    : result.registered_views.length === 0 && candidates.length > 1
+    : result.registered_views.length === 0 && !seedCoversSegment(result, candidates.length)
       ? bootstrap.decisive_gate === "registration"
-      : // Registered views, or a two-frame clip that the seed pair covers.
+      : // Registered views, or a two-frame segment that the seed pair covers.
         bootstrap.decisive_gate === null;
   if (candidates.length > 0 && !expectedGate) {
     throw new Error(

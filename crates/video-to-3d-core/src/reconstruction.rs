@@ -255,6 +255,8 @@ pub struct SeedCandidateStats {
     pub required_points: Option<usize>,
     pub triangulated_points: Option<usize>,
     pub behind_camera: Option<usize>,
+    /// Inliers whose rays gave no finite point; not counted as behind a camera.
+    pub failed_triangulations: Option<usize>,
     pub high_reprojection: Option<usize>,
     pub median_reprojection_error_pixels: Option<f32>,
     pub median_triangulation_angle_degrees: Option<f32>,
@@ -608,6 +610,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
             required_points: None,
             triangulated_points: None,
             behind_camera: None,
+            failed_triangulations: None,
             high_reprojection: None,
             median_reprojection_error_pixels: None,
             median_triangulation_angle_degrees: None,
@@ -615,7 +618,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         if !segmentation.usable(pair_index) || !segmentation.usable(pair_index + 1) {
             seed.rejected_gate = Some(SeedGate::FrameQuality);
         } else if !seed_eligible {
-            seed.rejected_gate = Some(SeedGate::SegmentBreak);
+            seed.rejected_gate = Some(ineligible_link_gate(
+                segmentation.link_break(pair_index, matches.len(), overlap_ratio, median_motion),
+                matches.len(),
+            ));
         } else if low_parallax {
             seed.rejected_gate = Some(SeedGate::Parallax);
         } else {
@@ -1001,9 +1007,19 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         }
     }
 
+    // The seed's segment is the only one its solve may register into.
+    let seed_covers_segment = calibrated_pair.as_ref().is_some_and(|pair| {
+        multi_view
+            .keyframe_selection
+            .segments
+            .iter()
+            .find(|segment| segment.first_frame <= pair.from_frame && pair.to_frame <= segment.last_frame)
+            .map_or(seed_evidence.len() <= 1, |segment| segment.last_frame - segment.first_frame <= 1)
+    });
     let bootstrap = diagnose_bootstrap(
         &seed_evidence,
         calibrated_pair.is_some(),
+        seed_covers_segment,
         registered_views.len(),
         multi_view
             .registration_candidates
@@ -1094,6 +1110,7 @@ fn record_two_view_evidence(seed: &mut SeedCandidateStats, evidence: &two_view::
         seed.required_points = Some(pose.required_points);
         seed.triangulated_points = Some(pose.accepted_points);
         seed.behind_camera = Some(pose.behind_camera);
+        seed.failed_triangulations = Some(pose.failed_triangulation);
         seed.high_reprojection = Some(pose.high_reprojection);
         seed.median_reprojection_error_pixels = pose
             .median_reprojection_error_pixels
@@ -1134,19 +1151,31 @@ fn seed_gate_measurement(seed: &SeedCandidateStats, gate: SeedGate) -> String {
             two_view::MIN_SEED_ROTATION_RESIDUAL_PIXELS
         ),
         SeedGate::Cheirality | SeedGate::Reprojection => format!(
-            "{} of {} inliers triangulate in front of both cameras within {:.1} px ({} behind a camera, {} above the reprojection gate; requires {})",
+            "{} of {} inliers triangulate in front of both cameras within {:.1} px ({} behind a camera, {} above the reprojection gate, {} without a finite point; requires {})",
             seed.triangulated_points.unwrap_or(0),
             seed.inliers.unwrap_or(0),
             two_view::MAX_SEED_REPROJECTION_ERROR_PIXELS,
             seed.behind_camera.unwrap_or(0),
             seed.high_reprojection.unwrap_or(0),
+            seed.failed_triangulations.unwrap_or(0),
             seed.required_points.unwrap_or(0)
         ),
         SeedGate::TriangulationAngle => format!(
-            "median triangulation angle {}° (requires {:.2}°)",
+            "median triangulation angle {}° (requires {:.2}°; {} inliers without a finite point)",
             optional(seed.median_triangulation_angle_degrees),
-            two_view::MIN_SEED_TRIANGULATION_ANGLE_DEGREES
+            two_view::MIN_SEED_TRIANGULATION_ANGLE_DEGREES,
+            seed.failed_triangulations.unwrap_or(0)
         ),
+    }
+}
+
+/// The seed gate of a link the segmentation will not seed from. Too few matches without an
+/// exposure jump is a correspondence limit, not a cut, so it reports the match gate.
+fn ineligible_link_gate(link_break: Option<SegmentBreak>, matches: usize) -> SeedGate {
+    if matches < MIN_TRACK_MATCHES && link_break == Some(SegmentBreak::LostOverlap) {
+        SeedGate::Matches
+    } else {
+        SeedGate::SegmentBreak
     }
 }
 
@@ -1156,6 +1185,7 @@ fn seed_gate_measurement(seed: &SeedCandidateStats, gate: SeedGate) -> String {
 fn diagnose_bootstrap(
     seeds: &[SeedCandidateStats],
     seeded: bool,
+    seed_covers_segment: bool,
     registered_views: usize,
     pnp_ready: usize,
 ) -> BootstrapDiagnosis {
@@ -1183,14 +1213,15 @@ fn diagnose_bootstrap(
                 ),
             };
         }
-        // One adjacent pair means two frames: the seed pair already covers the clip.
-        if seeds.len() <= 1 {
+        // A two-frame segment (or clip): the seed pair already covers every frame its
+        // solve may register.
+        if seed_covers_segment {
             return BootstrapDiagnosis {
                 decisive_gate: None,
                 decisive_pair: None,
                 escalation: None,
                 rejections,
-                summary: "A calibrated seed pair was accepted and covers every frame.".into(),
+                summary: "A calibrated seed pair was accepted and covers every frame of its segment.".into(),
             };
         }
         let summary = if pnp_ready == 0 {
@@ -2928,6 +2959,7 @@ mod tests {
             required_points: None,
             triangulated_points: None,
             behind_camera: None,
+            failed_triangulations: None,
             high_reprojection: None,
             median_reprojection_error_pixels: None,
             median_triangulation_angle_degrees: None,
@@ -2943,7 +2975,7 @@ mod tests {
             seed_stats(3, Some(SeedGate::Baseline), Some(36)),
             seed_stats(4, Some(SeedGate::TriangulationAngle), Some(25)),
         ];
-        let diagnosis = diagnose_bootstrap(&seeds, false, 0, 0);
+        let diagnosis = diagnose_bootstrap(&seeds, false, false, 0, 0);
         // The furthest stage wins over more inliers at an earlier gate; inliers break ties.
         assert_eq!(
             diagnosis.decisive_gate,
@@ -2980,6 +3012,7 @@ mod tests {
         let correspondence_limited = diagnose_bootstrap(
             &[seed_stats(0, Some(SeedGate::EssentialInliers), Some(9))],
             false,
+            false,
             0,
             0,
         );
@@ -2990,10 +3023,30 @@ mod tests {
         let unusable = diagnose_bootstrap(
             &[seed_stats(0, Some(SeedGate::FrameQuality), None)],
             false,
+            false,
             0,
             0,
         );
         assert_eq!(unusable.escalation, None);
+    }
+
+    #[test]
+    fn too_few_matches_without_a_cut_report_the_match_gate() {
+        assert_eq!(
+            ineligible_link_gate(Some(SegmentBreak::LostOverlap), MIN_TRACK_MATCHES - 1),
+            SeedGate::Matches
+        );
+        assert_eq!(ineligible_link_gate(Some(SegmentBreak::LostOverlap), 0), SeedGate::Matches);
+        // A hard cut, a motion jump, or lost overlap with enough matches is a segment break.
+        assert_eq!(ineligible_link_gate(Some(SegmentBreak::HardCut), 0), SeedGate::SegmentBreak);
+        assert_eq!(
+            ineligible_link_gate(Some(SegmentBreak::MotionJump), 40),
+            SeedGate::SegmentBreak
+        );
+        assert_eq!(
+            ineligible_link_gate(Some(SegmentBreak::LostOverlap), MIN_TRACK_MATCHES),
+            SeedGate::SegmentBreak
+        );
     }
 
     #[test]
@@ -3002,7 +3055,7 @@ mod tests {
             seed_stats(0, None, Some(40)),
             seed_stats(1, Some(SeedGate::Baseline), Some(30)),
         ];
-        let stalled = diagnose_bootstrap(&seeds, true, 0, 3);
+        let stalled = diagnose_bootstrap(&seeds, true, false, 0, 3);
         assert_eq!(stalled.decisive_gate, Some(BootstrapGate::Registration));
         assert!(stalled.decisive_pair.is_none());
         assert!(stalled.summary.contains("3 other selected keyframe(s)"));
@@ -3011,18 +3064,18 @@ mod tests {
             "registration"
         );
 
-        let registered = diagnose_bootstrap(&seeds, true, 2, 3);
+        let registered = diagnose_bootstrap(&seeds, true, false, 2, 3);
         assert_eq!(registered.decisive_gate, None);
         assert_eq!(registered.escalation, None);
 
         // No keyframe reached PnP: the limit is correspondence, not a rejected pose.
-        let untried = diagnose_bootstrap(&seeds, true, 0, 0);
+        let untried = diagnose_bootstrap(&seeds, true, false, 0, 0);
         assert_eq!(untried.decisive_gate, Some(BootstrapGate::Registration));
         assert!(untried.summary.contains("no registration was tried"), "{}", untried.summary);
         assert!(!untried.summary.contains("inlier and reprojection gates"));
 
         // A two-frame clip is fully covered by its seed pair.
-        let two_frames = diagnose_bootstrap(&seeds[..1], true, 0, 0);
+        let two_frames = diagnose_bootstrap(&seeds[..1], true, true, 0, 0);
         assert_eq!(two_frames.decisive_gate, None);
         assert_eq!(two_frames.escalation, None);
     }

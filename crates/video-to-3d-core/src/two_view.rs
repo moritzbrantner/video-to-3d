@@ -77,6 +77,9 @@ pub(super) struct PoseEvidence {
     pub required_points: usize,
     pub accepted_points: usize,
     pub behind_camera: usize,
+    /// Inliers whose rays gave no finite point (effectively parallel rays): no depth-sign
+    /// test was possible, so they are not counted as behind a camera.
+    pub failed_triangulation: usize,
     pub high_reprojection: usize,
     pub median_reprojection_error_pixels: Option<f64>,
     pub median_triangulation_angle_degrees: Option<f64>,
@@ -111,6 +114,7 @@ struct PoseCandidate {
     median_reprojection_error_pixels: f64,
     median_triangulation_angle_degrees: f64,
     behind_camera: usize,
+    failed_triangulation: usize,
     high_reprojection: usize,
 }
 
@@ -121,6 +125,7 @@ impl PoseCandidate {
             required_points,
             accepted_points: self.points.len(),
             behind_camera: self.behind_camera,
+            failed_triangulation: self.failed_triangulation,
             high_reprojection: self.high_reprojection,
             median_reprojection_error_pixels: finite(self.median_reprojection_error_pixels),
             median_triangulation_angle_degrees: finite(self.median_triangulation_angle_degrees),
@@ -166,23 +171,28 @@ fn pose_rejection(candidate: &PoseCandidate, required_points: usize) -> Option<T
     pose_rejection_from_counts(
         candidate.points.len(),
         candidate.behind_camera,
+        candidate.failed_triangulation,
         candidate.high_reprojection,
         candidate.median_triangulation_angle_degrees,
         required_points,
     )
 }
 
-/// Too few accepted points blame whichever loss was larger: points behind a camera
-/// (cheirality, also on a tie) or points over the reprojection gate.
+/// Too few accepted points blame whichever loss was largest: points behind a camera
+/// (cheirality, also on a tie), points over the reprojection gate, or rays that gave no
+/// finite point, which lack depth parallax (triangulation angle).
 fn pose_rejection_from_counts(
     accepted_points: usize,
     behind_camera: usize,
+    failed_triangulation: usize,
     high_reprojection: usize,
     median_triangulation_angle_degrees: f64,
     required_points: usize,
 ) -> Option<TwoViewRejection> {
     if accepted_points < required_points {
-        return Some(if behind_camera >= high_reprojection {
+        return Some(if failed_triangulation > behind_camera.max(high_reprojection) {
+            TwoViewRejection::TriangulationAngle
+        } else if behind_camera >= high_reprojection {
             TwoViewRejection::Cheirality
         } else {
             TwoViewRejection::Reprojection
@@ -625,6 +635,7 @@ fn evaluate_pose(
     let mut reprojection_errors = Vec::new();
     let mut triangulation_angles = Vec::new();
     let mut behind_camera = 0;
+    let mut failed_triangulation = 0;
     let mut high_reprojection = 0;
 
     for &index in inliers {
@@ -635,7 +646,7 @@ fn evaluate_pose(
             &rotation,
             &translation,
         ) else {
-            behind_camera += 1;
+            failed_triangulation += 1;
             continue;
         };
         let camera_two_point = rotation * position + translation;
@@ -677,6 +688,7 @@ fn evaluate_pose(
         median_reprojection_error_pixels: median_f64(&mut reprojection_errors),
         median_triangulation_angle_degrees: median_f64(&mut triangulation_angles),
         behind_camera,
+        failed_triangulation,
         high_reprojection,
     }
 }
@@ -775,23 +787,33 @@ mod tests {
         let angle = MIN_TRIANGULATION_ANGLE_DEGREES * 4.0;
         // 20 inliers need 12; 6 survive. More points behind a camera: cheirality.
         assert_eq!(
-            pose_rejection_from_counts(6, 10, 4, angle, 12),
+            pose_rejection_from_counts(6, 10, 0, 4, angle, 12),
             Some(TwoViewRejection::Cheirality)
         );
         // More points over the reprojection gate: reprojection.
         assert_eq!(
-            pose_rejection_from_counts(6, 4, 10, angle, 12),
+            pose_rejection_from_counts(6, 4, 0, 10, angle, 12),
             Some(TwoViewRejection::Reprojection)
         );
         // A tie blames cheirality.
         assert_eq!(
-            pose_rejection_from_counts(6, 7, 7, angle, 12),
+            pose_rejection_from_counts(6, 7, 0, 7, angle, 12),
+            Some(TwoViewRejection::Cheirality)
+        );
+        // Rays that gave no finite point are not cheirality: more of them than of the
+        // other losses blames the missing depth parallax.
+        assert_eq!(
+            pose_rejection_from_counts(6, 3, 9, 2, angle, 12),
+            Some(TwoViewRejection::TriangulationAngle)
+        );
+        assert_eq!(
+            pose_rejection_from_counts(6, 9, 9, 2, angle, 12),
             Some(TwoViewRejection::Cheirality)
         );
         // Enough points: only the triangulation angle can still reject.
-        assert_eq!(pose_rejection_from_counts(12, 7, 1, angle, 12), None);
+        assert_eq!(pose_rejection_from_counts(12, 7, 0, 1, angle, 12), None);
         assert_eq!(
-            pose_rejection_from_counts(12, 0, 0, MIN_TRIANGULATION_ANGLE_DEGREES * 0.5, 12),
+            pose_rejection_from_counts(12, 0, 0, 0, MIN_TRIANGULATION_ANGLE_DEGREES * 0.5, 12),
             Some(TwoViewRejection::TriangulationAngle)
         );
     }
