@@ -1,13 +1,11 @@
 mod bundle_adjustment;
 
-use super::{Feature, FeatureMatch, PairStats};
+use super::keyframe_selection::{KeyframeSelection, KeyframeSelectionStats};
+use super::{Feature, FeatureMatch};
 use nalgebra::{Matrix3, Matrix4, Vector3};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-const MIN_KEYFRAME_OVERLAP: f32 = 0.18;
-const KEYFRAME_PARALLAX_BUDGET: f32 = 1.25;
-const MIN_STRONG_PAIR_PARALLAX: f32 = 0.55;
 const MIN_PNP_CORRESPONDENCES: usize = 8;
 const MIN_NEW_LANDMARK_TRIANGULATION_ANGLE_DEGREES: f64 = 0.5;
 const MAX_NEW_LANDMARK_REPROJECTION_ERROR_PIXELS: f64 = 4.0;
@@ -49,6 +47,8 @@ pub struct NewLandmarkStats {
 #[derive(Clone, Debug, Serialize)]
 pub struct MultiViewStats {
     pub keyframes: Vec<usize>,
+    /// Per-frame selection decisions and clip segments behind `keyframes`.
+    pub keyframe_selection: KeyframeSelectionStats,
     pub track_count: usize,
     pub tracks_three_plus: usize,
     pub longest_track: usize,
@@ -168,12 +168,12 @@ struct TriangulatedTrack {
 }
 
 pub(super) fn analyze(
-    pairs: &[PairStats],
+    selection: &KeyframeSelection,
     adjacent_matches: &[Vec<FeatureMatch>],
     seed_pair: Option<(usize, &[SeedLandmark])>,
 ) -> MultiViewAnalysis {
     let (tracks, membership) = build_feature_tracks(adjacent_matches);
-    let keyframes = select_keyframes(pairs);
+    let keyframes = selection.keyframes.clone();
     let seed_pair_index = seed_pair.map(|(pair_index, _)| pair_index);
     let seed_tracks = seed_pair
         .map(|(pair_index, seed_landmarks)| {
@@ -183,7 +183,15 @@ pub(super) fn analyze(
     let seed_track_indices = seed_tracks.iter().map(|seed| seed.track_index).collect();
     let registration_candidates = seed_pair
         .map(|(pair_index, seed_landmarks)| {
-            registration_candidates(&keyframes, &tracks, &membership, pair_index, seed_landmarks)
+            // Only the seed's segment shares its geometric solve; other segments are
+            // reported, not forced into it.
+            registration_candidates(
+                &selection.segment_keyframes(pair_index),
+                &tracks,
+                &membership,
+                pair_index,
+                seed_landmarks,
+            )
         })
         .unwrap_or_default();
     let registration_candidate_stats = registration_candidates
@@ -198,6 +206,7 @@ pub(super) fn analyze(
     MultiViewAnalysis {
         stats: MultiViewStats {
             keyframes,
+            keyframe_selection: selection.stats.clone(),
             track_count: tracks.len(),
             tracks_three_plus: tracks
                 .iter()
@@ -650,47 +659,10 @@ fn median_f64(values: &mut [f64]) -> Option<f64> {
     })
 }
 
-fn select_keyframes(pairs: &[PairStats]) -> Vec<usize> {
-    let Some(first_pair) = pairs.first() else {
-        return Vec::new();
-    };
-
-    let mut keyframes = vec![first_pair.from_frame];
-    let mut accumulated_parallax = 0.0f32;
-    let mut strongest_pair: Option<(usize, f32)> = None;
-
-    for pair in pairs {
-        if pair.matches < 8 || pair.overlap_ratio < MIN_KEYFRAME_OVERLAP {
-            accumulated_parallax = 0.0;
-            continue;
-        }
-        accumulated_parallax += pair.median_parallax_residual.max(0.0);
-        if !pair.low_parallax && pair.median_parallax_residual >= MIN_STRONG_PAIR_PARALLAX {
-            let score = pair.median_parallax_residual * pair.overlap_ratio;
-            if strongest_pair.is_none_or(|(_, best_score)| score > best_score) {
-                strongest_pair = Some((pair.to_frame, score));
-            }
-        }
-
-        if accumulated_parallax >= KEYFRAME_PARALLAX_BUDGET {
-            if keyframes.last().copied() != Some(pair.to_frame) {
-                keyframes.push(pair.to_frame);
-            }
-            accumulated_parallax = 0.0;
-        }
-    }
-
-    if keyframes.len() == 1 {
-        if let Some((frame_index, _)) = strongest_pair {
-            keyframes.push(frame_index);
-        }
-    }
-
-    keyframes
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::keyframe_selection::select_for_pairs;
+    use super::super::PairStats;
     use super::*;
 
     fn feature_match(a: usize, b: usize) -> FeatureMatch {
@@ -810,7 +782,7 @@ mod tests {
             (0..5).map(|index| feature_match(index, index)).collect();
         let matches = vec![seed_matches, next_matches];
         let analysis = analyze(
-            &[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)],
+            &select_for_pairs(&[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)]),
             &matches,
             Some((0, &seed_landmarks(8))),
         );
@@ -836,7 +808,7 @@ mod tests {
             .collect();
         let matches = vec![vec![feature_match(0, 0)], vec![feature_match(0, 0)]];
         let analysis = analyze(
-            &[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)],
+            &select_for_pairs(&[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)]),
             &matches,
             Some((0, &[])),
         );
@@ -971,7 +943,7 @@ mod tests {
             .collect();
         let matches = vec![vec![feature_match(0, 0)], vec![feature_match(0, 0)]];
         let analysis = analyze(
-            &[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)],
+            &select_for_pairs(&[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)]),
             &matches,
             Some((0, &[])),
         );
@@ -985,31 +957,8 @@ mod tests {
     }
 
     #[test]
-    fn selects_keyframes_from_overlap_and_accumulated_parallax() {
-        let pairs = vec![
-            pair(0, 0.65, 0.45, true),
-            pair(1, 0.62, 0.46, true),
-            pair(2, 0.58, 0.50, true),
-            pair(3, 0.55, 0.70, false),
-        ];
-
-        assert_eq!(select_keyframes(&pairs), vec![0, 3]);
-    }
-
-    #[test]
-    fn weak_or_stationary_links_do_not_create_keyframes() {
-        let pairs = vec![
-            pair(0, 0.70, 0.0, true),
-            pair(1, 0.10, 0.8, false),
-            pair(2, 0.75, 0.0, true),
-        ];
-
-        assert_eq!(select_keyframes(&pairs), vec![0]);
-    }
-
-    #[test]
     fn bundle_adjust_stats_retain_returned_camera_poses() {
-        let analysis = analyze(&[], &[], Some((0, &[])));
+        let analysis = analyze(&select_for_pairs(&[]), &[], Some((0, &[])));
         let cameras = vec![camera(0, 0.0), camera(1, 1.0)];
         let features = vec![Vec::<Feature>::new(), Vec::<Feature>::new()];
 

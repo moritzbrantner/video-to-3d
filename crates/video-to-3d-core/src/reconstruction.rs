@@ -1,4 +1,5 @@
 mod dense;
+mod keyframe_selection;
 mod mesh;
 mod multi_view;
 mod pnp;
@@ -6,6 +7,9 @@ mod revisit;
 mod two_view;
 
 pub use dense::{DenseGridSite, DenseStats, DenseWorkingSetEstimate};
+pub use keyframe_selection::{
+    ClipSegmentStats, FrameDecision, FrameSelectionStats, KeyframeSelectionStats, SegmentBreak,
+};
 pub use mesh::{MeshStats, MeshTriangle};
 pub use multi_view::{
     BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
@@ -261,6 +265,36 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
     let mut warnings = Vec::new();
     let mut motion_guided_pairs = 0usize;
     let mut best_two_view: Option<(usize, two_view::TwoViewEstimate)> = None;
+    let frame_evidence: Vec<_> = luma_frames
+        .iter()
+        .enumerate()
+        .map(|(index, luma)| crate::input_readiness::frame_evidence(index, luma, width, height))
+        .collect();
+    let mut segmentation =
+        keyframe_selection::SegmentationContext::new(&frame_evidence, width, height);
+    for (before, after) in segmentation.rejected_runs() {
+        let (source, target) = (&features[before], &features[after]);
+        let mut matches = match_features(source, target, options);
+        if let Some(guided) = motion_guided_matches(source, target, options) {
+            if guided.len() > matches.len() {
+                matches = guided;
+            }
+        }
+        let overlap = if source.is_empty() || target.is_empty() {
+            0.0
+        } else {
+            matches.len() as f32 / source.len().min(target.len()) as f32
+        };
+        let mut motion: Vec<f32> = matches
+            .iter()
+            .map(|m| {
+                let (a, b) = (&source[m.a], &target[m.b]);
+                (b.x as f32 - a.x as f32).hypot(b.y as f32 - a.y as f32)
+            })
+            .collect();
+        let median_motion = median(&mut motion);
+        segmentation.bridge(before, after, matches.len(), overlap, median_motion);
+    }
 
     let mut camera = CameraPose {
         frame_index: 0,
@@ -323,7 +357,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         let low_parallax =
             matches.len() < 6 || median_motion < 1.4 || median_parallax_residual < 0.55;
 
-        if !low_parallax {
+        // The seed uses two frames that pass the quality gates, within one segment.
+        let seed_eligible =
+            segmentation.seed_eligible(pair_index, matches.len(), overlap_ratio, median_motion);
+        if !low_parallax && seed_eligible {
             if let Some(estimate) = two_view::estimate_two_view(
                 source_features,
                 target_features,
@@ -422,8 +459,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
                 .collect::<Vec<_>>(),
         )
     });
+    let keyframe_selection =
+        keyframe_selection::select(&pairs, &frame_evidence, &segmentation);
     let mut multi_view_analysis = multi_view::analyze(
-        &pairs,
+        &keyframe_selection,
         &adjacent_matches,
         seed_landmarks
             .as_ref()
@@ -435,6 +474,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         &revisit_context,
         &multi_view_analysis.stats.keyframes,
         best_two_view.as_ref().map(|(pair_index, _)| *pair_index),
+        &best_two_view
+            .as_ref()
+            .map(|(pair_index, _)| keyframe_selection.segment_keyframes(*pair_index))
+            .unwrap_or_default(),
     );
 
     let mut registered_views = Vec::new();
@@ -864,6 +907,24 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         "Motion-guided adjacent matching recovered {motion_guided_pairs} sampled frame pair(s) after the ordinary origin-centered local search was starved. A strict global descriptor consensus only predicts the dominant displacement used to center the existing bounded local search; all calibrated geometry still passes the normal epipolar, PnP, bundle-adjustment, dense-depth, and mesh gates."
     ));
 }
+
+    let segments = &multi_view.keyframe_selection.segments;
+    if segments.len() > 1 {
+        let spans = segments
+            .iter()
+            .map(|segment| format!("{}–{}", segment.first_frame + 1, segment.last_frame + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let solved = if calibrated_pair.is_some() {
+            "Only the segment containing the seed pair is solved; the others are reported, not forced into one geometric solve."
+        } else {
+            "No segment yielded a calibrated seed pair, so none is solved; the uncalibrated preview spans all segments."
+        };
+        warnings.push(format!(
+            "The clip splits into {} segments at hard cuts or discontinuities (frames {spans}). {solved}",
+            segments.len()
+        ));
+    }
 
     let low_pairs = pairs.iter().filter(|pair| pair.low_parallax).count();
     if low_pairs > pairs.len() / 2 {
