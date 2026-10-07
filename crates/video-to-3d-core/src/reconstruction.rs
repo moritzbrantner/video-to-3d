@@ -180,6 +180,10 @@ pub struct ReconstructionResult {
     pub revisits: RevisitStats,
     pub registered_views: Vec<RegisteredViewStats>,
     pub warnings: Vec<String>,
+    /// `[tracks_three_plus, longest_track, linked_pairs]` within the primary segment, for
+    /// recovery ranking; the clip-wide values when the clip is not split.
+    #[serde(skip)]
+    pub(crate) primary_track_stats: [usize; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -530,6 +534,16 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         ));
         segment_solves.sort_by_key(|solve| solve.segment);
     }
+    let (primary_first, primary_last) = primary_segment
+        .filter(|_| clip_segments.len() > 1)
+        .map_or((0, request.frames.len() - 1), |segment| {
+            (clip_segments[segment].first_frame, clip_segments[segment].last_frame)
+        });
+    let primary_track_stats = primary_solve.multi_view_analysis.track_stats_within(
+        primary_first,
+        primary_last,
+        &adjacent_matches,
+    );
     let SegmentSolve {
         mut multi_view_analysis,
         revisits,
@@ -811,6 +825,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         revisits,
         registered_views,
         warnings,
+        primary_track_stats,
     })
 }
 
@@ -1365,8 +1380,12 @@ fn needs_registration_recovery(
         && result.multi_view.registration_candidates.len() > result.registered_views.len();
     let tracks_end_early = request.frames.len() >= 4 && result.multi_view.longest_track < 4;
     // A split clip solves its other segments on their own, so a retry can also help them.
+    // A one-frame segment has no pair to seed. Views recovered from revisit evidence need
+    // not be PnP-ready candidates, so they cannot cover a failed one.
     let secondary_segment_short = secondary_segment_solves(result).any(|solve| {
-        solve.seed_pair.is_none() || solve.pnp_ready_candidates > solve.registered_views
+        (solve.seed_pair.is_none() && solve.last_frame > solve.first_frame)
+            || solve.pnp_ready_candidates
+                > solve.registered_views.saturating_sub(solve.recovered_from_revisit)
     });
     missing_seed
         || starved_adjacent_pair
@@ -1414,36 +1433,25 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult) -> [usize; 14] {
+fn reconstruction_score(result: &ReconstructionResult) -> [usize; 11] {
     // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
     // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
-    // camera/point solution survives. The primary solve ranks first; the other segments of a
-    // split clip only break ties, so a retry never trades primary quality for secondary gains.
+    // camera/point solution survives. Every field up to the sparse points describes the primary
+    // solve (track statistics only within its segment); the other segments of a split clip only
+    // break ties, so a retry never trades primary quality for secondary gains.
     let secondary = |measure: fn(&SegmentSolveStats) -> usize| {
         secondary_segment_solves(result).map(measure).sum::<usize>()
     };
-    // Track statistics span every adjacent pair. On a split clip that includes the other
-    // segments, so they rank after the primary sparse points there; a single-segment clip
-    // keeps its original order.
-    let stats = &result.multi_view;
-    let tracks = [stats.tracks_three_plus, stats.longest_track, stats.linked_pairs];
-    let (primary_tracks, split_tracks) = if stats.segment_solves.is_empty() {
-        (tracks, [0; 3])
-    } else {
-        ([0; 3], tracks)
-    };
+    let [tracks_three_plus, longest_track, linked_pairs] = result.primary_track_stats;
     [
         usize::from(result.calibrated_pair.is_some()),
         accepted_registered_camera_count(result),
         result.registered_views.len(),
-        usize::from(stats.bundle_adjustment.accepted),
-        primary_tracks[0],
-        primary_tracks[1],
-        primary_tracks[2],
+        usize::from(result.multi_view.bundle_adjustment.accepted),
+        tracks_three_plus,
+        longest_track,
+        linked_pairs,
         result.points.len(),
-        split_tracks[0],
-        split_tracks[1],
-        split_tracks[2],
         secondary(|solve| usize::from(solve.seed_pair.is_some())),
         secondary(|solve| solve.registered_views),
         secondary(|solve| solve.sparse_points),
@@ -2412,6 +2420,24 @@ mod tests {
     }
 
     #[test]
+    fn primary_track_statistics_stay_inside_the_primary_segment() {
+        let single = reconstruct_once(&scene_request(lateral_span(&scene_points(0x5eed), 236)))
+            .expect("single segment should reconstruct");
+        let stats = &single.multi_view;
+        assert_eq!(
+            single.primary_track_stats,
+            [stats.tracks_three_plus, stats.longest_track, stats.linked_pairs]
+        );
+
+        let split = reconstruct_once(&wide_pan_split_request()).expect("split should reconstruct");
+        let stats = &split.multi_view;
+        let [three_plus, longest, linked] = split.primary_track_stats;
+        assert!(stats.keyframe_selection.segments.len() > 1);
+        assert!(linked < stats.linked_pairs, "the other segment's pairs are excluded");
+        assert!(three_plus <= stats.tracks_three_plus && longest <= stats.longest_track);
+    }
+
+    #[test]
     fn a_short_secondary_segment_alone_triggers_recovery() {
         let request = scene_request(lateral_span(&scene_points(0x5eed), 236));
         let mut result = reconstruct_once(&request).expect("fixture should reconstruct");
@@ -2438,6 +2464,26 @@ mod tests {
         assert!(needs_registration_recovery(&request, &result));
         result.multi_view.segment_solves[0] = SegmentSolveStats {
             seed_pair: None,
+            ..solve.clone()
+        };
+        assert!(needs_registration_recovery(&request, &result));
+
+        // A one-frame segment cannot be seeded, so it never asks for a retry.
+        result.multi_view.segment_solves[0] = SegmentSolveStats {
+            seed_pair: None,
+            first_frame: 6,
+            last_frame: 6,
+            registration_candidates: 0,
+            pnp_ready_candidates: 0,
+            registered_views: 0,
+            ..solve.clone()
+        };
+        assert!(!needs_registration_recovery(&request, &result));
+
+        // A revisit-recovered view does not cover a PnP-ready candidate that failed.
+        result.multi_view.segment_solves[0] = SegmentSolveStats {
+            registered_views: 3,
+            recovered_from_revisit: 1,
             ..solve
         };
         assert!(needs_registration_recovery(&request, &result));
@@ -2471,22 +2517,11 @@ mod tests {
         stronger_primary.points.push(base.points[0]);
         assert!(reconstruction_score(&stronger_primary) > reconstruction_score(&seeded));
 
-        // Clip-wide track statistics include the other segments, so on a split clip they
-        // never outrank the primary sparse points.
-        let mut longer_tracks = seeded.clone();
-        longer_tracks.multi_view.tracks_three_plus += 100;
-        longer_tracks.multi_view.longest_track += 10;
-        longer_tracks.multi_view.linked_pairs += 10;
-        let mut more_points = seeded.clone();
-        more_points.points.push(base.points[0]);
-        assert!(reconstruction_score(&more_points) > reconstruction_score(&longer_tracks));
-        assert!(reconstruction_score(&longer_tracks) > reconstruction_score(&seeded));
-
-        // A single-segment clip keeps tracks ahead of points, as before split solves.
-        let mut single_tracks = base.clone();
-        single_tracks.multi_view.tracks_three_plus += 100;
-        let mut single_points = base.clone();
-        single_points.points.push(base.points[0]);
-        assert!(reconstruction_score(&single_tracks) > reconstruction_score(&single_points));
+        // Ranking reads the primary segment's track statistics, not the clip-wide ones.
+        let mut clip_wide = seeded.clone();
+        clip_wide.multi_view.tracks_three_plus += 100;
+        clip_wide.multi_view.longest_track += 10;
+        clip_wide.multi_view.linked_pairs += 10;
+        assert_eq!(reconstruction_score(&clip_wide), reconstruction_score(&seeded));
     }
 }
