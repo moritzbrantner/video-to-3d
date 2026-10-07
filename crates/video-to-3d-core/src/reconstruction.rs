@@ -474,6 +474,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         &revisit_context,
         &multi_view_analysis.stats.keyframes,
         best_two_view.as_ref().map(|(pair_index, _)| *pair_index),
+        &best_two_view
+            .as_ref()
+            .map(|(pair_index, _)| keyframe_selection.segment_keyframes(*pair_index))
+            .unwrap_or_default(),
     );
 
     let mut registered_views = Vec::new();

@@ -199,7 +199,10 @@ impl SegmentationContext {
                 SegmentBreak::LostOverlap
             });
         }
-        (median_motion > MAX_LINK_MOTION_DIAGONAL_FRACTION * self.diagonal)
+        // A bridge across rejected frames spans several sampling intervals, so ordinary
+        // camera motion accumulates; the one-step motion gate scales with the gap.
+        let intervals = to.saturating_sub(from).max(1) as f32;
+        (median_motion > MAX_LINK_MOTION_DIAGONAL_FRACTION * self.diagonal * intervals)
             .then_some(SegmentBreak::MotionJump)
     }
 
@@ -651,6 +654,31 @@ mod tests {
         let mut same_shot = SegmentationContext::new(&frames_with_blur(5, 2), WIDTH, HEIGHT);
         same_shot.bridge(1, 3, 80, 0.6, 3.0);
         assert_eq!(select(&pairs, &frames_with_blur(5, 2), &same_shot).stats.segments.len(), 1);
+    }
+
+    #[test]
+    fn a_bridge_scales_the_motion_gate_with_the_rejected_gap() {
+        let evidence = frames_with_blur(5, 2);
+        let pairs = [
+            pair(0, 0.8, 0.5, false),
+            pair(1, 0.8, 0.5, false),
+            pair(2, 0.8, 0.5, false),
+            pair(3, 0.8, 0.5, false),
+        ];
+        let diagonal = (WIDTH as f32).hypot(HEIGHT as f32);
+
+        // 20% of the diagonal per interval is ordinary motion; across one rejected frame it
+        // accumulates to 40%, above the one-step gate but within the two-interval gate.
+        let mut continuous = SegmentationContext::new(&evidence, WIDTH, HEIGHT);
+        continuous.bridge(1, 3, 80, 0.6, 0.4 * diagonal);
+        assert_eq!(select(&pairs, &evidence, &continuous).stats.segments.len(), 1);
+
+        // A jump beyond the scaled gate still splits the clip after the run.
+        let mut jump = SegmentationContext::new(&evidence, WIDTH, HEIGHT);
+        jump.bridge(1, 3, 80, 0.6, 0.8 * diagonal);
+        let selection = select(&pairs, &evidence, &jump);
+        assert_eq!(selection.stats.segments.len(), 2);
+        assert_eq!(selection.stats.segments[0].ends_with, Some(SegmentBreak::MotionJump));
     }
 
     #[test]

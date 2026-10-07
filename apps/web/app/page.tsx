@@ -506,8 +506,9 @@ export default function Home() {
       </header>
 
       <section className="scene-status">
-        <strong>Scene detection:</strong> not active yet. The Pages demo currently treats each file as
-        one sequence; it does not call scenedetect-rs.
+        <strong>Scene detection:</strong> the reconstruction splits a clip into segments at hard cuts,
+        lost overlap and motion jumps, and solves only the segment that holds the seed pair (see
+        Clip segments). The scenedetect-rs integration is not used yet.
       </section>
 
       <section className="status-line" aria-live="polite">

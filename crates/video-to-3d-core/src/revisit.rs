@@ -115,6 +115,7 @@ pub(super) fn analyze(
     context: &RevisitContext<'_>,
     keyframes: &[usize],
     seed_pair_index: Option<usize>,
+    seed_segment: &[usize],
 ) -> RevisitStats {
     let mut frames = keyframes.to_vec();
     if let Some(seed_pair_index) = seed_pair_index {
@@ -124,7 +125,7 @@ pub(super) fn analyze(
     frames.sort_unstable();
     frames.dedup();
 
-    let pairs = preselect_pairs(&frames, seed_pair_index);
+    let pairs = preselect_pairs(&frames, seed_pair_index, seed_segment);
     let mut candidates = Vec::new();
     let mut seed_evidence = Vec::new();
 
@@ -419,7 +420,21 @@ fn rotation_delta_degrees(left: &Matrix3<f64>, right: &Matrix3<f64>) -> f64 {
     cosine.acos().to_degrees()
 }
 
-fn preselect_pairs(frames: &[usize], seed_pair_index: Option<usize>) -> Vec<(usize, usize)> {
+/// Pairs to screen, best first, capped at `MAX_REVISIT_PAIR_EVALUATIONS`. Pairs inside the
+/// seed's clip segment (`seed_segment` keyframes plus the seed frames) come before
+/// cross-segment diagnostic pairs, so later segments cannot exhaust the budget that direct
+/// revisit recovery in the solved segment depends on. An empty `seed_segment` disables
+/// that priority.
+fn preselect_pairs(
+    frames: &[usize],
+    seed_pair_index: Option<usize>,
+    seed_segment: &[usize],
+) -> Vec<(usize, usize)> {
+    let in_seed_segment = |frame: usize| {
+        seed_segment.is_empty()
+            || seed_segment.contains(&frame)
+            || seed_pair_index.is_some_and(|seed| frame == seed || frame == seed + 1)
+    };
     let mut pairs = Vec::new();
     for (left_offset, &from_frame) in frames.iter().enumerate() {
         for &to_frame in frames.iter().skip(left_offset + 1) {
@@ -433,8 +448,11 @@ fn preselect_pairs(frames: &[usize], seed_pair_index: Option<usize>) -> Vec<(usi
     pairs.sort_by(|left, right| {
         let left_seed = seed_pair_index.is_some_and(|seed| left.0 == seed || left.1 == seed);
         let right_seed = seed_pair_index.is_some_and(|seed| right.0 == seed || right.1 == seed);
-        right_seed
-            .cmp(&left_seed)
+        let left_segment = in_seed_segment(left.0) && in_seed_segment(left.1);
+        let right_segment = in_seed_segment(right.0) && in_seed_segment(right.1);
+        right_segment
+            .cmp(&left_segment)
+            .then_with(|| right_seed.cmp(&left_seed))
             .then_with(|| (right.1 - right.0).cmp(&(left.1 - left.0)))
             .then_with(|| left.0.cmp(&right.0))
             .then_with(|| left.1.cmp(&right.1))
@@ -591,7 +609,7 @@ mod tests {
         let features = vec![base.clone(), base.clone(), base.clone()];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let stats = analyze(&context, &[0, 1, 2], Some(0));
+        let stats = analyze(&context, &[0, 1, 2], Some(0), &[]);
 
         assert_eq!(stats.evaluated_pairs, 1);
         assert_eq!(stats.candidates.len(), 1);
@@ -603,11 +621,32 @@ mod tests {
     #[test]
     fn revisit_analysis_bounds_pair_evaluations_before_matching() {
         let frames: Vec<usize> = (0..18).collect();
-        let pairs = preselect_pairs(&frames, Some(0));
+        let pairs = preselect_pairs(&frames, Some(0), &[]);
 
         assert_eq!(pairs.len(), MAX_REVISIT_PAIR_EVALUATIONS);
         assert!(pairs.iter().all(|(from, to)| *to > *from + 1));
         assert!(pairs.iter().all(|(from, to)| *from == 0 || *to == 0));
+    }
+
+    #[test]
+    fn revisit_budget_goes_to_the_seed_segment_before_other_segments() {
+        // Seed at frame 6; the seed segment holds keyframes 4..=9, later segments hold
+        // 10..=29. Distant cross-segment seed pairs must not crowd out in-segment pairs.
+        let frames: Vec<usize> = (4..30).collect();
+        let seed_segment: Vec<usize> = (4..10).collect();
+        let pairs = preselect_pairs(&frames, Some(6), &seed_segment);
+
+        assert_eq!(pairs.len(), MAX_REVISIT_PAIR_EVALUATIONS);
+        let in_segment = |frame: usize| (4..10).contains(&frame);
+        let in_segment_pairs = (4..10)
+            .flat_map(|from| (from + 2..10).map(move |to| (from, to)))
+            .count();
+        assert!(pairs
+            .iter()
+            .take(in_segment_pairs)
+            .all(|&(from, to)| in_segment(from) && in_segment(to)));
+        assert!(pairs.contains(&(4, 8)));
+        assert_eq!(pairs, preselect_pairs(&frames, Some(6), &seed_segment));
     }
 
     #[test]
@@ -621,7 +660,7 @@ mod tests {
         ];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let mut stats = analyze(&context, &[0, 3], Some(0));
+        let mut stats = analyze(&context, &[0, 3], Some(0), &[]);
         let recovered = recover_failed_registrations(
             &mut stats,
             0,
@@ -649,7 +688,7 @@ mod tests {
         ];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let mut stats = analyze(&context, &[0, 3], Some(0));
+        let mut stats = analyze(&context, &[0, 3], Some(0), &[]);
         let drifted_center = Vector3::new(0.69, -0.06, 0.11);
         let registered = vec![
             RegisteredCamera {
@@ -689,7 +728,7 @@ mod tests {
         ];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let mut stats = analyze(&context, &[0, 3], Some(0));
+        let mut stats = analyze(&context, &[0, 3], Some(0), &[]);
         let registered = vec![RegisteredCamera {
             frame_index: 3,
             rotation: Matrix3::identity(),
@@ -711,7 +750,7 @@ mod tests {
         let features = vec![base.clone(), base.clone(), base.clone(), base];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let stats = analyze(&context, &[1, 2, 3], Some(2));
+        let stats = analyze(&context, &[1, 2, 3], Some(2), &[]);
 
         assert!(stats
             .candidates
