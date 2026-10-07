@@ -97,42 +97,58 @@ impl CoarseCollider {
     ) -> Self {
         let points = evidence.points;
         let mut excluded = ColliderExclusions::default();
-        let mut eligible = Vec::new();
+        // Eligible triangles stay indices into the borrowed evidence; positions are read on
+        // demand, so the collider adds no copy of the accepted geometry.
+        let mut eligible: Vec<usize> = Vec::new();
         // The field must have been built from this evidence; provenance is read from the
         // evidence itself either way, so a stale field can never admit unobserved geometry.
         let field_matches = confidence.describes(evidence);
-        for triangle in evidence.triangles {
-            let corners = [triangle.a, triangle.b, triangle.c];
-            let observed = corners.iter().all(|&point| {
-                evidence.regions.iter().any(|region| {
-                    region.points.start <= point
-                        && point < region.points.start + region.points.count
-                        && matches!(
-                            region.origin,
-                            EvidenceOrigin::GeometricMultiView
-                                | EvidenceOrigin::RevalidatedCompletion
-                        )
-                })
-            });
+        // `(start, end, observed)` per region, sorted by start: one binary search per vertex.
+        let mut ranges: Vec<(usize, usize, bool)> = evidence
+            .regions
+            .iter()
+            .map(|region| {
+                (
+                    region.points.start,
+                    region.points.start.saturating_add(region.points.count),
+                    matches!(
+                        region.origin,
+                        EvidenceOrigin::GeometricMultiView | EvidenceOrigin::RevalidatedCompletion
+                    ),
+                )
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|range| range.0);
+        let observed_point = |point: usize| {
+            let after = ranges.partition_point(|range| range.0 <= point);
+            after > 0 && {
+                let (_, end, observed) = ranges[after - 1];
+                point < end && observed
+            }
+        };
+        for (index, triangle) in evidence.triangles.iter().enumerate() {
+            let observed = [triangle.a, triangle.b, triangle.c]
+                .into_iter()
+                .all(observed_point);
             if !field_matches {
                 excluded.mismatched_confidence += 1;
             } else if !observed {
                 excluded.unobserved_provenance += 1;
-            } else if confidence
-                .triangle_confidence(triangle)
-                // The triangle's own vertex minimum: a few weak points do not move the
-                // region's lower median, but they still keep their triangles out.
-                .min(triangle.confidence)
-                < options.min_confidence
-            {
+            } else if confidence.local_triangle_confidence(triangle) < options.min_confidence {
+                // A few weak points do not move the region's lower median, but their
+                // triangles still stay out.
                 excluded.low_confidence += 1;
             } else {
-                eligible.push(corners.map(|index| {
-                    let point = &points[index];
-                    [point.x as f64, point.y as f64, point.z as f64]
-                }));
+                eligible.push(index);
             }
         }
+        let corners = |index: usize| {
+            let triangle = &evidence.triangles[index];
+            [triangle.a, triangle.b, triangle.c].map(|point| {
+                let point = &points[point];
+                [point.x as f64, point.y as f64, point.z as f64]
+            })
+        };
 
         let mut collider = Self {
             schema_version: COARSE_COLLIDER_SCHEMA_VERSION,
@@ -147,13 +163,13 @@ impl CoarseCollider {
             max_surface_offset: None,
             boxes: Vec::new(),
         };
-        let Some(grid) = Grid::fit(&eligible, &options) else {
+        let Some(grid) = Grid::fit(eligible.iter().map(|&index| corners(index)), &options) else {
             return collider;
         };
 
         let mut occupied = BTreeSet::new();
-        for triangle in &eligible {
-            grid.mark(triangle, &mut occupied);
+        for &index in &eligible {
+            grid.mark(&corners(index), &mut occupied);
         }
         collider.boxes = grid.merge(&occupied);
         collider.cell_size = Some(grid.cell as f32);
@@ -202,24 +218,29 @@ struct Grid {
 }
 
 impl Grid {
-    fn fit(triangles: &[[[f64; 3]; 3]], options: &CoarseColliderOptions) -> Option<Self> {
-        if triangles.is_empty() {
-            return None;
-        }
+    fn fit(
+        triangles: impl Iterator<Item = [[f64; 3]; 3]>,
+        options: &CoarseColliderOptions,
+    ) -> Option<Self> {
         let mut min = [f64::INFINITY; 3];
         let mut max = [f64::NEG_INFINITY; 3];
-        let mut edges = Vec::with_capacity(triangles.len() * 3);
+        // Edge lengths only pick the median cell size; `f32` halves the transient buffer.
+        let mut edges: Vec<f32> = Vec::new();
         for triangle in triangles {
             for (index, vertex) in triangle.iter().enumerate() {
                 for axis in 0..3 {
                     min[axis] = min[axis].min(vertex[axis]);
                     max[axis] = max[axis].max(vertex[axis]);
                 }
-                edges.push(distance(*vertex, triangle[(index + 1) % 3]));
+                edges.push(distance(*vertex, triangle[(index + 1) % 3]) as f32);
             }
         }
-        edges.sort_unstable_by(f64::total_cmp);
-        let median_edge = edges[(edges.len() - 1) / 2];
+        if edges.is_empty() {
+            return None;
+        }
+        let middle = (edges.len() - 1) / 2;
+        let (_, median_edge, _) = edges.select_nth_unstable_by(middle, f32::total_cmp);
+        let median_edge = f64::from(*median_edge);
         let extent = (0..3).map(|axis| max[axis] - min[axis]).fold(0.0, f64::max);
         let cell = (median_edge * f64::from(options.cell_edge_multiple))
             .max(extent / f64::from(options.max_cells_per_axis.max(1)));

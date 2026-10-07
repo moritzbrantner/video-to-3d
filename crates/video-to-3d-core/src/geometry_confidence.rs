@@ -317,6 +317,12 @@ impl GeometryConfidenceField {
             .map_or(0.0, |region| region.confidence)
     }
 
+    /// The confidence the collider and the band diagnostics use: the field's score capped by
+    /// the triangle's own vertex minimum, so locally weak geometry is never reported higher.
+    pub fn local_triangle_confidence(&self, triangle: &MeshTriangle) -> f32 {
+        self.triangle_confidence(triangle).min(triangle.confidence)
+    }
+
     /// Conservative triangle confidence: its weakest vertex region.
     pub fn triangle_confidence(&self, triangle: &MeshTriangle) -> f32 {
         [triangle.a, triangle.b, triangle.c]
@@ -354,9 +360,10 @@ impl GeometryConfidenceField {
             );
         }
         for triangle in triangles {
-            summary
-                .triangles
-                .add(ConfidenceBand::of(self.triangle_confidence(triangle)), 1);
+            summary.triangles.add(
+                ConfidenceBand::of(self.local_triangle_confidence(triangle)),
+                1,
+            );
         }
         summary
     }

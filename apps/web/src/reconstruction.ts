@@ -1054,8 +1054,16 @@ function assertConfidenceContract(result: ReconstructionResult): void {
   if (field.point_count !== result.dense_points.length) {
     throw new Error("confidence contract mismatch: confidence field covers different dense points");
   }
-  const covered = field.regions.reduce((sum, region) => sum + region.points.count, 0);
-  if (covered !== result.dense_points.length) {
+  // An exact partition: sorted by start, each non-empty range begins where the last ended.
+  const ranges = field.regions.map((region) => region.points).sort((a, b) => a.start - b.start);
+  let next = 0;
+  for (const range of ranges) {
+    if (range.count <= 0 || range.start !== next) {
+      throw new Error("confidence contract mismatch: regions do not partition the dense points");
+    }
+    next = range.start + range.count;
+  }
+  if (next !== result.dense_points.length) {
     throw new Error("confidence contract mismatch: regions do not partition the dense points");
   }
   if (
