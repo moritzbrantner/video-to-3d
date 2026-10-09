@@ -395,6 +395,9 @@ impl ProjectStore {
                             && length == receipt.output.byte_length => {}
                     _ => continue,
                 }
+                if self.verify_sidecars(&candidate, cache).is_err() {
+                    continue;
+                }
                 let mut next = manifest.clone();
                 next.artifacts.push(candidate);
                 next.attempt_usage
@@ -453,6 +456,16 @@ impl ProjectStore {
                 actual,
             });
         }
+        self.verify_sidecars(artifact, cache)
+    }
+
+    /// Sidecar files listed by a keyframes or surface-textures document must
+    /// match their recorded hashes.
+    fn verify_sidecars(
+        &self,
+        artifact: &ArtifactRecord,
+        cache: &mut HashCache,
+    ) -> Result<(), Invalidation> {
         if matches!(
             artifact.kind,
             ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures

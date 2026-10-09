@@ -54,6 +54,8 @@ pub const SURFACE_MESH_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub const SURFACE_TEXTURES_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 /// File name of the material manifest inside a texture-bake output directory.
 pub const SURFACE_TEXTURES_FILE: &str = "surface-textures.json";
+/// Identifier limit of the assembled scene model.
+const MAX_SCENE_IDENTIFIER_LENGTH: usize = 64;
 
 fn parse_versioned<T: DeserializeOwned>(
     document: &str,
@@ -456,6 +458,20 @@ impl SurfaceTexturesArtifact {
             }
         }
         // Textured and fallback triangles partition the accepted triangles.
+        // Check the count first so an untrusted `triangle_count` never sizes
+        // an allocation beyond the listed indices.
+        let listed_count = self
+            .materials
+            .iter()
+            .map(|material| material.triangles.len())
+            .sum::<usize>()
+            + self.fallback_triangles.len();
+        if listed_count != self.triangle_count {
+            return Err(format!(
+                "surface textures artifact assigns {listed_count} triangle(s) for {} accepted triangles",
+                self.triangle_count
+            ));
+        }
         let mut seen = vec![false; self.triangle_count];
         let listed = self
             .materials
@@ -518,7 +534,28 @@ impl SurfaceTexturesArtifact {
     /// own. The scene must declare an accepted camera for every cited frame.
     /// `namespace` (for example the producing operation id) prefixes every
     /// generated identifier, so entries of several bakes can share one scene.
-    pub fn scene_entries(&self, namespace: &str) -> (Vec<SceneResource>, Vec<Material>) {
+    pub fn scene_entries(
+        &self,
+        namespace: &str,
+    ) -> Result<(Vec<SceneResource>, Vec<Material>), String> {
+        // Scene identifiers are at most 64 bytes; reject a namespace that
+        // cannot carry the longest generated suffix.
+        if let Some(longest) = self
+            .materials
+            .iter()
+            .map(|material| {
+                surface_material_id(namespace, material.reference_frame)
+                    .len()
+                    .max(surface_texture_id(namespace, material.reference_frame).len())
+            })
+            .max()
+        {
+            if longest > MAX_SCENE_IDENTIFIER_LENGTH {
+                return Err(format!(
+                    "scene entry namespace `{namespace}` makes identifiers of {longest} bytes (limit {MAX_SCENE_IDENTIFIER_LENGTH})"
+                ));
+            }
+        }
         let mut resources = Vec::with_capacity(self.materials.len());
         let mut materials = Vec::with_capacity(self.materials.len());
         for material in &self.materials {
@@ -548,7 +585,7 @@ impl SurfaceTexturesArtifact {
                 provenance: SceneProvenance::Estimated,
             });
         }
-        (resources, materials)
+        Ok((resources, materials))
     }
 
     pub fn diagnostic(&self) -> String {
@@ -777,40 +814,77 @@ pub fn texture_bake_output(operation_id: &str) -> Result<ProjectPath, String> {
 #[derive(Clone, Debug)]
 pub struct BuiltInExecutor {
     root: PathBuf,
-    /// Declared paths and their owners (media inputs, exports, and artifacts
-    /// recorded by other operations), which an output must never overwrite.
-    reserved: Vec<(String, ProjectPath)>,
+    reservations: Reservations,
+}
+
+#[derive(Clone, Debug)]
+enum Reservations {
+    Fixed(Vec<(String, ProjectPath)>),
+    /// Re-read at execution, so the reconciled manifest a build persisted
+    /// before running decides (dropped stale records do not block an output).
+    ManifestFile(PathBuf),
+}
+
+/// Declared paths and their owners (media inputs, exports, and artifacts
+/// recorded by operations), which an output of another owner must never
+/// overwrite.
+fn reserved_paths(manifest: &SceneProjectManifest) -> Vec<(String, ProjectPath)> {
+    let mut reserved: Vec<(String, ProjectPath)> = manifest
+        .inputs
+        .iter()
+        .map(|input| (String::new(), input.path.clone()))
+        .collect();
+    reserved.extend(
+        manifest
+            .exports
+            .iter()
+            .map(|export| (String::new(), export.path.clone())),
+    );
+    reserved.extend(
+        manifest
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.produced_by.clone(), artifact.path.clone())),
+    );
+    reserved
 }
 
 impl BuiltInExecutor {
+    /// Reservations from an in-memory manifest.
     pub fn new(project_root: impl Into<PathBuf>, manifest: &SceneProjectManifest) -> Self {
-        let mut reserved: Vec<(String, ProjectPath)> = manifest
-            .inputs
-            .iter()
-            .map(|input| (String::new(), input.path.clone()))
-            .collect();
-        reserved.extend(
-            manifest
-                .exports
-                .iter()
-                .map(|export| (String::new(), export.path.clone())),
-        );
-        reserved.extend(
-            manifest
-                .artifacts
-                .iter()
-                .map(|artifact| (artifact.produced_by.clone(), artifact.path.clone())),
-        );
         Self {
             root: project_root.into(),
-            reserved,
+            reservations: Reservations::Fixed(reserved_paths(manifest)),
+        }
+    }
+
+    /// Reservations re-read from the project manifest at each execution; use
+    /// this with [`crate::scene_store::ProjectStore::build`], which reconciles
+    /// and saves the manifest before running.
+    pub fn for_project(
+        project_root: impl Into<PathBuf>,
+        manifest_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            root: project_root.into(),
+            reservations: Reservations::ManifestFile(manifest_path.into()),
         }
     }
 
     /// A declared path of another owner inside `directory` (or the directory
     /// itself, or one of its ancestors).
-    fn collision(&self, operation: &str, directory: &str) -> Option<&ProjectPath> {
-        self.reserved
+    fn collision(&self, operation: &str, directory: &str) -> Result<Option<ProjectPath>, String> {
+        let loaded;
+        let reserved = match &self.reservations {
+            Reservations::Fixed(reserved) => reserved,
+            Reservations::ManifestFile(path) => {
+                loaded = reserved_paths(
+                    &SceneProjectManifest::load(path).map_err(|error| error.to_string())?,
+                );
+                &loaded
+            }
+        };
+        Ok(reserved
             .iter()
             .filter(|(owner, _)| owner != operation)
             .map(|(_, path)| path)
@@ -820,6 +894,7 @@ impl BuiltInExecutor {
                     || path.starts_with(&format!("{directory}/"))
                     || directory.starts_with(&format!("{path}/"))
             })
+            .cloned())
     }
 
     fn texture_bake(
@@ -862,7 +937,11 @@ impl BuiltInExecutor {
             Err(error) => return AttemptOutcome::Failed(error),
         };
         let directory = parent(&output).unwrap_or_default();
-        if let Some(path) = self.collision(&request.operation.id, directory) {
+        let collision = match self.collision(&request.operation.id, directory) {
+            Ok(collision) => collision,
+            Err(error) => return AttemptOutcome::Failed(error),
+        };
+        if let Some(path) = collision {
             return AttemptOutcome::Failed(format!(
                 "texture_bake output directory `{directory}` would overwrite the declared path `{}`",
                 path.as_str()

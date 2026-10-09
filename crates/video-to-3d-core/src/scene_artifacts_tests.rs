@@ -397,7 +397,7 @@ fn scene_with(artifact: &SurfaceTexturesArtifact) -> AssembledScene {
             intrinsics: None,
         })
         .collect();
-    let (resources, materials) = artifact.scene_entries("bake");
+    let (resources, materials) = artifact.scene_entries("bake").unwrap();
     scene.resources = resources;
     scene.materials = materials;
     scene
@@ -621,7 +621,7 @@ fn texture_artifacts_must_partition_the_triangles() {
     artifact.validate().unwrap();
 
     let mut duplicated = artifact.clone();
-    duplicated.fallback_triangles.push(0);
+    duplicated.fallback_triangles = vec![0];
     assert!(duplicated
         .validate()
         .unwrap_err()
@@ -632,12 +632,16 @@ fn texture_artifacts_must_partition_the_triangles() {
         .validate()
         .unwrap_err()
         .contains("triangle 9 of 5"));
-    let mut missing = artifact;
+    let mut missing = artifact.clone();
     missing.fallback_triangles.clear();
     assert!(missing
         .validate()
         .unwrap_err()
-        .contains("does not assign triangle 3"));
+        .contains("assigns 4 triangle(s) for 5"));
+    let mut huge = artifact.clone();
+    huge.triangle_count = usize::MAX;
+    assert!(huge.validate().is_err());
+    assert!(artifact.scene_entries(&"x".repeat(60)).is_err());
 }
 
 #[test]

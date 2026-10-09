@@ -201,7 +201,8 @@ fn build(manifest_path: &std::path::Path, jobs: usize) -> Outcome {
     let (store, mut manifest) = open(manifest_path)?;
     // Built-in executors exist for texture_bake; every other kind reports an
     // explicit unsupported outcome.
-    let executor = BuiltInExecutor::new(store.root(), &manifest);
+    // Reservations come from the reconciled manifest the build persists.
+    let executor = BuiltInExecutor::for_project(store.root(), manifest_path);
     let report = store
         .build(
             &mut manifest,
