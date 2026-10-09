@@ -6,3 +6,4 @@ target/
 .benchmark-data/
 apps/web/public/wasm/
 apps/desktop/src-tauri/gen/
+__pycache__/

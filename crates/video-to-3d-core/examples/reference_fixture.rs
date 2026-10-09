@@ -9,9 +9,11 @@
 //! Usage: `reference_fixture <fixture-dir|-> <case>`, where `case` is one of
 //! `slow-lateral-pan`, `pure-rotation` or `overlapping-references`. The fixture directory
 //! receives `images/` (the frames COLMAP and video-to-3d both consume), `truth/` and
-//! `rust-evidence.json`. The last stdout line is the `golden-rust` metrics line.
+//! `rust-evidence.json` and `stage-report.json` (per-stage checks against the truth, see
+//! `reference_stages`). The last stdout line is the `golden-rust` metrics line.
 
 mod common;
+mod reference_stages;
 
 use std::{env, fs, path::Path};
 
@@ -946,6 +948,11 @@ struct MeshTopology {
     /// Share of all triangles in the largest component.
     largest_component_share: f64,
     cross_reference_triangles: usize,
+    /// Vertices of one patch that a cross-reference triangle joins to another patch.
+    shared_vertices: usize,
+    /// Components of the graph of meshed reference patches, joined by cross-reference
+    /// triangles: 1 when every patch is connected to every other.
+    reference_patch_components: usize,
     meshed_reference_patches: usize,
 }
 
@@ -965,14 +972,19 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
             .iter()
             .map(|triangle| [triangle.a, triangle.b, triangle.c])
     };
-    let cross_reference_triangles = triangles()
-        .filter(|vertices| {
+    let crossing = || {
+        triangles().filter(|vertices| {
             let first = patch_of_point.get(vertices[0]);
             vertices
                 .iter()
                 .any(|&vertex| patch_of_point.get(vertex) != first)
         })
-        .count();
+    };
+    let cross_reference_triangles = crossing().count();
+    let mut shared = std::collections::BTreeSet::new();
+    shared.extend(crossing().flatten());
+    let shared_vertices = shared.len();
+    let reference_patch_components = patch_graph_components(&patch_of_point, triangles());
     let vertex_count = reconstruction.dense_points.len();
     let mut patches: Vec<usize> = patch_of_point.clone();
     patches.sort_unstable();
@@ -1006,6 +1018,8 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
             largest as f64 / total as f64
         },
         cross_reference_triangles,
+        shared_vertices,
+        reference_patch_components,
         meshed_reference_patches: reconstruction
             .mesh
             .reference_patches
@@ -1013,6 +1027,36 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
             .filter(|patch| patch.accepted_triangles > 0)
             .count(),
     }
+}
+
+/// Components of the graph whose nodes are the reference patches that own triangle
+/// vertices and whose edges are the triangles spanning two patches. Vertices without a
+/// patch (`usize::MAX` or out of range) are ignored.
+fn patch_graph_components(
+    patch_of_point: &[usize],
+    triangles: impl Iterator<Item = [usize; 3]>,
+) -> usize {
+    let mut patches = std::collections::BTreeMap::new();
+    let mut edges = Vec::new();
+    for vertices in triangles {
+        let owners: Vec<usize> = vertices
+            .iter()
+            .filter_map(|&vertex| patch_of_point.get(vertex).copied())
+            .filter(|&patch| patch != usize::MAX)
+            .collect();
+        for &patch in &owners {
+            let next = patches.len();
+            patches.entry(patch).or_insert(next);
+        }
+        for pair in owners.windows(2) {
+            edges.push([patches[&pair[0]], patches[&pair[1]], patches[&pair[1]]]);
+        }
+    }
+    let labels = component_labels(patches.len(), edges.into_iter());
+    labels
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 fn format_metric(value: Option<f64>) -> String {
@@ -1097,6 +1141,8 @@ fn main() {
                 "per_patch_components": topology.per_patch_components,
                 "largest_component_share": topology.largest_component_share,
                 "cross_reference_triangles": topology.cross_reference_triangles,
+                "shared_vertices": topology.shared_vertices,
+                "reference_patch_components": topology.reference_patch_components,
                 "meshed_reference_patches": topology.meshed_reference_patches,
             },
             "warnings": reconstruction.warnings,
@@ -1106,6 +1152,19 @@ fn main() {
             serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
         )
         .expect("write evidence");
+        let stages = reference_stages::stage_report(&reference_stages::StageInputs {
+            fixture: &fixture,
+            result: &result,
+            registered_images,
+            normalized_pose_rmse: pose_rmse,
+            decisive_gate: &decisive_gate,
+            topology: &topology,
+        });
+        fs::write(
+            Path::new(output_dir).join("stage-report.json"),
+            serde_json::to_vec_pretty(&stages).expect("serialize stage report"),
+        )
+        .expect("write stage report");
     }
 
     println!(
@@ -1269,6 +1328,29 @@ mod tests {
                 2 * (mesh.columns - 1) * (mesh.rows - 1)
             );
         }
+    }
+
+    #[test]
+    fn patch_graph_needs_every_reference_patch_connected() {
+        // Three patches of two vertices each (0-1, 2-3, 4-5) plus an unowned vertex 6.
+        let patch_of_point = [10, 10, 20, 20, 30, 30, usize::MAX];
+        let within = [[0, 1, 0], [2, 3, 2], [4, 5, 4]];
+        assert_eq!(
+            patch_graph_components(&patch_of_point, within.into_iter()),
+            3
+        );
+        // One crossing triangle joins two patches; the third stays apart.
+        let partial = [[0, 1, 0], [2, 3, 2], [4, 5, 4], [1, 2, 6]];
+        assert_eq!(
+            patch_graph_components(&patch_of_point, partial.into_iter()),
+            2
+        );
+        let full = [[0, 1, 0], [2, 3, 2], [4, 5, 4], [1, 2, 3], [3, 4, 5]];
+        assert_eq!(patch_graph_components(&patch_of_point, full.into_iter()), 1);
+        assert_eq!(
+            patch_graph_components(&patch_of_point, std::iter::empty()),
+            0
+        );
     }
 
     #[test]
