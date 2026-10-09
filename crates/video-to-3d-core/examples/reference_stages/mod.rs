@@ -66,7 +66,7 @@ pub fn stage_report(inputs: &StageInputs<'_>) -> Value {
             "blocked_by": format!("{stage}: no registered cameras to align with the truth"),
         })
     };
-    let registration = registration_stage(inputs, &cameras, alignment.as_ref());
+    let registration = registration_stage(inputs, &cameras, &truth, alignment.as_ref());
     let aligned = alignment.map(|global| Aligned::new(inputs, &evidence, &cameras, global));
     json!({
         "schema": STAGE_REPORT_SCHEMA,
@@ -365,8 +365,7 @@ fn features_stage(inputs: &StageInputs<'_>) -> Value {
     };
     let (width, height) = (fixture.intrinsics.width, fixture.intrinsics.height);
     let mut pairs = Vec::new();
-    let mut all_errors = Vec::new();
-    let (mut min_matches, mut min_precision) = (usize::MAX, f64::INFINITY);
+    let mut scores = Vec::new();
     for (index, pair) in fixture.views.windows(2).enumerate() {
         let (from, to) = (&pair[0], &pair[1]);
         let analysis = analyze_rgba_pair(
@@ -392,15 +391,11 @@ fn features_stage(inputs: &StageInputs<'_>) -> Value {
             correct += usize::from(error <= MATCH_TOLERANCE_PIXELS);
             errors.push(error);
         }
-        let matches = analysis.matches.len();
-        let precision = if matches == 0 {
-            0.0
-        } else {
-            correct as f64 / matches as f64
+        let score = PairScore {
+            matches: analysis.matches.len(),
+            correct,
+            errors,
         };
-        min_matches = min_matches.min(matches);
-        min_precision = min_precision.min(precision);
-        all_errors.extend(&errors);
         let pipeline = reconstruction
             .pairs
             .iter()
@@ -414,24 +409,55 @@ fn features_stage(inputs: &StageInputs<'_>) -> Value {
             "to_frame": index + 1,
             "source_features": analysis.source_features.len(),
             "target_features": analysis.target_features.len(),
-            "matches": matches,
-            "correct_matches": correct,
-            "precision": round6(precision),
-            "median_error_pixels": rounded(median(errors)),
+            "matches": score.matches,
+            "correct_matches": score.correct,
+            "precision": round6(score.precision()),
+            "median_error_pixels": rounded(median(score.errors.clone())),
             "pipeline_matches": pipeline.map(|stats| stats.matches),
             "essential_inlier_ratio": candidate.and_then(|candidate| candidate.inlier_ratio),
         }));
+        scores.push(score);
     }
     json!({
         "available": true,
         "matcher": "authoritative whole-pixel Harris-patch matcher with the browser's options",
-        "metrics": {
-            "pairs": pairs.len(),
-            "min_pair_matches": min_matches,
-            "min_match_precision": round6(min_precision),
-            "median_match_error_pixels": rounded(median(all_errors)),
-        },
+        "metrics": pair_metrics(&scores),
         "pairs": pairs,
+    })
+}
+
+/// One adjacent pair's matches scored against the true correspondences.
+struct PairScore {
+    matches: usize,
+    /// Matches within `MATCH_TOLERANCE_PIXELS` of the true correspondence.
+    correct: usize,
+    /// Error of every match whose source point is visible in the target.
+    errors: Vec<f64>,
+}
+
+impl PairScore {
+    fn precision(&self) -> f64 {
+        if self.matches == 0 {
+            0.0
+        } else {
+            self.correct as f64 / self.matches as f64
+        }
+    }
+}
+
+/// Worst-pair aggregates, so one bad pair cannot hide behind accurate neighbours. A pair
+/// without a scorable match has no median error and makes the worst-pair metric missing.
+fn pair_metrics(scores: &[PairScore]) -> Value {
+    let worst_median = scores
+        .iter()
+        .map(|score| median(score.errors.clone()).unwrap_or(f64::INFINITY))
+        .reduce(f64::max);
+    json!({
+        "pairs": scores.len(),
+        "min_pair_matches": scores.iter().map(|score| score.matches).min().unwrap_or(0),
+        "min_match_precision": round6(scores.iter().map(PairScore::precision).reduce(f64::min).unwrap_or(0.0)),
+        "max_pair_median_error_pixels": rounded(worst_median.filter(|value| value.is_finite())),
+        "median_match_error_pixels": rounded(median(scores.iter().flat_map(|score| score.errors.iter().copied()).collect())),
     })
 }
 
@@ -527,35 +553,57 @@ fn true_triangulation_angle(fixture: &Fixture, from: &View, to: &View) -> Option
 fn registration_stage(
     inputs: &StageInputs<'_>,
     cameras: &[EstimatedCamera],
+    truth: &[Pose],
     alignment: Option<&Alignment>,
 ) -> Value {
-    let views = &inputs.fixture.views;
-    let rotation_errors: Vec<f64> = alignment
-        .map(|alignment| {
-            cameras
-                .iter()
-                .map(|camera| {
-                    rotation_angle_degrees(
-                        &(views[camera.frame].pose.rotation.transpose()
-                            * camera.rotation
-                            * alignment.rotation.transpose()),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let errors = alignment.map(|alignment| pose_errors(cameras, truth, alignment));
     let mut frames: Vec<usize> = cameras.iter().map(|camera| camera.frame).collect();
     frames.sort_unstable();
     json!({
         "available": true,
         "metrics": {
             "registered_images": inputs.registered_images,
-            "normalized_pose_rmse": rounded(inputs.normalized_pose_rmse),
-            "max_rotation_error_degrees": rounded(rotation_errors.iter().copied().reduce(f64::max)),
+            "normalized_pose_rmse": rounded(errors.map(|errors| errors.normalized_center_rmse)),
+            "max_rotation_error_degrees": rounded(errors.map(|errors| errors.max_rotation_degrees)),
+            "center_only_pose_rmse": rounded(inputs.normalized_pose_rmse),
             "alignment_scale": rounded(alignment.map(|alignment| alignment.scale)),
         },
         "registered_frames": frames,
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PoseErrors {
+    /// Center RMSE through the pose alignment, divided by the true trajectory span.
+    normalized_center_rmse: f64,
+    max_rotation_degrees: f64,
+}
+
+/// Center and orientation errors of every camera through one and the same similarity, so
+/// centers and orientations that no single similarity reconciles cannot both pass.
+fn pose_errors(cameras: &[EstimatedCamera], truth: &[Pose], alignment: &Alignment) -> PoseErrors {
+    let centers: Vec<Vector3<f64>> = truth.iter().map(|pose| pose.center).collect();
+    let span = super::common::trajectory_span(&centers);
+    let squared = cameras
+        .iter()
+        .map(|camera| {
+            (alignment.apply(&camera.center()) - truth[camera.frame].center).norm_squared()
+        })
+        .sum::<f64>();
+    let max_rotation_degrees = cameras
+        .iter()
+        .map(|camera| {
+            rotation_angle_degrees(
+                &(truth[camera.frame].rotation.transpose()
+                    * camera.rotation
+                    * alignment.rotation.transpose()),
+            )
+        })
+        .fold(0.0, f64::max);
+    PoseErrors {
+        normalized_center_rmse: (squared / cameras.len().max(1) as f64).sqrt() / span,
+        max_rotation_degrees,
+    }
 }
 
 /// Depth of every observed dense point in its reference camera against the true depth
@@ -693,11 +741,11 @@ fn mesh_stage(
         }
     }
 
-    // Cells the registered cameras see from at least two views.
-    let registered: Vec<&Pose> = aligned
+    // Cells the registered cameras see, unoccluded, from at least two views.
+    let registered: Vec<&View> = aligned
         .cameras
         .iter()
-        .map(|camera| &fixture.views[camera.frame].pose)
+        .map(|camera| &fixture.views[camera.frame])
         .collect();
     let (mut observed, mut covered, mut duplicated) = (0_usize, 0_usize, 0_usize);
     for row in 0..rows {
@@ -706,15 +754,7 @@ fn mesh_stage(
             let world = Vector3::new(x, y, facade.surface_z(x, y));
             let seen = registered
                 .iter()
-                .filter(|pose| {
-                    fixture
-                        .intrinsics
-                        .project(&pose.world_to_camera(&world))
-                        .is_some_and(|(u, v)| {
-                            (0.0..fixture.intrinsics.width as f64).contains(&u)
-                                && (0.0..fixture.intrinsics.height as f64).contains(&v)
-                        })
-                })
+                .filter(|view| visible_projection(fixture, view, &world).is_some())
                 .count();
             if seen < 2 {
                 continue;
@@ -918,6 +958,107 @@ mod tests {
             .collect();
         assert!(align(&cameras, &truth).is_none());
         assert!(align(&cameras[..1], &truth).is_none());
+    }
+
+    #[test]
+    fn pose_errors_use_one_alignment_for_centers_and_orientations() {
+        let truth: Vec<Pose> = (0..5)
+            .map(|index| pose(0.0, Vector3::new(0.2 * index as f64, 0.0, 0.0)))
+            .collect();
+        let cameras = |center_frame: Matrix3<f64>, orientation_frame: Matrix3<f64>| {
+            truth
+                .iter()
+                .enumerate()
+                .map(|(frame, pose)| {
+                    let center = center_frame.transpose() * pose.center * 3.0;
+                    let rotation = pose.rotation * orientation_frame;
+                    EstimatedCamera {
+                        frame,
+                        rotation,
+                        translation: -(rotation * center),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let frame = *Rotation3::from_euler_angles(0.1, 0.4, -0.3).matrix();
+        let consistent = cameras(frame, frame);
+        let alignment = align(&consistent, &truth).expect("alignment");
+        let errors = pose_errors(&consistent, &truth, &alignment);
+        assert!(errors.normalized_center_rmse < 1e-9);
+        assert!(errors.max_rotation_degrees < 1e-6);
+
+        // Orientations agree with each other but not with the centers: the camera path
+        // is turned 40° away from where the cameras look. A center-only fit would still
+        // place every center exactly; the shared alignment must not.
+        let turned = *Rotation3::from_euler_angles(0.1, 0.4 + 40f64.to_radians(), -0.3).matrix();
+        let inconsistent = cameras(turned, frame);
+        let alignment = align(&inconsistent, &truth).expect("alignment");
+        let errors = pose_errors(&inconsistent, &truth, &alignment);
+        assert!(errors.max_rotation_degrees < 1e-6);
+        assert!(errors.normalized_center_rmse > 0.1, "{errors:?}");
+    }
+
+    #[test]
+    fn visibility_respects_the_true_depth() {
+        let (width, height) = (8, 6);
+        let intrinsics = super::super::Intrinsics {
+            width,
+            height,
+            focal: 10.0,
+            cx: 4.0,
+            cy: 3.0,
+        };
+        let view = View {
+            pose: pose(0.0, Vector3::zeros()),
+            frame: video_to_3d_core::FrameInput {
+                width,
+                height,
+                rgba: vec![0; (width * height * 4) as usize],
+            },
+            depth: vec![2.0; (width * height) as usize],
+        };
+        let fixture = Fixture {
+            case: super::super::Case::OverlappingReferences,
+            spec: super::super::Case::OverlappingReferences.spec(),
+            plan: super::super::sampling_plan(),
+            intrinsics,
+            views: Vec::new(),
+        };
+        let on_surface = Vector3::new(0.1, 0.0, 2.0);
+        assert!(visible_projection(&fixture, &view, &on_surface).is_some());
+        // Behind the surface the view sees there: occluded, not observed.
+        assert!(visible_projection(&fixture, &view, &Vector3::new(0.15, 0.0, 3.0)).is_none());
+        // Outside the image or behind the camera.
+        assert!(visible_projection(&fixture, &view, &Vector3::new(5.0, 0.0, 2.0)).is_none());
+        assert!(visible_projection(&fixture, &view, &Vector3::new(0.0, 0.0, -2.0)).is_none());
+    }
+
+    #[test]
+    fn one_biased_pair_fails_the_worst_pair_error() {
+        let accurate = || PairScore {
+            matches: 100,
+            correct: 100,
+            errors: vec![0.2; 100],
+        };
+        // Every match within the 1.5 px precision tolerance, but biased by 1.2 px.
+        let biased = PairScore {
+            matches: 100,
+            correct: 100,
+            errors: vec![1.2; 100],
+        };
+        let metrics = pair_metrics(&[accurate(), accurate(), biased, accurate()]);
+        assert_eq!(metrics["min_match_precision"], json!(1.0));
+        assert_eq!(metrics["median_match_error_pixels"], json!(0.2));
+        assert_eq!(metrics["max_pair_median_error_pixels"], json!(1.2));
+        // A pair without a scorable match leaves the worst-pair error missing.
+        let empty = PairScore {
+            matches: 0,
+            correct: 0,
+            errors: Vec::new(),
+        };
+        let metrics = pair_metrics(&[accurate(), empty]);
+        assert_eq!(metrics["max_pair_median_error_pixels"], Value::Null);
+        assert_eq!(metrics["min_match_precision"], json!(0.0));
     }
 
     #[test]

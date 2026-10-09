@@ -27,7 +27,7 @@
       }
     },
     "features": {
-      "measures": "The authoritative whole-pixel matcher with the browser's options on every adjacent pair, against the true correspondence of each source feature (exact depth reprojected into the target, occlusion-aware). A match is correct within 1.5 px.",
+      "measures": "The authoritative whole-pixel matcher with the browser's options on every adjacent pair, against the true correspondence of each source feature (exact depth reprojected into the target, occlusion-aware). A match is correct within 1.5 px; counts, precision and median error are gated on the worst pair.",
       "default_checks": {
         "min_pair_matches": {
           "min": 50
@@ -35,7 +35,7 @@
         "min_match_precision": {
           "min": 0.8
         },
-        "median_match_error_pixels": {
+        "max_pair_median_error_pixels": {
           "max": 1.0
         }
       }
@@ -55,7 +55,7 @@
       }
     },
     "registration": {
-      "measures": "Registered views; camera-center RMSE after similarity alignment, divided by the true trajectory span; worst camera orientation error after the alignment.",
+      "measures": "Registered views; camera-center RMSE divided by the true trajectory span and the worst camera orientation error, both through one pose alignment (orientation-derived rotation, center-fitted scale and translation).",
       "default_checks": {
         "registered_images": {
           "min": 9
@@ -83,7 +83,7 @@
       }
     },
     "mesh": {
-      "measures": "The mesh through each reference's local alignment against the true heightfield: median centroid error, share of triangles more than 5 cm off the surface (unsupported), coverage of the 5 cm surface cells two registered cameras see, cells covered by more than one reference (duplicated overlap), and topology.",
+      "measures": "The mesh through each reference's local alignment against the true heightfield: median centroid error, share of triangles more than 5 cm off the surface (unsupported), coverage of the 5 cm surface cells two registered cameras see unoccluded, cells covered by more than one reference (duplicated overlap), and topology.",
       "default_checks": {
         "median_surface_error_m": {
           "max": 0.03

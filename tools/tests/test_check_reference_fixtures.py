@@ -133,6 +133,17 @@ class ReferenceFixtureGateTests(unittest.TestCase):
         self.assertTrue(module.check_result({"equals": True}, True))
         self.assertEqual(self.evaluate(fixture, stages(registration__registered_images=True))["status"], "FAIL")
 
+    def test_equality_requires_the_metric_type(self):
+        self.assertFalse(module.check_result({"equals": True}, 1))
+        self.assertFalse(module.check_result({"equals": False}, 0))
+        self.assertFalse(module.check_result({"equals": 0}, False))
+        self.assertFalse(module.check_result({"equals": "baseline"}, None))
+        self.assertTrue(module.check_result({"equals": 0}, 0.0))
+        self.assertTrue(module.check_result({"equals": "baseline"}, "baseline"))
+        result = self.evaluate(overlap_fixture(), stages(seed__seed_selected=1))
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["first_failing_stage"], "seed")
+
     def test_repository_manifest_is_valid(self):
         definition = module.load_manifest(module.DEFAULT_MANIFEST)
         self.assertEqual(

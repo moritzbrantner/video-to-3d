@@ -110,7 +110,12 @@ def load_stages(fixture_dir: Path, case: str) -> dict:
 def check_result(bound: dict, value) -> bool:
     kind, expected = next(iter(bound.items()))
     if kind == "equals":
-        return value == expected
+        # Python treats 1 == True; a report that changes a metric's JSON type is broken.
+        if isinstance(expected, bool) or isinstance(value, bool):
+            return type(value) is type(expected) and value == expected
+        if isinstance(expected, (int, float)):
+            return isinstance(value, (int, float)) and value == expected
+        return type(value) is type(expected) and value == expected
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return False
     return value >= expected if kind == "min" else value <= expected
