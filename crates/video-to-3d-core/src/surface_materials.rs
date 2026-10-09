@@ -90,7 +90,7 @@ pub struct BakedReferenceMaterial {
 }
 
 /// Why an accepted triangle keeps the untextured fallback.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FallbackReasons {
     /// Vertices belong to different reference views.
     pub mixed_reference: usize,

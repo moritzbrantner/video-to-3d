@@ -6,7 +6,7 @@ use std::collections::HashSet;
 pub const RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION: u32 = 2;
 const CLASSIC_PROVIDER_ID: &str = "video-to-3d-core/classic";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconstructionProviderClass {
     GeometricMultiView,
@@ -14,7 +14,7 @@ pub enum ReconstructionProviderClass {
     GenerativeCompletion,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconstructionProviderDescriptor {
     pub id: String,
     pub class: ReconstructionProviderClass,
@@ -43,7 +43,7 @@ impl ReconstructionProviderDescriptor {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceScale {
     ArbitraryMonocular,
@@ -69,7 +69,7 @@ pub struct EvidenceCamera {
     pub median_reprojection_error_pixels: Option<f32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceOrigin {
     GeometricMultiView,
@@ -84,7 +84,7 @@ impl EvidenceOrigin {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRange {
     pub start: usize,
     pub count: usize,
@@ -104,7 +104,7 @@ impl EvidenceRange {
 ///
 /// Kept as an optional attribute slice parallel to the shared point buffer, so each region
 /// reads it through its own point range; it is never a second geometry buffer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EvidencePointAttributes {
     /// Fraction of the supporting source views whose reciprocal depth agreed with the point.
     pub reciprocal_consistency: f32,
@@ -114,7 +114,7 @@ pub struct EvidencePointAttributes {
     pub depth_margin: f32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SurfaceEvidenceRegion {
     pub origin: EvidenceOrigin,
     pub reference_frame: Option<usize>,
