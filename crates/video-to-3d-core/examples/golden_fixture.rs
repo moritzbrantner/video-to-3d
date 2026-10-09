@@ -1,3 +1,5 @@
+mod common;
+
 use std::{env, fs, path::Path};
 
 use nalgebra::Vector3;
@@ -152,81 +154,21 @@ fn write_ppm(path: &Path, frame: &FrameInput) {
 }
 
 fn normalized_pose_rmse(cameras: &[CameraPose], scenario: Scenario) -> Option<f64> {
+    let truth = |frame: usize| {
+        let center = scenario.camera_center(frame);
+        Vector3::new(center.x, center.y, center.z)
+    };
     let matched: Vec<(Vector3<f64>, Vector3<f64>)> = cameras
         .iter()
         .map(|camera| {
-            let truth = scenario.camera_center(camera.frame_index);
             (
                 Vector3::new(camera.x as f64, camera.y as f64, camera.z as f64),
-                Vector3::new(truth.x, truth.y, truth.z),
+                truth(camera.frame_index),
             )
         })
         .collect();
-    if matched.len() < 3 {
-        return None;
-    }
-
-    let count = matched.len() as f64;
-    let estimated_centroid = matched
-        .iter()
-        .map(|(estimated, _)| *estimated)
-        .sum::<Vector3<f64>>()
-        / count;
-    let truth_centroid = matched
-        .iter()
-        .map(|(_, truth)| *truth)
-        .sum::<Vector3<f64>>()
-        / count;
-
-    let mut covariance = nalgebra::Matrix3::zeros();
-    let mut estimated_variance = 0.0;
-    for (estimated, truth) in &matched {
-        let estimated_centered = estimated - estimated_centroid;
-        let truth_centered = truth - truth_centroid;
-        covariance += estimated_centered * truth_centered.transpose();
-        estimated_variance += estimated_centered.norm_squared();
-    }
-    if estimated_variance <= 1e-12 {
-        return None;
-    }
-
-    let svd = covariance.svd(true, true);
-    let u = svd.u?;
-    let v_t = svd.v_t?;
-    let v = v_t.transpose();
-    let mut correction = nalgebra::Matrix3::identity();
-    if (v * u.transpose()).determinant() < 0.0 {
-        correction[(2, 2)] = -1.0;
-    }
-    let rotation = v * correction * u.transpose();
-    let signed_singular_sum = svd.singular_values[0]
-        + svd.singular_values[1]
-        + correction[(2, 2)] * svd.singular_values[2];
-    let scale = signed_singular_sum / estimated_variance;
-    if !scale.is_finite() || scale <= 0.0 {
-        return None;
-    }
-    let translation = truth_centroid - scale * rotation * estimated_centroid;
-
-    let squared_error = matched
-        .iter()
-        .map(|(estimated, truth)| {
-            let aligned = scale * rotation * estimated + translation;
-            (aligned - truth).norm_squared()
-        })
-        .sum::<f64>();
-    let rmse = (squared_error / count).sqrt();
-
-    let trajectory_span = (0..FRAME_COUNT)
-        .flat_map(|left| {
-            ((left + 1)..FRAME_COUNT).map(move |right| {
-                let a = scenario.camera_center(left);
-                let b = scenario.camera_center(right);
-                Vector3::new(a.x - b.x, a.y - b.y, a.z - b.z).norm()
-            })
-        })
-        .fold(0.0_f64, f64::max);
-    (trajectory_span > 1e-12).then_some(rmse / trajectory_span)
+    let centers: Vec<Vector3<f64>> = (0..FRAME_COUNT).map(truth).collect();
+    common::normalized_center_rmse(&matched, common::trajectory_span(&centers))
 }
 
 fn main() {
