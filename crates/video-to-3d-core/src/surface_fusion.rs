@@ -24,6 +24,13 @@ struct FusionStats {
     fused_pairs: usize,
 }
 
+/// Vertex pairs fusion accepted as one surface point and moved to one position.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FusionOutcome {
+    stats: FusionStats,
+    pairs: Vec<(usize, usize)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct EvidenceSupportKey {
     reference_frame: usize,
@@ -59,7 +66,7 @@ pub(super) fn consolidate_surface_evidence(
         return Ok(());
     }
 
-    let stats = fuse_mutually_supported_vertices(
+    let FusionOutcome { stats, pairs } = fuse_mutually_supported_vertices(
         &mut reconstruction.dense_points,
         &reconstruction.mesh_triangles,
         &membership,
@@ -86,6 +93,17 @@ pub(super) fn consolidate_surface_evidence(
         )
     };
     reconstruction.warnings.push(diagnostic);
+
+    let merge = crate::surface_merge::merge_fused_patches(
+        &reconstruction.dense_points,
+        &mut reconstruction.mesh_triangles,
+        &membership,
+        &pairs,
+    );
+    reconstruction.mesh.accepted_triangles = reconstruction.mesh_triangles.len();
+    reconstruction
+        .warnings
+        .push(merge.diagnostic(support_group_count));
     Ok(())
 }
 
@@ -132,9 +150,9 @@ fn fuse_mutually_supported_vertices(
     points: &mut [Point3],
     triangles: &[MeshTriangle],
     membership: &[Option<usize>],
-) -> FusionStats {
+) -> FusionOutcome {
     if points.len() != membership.len() {
-        return FusionStats::default();
+        return FusionOutcome::default();
     }
 
     let VertexSurfaceEvidence {
@@ -144,7 +162,7 @@ fn fuse_mutually_supported_vertices(
         global_edge_scale,
     } = vertex_surface_evidence(points, triangles);
     let Some(global_edge_scale) = global_edge_scale else {
-        return FusionStats::default();
+        return FusionOutcome::default();
     };
     let cell_size = (global_edge_scale * MAX_GLOBAL_EDGE_FRACTION).max(GEOMETRIC_EPSILON);
 
@@ -265,12 +283,18 @@ fn fuse_mutually_supported_vertices(
         set_point_position(&mut points[movement.second], movement.position);
     }
 
-    FusionStats {
-        eligible_vertices,
-        candidate_pairs,
-        rejected_normal_pairs,
-        rejected_topology_pairs,
-        fused_pairs: accepted_moves.len(),
+    FusionOutcome {
+        stats: FusionStats {
+            eligible_vertices,
+            candidate_pairs,
+            rejected_normal_pairs,
+            rejected_topology_pairs,
+            fused_pairs: accepted_moves.len(),
+        },
+        pairs: accepted_moves
+            .iter()
+            .map(|movement| (movement.first, movement.second))
+            .collect(),
     }
 }
 
@@ -607,7 +631,7 @@ mod tests {
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
         let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 3);
         assert_eq!(stats.rejected_normal_pairs, 0);
@@ -631,7 +655,7 @@ mod tests {
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
         let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 0);
         assert!(stats.rejected_normal_pairs >= 2);
@@ -652,7 +676,7 @@ mod tests {
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
         let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 0);
         assert!(stats.rejected_topology_pairs > 0);
@@ -700,7 +724,7 @@ mod tests {
         let triangles = [triangle(0, 1, 2)];
         let membership = vec![Some(0), Some(0), Some(0)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 0);
         assert_eq!(stats.candidate_pairs, 0);
