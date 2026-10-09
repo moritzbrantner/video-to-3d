@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Check a reference fixture (issue #128) against its target and recorded baseline.
+"""Check a reference fixture stage by stage against its exact truth (issues #128, #129).
 
-Each fixture in `benchmarks/reference-fixtures.json` states the outcome its exact truth
-demands (`target`) and the checks the current pipeline is known to fail
-(`baseline.expected_failures`, each tied to the issue that will fix it). The gate:
+`benchmarks/reference-fixtures.json` lists the pipeline stages in order, each with
+explicit tolerances, and per fixture the checks its truth demands plus the checks the
+current pipeline is known to fail (each tied to the issue that will fix it). The
+fixture's measurements come from `stage-report.json` (written by the
+`reference_fixture` example) and `sampling-report.json` (written by
+`tools/check_reference_sampling.ts`).
 
-- PASS: every target check passes and none is expected to fail.
+A stage that could not run (for example dense depth without registered cameras) fails
+every one of its checks as "not reached". The report names the first failing stage.
+
+- PASS: every check passes.
 - EXPECTED FAILURE: exactly the recorded checks fail. Reported, not fatal.
 - UNEXPECTED PASS: a recorded failure now passes. Fatal until the baseline is updated,
   so the record never claims a failure that no longer exists.
@@ -22,60 +28,60 @@ import re
 from pathlib import Path
 
 DEFAULT_MANIFEST = Path(__file__).parents[1] / "benchmarks" / "reference-fixtures.json"
-
-TARGET_CHECKS = {
-    "min_registered_images": ("registered_images", "≥"),
-    "max_registered_images": ("registered_images", "≤"),
-    "max_normalized_pose_rmse": ("normalized_pose_rmse", "≤"),
-    "decisive_gate": ("decisive_gate", "="),
-    "mesh_components": ("mesh_components", "="),
-    "min_cross_reference_triangles": ("cross_reference_triangles", "≥"),
-}
-
-REPORTED_METRICS = [
-    "registered_images",
-    "points",
-    "median_reprojection_error_pixels",
-    "normalized_pose_rmse",
-    "decisive_gate",
-    "dense_points",
-    "mesh_triangles",
-    "mesh_components",
-    "per_patch_components",
-    "largest_component_share",
-    "meshed_reference_patches",
-    "cross_reference_triangles",
-]
-
-
-def parse_line(path: Path, prefix: str) -> dict[str, str]:
-    line = next((line for line in path.read_text().splitlines() if line.startswith(prefix)), None)
-    if line is None:
-        raise ValueError(f"missing {prefix} metrics in {path}")
-    return dict(re.findall(r"([a-z_]+)=([^ ]+)", line))
+STAGE_REPORT_SCHEMA = "video-to-3d/reference-stage-report/v1"
+BOUNDS = {"min": "≥", "max": "≤", "equals": "="}
 
 
 def load_manifest(path: Path) -> dict:
     manifest = json.loads(path.read_text())
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") != 2:
         raise ValueError(f"unsupported reference fixture manifest schema in {path}")
+    order = manifest["stage_order"]
+    if sorted(order) != sorted(manifest["stages"]):
+        raise ValueError("stage_order and stages must name the same stages")
+    for stage, definition in manifest["stages"].items():
+        validate_checks(f"stage {stage}", definition["default_checks"])
     seen = set()
     for fixture in manifest["fixtures"]:
         identifier = fixture["id"]
         if identifier in seen:
             raise ValueError(f"duplicate reference fixture {identifier!r}")
         seen.add(identifier)
-        unknown = set(fixture["target"]) - set(TARGET_CHECKS)
-        if unknown:
-            raise ValueError(f"{identifier}: unknown target checks {sorted(unknown)}")
+        checks = fixture_checks(manifest, fixture)
+        for stage in fixture["checks"]:
+            if stage not in manifest["stages"]:
+                raise ValueError(f"{identifier}: unknown stage {stage!r}")
         for failure in fixture["baseline"]["expected_failures"]:
-            if failure["check"] not in fixture["target"]:
+            stage = failure.get("stage")
+            if stage not in checks:
+                raise ValueError(f"{identifier}: expected failure names unchecked stage {stage!r}")
+            if "check" in failure and failure["check"] not in checks[stage]:
                 raise ValueError(
-                    f"{identifier}: expected failure {failure['check']!r} is not a target check"
+                    f"{identifier}: expected failure {stage}.{failure['check']} is not a check of that stage"
                 )
             if not isinstance(failure.get("issue"), int):
-                raise ValueError(f"{identifier}: expected failure {failure['check']!r} needs an issue")
+                raise ValueError(f"{identifier}: expected failure in {stage} needs an issue")
     return manifest
+
+
+def validate_checks(owner: str, checks: dict) -> None:
+    for metric, bound in checks.items():
+        if not isinstance(bound, dict) or len(bound) != 1 or next(iter(bound)) not in BOUNDS:
+            raise ValueError(f"{owner}: check {metric!r} needs exactly one of {sorted(BOUNDS)}")
+
+
+def fixture_checks(manifest: dict, fixture: dict) -> dict[str, dict]:
+    """The fixture's checks per stage, in pipeline order."""
+    checks = {}
+    for stage in manifest["stage_order"]:
+        if stage not in fixture["checks"]:
+            continue
+        stage_checks = fixture["checks"][stage]
+        if stage_checks == "default":
+            stage_checks = manifest["stages"][stage]["default_checks"]
+        validate_checks(f"{fixture['id']} {stage}", stage_checks)
+        checks[stage] = stage_checks
+    return checks
 
 
 def fixture_by_id(manifest: dict, case: str) -> dict:
@@ -85,60 +91,123 @@ def fixture_by_id(manifest: dict, case: str) -> dict:
     return fixture
 
 
-def number(metrics: dict[str, str], key: str) -> float:
-    try:
-        return float(metrics[key])
-    except KeyError as error:
-        raise ValueError(f"missing {key} metric") from error
-    except ValueError as error:
-        raise ValueError(f"invalid {key} metric: {metrics[key]}") from error
+def load_stages(fixture_dir: Path, case: str) -> dict:
+    report = json.loads((fixture_dir / "stage-report.json").read_text())
+    if report.get("schema") != STAGE_REPORT_SCHEMA:
+        raise ValueError(f"unsupported stage report schema {report.get('schema')!r}")
+    if report.get("case") != case:
+        raise ValueError(f"stage report is for case {report.get('case')!r}; expected {case!r}")
+    stages = dict(report["stages"])
+    sampling = fixture_dir / "sampling-report.json"
+    stages["sampling"] = (
+        json.loads(sampling.read_text())
+        if sampling.exists()
+        else {"available": False, "blocked_by": "sampling-report.json is missing"}
+    )
+    return stages
 
 
-def check_passes(check: str, expected, rust: dict[str, str]) -> bool:
-    metric, _ = TARGET_CHECKS[check]
-    if check == "decisive_gate":
-        if metric not in rust:
-            raise ValueError(f"missing {metric} metric")
-        return rust[metric] == expected
-    value = number(rust, metric)
-    if not math.isfinite(value):
+def check_result(bound: dict, value) -> bool:
+    kind, expected = next(iter(bound.items()))
+    if kind == "equals":
+        return value == expected
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return False
-    if check.startswith("min_"):
-        return value >= expected
-    if check.startswith("max_"):
-        return value <= expected
-    return value == expected
+    return value >= expected if kind == "min" else value <= expected
 
 
-def evaluate(fixture: dict, rust: dict[str, str]) -> tuple[str, list[str]]:
-    """Return the status and the failure messages that make it fatal, if any."""
-    if rust.get("case") != fixture["id"]:
-        return "FAIL", [f"Rust metrics reported case {rust.get('case')!r}; expected {fixture['id']!r}"]
-    failing = {
-        check for check, expected in fixture["target"].items() if not check_passes(check, expected, rust)
-    }
-    expected_failures = {failure["check"]: failure for failure in fixture["baseline"]["expected_failures"]}
+def evaluate(manifest: dict, fixture: dict, stages: dict) -> dict:
+    """Per-stage check results, the first failing stage and the overall status."""
+    checks = fixture_checks(manifest, fixture)
+    expected = fixture["baseline"]["expected_failures"]
 
-    unexpected = sorted(failing - set(expected_failures))
-    recovered = sorted(set(expected_failures) - failing)
+    def expectation(stage: str, metric: str):
+        return next(
+            (
+                failure
+                for failure in expected
+                if failure["stage"] == stage and failure.get("check", metric) == metric
+            ),
+            None,
+        )
+
+    results = []
+    for stage, stage_checks in checks.items():
+        evidence = stages.get(stage) or {"available": False, "blocked_by": "no evidence"}
+        available = evidence.get("available", False)
+        metrics = evidence.get("metrics", {})
+        rows = []
+        for metric, bound in stage_checks.items():
+            value = metrics.get(metric) if available else None
+            passed = available and check_result(bound, value)
+            rows.append(
+                {
+                    "metric": metric,
+                    "bound": bound,
+                    "value": value,
+                    "passed": passed,
+                    "reached": available,
+                    "expected_failure": expectation(stage, metric),
+                }
+            )
+        results.append(
+            {
+                "stage": stage,
+                "available": available,
+                "blocked_by": evidence.get("blocked_by"),
+                "metrics": metrics,
+                "checks": rows,
+            }
+        )
+
     errors = []
-    for check in unexpected:
-        metric, relation = TARGET_CHECKS[check]
-        errors.append(
-            f"{fixture['id']}: {check} failed: {metric}={rust.get(metric)} (target {relation} {fixture['target'][check]})"
-        )
-    for check in recovered:
-        errors.append(
-            f"{fixture['id']}: expected failure {check} (#{expected_failures[check]['issue']}) now passes; "
-            "remove it from benchmarks/reference-fixtures.json and record the new baseline"
-        )
+    for result in results:
+        for row in result["checks"]:
+            if not row["passed"] and row["expected_failure"] is None:
+                actual = row["value"] if row["reached"] else f"not reached ({result['blocked_by']})"
+                kind, target = next(iter(row["bound"].items()))
+                errors.append(
+                    f"{fixture['id']}: {result['stage']}.{row['metric']} failed: {actual} (target {BOUNDS[kind]} {target})"
+                )
+    unexpected = bool(errors)
+    for failure in expected:
+        covered = [
+            row
+            for result in results
+            if result["stage"] == failure["stage"]
+            for row in result["checks"]
+            if failure.get("check", row["metric"]) == row["metric"]
+        ]
+        if all(row["passed"] for row in covered):
+            name = failure["stage"] + (f".{failure['check']}" if "check" in failure else "")
+            errors.append(
+                f"{fixture['id']}: expected failure {name} (#{failure['issue']}) now passes; "
+                "remove it from benchmarks/reference-fixtures.json and record the new baseline"
+            )
+
+    failing = [
+        result["stage"]
+        for result in results
+        if any(not row["passed"] for row in result["checks"])
+    ]
+    first = failing[0] if failing else None
     if unexpected:
-        return "FAIL", errors
-    if recovered:
-        return "UNEXPECTED PASS", errors
-    if failing:
-        return "EXPECTED FAILURE", []
-    return "PASS", []
+        status = "FAIL"
+    elif errors:
+        status = "UNEXPECTED PASS"
+    elif failing:
+        status = "EXPECTED FAILURE"
+    else:
+        status = "PASS"
+    return {"status": status, "errors": errors, "first_failing_stage": first, "stages": results}
+
+
+def format_value(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value).lower() if isinstance(value, bool) else str(value)
 
 
 def colmap_summary(colmap: dict[str, str] | None) -> str:
@@ -150,36 +219,58 @@ def colmap_summary(colmap: dict[str, str] | None) -> str:
     return f"{registered} registered, {colmap.get('points', '?')} points, {colmap.get('mean_reprojection_error_pixels', '?')} px mean reprojection"
 
 
-def render_markdown(fixture: dict, rust: dict[str, str], colmap: dict[str, str] | None, status: str, errors: list[str]) -> str:
-    baseline = fixture["baseline"]["rust"]
-    target_rows = []
-    for check, expected in fixture["target"].items():
-        metric, relation = TARGET_CHECKS[check]
-        target_rows.append(f"{metric} {relation} {expected}")
-    rows = "\n".join(
-        f"| {metric} | {rust.get(metric, '—')} | {baseline.get(metric, '—')} |" for metric in REPORTED_METRICS
-    )
+def parse_line(path: Path, prefix: str) -> dict[str, str]:
+    line = next((line for line in path.read_text().splitlines() if line.startswith(prefix)), None)
+    if line is None:
+        raise ValueError(f"missing {prefix} metrics in {path}")
+    return dict(re.findall(r"([a-z_]+)=([^ ]+)", line))
+
+
+def render_markdown(fixture: dict, evaluation: dict, colmap: dict[str, str] | None) -> str:
+    rows = []
+    for result in evaluation["stages"]:
+        for row in result["checks"]:
+            kind, target = next(iter(row["bound"].items()))
+            if row["passed"]:
+                outcome = "pass"
+            elif row["expected_failure"] is not None:
+                outcome = f"expected failure (#{row['expected_failure']['issue']})"
+            else:
+                outcome = "**FAIL**"
+            value = format_value(row["value"]) if row["reached"] else "not reached"
+            rows.append(
+                f"| {result['stage']} | {row['metric']} | {value} | {BOUNDS[kind]} {format_value(target)} | {outcome} |"
+            )
+    first = evaluation["first_failing_stage"]
+    recorded = fixture["baseline"].get("first_failing_stage")
+    if first is None:
+        first_line = "First failing stage: none"
+    else:
+        first_line = f"First failing stage: **{first}**"
+    if first != recorded:
+        first_line += f" (baseline: {recorded or 'none'})"
     expected = "\n".join(
-        f"- Expected failure `{failure['check']}` (#{failure['issue']}): {failure['reason']}"
+        f"- Expected failure `{failure['stage']}{'.' + failure['check'] if 'check' in failure else ''}` "
+        f"(#{failure['issue']}): {failure['reason']}"
         for failure in fixture["baseline"]["expected_failures"]
     )
-    details = "\n".join(f"- {error}" for error in errors)
+    details = "\n".join(f"- {error}" for error in evaluation["errors"])
     notes = fixture["baseline"].get("notes", "")
+    table = "\n".join(rows)
     return f"""#### Reference fixture — {fixture['id']}
 
 {fixture['intent']}
 
-Target: {'; '.join(target_rows)}
+Status: **{evaluation['status']}**. {first_line}.
 
-| Evidence | video-to-3d | Baseline ({fixture['baseline']['recorded']}) |
-| --- | ---: | ---: |
-{rows}
+| Stage | Check | video-to-3d | Tolerance | Result |
+| --- | --- | ---: | ---: | --- |
+{table}
 
 COLMAP reference: {colmap_summary(colmap)} (expected: {fixture['colmap_expectation']}; reported, not gated)
 
 {notes}
 
-Status: {status}
 {expected}
 {details}
 """
@@ -190,9 +281,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--list-cases", action="store_true", help="print fixture ids and exit")
     parser.add_argument("--case")
-    parser.add_argument("--rust", type=Path)
+    parser.add_argument("--fixture-dir", type=Path, help="directory with stage-report.json and sampling-report.json")
     parser.add_argument("--colmap", type=Path)
     parser.add_argument("--markdown", type=Path)
+    parser.add_argument("--json", type=Path, help="write the machine-readable per-stage result")
     return parser.parse_args()
 
 
@@ -202,20 +294,36 @@ def main() -> int:
     if args.list_cases:
         print("\n".join(fixture["id"] for fixture in manifest["fixtures"]))
         return 0
-    if not args.case or not args.rust:
-        raise SystemExit("--case and --rust are required")
+    if not args.case or not args.fixture_dir:
+        raise SystemExit("--case and --fixture-dir are required")
 
     try:
         fixture = fixture_by_id(manifest, args.case)
-        rust = parse_line(args.rust, "golden-rust")
+        stages = load_stages(args.fixture_dir, args.case)
         colmap = None
         if args.colmap:
             try:
                 colmap = parse_line(args.colmap, "golden-colmap")
             except (OSError, ValueError):
                 colmap = None
-        status, errors = evaluate(fixture, rust)
-        markdown = render_markdown(fixture, rust, colmap, status, errors)
+        evaluation = evaluate(manifest, fixture, stages)
+        status, errors = evaluation["status"], evaluation["errors"]
+        markdown = render_markdown(fixture, evaluation, colmap)
+        if args.json:
+            args.json.write_text(
+                json.dumps(
+                    {
+                        "case": args.case,
+                        "status": status,
+                        "first_failing_stage": evaluation["first_failing_stage"],
+                        "errors": errors,
+                        "stages": evaluation["stages"],
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     except (OSError, ValueError, KeyError) as error:
         status, errors = "FAIL", [f"incomplete reference fixture evidence: {error}"]
         markdown = f"#### Reference fixture — {args.case}\n\nStatus: FAIL\n\n- {errors[0]}\n"

@@ -1,102 +1,248 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generator": "crates/video-to-3d-core/examples/reference_fixture.rs",
-  "issue": 128,
+  "issues": [
+    128,
+    129
+  ],
+  "stage_order": [
+    "sampling",
+    "features",
+    "seed",
+    "registration",
+    "dense",
+    "mesh",
+    "texture"
+  ],
+  "stages": {
+    "sampling": {
+      "measures": "Exported frames against the browser's buildVideoSamplingPlan for the notional source clip: frame count, analysis size, timestamps.",
+      "default_checks": {
+        "mismatched_frames": {
+          "equals": 0
+        },
+        "max_time_error_seconds": {
+          "max": 1e-06
+        }
+      }
+    },
+    "features": {
+      "measures": "The authoritative whole-pixel matcher with the browser's options on every adjacent pair, against the true correspondence of each source feature (exact depth reprojected into the target, occlusion-aware). A match is correct within 1.5 px.",
+      "default_checks": {
+        "min_pair_matches": {
+          "min": 50
+        },
+        "min_match_precision": {
+          "min": 0.8
+        },
+        "median_match_error_pixels": {
+          "max": 1.0
+        }
+      }
+    },
+    "seed": {
+      "measures": "The chosen calibrated seed pair against the true relative pose: rotation error and translation-direction error; the true baseline, true triangulation angle and the rotation-only residual are reported per candidate.",
+      "default_checks": {
+        "seed_selected": {
+          "equals": true
+        },
+        "rotation_error_degrees": {
+          "max": 1.0
+        },
+        "translation_direction_error_degrees": {
+          "max": 5.0
+        }
+      }
+    },
+    "registration": {
+      "measures": "Registered views; camera-center RMSE after similarity alignment, divided by the true trajectory span; worst camera orientation error after the alignment.",
+      "default_checks": {
+        "registered_images": {
+          "min": 9
+        },
+        "normalized_pose_rmse": {
+          "max": 0.25
+        },
+        "max_rotation_error_degrees": {
+          "max": 3.0
+        }
+      }
+    },
+    "dense": {
+      "measures": "Each reference's dense depth against the true depth through the same grid pixel, after removing that reference's scale bias (the registration owns scale; the bias is reported). Accurate coverage is the share of sampled grid pixels with a point within 2 % of the true depth.",
+      "default_checks": {
+        "references": {
+          "min": 1
+        },
+        "max_median_relative_depth_error": {
+          "max": 0.01
+        },
+        "min_accurate_coverage": {
+          "min": 0.4
+        }
+      }
+    },
+    "mesh": {
+      "measures": "The mesh through each reference's local alignment against the true heightfield: median centroid error, share of triangles more than 5 cm off the surface (unsupported), coverage of the 5 cm surface cells two registered cameras see, cells covered by more than one reference (duplicated overlap), and topology.",
+      "default_checks": {
+        "median_surface_error_m": {
+          "max": 0.03
+        },
+        "unsupported_triangle_share": {
+          "max": 0.1
+        },
+        "surface_coverage": {
+          "min": 0.3
+        },
+        "cross_reference_triangles": {
+          "min": 1
+        },
+        "shared_vertices": {
+          "min": 1
+        },
+        "duplicated_coverage_share": {
+          "max": 0.1
+        }
+      }
+    },
+    "texture": {
+      "measures": "The reference-view material bake: textured triangle share, and for four barycentric samples per textured triangle the distance between the texel's source pixel and the true projection of its surface point, and its color against the true shaded albedo at that point (8-bit levels).",
+      "default_checks": {
+        "textured_triangle_share": {
+          "min": 0.5
+        },
+        "median_texel_reprojection_error_pixels": {
+          "max": 1.0
+        },
+        "median_texel_color_error": {
+          "max": 10.0
+        }
+      }
+    }
+  },
   "fixtures": [
     {
       "id": "slow-lateral-pan",
       "intent": "Small lateral steps (0.15 m per sampling interval) along a Trevi-like façade 6 m away with 0.45 m relief. Relief parallax is 0.63 px per interval, below the 1.25 px rotation-only gate, and 10.7 px over the clip. Cameras should register.",
-      "target": {
-        "min_registered_images": 9,
-        "max_normalized_pose_rmse": 0.25
-      },
       "colmap_expectation": "registers",
+      "checks": {
+        "sampling": "default",
+        "features": "default",
+        "seed": "default",
+        "registration": "default",
+        "dense": "default",
+        "mesh": "default",
+        "texture": "default"
+      },
       "baseline": {
         "recorded": "2026-10-09",
+        "first_failing_stage": "seed",
         "expected_failures": [
           {
-            "check": "min_registered_images",
+            "stage": "seed",
+            "check": "seed_selected",
             "issue": 127,
-            "reason": "No adjacent pair passes the residual-parallax gate, so no seed pair is accepted."
+            "reason": "No adjacent pair passes the residual-parallax gate (0.0–0.38 px against 0.55 px), so no seed pair is accepted."
           },
           {
-            "check": "max_normalized_pose_rmse",
+            "stage": "seed",
+            "check": "rotation_error_degrees",
             "issue": 127,
-            "reason": "No camera pose exists to score."
+            "reason": "No seed pair to score."
+          },
+          {
+            "stage": "seed",
+            "check": "translation_direction_error_degrees",
+            "issue": 127,
+            "reason": "No seed pair to score."
+          },
+          {
+            "stage": "registration",
+            "issue": 127,
+            "reason": "No camera registers without a seed pair."
+          },
+          {
+            "stage": "dense",
+            "issue": 127,
+            "reason": "Blocked: no registered cameras."
+          },
+          {
+            "stage": "mesh",
+            "issue": 127,
+            "reason": "Blocked: no registered cameras."
+          },
+          {
+            "stage": "texture",
+            "issue": 127,
+            "reason": "Blocked: no registered cameras."
           }
-        ],
-        "rust": {
-          "registered_images": 0,
-          "points": 0,
-          "decisive_gate": "parallax",
-          "dense_points": 0,
-          "mesh_triangles": 0,
-          "mesh_components": 0,
-          "meshed_reference_patches": 0,
-          "cross_reference_triangles": 0,
-          "per_patch_components": 0,
-          "largest_component_share": 0.0
-        }
+        ]
       }
     },
     {
       "id": "pure-rotation",
       "intent": "The same façade and viewing direction with the camera rotating in place by the pan's image motion. Negative control: the translation-baseline gate must reject it and no camera may register.",
-      "target": {
-        "max_registered_images": 0,
-        "decisive_gate": "baseline"
-      },
       "colmap_expectation": "no model",
+      "checks": {
+        "sampling": "default",
+        "features": "default",
+        "seed": {
+          "seed_selected": {
+            "equals": false
+          },
+          "decisive_gate": {
+            "equals": "baseline"
+          }
+        },
+        "registration": {
+          "registered_images": {
+            "max": 0
+          }
+        }
+      },
       "baseline": {
         "recorded": "2026-10-09",
-        "expected_failures": [],
-        "rust": {
-          "registered_images": 0,
-          "points": 3599,
-          "decisive_gate": "baseline",
-          "dense_points": 0,
-          "mesh_triangles": 0,
-          "mesh_components": 0,
-          "meshed_reference_patches": 0,
-          "cross_reference_triangles": 0,
-          "per_patch_components": 0,
-          "largest_component_share": 0.0
-        }
+        "first_failing_stage": null,
+        "expected_failures": []
       }
     },
     {
       "id": "overlapping-references",
       "intent": "A pan (0.2 m per interval) over a façade 4 m away with 1 m relief on gentle slopes; adjacent views overlap by more than 90 %, so neighbouring reference patches see the same surface. The truth is one connected surface, so overlapping patches must share topology.",
-      "target": {
-        "min_registered_images": 9,
-        "max_normalized_pose_rmse": 0.25,
-        "min_cross_reference_triangles": 1
-      },
       "colmap_expectation": "registers",
+      "checks": {
+        "sampling": "default",
+        "features": "default",
+        "seed": "default",
+        "registration": "default",
+        "dense": "default",
+        "mesh": "default",
+        "texture": "default"
+      },
       "baseline": {
         "recorded": "2026-10-09",
+        "first_failing_stage": "mesh",
         "expected_failures": [
           {
-            "check": "min_cross_reference_triangles",
+            "stage": "mesh",
+            "check": "cross_reference_triangles",
             "issue": 126,
-            "reason": "Each reference patch is triangulated on its own; no triangle spans two reference patches, so overlapping patches stay separate sheets."
+            "reason": "Each reference patch is triangulated on its own; no triangle spans two reference patches."
+          },
+          {
+            "stage": "mesh",
+            "check": "shared_vertices",
+            "issue": 126,
+            "reason": "No vertex is shared between reference patches."
+          },
+          {
+            "stage": "mesh",
+            "check": "duplicated_coverage_share",
+            "issue": 126,
+            "reason": "Overlapping references stay separate sheets, so the overlap is meshed more than once."
           }
         ],
-        "rust": {
-          "registered_images": 10,
-          "points": 1098,
-          "median_reprojection_error_pixels": 0.211281,
-          "normalized_pose_rmse": 0.018219,
-          "decisive_gate": "none",
-          "dense_points": 6251,
-          "mesh_triangles": 8202,
-          "mesh_components": 59,
-          "per_patch_components": 59,
-          "largest_component_share": 0.3926,
-          "meshed_reference_patches": 3,
-          "cross_reference_triangles": 0
-        },
-        "notes": "The true surface is one component; the accepted mesh has 59. Every one of them lies inside a single reference patch (per_patch_components equals mesh_components): dense coverage holes and discontinuity rejections fragment each patch, and no patch connects to another. Only the cross-patch part is gated here (#126); component counts are reported against the truth."
+        "notes": "The true surface is one component; the accepted mesh has 59, every one inside a single reference patch. Dense coverage holes and discontinuity rejections fragment each patch, and no patch connects to another. Component counts are reported against the truth; the cross-patch part is gated (#126)."
       }
     }
   ]

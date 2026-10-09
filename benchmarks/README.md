@@ -39,27 +39,50 @@ Every fixture renders a textured, Trevi-like façade (stone blocks, pilasters, c
 - `truth/albedo.ppm`: the albedo over the façade extent at 100 px/m. Frames are shaded `albedo × (0.3 + 0.7 · max(0, n·l))`.
 - `truth/colmap-camera-params.txt`: the true intrinsics in COLMAP's `fx,fy,cx,cy` form.
 - `rust-evidence.json`: the bootstrap diagnosis, every seed candidate, dense reference patches, mesh statistics and mesh topology from the Rust run.
+- `stage-report.json`: the per-stage measurements against this truth (see below).
+
+`bun tools/check_reference_sampling.ts <fixture-dir>` adds `sampling-report.json`: the exported frames against the browser's own `buildVideoSamplingPlan`.
 
 The example's unit tests (`cargo test -p video-to-3d-core --example reference_fixture`) check the truth itself: the sampling plan, depth that reprojects consistently between views, the intended motions and parallax, adjacent-view overlap, coverage of the exported surface, and a single true surface component.
 
-### Baseline and gate
+### Per-stage gates
 
-`benchmarks/reference-fixtures.json` states each fixture's target (what its truth demands of the pipeline) and the current baseline, including the checks that fail today and the issue that will fix each one. `tools/check_reference_fixtures.py` reports every fixture in the golden job summary:
+The golden job checks every pipeline stage of every reference fixture on its own (#129), so a failure names the stage that broke instead of only an end result. `benchmarks/reference-fixtures.json` lists the stages in pipeline order with their tolerances, and per fixture which checks its truth demands. `tools/check_reference_fixtures.py` applies them and writes the summary table, naming the first failing stage.
 
-- **PASS**: every target check passes.
+Reconstructions are monocular, so measurements that need metric coordinates first align the estimated cameras to the true ones with one similarity: rotation from the camera orientations (well defined even for the collinear centers of a lateral pan), scale and translation from the centers. Dense, mesh and texture are then judged through each reference camera's own alignment, with that reference's depth scale bias removed and reported, so registration drift is charged to the registration stage and not to the stages after it.
+
+| Stage | Measured against the truth | Gated tolerance (default) |
+| --- | --- | --- |
+| `sampling` | Exported frame count, analysis size and timestamps against `buildVideoSamplingPlan` with the browser's defaults for the notional 1920×1080, 16 s clip | 0 mismatched frames; timestamp error ≤ 1 µs |
+| `features` | The authoritative whole-pixel matcher with the browser's options on every adjacent pair; each match against the true correspondence (exact depth reprojected into the target, occlusion-aware). A match is correct within 1.5 px | ≥ 50 matches and precision ≥ 0.8 on the worst pair; median match error ≤ 1 px |
+| `seed` | Chosen calibrated pair against the true relative pose. Every candidate also reports its rotation-only residual and triangulation angle next to the true baseline and relief parallax | a seed pair exists; rotation error ≤ 1°; translation-direction error ≤ 5° |
+| `registration` | Registered views; camera-center RMSE after similarity alignment ÷ true trajectory span; worst orientation error after alignment | ≥ 9 views; normalized RMSE ≤ 0.25; orientation error ≤ 3° |
+| `dense` | Each reference's depth against the true depth through the same grid pixel, scale bias removed. Accurate coverage = sampled grid pixels with a point within 2 % of the true depth | ≥ 1 reference; worst median relative error ≤ 1 %; worst accurate coverage ≥ 0.4 |
+| `mesh` | Triangle centroids against the true heightfield; triangles more than 5 cm off are unsupported (holes must stay holes); coverage of the 5 cm surface cells seen by two registered cameras; cells meshed by more than one reference (duplicated overlap); components, cross-reference triangles and shared vertices | median error ≤ 3 cm; unsupported ≤ 10 %; coverage ≥ 0.3; ≥ 1 cross-reference triangle and shared vertex; duplicated overlap ≤ 10 % |
+| `texture` | The reference-view material bake: four barycentric texels per textured triangle, each placed on the aligned surface, against the true projection of that point (pixels) and the true shaded albedo there (8-bit levels) | textured share ≥ 0.5; median texel reprojection ≤ 1 px; median color error ≤ 10 |
+
+A fixture can override a stage's checks (the pure-rotation control demands no seed pair, the `baseline` decisive gate and no registered view) or leave stages out. A stage that cannot run, such as dense depth without registered cameras, fails all its checks as *not reached*.
+
+Each fixture's baseline records the checks that fail today, each with the issue that will fix it; an expected failure may name a single check or a whole stage. Per fixture the gate reports:
+
+- **PASS**: every check passes.
 - **EXPECTED FAILURE**: exactly the recorded checks fail. Not fatal.
 - **UNEXPECTED PASS**: a recorded failure now passes. Fatal until the pull request that fixed it updates the baseline, so the record never claims a failure that no longer exists.
 - **FAIL**: any other check fails. Fatal.
 
-Baseline recorded 2026-10-09:
+#### Report schema
 
-| Fixture | video-to-3d | Target status | COLMAP reference (expected) |
-| --- | --- | --- | --- |
-| `slow-lateral-pan` | 0/18 registered; decisive gate `parallax` (residual parallax 0.0–0.38 px against 0.55 px) | Expected failure (#127) | registers |
-| `pure-rotation` | 0/18 registered; decisive gate `baseline` | Pass | no model |
-| `overlapping-references` | 10/18 registered, normalized pose RMSE 0.018; 3 meshed reference patches, 0 cross-reference triangles, 59 mesh components (truth: 1) | Expected failure (#126) | registers |
+`stage-report.json` (`schema: video-to-3d/reference-stage-report/v1`) has `case`, the measurement `tolerances`, and `stages.<stage>` with `available`, `blocked_by` when not available, `metrics` (the values checks read) and stage detail: `pairs` (features), `candidates` (seed), `registered_frames`, `references` (dense, per reference: points, scale bias, median error, coverage), the mesh cell size, and the texture fallback reasons. `sampling-report.json` has the same `available` / `metrics` shape. `check_reference_fixtures.py --json` writes the evaluated result: `status`, `first_failing_stage`, `errors`, and per stage every check's bound, value, outcome and expected-failure record. All three are uploaded with the golden job's evidence.
 
-COLMAP is reported next to its expected outcome but never gates these fixtures: it is a reference implementation, not ground truth. Per-stage checks against the exported truth (features, seed pair, dense depth, mesh and texture) build on these fixtures in #129.
+#### Baseline recorded 2026-10-09
+
+| Fixture | Target status | First failing stage | Expected failures | COLMAP reference (expected) |
+| --- | --- | --- | --- | --- |
+| `slow-lateral-pan` | Expected failure | `seed`: no adjacent pair passes the residual-parallax gate (0.0–0.38 px against 0.55 px); sampling and features pass (worst-pair match precision 0.96) | seed, and registration, dense, mesh and texture behind it (#127) | registers |
+| `pure-rotation` | Pass | — (no seed pair, decisive gate `baseline`, 0 registered) | none | no model |
+| `overlapping-references` | Expected failure | `mesh`: 0 cross-reference triangles, 0 shared vertices, 38 % of covered cells meshed twice. Everything before it passes: 10/18 registered (orientation error ≤ 2.1°), dense depth within 0.7 % after a 3–4 % per-reference scale bias, texels within 0.74 px | mesh topology (#126); the true surface has 1 component, the mesh 59 (reported) | registers |
+
+COLMAP is reported next to its expected outcome but never gates these fixtures: it is a reference implementation, not ground truth.
 
 ## Real-image benchmark candidates
 

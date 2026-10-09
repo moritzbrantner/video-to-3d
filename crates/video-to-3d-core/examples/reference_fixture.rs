@@ -9,9 +9,11 @@
 //! Usage: `reference_fixture <fixture-dir|-> <case>`, where `case` is one of
 //! `slow-lateral-pan`, `pure-rotation` or `overlapping-references`. The fixture directory
 //! receives `images/` (the frames COLMAP and video-to-3d both consume), `truth/` and
-//! `rust-evidence.json`. The last stdout line is the `golden-rust` metrics line.
+//! `rust-evidence.json` and `stage-report.json` (per-stage checks against the truth, see
+//! `reference_stages`). The last stdout line is the `golden-rust` metrics line.
 
 mod common;
+mod reference_stages;
 
 use std::{env, fs, path::Path};
 
@@ -946,6 +948,8 @@ struct MeshTopology {
     /// Share of all triangles in the largest component.
     largest_component_share: f64,
     cross_reference_triangles: usize,
+    /// Vertices of one patch that a cross-reference triangle joins to another patch.
+    shared_vertices: usize,
     meshed_reference_patches: usize,
 }
 
@@ -965,14 +969,18 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
             .iter()
             .map(|triangle| [triangle.a, triangle.b, triangle.c])
     };
-    let cross_reference_triangles = triangles()
-        .filter(|vertices| {
+    let crossing = || {
+        triangles().filter(|vertices| {
             let first = patch_of_point.get(vertices[0]);
             vertices
                 .iter()
                 .any(|&vertex| patch_of_point.get(vertex) != first)
         })
-        .count();
+    };
+    let cross_reference_triangles = crossing().count();
+    let mut shared = std::collections::BTreeSet::new();
+    shared.extend(crossing().flatten());
+    let shared_vertices = shared.len();
     let vertex_count = reconstruction.dense_points.len();
     let mut patches: Vec<usize> = patch_of_point.clone();
     patches.sort_unstable();
@@ -1006,6 +1014,7 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
             largest as f64 / total as f64
         },
         cross_reference_triangles,
+        shared_vertices,
         meshed_reference_patches: reconstruction
             .mesh
             .reference_patches
@@ -1097,6 +1106,7 @@ fn main() {
                 "per_patch_components": topology.per_patch_components,
                 "largest_component_share": topology.largest_component_share,
                 "cross_reference_triangles": topology.cross_reference_triangles,
+                "shared_vertices": topology.shared_vertices,
                 "meshed_reference_patches": topology.meshed_reference_patches,
             },
             "warnings": reconstruction.warnings,
@@ -1106,6 +1116,19 @@ fn main() {
             serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
         )
         .expect("write evidence");
+        let stages = reference_stages::stage_report(&reference_stages::StageInputs {
+            fixture: &fixture,
+            result: &result,
+            registered_images,
+            normalized_pose_rmse: pose_rmse,
+            decisive_gate: &decisive_gate,
+            topology: &topology,
+        });
+        fs::write(
+            Path::new(output_dir).join("stage-report.json"),
+            serde_json::to_vec_pretty(&stages).expect("serialize stage report"),
+        )
+        .expect("write stage report");
     }
 
     println!(
