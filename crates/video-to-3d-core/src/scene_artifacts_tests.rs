@@ -211,21 +211,42 @@ fn keyframes_round_trip_and_verify_their_pixels() {
     let document = fs::read_to_string(keyframes.resolve(&dir.0)).unwrap();
     let artifact = KeyframesArtifact::from_json(&document).unwrap();
     assert_eq!(artifact.to_json(), document);
-    assert_eq!(
-        artifact
-            .frames
-            .iter()
-            .map(|frame| frame.pixels.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "inputs/frames/frame-000000.rgba",
-            "inputs/frames/frame-000001.rgba",
-            "inputs/frames/frame-000002.rgba"
-        ]
-    );
+    for frame in &artifact.frames {
+        let digest = &frame.content_hash.as_str()["sha256:".len()..];
+        assert_eq!(
+            frame.pixels.as_str(),
+            format!("inputs/frames/{digest}.rgba")
+        );
+    }
     assert_eq!(artifact.load_pixels(&dir.0, 1).unwrap(), image(90));
 
-    fs::write(dir.0.join("inputs/frames/frame-000001.rgba"), image(91)).unwrap();
+    // A rejected rewrite leaves the existing artifact intact.
+    let bad = [SampledFrame {
+        frame_index: 0,
+        timestamp_seconds: 0.0,
+        width: WIDTH,
+        height: HEIGHT,
+        rgba: &[1, 2, 3],
+    }];
+    assert!(write_keyframes_artifact(&dir.0, &keyframes, &bad).is_err());
+    let duplicate_pixels = image(1);
+    let duplicate = [0, 0].map(|frame_index| SampledFrame {
+        frame_index,
+        timestamp_seconds: 0.0,
+        width: WIDTH,
+        height: HEIGHT,
+        rgba: &duplicate_pixels,
+    });
+    assert!(write_keyframes_artifact(&dir.0, &keyframes, &duplicate).is_err());
+    assert_eq!(
+        fs::read_to_string(keyframes.resolve(&dir.0)).unwrap(),
+        document
+    );
+    for frame in 0..3 {
+        artifact.load_pixels(&dir.0, frame).unwrap();
+    }
+
+    fs::write(artifact.frames[1].pixels.resolve(&dir.0), image(91)).unwrap();
     let error = artifact.load_pixels(&dir.0, 1).unwrap_err();
     assert!(
         error.contains("does not match its recorded content hash"),
@@ -376,7 +397,7 @@ fn scene_with(artifact: &SurfaceTexturesArtifact) -> AssembledScene {
             intrinsics: None,
         })
         .collect();
-    let (resources, materials) = artifact.scene_entries();
+    let (resources, materials) = artifact.scene_entries("bake");
     scene.resources = resources;
     scene.materials = materials;
     scene
@@ -392,7 +413,7 @@ fn baked_textures_map_to_camera_backed_scene_resources() {
     scene.validate().unwrap();
 
     let texture = &scene.resources[0];
-    assert_eq!(texture.id, "surface-texture-f0");
+    assert_eq!(texture.id, "bake.texture-f0");
     assert_eq!(texture.kind, ResourceKind::Texture);
     assert_eq!(texture.source_frames, vec![0, 1, 2]);
     assert_eq!(
@@ -403,10 +424,10 @@ fn baked_textures_map_to_camera_backed_scene_resources() {
         ]
     );
     assert_eq!(texture.path, artifact.materials[0].texture.path);
-    assert_eq!(scene.materials[0].id, "surface-material-f0");
+    assert_eq!(scene.materials[0].id, "bake.material-f0");
     assert_eq!(
         scene.materials[0].base_color_texture.as_deref(),
-        Some("surface-texture-f0")
+        Some("bake.texture-f0")
     );
     // The canonical scene document round-trips.
     let document = scene.to_canonical_json().unwrap();
@@ -496,7 +517,7 @@ fn builtin_executor_bakes_texture_operations_in_a_project_build() {
     let executor = Upstream {
         fixture: &fixture,
         root: dir.0.clone(),
-        builtin: BuiltInExecutor::new(&dir.0),
+        builtin: BuiltInExecutor::new(&dir.0, &manifest),
     };
     let report = store
         .build(
@@ -534,6 +555,29 @@ fn builtin_executor_bakes_texture_operations_in_a_project_build() {
         )
         .unwrap();
     assert_eq!(report.run.states["bake"], OperationState::Reused);
+
+    // A deleted texture sidecar invalidates the recorded bake, which reruns.
+    let document = fs::read_to_string(dir.0.join("artifacts/bake/surface-textures.json")).unwrap();
+    let textures = SurfaceTexturesArtifact::from_json(&document).unwrap();
+    fs::remove_file(textures.materials[0].texture.path.resolve(&dir.0)).unwrap();
+    let mut manifest = SceneProjectManifest::load(&dir.0.join("project.json")).unwrap();
+    let report = store
+        .build(
+            &mut manifest,
+            &executor,
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        report.reconcile.invalidated.as_slice(),
+        [(operation, crate::scene_store::Invalidation::CorruptSidecar(_))] if operation == "bake"
+    ));
+    assert!(matches!(
+        report.run.states["bake"],
+        OperationState::Succeeded { .. }
+    ));
+    textures.verify_textures(&dir.0).unwrap();
 }
 
 #[test]
@@ -554,9 +598,10 @@ fn builtin_executor_reports_other_operations_as_unsupported() {
         "requested_outputs": ["keyframes"]
     });
     let mut manifest = SceneProjectManifest::from_json(&manifest_document.to_string()).unwrap();
+    let executor = BuiltInExecutor::new(&dir.0, &manifest);
     let report = crate::scene_runner::run(
         &mut manifest,
-        &BuiltInExecutor::new(&dir.0),
+        &executor,
         RunOptions::default(),
         &CancellationToken::new(),
     )
@@ -565,4 +610,106 @@ fn builtin_executor_reports_other_operations_as_unsupported() {
         report.states["ingest"].diagnostic("ingest"),
         "ingest: unsupported by every reachable provider after 1 attempt(s): ingest_video has no native executor in this build"
     );
+}
+
+#[test]
+fn texture_artifacts_must_partition_the_triangles() {
+    let dir = TempDir::new("partition");
+    let fixture = Fixture::new();
+    let inputs = fixture.write(&dir.0);
+    let artifact = bake(&dir.0, &inputs).artifact;
+    artifact.validate().unwrap();
+
+    let mut duplicated = artifact.clone();
+    duplicated.fallback_triangles.push(0);
+    assert!(duplicated
+        .validate()
+        .unwrap_err()
+        .contains("more than once"));
+    let mut out_of_range = artifact.clone();
+    out_of_range.fallback_triangles = vec![9];
+    assert!(out_of_range
+        .validate()
+        .unwrap_err()
+        .contains("triangle 9 of 5"));
+    let mut missing = artifact;
+    missing.fallback_triangles.clear();
+    assert!(missing
+        .validate()
+        .unwrap_err()
+        .contains("does not assign triangle 3"));
+}
+
+#[test]
+fn builtin_executor_rejects_ambiguous_inputs_and_foreign_paths() {
+    let dir = TempDir::new("guards");
+    let fixture = Fixture::new();
+    let (keyframes, mesh) = fixture.write(&dir.0);
+    let hash = |path: &ProjectPath| ContentHash::of_bytes(&fs::read(path.resolve(&dir.0)).unwrap());
+    let record =
+        |id: &str, kind: ArtifactKind, path: &ProjectPath| crate::scene_project::ArtifactRecord {
+            id: format!("{id}.output"),
+            kind,
+            produced_by: id.into(),
+            operation_identity: ContentHash::of_bytes(id.as_bytes()),
+            path: path.clone(),
+            content_hash: hash(path),
+            provider: None,
+        };
+    let manifest_document = json!({
+        "schema_version": 1,
+        "project_id": "guards",
+        "quality_mode": "standard",
+        "inputs": [{
+            "id": "clip", "path": "artifacts/bake/clip.webm",
+            "content_hash": ContentHash::of_bytes(b"clip").as_str(), "byte_length": 4
+        }],
+        "provider_policy": { "execution": "local_only" },
+        "operations": [
+            { "id": "ingest", "kind": "ingest_video", "inputs": [{ "media": "clip" }] }
+        ],
+        "requested_outputs": ["keyframes"]
+    });
+    let manifest = SceneProjectManifest::from_json(&manifest_document.to_string()).unwrap();
+    let request = |inputs: Vec<ResolvedInput>| OperationRequest {
+        operation: crate::scene_project::OperationDeclaration {
+            id: "bake".into(),
+            kind: OperationKind::TextureBake,
+            inputs: Vec::new(),
+            provider: None,
+            max_attempts: 1,
+        },
+        identity: ContentHash::of_bytes(b"bake"),
+        provider: None,
+        attempt: 1,
+        inputs,
+    };
+    let keyframes_input =
+        ResolvedInput::Artifact(record("ingest", ArtifactKind::Keyframes, &keyframes));
+    let mesh_input = ResolvedInput::Artifact(record("mesh", ArtifactKind::SurfaceMesh, &mesh));
+
+    let executor = BuiltInExecutor::new(&dir.0, &manifest);
+    let outcome = executor.execute(
+        &request(vec![
+            keyframes_input.clone(),
+            mesh_input.clone(),
+            mesh_input.clone(),
+        ]),
+        &CancellationToken::new(),
+    );
+    assert!(
+        matches!(&outcome, AttemptOutcome::Failed(message) if message.contains("exactly one keyframes and one surface_mesh")),
+        "{outcome:?}"
+    );
+
+    // The media input lives inside the bake's output directory: refuse to write.
+    let outcome = executor.execute(
+        &request(vec![keyframes_input, mesh_input]),
+        &CancellationToken::new(),
+    );
+    assert!(
+        matches!(&outcome, AttemptOutcome::Failed(message) if message.contains("would overwrite the declared path `artifacts/bake/clip.webm`")),
+        "{outcome:?}"
+    );
+    assert!(!dir.0.join("artifacts/bake").exists());
 }

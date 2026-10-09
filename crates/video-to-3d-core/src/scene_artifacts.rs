@@ -20,12 +20,14 @@
 //!   references whose appearance changed.
 //!
 //! Recorded artifacts and receipts cover the JSON documents. Their sidecar
-//! files are covered by the content hashes inside those documents and are
-//! verified whenever they are read, so a missing or edited sidecar fails
-//! loudly instead of being used.
+//! files are covered by the content hashes inside those documents: build
+//! reconciliation checks them (a missing or edited sidecar invalidates the
+//! artifact, so it is rebuilt) and readers verify them again on use.
 
 use crate::scene_model::{Material, ResourceKind, SceneProvenance, SceneResource};
-use crate::scene_project::{ArtifactKind, ContentHash, OperationKind, ProjectPath};
+use crate::scene_project::{
+    ArtifactKind, ContentHash, OperationKind, ProjectPath, SceneProjectManifest,
+};
 use crate::scene_runner::{
     AttemptOutcome, CancellationToken, OperationExecutor, OperationRequest, ProducedArtifact,
     ResolvedInput,
@@ -233,6 +235,8 @@ pub fn write_keyframes_artifact(
     index: &ProjectPath,
     frames: &[SampledFrame<'_>],
 ) -> Result<(KeyframesArtifact, ContentHash), String> {
+    // Validate the complete replacement first. Sidecars are content-addressed,
+    // so writing them never changes a file an existing index refers to.
     let mut records = Vec::with_capacity(frames.len());
     for frame in frames {
         if Some(frame.rgba.len()) != rgba_length(frame.width, frame.height) {
@@ -241,18 +245,16 @@ pub fn write_keyframes_artifact(
                 frame.frame_index, frame.width, frame.height
             ));
         }
-        let pixels = sibling(
-            index,
-            &format!("frames/frame-{:06}.rgba", frame.frame_index),
-        )?;
-        write_atomically(&pixels.resolve(root), frame.rgba)?;
+        let content_hash = ContentHash::of_bytes(frame.rgba);
+        let digest = &content_hash.as_str()["sha256:".len()..];
+        let pixels = sibling(index, &format!("frames/{digest}.rgba"))?;
         records.push(KeyframeRecord {
             frame_index: frame.frame_index,
             timestamp_seconds: frame.timestamp_seconds,
             width: frame.width,
             height: frame.height,
             pixels,
-            content_hash: ContentHash::of_bytes(frame.rgba),
+            content_hash,
         });
     }
     records.sort_by_key(|record| record.frame_index);
@@ -261,6 +263,16 @@ pub fn write_keyframes_artifact(
         frames: records,
     };
     artifact.validate()?;
+    for (record, frame) in artifact.frames.iter().zip({
+        let mut sorted: Vec<&SampledFrame<'_>> = frames.iter().collect();
+        sorted.sort_by_key(|frame| frame.frame_index);
+        sorted
+    }) {
+        let target = record.pixels.resolve(root);
+        if read_verified(root, &record.pixels, &record.content_hash).is_err() {
+            write_atomically(&target, frame.rgba)?;
+        }
+    }
     let document = artifact.to_json();
     write_atomically(&index.resolve(root), document.as_bytes())?;
     Ok((artifact, ContentHash::of_bytes(document.as_bytes())))
@@ -443,6 +455,34 @@ impl SurfaceTexturesArtifact {
                 ));
             }
         }
+        // Textured and fallback triangles partition the accepted triangles.
+        let mut seen = vec![false; self.triangle_count];
+        let listed = self
+            .materials
+            .iter()
+            .flat_map(|material| &material.triangles)
+            .chain(&self.fallback_triangles);
+        for &triangle in listed {
+            match seen.get_mut(triangle) {
+                Some(slot) if !*slot => *slot = true,
+                Some(_) => {
+                    return Err(format!(
+                        "surface textures artifact lists triangle {triangle} more than once"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "surface textures artifact names triangle {triangle} of {}",
+                        self.triangle_count
+                    ))
+                }
+            }
+        }
+        if let Some(missing) = seen.iter().position(|seen| !seen) {
+            return Err(format!(
+                "surface textures artifact does not assign triangle {missing}"
+            ));
+        }
         Ok(())
     }
 
@@ -476,11 +516,13 @@ impl SurfaceTexturesArtifact {
     /// are neutral constants (white, non-metallic, fully rough) and are marked
     /// `Estimated`, since material factors carry no evidence links of their
     /// own. The scene must declare an accepted camera for every cited frame.
-    pub fn scene_entries(&self) -> (Vec<SceneResource>, Vec<Material>) {
+    /// `namespace` (for example the producing operation id) prefixes every
+    /// generated identifier, so entries of several bakes can share one scene.
+    pub fn scene_entries(&self, namespace: &str) -> (Vec<SceneResource>, Vec<Material>) {
         let mut resources = Vec::with_capacity(self.materials.len());
         let mut materials = Vec::with_capacity(self.materials.len());
         for material in &self.materials {
-            let texture_id = surface_texture_id(material.reference_frame);
+            let texture_id = surface_texture_id(namespace, material.reference_frame);
             let mut provenance: Vec<SceneProvenance> = material
                 .provenance
                 .iter()
@@ -498,7 +540,7 @@ impl SurfaceTexturesArtifact {
                 source_frames: material.source_frames.clone(),
             });
             materials.push(Material {
-                id: surface_material_id(material.reference_frame),
+                id: surface_material_id(namespace, material.reference_frame),
                 base_color: [1.0; 4],
                 base_color_texture: Some(texture_id),
                 metallic: 0.0,
@@ -525,14 +567,36 @@ impl SurfaceTexturesArtifact {
     }
 }
 
+/// Sidecar files a recorded artifact document refers to, with their hashes.
+/// Reconciliation verifies them next to the document itself; artifact kinds
+/// without sidecars return an empty list.
+pub fn artifact_sidecars(
+    kind: ArtifactKind,
+    document: &str,
+) -> Result<Vec<(ProjectPath, ContentHash)>, String> {
+    Ok(match kind {
+        ArtifactKind::Keyframes => KeyframesArtifact::from_json(document)?
+            .frames
+            .into_iter()
+            .map(|frame| (frame.pixels, frame.content_hash))
+            .collect(),
+        ArtifactKind::SurfaceTextures => SurfaceTexturesArtifact::from_json(document)?
+            .materials
+            .into_iter()
+            .map(|material| (material.texture.path, material.texture.content_hash))
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
 /// Scene resource id of the baked texture of one reference frame.
-pub fn surface_texture_id(reference_frame: usize) -> String {
-    format!("surface-texture-f{reference_frame}")
+pub fn surface_texture_id(namespace: &str, reference_frame: usize) -> String {
+    format!("{namespace}.texture-f{reference_frame}")
 }
 
 /// Scene material id of the baked material of one reference frame.
-pub fn surface_material_id(reference_frame: usize) -> String {
-    format!("surface-material-f{reference_frame}")
+pub fn surface_material_id(namespace: &str, reference_frame: usize) -> String {
+    format!("{namespace}.material-f{reference_frame}")
 }
 
 /// What a texture bake wrote.
@@ -713,13 +777,49 @@ pub fn texture_bake_output(operation_id: &str) -> Result<ProjectPath, String> {
 #[derive(Clone, Debug)]
 pub struct BuiltInExecutor {
     root: PathBuf,
+    /// Declared paths and their owners (media inputs, exports, and artifacts
+    /// recorded by other operations), which an output must never overwrite.
+    reserved: Vec<(String, ProjectPath)>,
 }
 
 impl BuiltInExecutor {
-    pub fn new(project_root: impl Into<PathBuf>) -> Self {
+    pub fn new(project_root: impl Into<PathBuf>, manifest: &SceneProjectManifest) -> Self {
+        let mut reserved: Vec<(String, ProjectPath)> = manifest
+            .inputs
+            .iter()
+            .map(|input| (String::new(), input.path.clone()))
+            .collect();
+        reserved.extend(
+            manifest
+                .exports
+                .iter()
+                .map(|export| (String::new(), export.path.clone())),
+        );
+        reserved.extend(
+            manifest
+                .artifacts
+                .iter()
+                .map(|artifact| (artifact.produced_by.clone(), artifact.path.clone())),
+        );
         Self {
             root: project_root.into(),
+            reserved,
         }
+    }
+
+    /// A declared path of another owner inside `directory` (or the directory
+    /// itself, or one of its ancestors).
+    fn collision(&self, operation: &str, directory: &str) -> Option<&ProjectPath> {
+        self.reserved
+            .iter()
+            .filter(|(owner, _)| owner != operation)
+            .map(|(_, path)| path)
+            .find(|path| {
+                let path = path.as_str();
+                path == directory
+                    || path.starts_with(&format!("{directory}/"))
+                    || directory.starts_with(&format!("{path}/"))
+            })
     }
 
     fn texture_bake(
@@ -727,27 +827,48 @@ impl BuiltInExecutor {
         request: &OperationRequest,
         cancel: &CancellationToken,
     ) -> AttemptOutcome {
-        let input = |kind: ArtifactKind| {
-            request.inputs.iter().find_map(|input| match input {
-                ResolvedInput::Artifact(artifact) if artifact.kind == kind => {
-                    Some(artifact.path.clone())
-                }
-                _ => None,
-            })
+        // Exactly one input of each kind: every input is part of the
+        // operation identity, so an ignored extra input is not allowed.
+        let inputs = |kind: ArtifactKind| -> Vec<ProjectPath> {
+            request
+                .inputs
+                .iter()
+                .filter_map(|input| match input {
+                    ResolvedInput::Artifact(artifact) if artifact.kind == kind => {
+                        Some(artifact.path.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
         };
-        let (Some(keyframes), Some(mesh)) = (
-            input(ArtifactKind::Keyframes),
-            input(ArtifactKind::SurfaceMesh),
-        ) else {
+        let (keyframes, mesh) = (
+            inputs(ArtifactKind::Keyframes),
+            inputs(ArtifactKind::SurfaceMesh),
+        );
+        let ([keyframes], [mesh]) = (keyframes.as_slice(), mesh.as_slice()) else {
+            return AttemptOutcome::Failed(format!(
+                "texture_bake needs exactly one keyframes and one surface_mesh input (got {} and {})",
+                keyframes.len(),
+                mesh.len()
+            ));
+        };
+        if request.inputs.len() != 2 {
             return AttemptOutcome::Failed(
-                "texture_bake needs a keyframes and a surface_mesh input".into(),
+                "texture_bake takes only a keyframes and a surface_mesh input".into(),
             );
-        };
+        }
         let output = match texture_bake_output(&request.operation.id) {
             Ok(output) => output,
             Err(error) => return AttemptOutcome::Failed(error),
         };
-        match bake_texture_artifact(&self.root, &output, &keyframes, &mesh, cancel) {
+        let directory = parent(&output).unwrap_or_default();
+        if let Some(path) = self.collision(&request.operation.id, directory) {
+            return AttemptOutcome::Failed(format!(
+                "texture_bake output directory `{directory}` would overwrite the declared path `{}`",
+                path.as_str()
+            ));
+        }
+        match bake_texture_artifact(&self.root, &output, keyframes, mesh, cancel) {
             Ok(outcome) => {
                 let list = |frames: &[usize]| {
                     frames

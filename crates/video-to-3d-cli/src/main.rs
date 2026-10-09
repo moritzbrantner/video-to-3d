@@ -193,17 +193,19 @@ fn invalidation_code(reason: &Invalidation) -> &'static str {
         Invalidation::MissingReceipt => "missing_receipt",
         Invalidation::UnreadableReceipt(_) => "unreadable_receipt",
         Invalidation::ReceiptMismatch(_) => "receipt_mismatch",
+        Invalidation::CorruptSidecar(_) => "corrupt_sidecar",
     }
 }
 
 fn build(manifest_path: &std::path::Path, jobs: usize) -> Outcome {
     let (store, mut manifest) = open(manifest_path)?;
+    // Built-in executors exist for texture_bake; every other kind reports an
+    // explicit unsupported outcome.
+    let executor = BuiltInExecutor::new(store.root(), &manifest);
     let report = store
         .build(
             &mut manifest,
-            // Built-in executors exist for texture_bake; every other kind
-            // reports an explicit unsupported outcome.
-            &BuiltInExecutor::new(store.root()),
+            &executor,
             RunOptions {
                 max_concurrency: jobs,
             },

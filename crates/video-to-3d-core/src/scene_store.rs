@@ -18,8 +18,8 @@
 //! changes a build result, and [`VerifyMode::Full`] ignores it.
 
 use crate::scene_project::{
-    ArtifactRecord, AttemptUsage, ContentHash, OperationInput, OperationKind, ProjectPath,
-    SceneProjectError, SceneProjectManifest, STATE_DIRECTORY,
+    ArtifactKind, ArtifactRecord, AttemptUsage, ContentHash, OperationInput, OperationKind,
+    ProjectPath, SceneProjectError, SceneProjectManifest, STATE_DIRECTORY,
 };
 use crate::scene_runner::{
     run_observed, CancellationToken, OperationExecutor, ProducedArtifact, RecordedOutput,
@@ -106,6 +106,9 @@ pub enum Invalidation {
     MissingReceipt,
     UnreadableReceipt(String),
     ReceiptMismatch(String),
+    /// A sidecar file the artifact document refers to is missing, unreadable,
+    /// or does not match its recorded hash.
+    CorruptSidecar(String),
 }
 
 impl Invalidation {
@@ -122,6 +125,7 @@ impl Invalidation {
                 format!("operation receipt is unreadable: {message}")
             }
             Self::ReceiptMismatch(message) => format!("operation receipt disagrees: {message}"),
+            Self::CorruptSidecar(message) => format!("artifact sidecar is invalid: {message}"),
         }
     }
 }
@@ -448,6 +452,35 @@ impl ProjectStore {
                 expected: artifact.content_hash.clone(),
                 actual,
             });
+        }
+        if matches!(
+            artifact.kind,
+            ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
+        ) {
+            let document = fs::read_to_string(self.resolve(&artifact.path))
+                .map_err(|error| Invalidation::CorruptSidecar(error.to_string()))?;
+            // The document itself is hash-verified above. One that is not a
+            // sidecar-bearing format (for example an opaque provider output)
+            // has no sidecars to check; its readers reject it on use.
+            let sidecars = crate::scene_artifacts::artifact_sidecars(artifact.kind, &document)
+                .unwrap_or_default();
+            for (path, expected) in sidecars {
+                match cache.hash(&self.resolve(&path), path.as_str()) {
+                    Some((hash, _)) if hash == expected => {}
+                    Some(_) => {
+                        return Err(Invalidation::CorruptSidecar(format!(
+                            "`{}` does not match its recorded content hash",
+                            path.as_str()
+                        )))
+                    }
+                    None => {
+                        return Err(Invalidation::CorruptSidecar(format!(
+                            "`{}` is missing or unreadable",
+                            path.as_str()
+                        )))
+                    }
+                }
+            }
         }
         Ok(())
     }

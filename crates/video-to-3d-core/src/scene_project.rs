@@ -188,7 +188,11 @@ impl OperationKind {
     /// artifacts become stale. Provider operations are versioned by their
     /// provider declaration instead.
     pub fn implementation_revision(self) -> u32 {
-        1
+        match self {
+            // 2: the built-in executor and the versioned surface-textures format.
+            Self::TextureBake => 2,
+            _ => 1,
+        }
     }
 
     fn name(self) -> &'static str {
