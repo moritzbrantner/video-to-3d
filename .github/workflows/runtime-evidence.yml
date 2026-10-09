@@ -77,7 +77,7 @@ jobs:
       - name: Prime deterministic workloads
         run: |
           (cd reference && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct)
-          (cd candidate && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct --example golden_fixture)
+          (cd candidate && cargo build --locked --release -p video-to-3d-core --example profile_reconstruct --example golden_fixture --example reference_fixture)
           test -z "$(git -C reference status --porcelain)"
           test -z "$(git -C candidate status --porcelain)"
 
@@ -131,6 +131,23 @@ jobs:
               "$case_name" \
               | tee "$RUNNER_TEMP/golden-colmap-$case_name.txt"; then
               status=1
+            fi
+          done
+          # Reference fixtures with exact truth (#128): the same images go to both pipelines.
+          # COLMAP is a reference here, not a gate, so its outcome is recorded either way.
+          for case_name in $(python3 tools/check_reference_fixtures.py --list-cases); do
+            case_dir="target/golden-reference/$case_name"
+            if ! target/release/examples/reference_fixture "$case_dir" "$case_name" \
+              | tee "$RUNNER_TEMP/golden-rust-$case_name.txt"; then
+              status=1
+            fi
+            if ! bash tools/run_colmap_golden.sh \
+              "$case_dir/images" \
+              "$case_dir/colmap-quality" \
+              "$case_name" \
+              "$(cat "$case_dir/truth/colmap-camera-params.txt")" \
+              | tee "$RUNNER_TEMP/golden-colmap-$case_name.txt"; then
+              echo "reference fixture $case_name: COLMAP did not complete; recorded, not gated"
             fi
           done
           printf '%s\n' "$status" > "$RUNNER_TEMP/golden-generate.status"
@@ -209,6 +226,20 @@ jobs:
               printf '\n' >> "$RUNNER_TEMP/colmap-golden.md"
             fi
           done
+          for case_name in $(python3 tools/check_reference_fixtures.py --list-cases); do
+            case_report="$RUNNER_TEMP/colmap-golden-$case_name.md"
+            if ! python3 tools/check_reference_fixtures.py \
+              --case "$case_name" \
+              --rust "$RUNNER_TEMP/golden-rust-$case_name.txt" \
+              --colmap "$RUNNER_TEMP/golden-colmap-$case_name.txt" \
+              --markdown "$case_report"; then
+              status=1
+            fi
+            if test -f "$case_report"; then
+              cat "$case_report" >> "$RUNNER_TEMP/colmap-golden.md"
+              printf '\n' >> "$RUNNER_TEMP/colmap-golden.md"
+            fi
+          done
           printf '%s\n' "$status" > "$RUNNER_TEMP/colmap-golden.status"
           exit 0
 
@@ -270,4 +301,6 @@ jobs:
             ${{ runner.temp }}/colmap-golden-*.md
             ${{ runner.temp }}/colmap-golden.md
             ${{ runner.temp }}/moonlight.md
+            candidate/target/golden-reference/*/truth/truth.json
+            candidate/target/golden-reference/*/rust-evidence.json
           if-no-files-found: warn

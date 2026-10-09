@@ -4,6 +4,8 @@ set -euo pipefail
 images_dir="${1:?images directory required}"
 work_dir="${2:?work directory required}"
 case_name="${3:-lateral}"
+# PINHOLE fx,fy,cx,cy; reference fixtures pass the truth intrinsics they generated.
+camera_params="${4:-520,520,320,240}"
 
 rm -rf "$work_dir"
 mkdir -p "$work_dir/sparse" "$work_dir/models"
@@ -19,7 +21,7 @@ colmap feature_extractor \
   --image_path "$images_dir" \
   --ImageReader.camera_model PINHOLE \
   --ImageReader.single_camera 1 \
-  --ImageReader.camera_params 520,520,320,240 \
+  --ImageReader.camera_params "$camera_params" \
   --SiftExtraction.num_threads 1 \
   --SiftExtraction.use_gpu 0 \
   "${colmap_random_args[@]}" \
@@ -27,7 +29,9 @@ colmap feature_extractor \
 
 python3 "$(dirname "${BASH_SOURCE[0]}")/match_colmap_golden.py" "$database" >/dev/null
 
-colmap mapper \
+# COLMAP exits non-zero when it cannot initialize any model; that outcome is reported
+# below as a zero-registration result instead of aborting the evidence run.
+if ! colmap mapper \
   --database_path "$database" \
   --image_path "$images_dir" \
   --output_path "$work_dir/sparse" \
@@ -37,7 +41,9 @@ colmap mapper \
   --Mapper.ba_refine_principal_point 0 \
   --Mapper.ba_refine_extra_params 0 \
   "${colmap_random_args[@]}" \
-  >/dev/null
+  >/dev/null; then
+  echo "COLMAP mapper reported failure for case $case_name" >&2
+fi
 
 best_model=""
 best_registered=-1
@@ -59,7 +65,12 @@ for model_dir in "$work_dir"/sparse/*; do
   fi
 done
 
-test -n "$best_model"
+if test -z "$best_model"; then
+  # No model is evidence too (the pure-rotation control expects it); the golden checks
+  # reject it wherever COLMAP must register.
+  printf 'golden-colmap case=%s registered_images=0 points=0 mean_reprojection_error_pixels=nan\n' "$case_name"
+  exit 0
+fi
 
 registered_images="$best_registered"
 points="$(grep -v '^#' "$best_model/points3D.txt" | sed '/^[[:space:]]*$/d' | wc -l)"

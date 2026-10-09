@@ -12,7 +12,7 @@ pub fn normalized_center_rmse(
     matched: &[(Vector3<f64>, Vector3<f64>)],
     trajectory_span: f64,
 ) -> Option<f64> {
-    if matched.len() < 3 || !(trajectory_span > 1e-12) {
+    if matched.len() < 3 || trajectory_span.is_nan() || trajectory_span <= 1e-12 {
         return None;
     }
 

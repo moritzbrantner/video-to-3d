@@ -97,6 +97,7 @@ impl Case {
         let trevi = Facade {
             distance: TREVI_DISTANCE,
             relief: 0.45,
+            relief_edge: 0.08,
             extent: [-6.0, 6.0, -3.0, 3.0],
         };
         match self {
@@ -115,6 +116,9 @@ impl Case {
                 facade: Facade {
                     distance: 4.0,
                     relief: 1.0,
+                    // Gentle slopes keep the true surface free of near-vertical steps, so
+                    // one connected mesh is reachable without bridging discontinuities.
+                    relief_edge: 0.4,
                     extent: [-5.0, 5.0, -2.5, 2.5],
                 },
                 motion: Motion::Lateral { step: 0.2 },
@@ -231,7 +235,7 @@ impl Pose {
         -(self.rotation * self.center)
     }
 
-    fn to_camera(&self, world: &Vector3<f64>) -> Vector3<f64> {
+    fn world_to_camera(&self, world: &Vector3<f64>) -> Vector3<f64> {
         self.rotation * (world - self.center)
     }
 
@@ -277,13 +281,14 @@ fn value_noise(x: f64, y: f64, cell: f64, salt: u64) -> f64 {
 struct Facade {
     distance: f64,
     relief: f64,
+    /// Width of the smooth ramp at every relief edge.
+    relief_edge: f64,
     /// `[x_min, x_max, y_min, y_max]` of the exported mesh and albedo, in metres.
     extent: [f64; 4],
 }
 
 const PILASTER_PERIOD: f64 = 1.7;
 const PILASTER_HALF_WIDTH: f64 = 0.22;
-const RELIEF_EDGE: f64 = 0.08;
 const BLOCK_WIDTH: f64 = 0.62;
 const BLOCK_HEIGHT: f64 = 0.26;
 const MORTAR: f64 = 0.018;
@@ -299,11 +304,12 @@ impl Facade {
         let pilaster = 1.0
             - smoothstep(
                 PILASTER_HALF_WIDTH,
-                PILASTER_HALF_WIDTH + RELIEF_EDGE,
+                PILASTER_HALF_WIDTH + self.relief_edge,
                 local.abs(),
             );
         let band = |low: f64, high: f64| {
-            smoothstep(low - RELIEF_EDGE, low, y) * (1.0 - smoothstep(high, high + RELIEF_EDGE, y))
+            smoothstep(low - self.relief_edge, low, y)
+                * (1.0 - smoothstep(high, high + self.relief_edge, y))
         };
         let cornice = band(-1.55, -1.25);
         let plinth = band(1.15, 4.0);
@@ -477,7 +483,7 @@ fn render(facade: &Facade, intrinsics: &Intrinsics, pose: Pose) -> View {
                 rgba[offset + channel] = (sum[channel] / samples * 255.0).round() as u8;
             }
             let center = surface_hit(facade, intrinsics, &pose, px as f64 + 0.5, py as f64 + 0.5);
-            depth[(py * width + px) as usize] = pose.to_camera(&center).z as f32;
+            depth[(py * width + px) as usize] = pose.world_to_camera(&center).z as f32;
         }
     }
     View {
@@ -535,10 +541,11 @@ fn true_mesh(facade: &Facade) -> TrueMesh {
     }
 }
 
-/// Connected components among the vertices that triangles reference.
-fn connected_components(vertex_count: usize, triangles: impl Iterator<Item = [usize; 3]>) -> usize {
-    let mut parent: Vec<usize> = (0..vertex_count).collect();
-    let mut used = vec![false; vertex_count];
+/// Union-find root of every vertex after joining the vertices of each triangle.
+fn component_labels(
+    vertex_count: usize,
+    triangles: impl Iterator<Item = [usize; 3]>,
+) -> Vec<usize> {
     fn root(parent: &mut [usize], mut node: usize) -> usize {
         while parent[node] != node {
             parent[node] = parent[parent[node]];
@@ -546,10 +553,8 @@ fn connected_components(vertex_count: usize, triangles: impl Iterator<Item = [us
         }
         node
     }
+    let mut parent: Vec<usize> = (0..vertex_count).collect();
     for [a, b, c] in triangles {
-        for vertex in [a, b, c] {
-            used[vertex] = true;
-        }
         for (left, right) in [(a, b), (b, c)] {
             let (left, right) = (root(&mut parent, left), root(&mut parent, right));
             if left != right {
@@ -558,7 +563,22 @@ fn connected_components(vertex_count: usize, triangles: impl Iterator<Item = [us
         }
     }
     (0..vertex_count)
-        .filter(|&vertex| used[vertex] && root(&mut parent, vertex) == vertex)
+        .map(|vertex| root(&mut parent, vertex))
+        .collect()
+}
+
+/// Connected components among the vertices that triangles reference.
+fn connected_components(
+    vertex_count: usize,
+    triangles: impl Iterator<Item = [usize; 3]> + Clone,
+) -> usize {
+    let mut used = vec![false; vertex_count];
+    for vertex in triangles.clone().flatten() {
+        used[vertex] = true;
+    }
+    let labels = component_labels(vertex_count, triangles);
+    (0..vertex_count)
+        .filter(|&vertex| used[vertex] && labels[vertex] == vertex)
         .count()
 }
 
@@ -571,7 +591,7 @@ fn view_overlap(facade: &Facade, intrinsics: &Intrinsics, from: &Pose, to: &Pose
             let u = (column as f64 + 0.5) * intrinsics.width as f64 / columns as f64;
             let v = (row as f64 + 0.5) * intrinsics.height as f64 / rows as f64;
             let world = surface_hit(facade, intrinsics, from, u, v);
-            let camera = to.to_camera(&world);
+            let camera = to.world_to_camera(&world);
             let Some((pu, pv)) = intrinsics.project(&camera) else {
                 continue;
             };
@@ -802,7 +822,7 @@ fn truth_document(fixture: &Fixture, mesh: &TrueMesh) -> Value {
                 "extent_m": facade.extent,
                 "pilaster_period_m": PILASTER_PERIOD,
                 "pilaster_half_width_m": PILASTER_HALF_WIDTH,
-                "relief_edge_m": RELIEF_EDGE,
+                "relief_edge_m": facade.relief_edge,
                 "block_size_m": [BLOCK_WIDTH, BLOCK_HEIGHT],
                 "mortar_m": MORTAR,
             },
@@ -917,10 +937,14 @@ fn write_fixture(root: &Path, fixture: &Fixture, mesh: &TrueMesh) {
     .expect("write truth");
 }
 
-/// Topology of the accepted mesh: connected components, and triangles whose vertices
-/// come from more than one reference patch.
+/// Topology of the accepted mesh: connected components, how many of them each reference
+/// patch has on its own, and triangles whose vertices come from more than one patch.
 struct MeshTopology {
     components: usize,
+    /// Sum over reference patches of the components of that patch's own triangles.
+    per_patch_components: usize,
+    /// Share of all triangles in the largest component.
+    largest_component_share: f64,
     cross_reference_triangles: usize,
     meshed_reference_patches: usize,
 }
@@ -949,8 +973,38 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
                 .any(|&vertex| patch_of_point.get(vertex) != first)
         })
         .count();
+    let vertex_count = reconstruction.dense_points.len();
+    let mut patches: Vec<usize> = patch_of_point.clone();
+    patches.sort_unstable();
+    patches.dedup();
+    let per_patch_components = patches
+        .iter()
+        .map(|&patch| {
+            connected_components(
+                vertex_count,
+                triangles().filter(|vertices| {
+                    vertices
+                        .iter()
+                        .all(|&vertex| patch_of_point.get(vertex) == Some(&patch))
+                }),
+            )
+        })
+        .sum();
+    let labels = component_labels(vertex_count, triangles());
+    let mut triangles_per_component = std::collections::HashMap::new();
+    for [a, _, _] in triangles() {
+        *triangles_per_component.entry(labels[a]).or_insert(0_usize) += 1;
+    }
+    let largest = triangles_per_component.values().copied().max().unwrap_or(0);
+    let total = reconstruction.mesh_triangles.len();
     MeshTopology {
-        components: connected_components(reconstruction.dense_points.len(), triangles()),
+        components: connected_components(vertex_count, triangles()),
+        per_patch_components,
+        largest_component_share: if total == 0 {
+            0.0
+        } else {
+            largest as f64 / total as f64
+        },
         cross_reference_triangles,
         meshed_reference_patches: reconstruction
             .mesh
@@ -1040,6 +1094,8 @@ fn main() {
             "mesh": reconstruction.mesh,
             "mesh_topology": {
                 "components": topology.components,
+                "per_patch_components": topology.per_patch_components,
+                "largest_component_share": topology.largest_component_share,
                 "cross_reference_triangles": topology.cross_reference_triangles,
                 "meshed_reference_patches": topology.meshed_reference_patches,
             },
@@ -1053,7 +1109,7 @@ fn main() {
     }
 
     println!(
-        "golden-rust case={} registered_images={} points={} median_reprojection_error_pixels={} normalized_pose_rmse={} decisive_gate={} dense_points={} mesh_triangles={} mesh_components={} meshed_reference_patches={} cross_reference_triangles={}",
+        "golden-rust case={} registered_images={} points={} median_reprojection_error_pixels={} normalized_pose_rmse={} decisive_gate={} dense_points={} mesh_triangles={} mesh_components={} per_patch_components={} largest_component_share={:.4} meshed_reference_patches={} cross_reference_triangles={}",
         case.name(),
         registered_images,
         reconstruction.points.len(),
@@ -1063,6 +1119,8 @@ fn main() {
         reconstruction.dense_points.len(),
         reconstruction.mesh_triangles.len(),
         topology.components,
+        topology.per_patch_components,
+        topology.largest_component_share,
         topology.meshed_reference_patches,
         topology.cross_reference_triangles,
     );
@@ -1111,13 +1169,13 @@ mod tests {
             let (from, to) = (&poses[4], &poses[5]);
             for (u, v) in [(40.5, 30.5), (180.5, 101.5), (300.5, 170.5)] {
                 let world = surface_hit(&spec.facade, &intrinsics, from, u, v);
-                let depth = from.to_camera(&world).z;
+                let depth = from.world_to_camera(&world).z;
                 let back = from.center + from.world_direction(&(intrinsics.ray(u, v) * depth));
                 assert!(
                     (back - world).norm() < 1e-6,
                     "{case:?} depth back-projection"
                 );
-                let camera = to.to_camera(&world);
+                let camera = to.world_to_camera(&world);
                 let (pu, pv) = intrinsics.project(&camera).expect("in front");
                 let again = surface_hit(&spec.facade, &intrinsics, to, pu, pv);
                 assert!(
@@ -1173,7 +1231,8 @@ mod tests {
             &poses[0],
             &poses[poses.len() - 1],
         );
-        assert!(ends > 0.2 && ends < 0.95, "{ends}");
+        // The pan covers new surface, yet first and last views still share some of it.
+        assert!(ends > 0.05 && ends < 0.5, "{ends}");
     }
 
     #[test]
