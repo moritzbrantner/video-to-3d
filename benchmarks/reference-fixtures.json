@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "generator": "crates/video-to-3d-core/examples/reference_fixture.rs",
+  "issue": 128,
+  "fixtures": [
+    {
+      "id": "slow-lateral-pan",
+      "intent": "Small lateral steps (0.15 m per sampling interval) along a Trevi-like façade 6 m away with 0.45 m relief. Relief parallax is 0.63 px per interval, below the 1.25 px rotation-only gate, and 10.7 px over the clip. Cameras should register.",
+      "target": {
+        "min_registered_images": 9,
+        "max_normalized_pose_rmse": 0.25
+      },
+      "colmap_expectation": "registers",
+      "baseline": {
+        "recorded": "2026-10-09",
+        "expected_failures": [
+          {
+            "check": "min_registered_images",
+            "issue": 127,
+            "reason": "No adjacent pair passes the residual-parallax gate, so no seed pair is accepted."
+          },
+          {
+            "check": "max_normalized_pose_rmse",
+            "issue": 127,
+            "reason": "No camera pose exists to score."
+          }
+        ],
+        "rust": {
+          "registered_images": 0,
+          "points": 0,
+          "decisive_gate": "parallax",
+          "dense_points": 0,
+          "mesh_triangles": 0,
+          "mesh_components": 0,
+          "meshed_reference_patches": 0,
+          "cross_reference_triangles": 0,
+          "per_patch_components": 0,
+          "largest_component_share": 0.0
+        }
+      }
+    },
+    {
+      "id": "pure-rotation",
+      "intent": "The same façade and viewing direction with the camera rotating in place by the pan's image motion. Negative control: the translation-baseline gate must reject it and no camera may register.",
+      "target": {
+        "max_registered_images": 0,
+        "decisive_gate": "baseline"
+      },
+      "colmap_expectation": "no model",
+      "baseline": {
+        "recorded": "2026-10-09",
+        "expected_failures": [],
+        "rust": {
+          "registered_images": 0,
+          "points": 3599,
+          "decisive_gate": "baseline",
+          "dense_points": 0,
+          "mesh_triangles": 0,
+          "mesh_components": 0,
+          "meshed_reference_patches": 0,
+          "cross_reference_triangles": 0,
+          "per_patch_components": 0,
+          "largest_component_share": 0.0
+        }
+      }
+    },
+    {
+      "id": "overlapping-references",
+      "intent": "A pan (0.2 m per interval) over a façade 4 m away with 1 m relief on gentle slopes; adjacent views overlap by more than 90 %, so neighbouring reference patches see the same surface. The truth is one connected surface, so overlapping patches must share topology.",
+      "target": {
+        "min_registered_images": 9,
+        "max_normalized_pose_rmse": 0.25,
+        "min_cross_reference_triangles": 1
+      },
+      "colmap_expectation": "registers",
+      "baseline": {
+        "recorded": "2026-10-09",
+        "expected_failures": [
+          {
+            "check": "min_cross_reference_triangles",
+            "issue": 126,
+            "reason": "Each reference patch is triangulated on its own; no triangle spans two reference patches, so overlapping patches stay separate sheets."
+          }
+        ],
+        "rust": {
+          "registered_images": 10,
+          "points": 1098,
+          "median_reprojection_error_pixels": 0.211281,
+          "normalized_pose_rmse": 0.018219,
+          "decisive_gate": "none",
+          "dense_points": 6251,
+          "mesh_triangles": 8202,
+          "mesh_components": 59,
+          "per_patch_components": 59,
+          "largest_component_share": 0.3926,
+          "meshed_reference_patches": 3,
+          "cross_reference_triangles": 0
+        },
+        "notes": "The true surface is one component; the accepted mesh has 59. Every one of them lies inside a single reference patch (per_patch_components equals mesh_components): dense coverage holes and discontinuity rejections fragment each patch, and no patch connects to another. Only the cross-patch part is gated here (#126); component counts are reported against the truth."
+      }
+    }
+  ]
+}
