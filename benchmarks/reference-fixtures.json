@@ -27,7 +27,7 @@
       }
     },
     "features": {
-      "measures": "The authoritative whole-pixel matcher with the browser's options on every adjacent pair, against the true correspondence of each source feature (exact depth reprojected into the target, occlusion-aware). A match is correct within 1.5 px; counts, precision and median error are gated on the worst pair.",
+      "measures": "The authoritative whole-pixel matcher with the browser's options on every adjacent pair, against the true correspondence of each source feature (exact depth reprojected into the target, occlusion-aware). A match is correct within 1.5 px; counts, precision and median error are gated on the worst pair. It scores the first-pass baseline matcher; matches the reconstruction substitutes (motion-guided or recovery passes) are not exposed by the core and are not scored here.",
       "default_checks": {
         "min_pair_matches": {
           "min": 50
@@ -69,7 +69,7 @@
       }
     },
     "dense": {
-      "measures": "Each reference's dense depth against the true depth through the same grid pixel, after removing that reference's scale bias (the registration owns scale; the bias is reported). Accurate coverage is the share of sampled grid pixels with a point within 2 % of the true depth.",
+      "measures": "Each reference's dense depth against the true depth through the same grid pixel, after removing that reference's scale bias (the registration owns scale; the bias is reported). Accurate coverage is the share of sampled grid pixels with a point within 2 % of the true depth. The scale bias itself is bounded: a reference whose depths disagree with the camera alignment by more than 10 % fails.",
       "default_checks": {
         "references": {
           "min": 1
@@ -79,11 +79,14 @@
         },
         "min_accurate_coverage": {
           "min": 0.4
+        },
+        "max_reference_scale_bias": {
+          "max": 0.1
         }
       }
     },
     "mesh": {
-      "measures": "The mesh through each reference's local alignment against the true heightfield: median centroid error, share of triangles more than 5 cm off the surface (unsupported), coverage of the 5 cm surface cells two registered cameras see unoccluded, cells covered by more than one reference (duplicated overlap), and topology.",
+      "measures": "The mesh through each reference's local alignment against the true heightfield: median centroid error, share of triangles more than 5 cm off the surface (unsupported), coverage of the 5 cm surface cells two registered cameras see unoccluded, cells covered by more than one reference (duplicated overlap), and topology: cross-reference triangles, shared vertices, and the components of the graph of meshed reference patches joined by cross-reference triangles (1 when every patch connects).",
       "default_checks": {
         "median_surface_error_m": {
           "max": 0.03
@@ -102,6 +105,9 @@
         },
         "duplicated_coverage_share": {
           "max": 0.1
+        },
+        "reference_patch_components": {
+          "equals": 1
         }
       }
     },
@@ -240,6 +246,12 @@
             "check": "duplicated_coverage_share",
             "issue": 126,
             "reason": "Overlapping references stay separate sheets, so the overlap is meshed more than once."
+          },
+          {
+            "stage": "mesh",
+            "check": "reference_patch_components",
+            "issue": 126,
+            "reason": "The three meshed reference patches are not joined by any triangle: three patch-graph components."
           }
         ],
         "notes": "The true surface is one component; the accepted mesh has 59, every one inside a single reference patch. Dense coverage holes and discontinuity rejections fragment each patch, and no patch connects to another. Component counts are reported against the truth; the cross-patch part is gated (#126)."

@@ -785,6 +785,7 @@ fn mesh_stage(
             "meshed_reference_patches": topology.meshed_reference_patches,
             "cross_reference_triangles": topology.cross_reference_triangles,
             "shared_vertices": topology.shared_vertices,
+            "reference_patch_components": topology.reference_patch_components,
         },
         "cell_size_m": super::MESH_SPACING,
     })
