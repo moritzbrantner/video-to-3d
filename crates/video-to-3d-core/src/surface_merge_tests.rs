@@ -270,7 +270,7 @@ fn image_ownership_tolerates_reference_scale_but_not_another_surface() {
     );
     // Unless the whole patch is 4 % nearer: a relative depth scale, removed
     // before the bound applies.
-    let ratios = footprint.depth_ratios(&layer, &|_| true, &|_| true);
+    let ratios = footprint.depth_ratios(&layer, &|_| true, &|_| true, usize::MAX);
     assert!(!ratios.is_empty());
     assert!(ratios.iter().all(|ratio| (ratio - 0.96).abs() < 1.0e-9));
     assert!(
@@ -674,12 +674,22 @@ fn scale_samples_need_an_anchored_owner_triangle() {
     let layer = corners([(-0.5, -0.5, 4.8), (0.6, -0.4, 4.8), (0.1, 0.7, 4.8)]);
     // No owner triangle touches an anchor: no sample.
     assert!(footprint
-        .depth_ratios(&layer, &|_| true, &|vertices| vertices.contains(&99))
+        .depth_ratios(
+            &layer,
+            &|_| true,
+            &|vertices| vertices.contains(&99),
+            usize::MAX
+        )
         .is_empty());
     // Only the owner triangle with vertex 1 is anchored: one sample.
     assert_eq!(
         footprint
-            .depth_ratios(&layer, &|_| true, &|vertices| vertices.contains(&1))
+            .depth_ratios(
+                &layer,
+                &|_| true,
+                &|vertices| vertices.contains(&1),
+                usize::MAX
+            )
             .len(),
         1
     );
@@ -713,4 +723,82 @@ fn unprojectable_linked_owners_leave_the_image_unable_to_judge() {
         .ownership(&outside, 1.0, &|component| component == 0)
         .unwrap();
     assert_eq!(judged.image_share, 0.0);
+}
+
+#[test]
+fn scale_samples_stop_at_the_limit() {
+    let footprint = square_footprint(identity_camera(0.0));
+    let layer = corners([(-0.5, -0.5, 4.8), (0.6, -0.4, 4.8), (0.1, 0.7, 4.8)]);
+    assert_eq!(
+        footprint
+            .depth_ratios(&layer, &|_| true, &|_| true, usize::MAX)
+            .len(),
+        2
+    );
+    assert_eq!(
+        footprint
+            .depth_ratios(&layer, &|_| true, &|_| true, 1)
+            .len(),
+        1
+    );
+    assert!(footprint
+        .depth_ratios(&layer, &|_| true, &|_| true, 0)
+        .is_empty());
+}
+
+#[test]
+fn an_owner_without_an_image_judgement_still_gets_the_3d_test() {
+    use crate::EvidenceOrigin::{GeometricMultiView, RevalidatedCompletion};
+    let points = vec![
+        // Patch 0 (no reference camera): a square at depth 5 ...
+        point(-1.0, -1.0, 5.0),
+        point(1.0, -1.0, 5.0),
+        point(1.0, 1.0, 5.0),
+        point(-1.0, 1.0, 5.0),
+        // ... and filler for priority.
+        point(-9.0, -9.0, 5.0),
+        point(-8.0, -9.0, 5.0),
+        point(-9.0, -8.0, 5.0),
+        // Patch 1 (with a camera), elsewhere: it judges the candidate unowned.
+        point(10.0, 0.0, 5.0),
+        point(11.0, 0.0, 5.0),
+        point(10.0, 1.0, 5.0),
+        // Patch 2: a candidate lying on patch 0's square.
+        point(-1.0, -1.0, 5.0),
+        point(0.0, -1.0, 5.0),
+        point(-1.0, 0.0, 5.0),
+    ];
+    let membership: Vec<Option<usize>> = (0..points.len())
+        .map(|index| {
+            Some(if index < 7 {
+                0
+            } else if index < 10 {
+                1
+            } else {
+                2
+            })
+        })
+        .collect();
+    let mut origins = vec![Some(GeometricMultiView); points.len()];
+    // The patch-1 link keeps separate vertices, so the candidate stays put.
+    origins[7] = Some(RevalidatedCompletion);
+    let mut triangles = vec![triangle(0, 1, 2), triangle(0, 2, 3)];
+    triangles.extend((0..12).map(|_| triangle(4, 5, 6)));
+    triangles.extend([triangle(7, 8, 9), triangle(7, 8, 9)]);
+    triangles.push(triangle(10, 11, 12));
+    let cameras = [None, Some(identity_camera(0.0)), None];
+    let stats = merge_fused_patches(
+        &points,
+        &mut triangles,
+        &membership,
+        &[(0, 10), (7, 11)],
+        &cameras,
+        &origins,
+    );
+    assert!(
+        !triangles.iter().any(|t| [t.a, t.b, t.c]
+            .iter()
+            .any(|vertex| (11..13).contains(vertex))),
+        "the duplicate candidate survived: {stats:?}"
+    );
 }

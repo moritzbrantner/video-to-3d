@@ -401,22 +401,24 @@ pub(super) fn merge_fused_patches(
                             .iter()
                             .any(|vertex| anchors.is_some_and(|set| set.contains(vertex)))
                     };
-                    let mut ratios: Vec<f64> = members
-                        .iter()
-                        .filter(|&&index| {
-                            let triangle = &triangles[index];
-                            anchored(&[triangle.a, triangle.b, triangle.c])
-                        })
-                        .filter_map(|&index| Some((index, geometry[index].as_ref()?)))
-                        .flat_map(|(index, candidate)| {
-                            footprint.depth_ratios(
+                    let mut ratios: Vec<f64> = Vec::new();
+                    for &index in &members {
+                        if ratios.len() >= MAX_SCALE_SAMPLES {
+                            break;
+                        }
+                        let triangle = &triangles[index];
+                        let Some(candidate) = geometry[index].as_ref() else {
+                            continue;
+                        };
+                        if anchored(&[triangle.a, triangle.b, triangle.c]) {
+                            ratios.extend(footprint.depth_ratios(
                                 &candidate.corners,
                                 &|component| components_linked(index, component),
                                 &anchored,
-                            )
-                        })
-                        .take(MAX_SCALE_SAMPLES)
-                        .collect();
+                                MAX_SCALE_SAMPLES - ratios.len(),
+                            ));
+                        }
+                    }
                     ratios.sort_by(f64::total_cmp);
                     let scale = if ratios.len() >= MIN_SCALE_SAMPLES {
                         ratios[ratios.len() / 2]
@@ -427,6 +429,12 @@ pub(super) fn merge_fused_patches(
                     (footprint, scale)
                 })
                 .collect();
+            // A linked, already processed patch without a footprint (no
+            // reference camera) can only be judged by the 3D test.
+            let imageless_owner = order[..patch_rank].iter().any(|owner| {
+                linked_patches.contains(&((*owner).min(*patch), (*owner).max(*patch)))
+                    && !footprints.iter().any(|footprint| footprint.patch == *owner)
+            });
             for &index in &members {
                 let Some(candidate) = &geometry[index] else {
                     continue;
@@ -436,10 +444,13 @@ pub(super) fn merge_fused_patches(
                 // triangle (behind the camera, degenerate, too large for the
                 // bounded query, or a linked owner triangle of that patch
                 // could not be projected).
+                let mut judged_patches = BTreeSet::new();
                 let judged: Vec<Ownership> = owners
                     .iter()
                     .filter_map(|(footprint, scale)| {
-                        footprint.ownership(&candidate.corners, *scale, &linked)
+                        let ownership = footprint.ownership(&candidate.corners, *scale, &linked)?;
+                        judged_patches.insert(footprint.patch);
+                        Some(ownership)
                     })
                     .collect();
                 let owned = judged
@@ -461,9 +472,10 @@ pub(super) fn merge_fused_patches(
                     }
                     continue;
                 }
-                // A linked owner judged this triangle in its image; its depth
-                // rejection must not be overturned by the looser 3D test.
-                if !judged.is_empty() {
+                // A linked owner that judged this triangle in its image keeps
+                // its depth rejection: the looser 3D test only considers
+                // owners whose image could not judge (or that have none).
+                if judged.len() == owners.len() && !imageless_owner {
                     if owned.image_share > OWNERSHIP_EPSILON {
                         remaining_overlap_triangles += 1;
                     }
@@ -489,6 +501,7 @@ pub(super) fn merge_fused_patches(
                         let (left, right) =
                             (component_by_triangle[index], component_by_triangle[other]);
                         linked_components.contains(&(left.min(right), left.max(right)))
+                            && patch_of[other].is_none_or(|owner| !judged_patches.contains(&owner))
                     })
                     .filter_map(|other| geometry[other].as_ref());
                 let (covered, partially_covered) = candidate.covered_by(candidates, tolerance);
@@ -919,11 +932,34 @@ impl Footprint {
         corners: &[Vector3<f64>; 3],
         linked: &dyn Fn(usize) -> bool,
     ) -> Option<(ProjectedTriangle, Vec<Overlap>)> {
+        let candidate = self.project_candidate(corners)?;
+        let mut overlaps = Vec::new();
+        self.visit_overlaps(
+            &candidate,
+            &|index| linked(self.components[index]),
+            &mut |polygon, index| {
+                overlaps.push((polygon, index));
+                true
+            },
+        )?;
+        Some((candidate, overlaps))
+    }
+
+    fn project_candidate(&self, corners: &[Vector3<f64>; 3]) -> Option<ProjectedTriangle> {
         let candidate = self.camera.project_triangle(corners)?;
-        if image_area(&candidate) <= GEOMETRIC_EPSILON * GEOMETRIC_EPSILON {
-            return None;
-        }
-        let keys = image_cells(&candidate, self.cell)?;
+        (image_area(&candidate) > GEOMETRIC_EPSILON * GEOMETRIC_EPSILON).then_some(candidate)
+    }
+
+    /// Clip the candidate against every nearby kept triangle accepted by
+    /// `include`, handing each non-empty overlap to `visit` until it returns
+    /// `false`. `None` when the candidate is too large for the bounded query.
+    fn visit_overlaps(
+        &self,
+        candidate: &ProjectedTriangle,
+        include: &dyn Fn(usize) -> bool,
+        visit: &mut dyn FnMut(Vec<Vector2<f64>>, usize) -> bool,
+    ) -> Option<()> {
+        let keys = image_cells(candidate, self.cell)?;
         let nearby: BTreeSet<usize> = keys
             .iter()
             .filter_map(|key| self.cells.get(key))
@@ -932,9 +968,8 @@ impl Footprint {
             .copied()
             .collect();
         let polygon: Vec<Vector2<f64>> = candidate.iter().map(|corner| corner.0).collect();
-        let mut overlaps = Vec::new();
         for index in nearby {
-            if !linked(self.components[index]) {
+            if !include(index) {
                 continue;
             }
             let kept = &self.triangles[index];
@@ -952,35 +987,50 @@ impl Footprint {
                     break;
                 }
             }
-            if polygon_area(&inside) > 0.0 {
-                overlaps.push((inside, index));
+            if polygon_area(&inside) > 0.0 && !visit(inside, index) {
+                break;
             }
         }
-        Some((candidate, overlaps))
+        Some(())
     }
 
     /// Candidate-to-owner depth ratios at the centroids of overlaps with kept
     /// triangles whose vertices satisfy `anchored`, that agree within
-    /// `MAX_RELATIVE_SCALE_SAMPLE`.
+    /// `MAX_RELATIVE_SCALE_SAMPLE`; at most `limit`, and no overlap beyond the
+    /// last one needed is clipped.
     fn depth_ratios(
         &self,
         corners: &[Vector3<f64>; 3],
         linked: &dyn Fn(usize) -> bool,
         anchored: &dyn Fn(&[usize; 3]) -> bool,
+        limit: usize,
     ) -> Vec<f64> {
-        let Some((candidate, overlaps)) = self.overlaps(corners, linked) else {
-            return Vec::new();
+        let mut ratios = Vec::new();
+        let Some(candidate) = self.project_candidate(corners) else {
+            return ratios;
         };
-        overlaps
-            .iter()
-            .filter(|(_, index)| anchored(&self.vertices[*index]))
-            .filter_map(|(polygon, index)| {
-                let kept = &self.triangles[*index];
+        if limit == 0 {
+            return ratios;
+        }
+        let _ = self.visit_overlaps(
+            &candidate,
+            &|index| linked(self.components[index]) && anchored(&self.vertices[index]),
+            &mut |polygon, index| {
+                let kept = &self.triangles[index];
                 let centroid = polygon.iter().sum::<Vector2<f64>>() / polygon.len() as f64;
-                let ratio = inverse_depth(kept, centroid)? / inverse_depth(&candidate, centroid)?;
-                ((ratio - 1.0).abs() <= MAX_RELATIVE_SCALE_SAMPLE).then_some(ratio)
-            })
-            .collect()
+                if let (Some(owner), Some(own)) = (
+                    inverse_depth(kept, centroid),
+                    inverse_depth(&candidate, centroid),
+                ) {
+                    let ratio = owner / own;
+                    if (ratio - 1.0).abs() <= MAX_RELATIVE_SCALE_SAMPLE {
+                        ratios.push(ratio);
+                    }
+                }
+                ratios.len() < limit
+            },
+        );
+        ratios
     }
 
     /// The share of the candidate's projected area lying on kept triangles at
