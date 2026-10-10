@@ -839,7 +839,7 @@ impl AssembledScene {
     }
 }
 
-fn validate_identifier(id: &str) -> Result<(), SceneProjectError> {
+pub(crate) fn validate_identifier(id: &str) -> Result<(), SceneProjectError> {
     let valid = !id.is_empty()
         && id.len() <= MAX_IDENTIFIER_LENGTH
         && id

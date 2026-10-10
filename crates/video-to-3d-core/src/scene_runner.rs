@@ -17,8 +17,8 @@
 //! job of receipt-backed reconciliation.
 
 use crate::scene_project::{
-    ArtifactRecord, AttemptUsage, ContentHash, MediaInput, OperationDeclaration, OperationInput,
-    ProjectPath, ProviderDeclaration, SceneProjectError, SceneProjectManifest,
+    ArtifactKind, ArtifactRecord, AttemptUsage, ContentHash, MediaInput, OperationDeclaration,
+    OperationInput, ProjectPath, ProviderDeclaration, SceneProjectError, SceneProjectManifest,
 };
 pub use crate::scene_store::Reproducibility;
 use std::collections::{BTreeMap, BTreeSet};
@@ -121,10 +121,15 @@ pub trait RunObserver: Send {
         Ok(())
     }
 
-    /// Check a produced output before it is accepted (for example by hashing
-    /// the written file). A rejection is a failed attempt for that provider,
-    /// so fallback providers still apply.
-    fn verify_output(&mut self, _produced: &ProducedArtifact) -> Result<(), String> {
+    /// Check a produced output of artifact `kind` before it is accepted (for
+    /// example by hashing the written file and the sidecars it lists). A
+    /// rejection is a failed attempt for that provider, so fallback providers
+    /// still apply.
+    fn verify_output(
+        &mut self,
+        _kind: ArtifactKind,
+        _produced: &ProducedArtifact,
+    ) -> Result<(), String> {
         Ok(())
     }
 
@@ -646,7 +651,7 @@ fn execute_operation(
             charged += 1;
         }
         if let AttemptOutcome::Succeeded(produced) = &outcome {
-            if let Err(message) = lock().verify_output(produced) {
+            if let Err(message) = lock().verify_output(base.operation.kind.output(), produced) {
                 outcome = AttemptOutcome::Failed(format!("output verification failed: {message}"));
             }
         }

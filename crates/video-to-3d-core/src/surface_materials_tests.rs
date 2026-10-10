@@ -293,6 +293,96 @@ fn malformed_or_duplicate_reference_images_fail_closed() {
 }
 
 #[test]
+fn cancellation_interrupts_evidence_validation_before_traversal_finishes() {
+    let mut small = Fixture::new();
+    small.triangles.truncate(1);
+    let mut small_polls = 0;
+    small
+        .evidence()
+        .validate_with_cancel(|| {
+            small_polls += 1;
+            Ok(())
+        })
+        .unwrap();
+
+    let mut large = Fixture::new();
+    large.triangles = (0..4096).map(|_| triangle(0, 1, 2)).collect();
+    let mut polls = 0;
+    let error = large
+        .evidence()
+        .validate_with_cancel(|| {
+            polls += 1;
+            if polls >= small_polls + 2 {
+                Err("validation canceled".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert_eq!(polls, small_polls + 2);
+}
+
+#[test]
+fn cancellation_interrupts_inner_triangle_work() {
+    let mut fixture = Fixture::new();
+    // More than two polling windows; a cancel delivered mid-traversal must
+    // stop before the full bake or any of the texture crops are produced.
+    fixture.triangles = (0..4096).map(|_| triangle(0, 1, 2)).collect();
+    let evidence = fixture.evidence();
+    let images = fixture.reference_images();
+    let mut validation_polls = 0;
+    evidence
+        .validate_with_cancel(|| {
+            validation_polls += 1;
+            Ok(())
+        })
+        .unwrap();
+    // Beyond validation: check the image and region setup, then cancel in
+    // the large triangle traversal before materials are allocated.
+    let threshold = validation_polls + 11;
+    let mut checks = 0;
+    let error = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        checks += 1;
+        checks >= threshold
+    })
+    .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert_eq!(
+        checks, threshold,
+        "the work should poll during triangle traversal"
+    );
+}
+
+#[test]
+fn cancellation_rejects_all_fallback_bakes() {
+    let mut fixture = Fixture::new();
+    // No grid mapping means every triangle falls back; there are no materials
+    // and hence no PNG loop in which an executor could notice cancellation.
+    fixture.sites.clear();
+    let evidence = fixture.evidence();
+    let images = fixture.reference_images();
+    let mut full_polls = 0;
+    let full = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        full_polls += 1;
+        false
+    })
+    .unwrap();
+    assert!(full.materials.is_empty());
+    let mut checks = 0;
+    let error = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        checks += 1;
+        checks == full_polls
+    })
+    .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert_eq!(
+        checks, full_polls,
+        "cancellation must be checked after fallback processing"
+    );
+}
+
+#[test]
 fn reprojection_and_framing_changes_invalidate_only_the_affected_reference() {
     let fixture = Fixture::new();
     let baseline = fixture.bake();

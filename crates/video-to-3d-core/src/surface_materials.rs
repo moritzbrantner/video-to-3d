@@ -90,7 +90,7 @@ pub struct BakedReferenceMaterial {
 }
 
 /// Why an accepted triangle keeps the untextured fallback.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FallbackReasons {
     /// Vertices belong to different reference views.
     pub mixed_reference: usize,
@@ -258,9 +258,31 @@ pub fn bake_surface_materials(
     grid_sites: &[DenseGridSite],
     reference_images: &[ReferenceImage<'_>],
 ) -> Result<SurfaceMaterialBake, String> {
-    evidence.validate()?;
+    bake_surface_materials_with_cancel(evidence, grid_sites, reference_images, || false)
+}
+
+/// The same deterministic bake with cooperative cancellation. The callback is
+/// polled at bounded intervals during region, triangle, and pixel processing;
+/// a canceled operation never returns a partial bake as successful.
+pub(crate) fn bake_surface_materials_with_cancel(
+    evidence: &ReconstructionEvidenceView<'_>,
+    grid_sites: &[DenseGridSite],
+    reference_images: &[ReferenceImage<'_>],
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<SurfaceMaterialBake, String> {
+    let mut check_canceled = || {
+        if is_canceled() {
+            Err("texture bake was canceled".to_owned())
+        } else {
+            Ok(())
+        }
+    };
+    check_canceled()?;
+    evidence.validate_with_cancel(&mut check_canceled)?;
+    check_canceled()?;
     let mut images = BTreeMap::new();
     for image in reference_images {
+        check_canceled()?;
         let expected = (image.width as usize)
             .checked_mul(image.height as usize)
             .and_then(|pixels| pixels.checked_mul(4));
@@ -281,6 +303,9 @@ pub fn bake_surface_materials(
     let points = evidence.points;
     let mut ownership = vec![Ownership::Unobserved; points.len()];
     for (region_index, region) in evidence.regions.iter().enumerate() {
+        if region_index % 64 == 0 {
+            check_canceled()?;
+        }
         let observed = matches!(
             region.origin,
             EvidenceOrigin::GeometricMultiView | EvidenceOrigin::RevalidatedCompletion
@@ -289,7 +314,10 @@ pub fn bake_surface_materials(
             continue;
         };
         let end = region.points.start + region.points.count;
-        for owner in &mut ownership[region.points.start..end] {
+        for (index, owner) in ownership[region.points.start..end].iter_mut().enumerate() {
+            if index % 1024 == 0 {
+                check_canceled()?;
+            }
             *owner = Ownership::Observed {
                 reference,
                 region: region_index,
@@ -302,6 +330,9 @@ pub fn bake_surface_materials(
     // reference frame -> (triangle indices, contributing regions)
     let mut assigned: BTreeMap<usize, (Vec<usize>, BTreeSet<usize>)> = BTreeMap::new();
     for (triangle_index, triangle) in evidence.triangles.iter().enumerate() {
+        if triangle_index % 1024 == 0 {
+            check_canceled()?;
+        }
         let corners = [triangle.a, triangle.b, triangle.c].map(|index| ownership[index]);
         let mut references = Vec::with_capacity(3);
         let mut regions = Vec::with_capacity(3);
@@ -350,6 +381,7 @@ pub fn bake_surface_materials(
 
     let mut materials = Vec::with_capacity(assigned.len());
     for (reference, (triangles, regions)) in assigned {
+        check_canceled()?;
         let camera = evidence
             .cameras
             .iter()
@@ -369,7 +401,14 @@ pub fn bake_surface_materials(
         provenance.sort_by_key(|origin| *origin as u8);
 
         let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
-        for triangle in triangles.iter().map(|index| &evidence.triangles[*index]) {
+        for (ordinal, triangle) in triangles
+            .iter()
+            .map(|index| &evidence.triangles[*index])
+            .enumerate()
+        {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
             for site in [triangle.a, triangle.b, triangle.c].map(|index| grid_sites[index]) {
                 min_x = min_x.min(site.x);
                 min_y = min_y.min(site.y);
@@ -384,29 +423,36 @@ pub fn bake_surface_materials(
         let (crop_width, crop_height) = (x1 - x0 + 1, y1 - y0 + 1);
         let mut rgba = Vec::with_capacity(crop_width as usize * crop_height as usize * 4);
         for y in y0..=y1 {
+            if (y - y0) % 64 == 0 {
+                check_canceled()?;
+            }
             let row = (y as usize * image.width as usize + x0 as usize) * 4;
             rgba.extend_from_slice(&image.rgba[row..row + crop_width as usize * 4]);
         }
         let mut texture_hasher = Sha256::new();
         texture_hasher.update(crop_width.to_le_bytes());
         texture_hasher.update(crop_height.to_le_bytes());
-        texture_hasher.update(&rgba);
+        for chunk in rgba.chunks(1024 * 1024) {
+            check_canceled()?;
+            texture_hasher.update(chunk);
+        }
         let texture_hash = content_hash(texture_hasher);
 
         // Grid sites address pixel centers of the reference image.
-        let corner_uvs = triangles
-            .iter()
-            .map(|index| {
-                let triangle = &evidence.triangles[*index];
-                [triangle.a, triangle.b, triangle.c].map(|point| {
-                    let site = grid_sites[point];
-                    [
-                        ((site.x - x0) as f32 + 0.5) / crop_width as f32,
-                        ((site.y - y0) as f32 + 0.5) / crop_height as f32,
-                    ]
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut corner_uvs = Vec::with_capacity(triangles.len());
+        for (ordinal, index) in triangles.iter().enumerate() {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
+            let triangle = &evidence.triangles[*index];
+            corner_uvs.push([triangle.a, triangle.b, triangle.c].map(|point| {
+                let site = grid_sites[point];
+                [
+                    ((site.x - x0) as f32 + 0.5) / crop_width as f32,
+                    ((site.y - y0) as f32 + 0.5) / crop_height as f32,
+                ]
+            }));
+        }
 
         // The key covers exactly what this material's appearance depends on:
         // its camera, the reference framing and crop, the cropped pixels, and
@@ -430,7 +476,14 @@ pub fn bake_surface_materials(
         for origin in &provenance {
             key.update([*origin as u8]);
         }
-        for triangle in triangles.iter().map(|index| &evidence.triangles[*index]) {
+        for (ordinal, triangle) in triangles
+            .iter()
+            .map(|index| &evidence.triangles[*index])
+            .enumerate()
+        {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
             for site in [triangle.a, triangle.b, triangle.c].map(|index| grid_sites[index]) {
                 key.update(site.x.to_le_bytes());
                 key.update(site.y.to_le_bytes());
@@ -459,6 +512,8 @@ pub fn bake_surface_materials(
         });
     }
 
+    // In particular, an all-fallback bake must not report success if canceled.
+    check_canceled()?;
     Ok(SurfaceMaterialBake {
         schema_version: SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
         point_count: points.len(),

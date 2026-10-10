@@ -10,7 +10,7 @@ const MAX_MESH_EDGE_FOOTPRINT_MULTIPLIER: f64 = 3.0;
 const MIN_MESH_AREA_FOOTPRINT_RATIO: f64 = 0.05;
 const MIN_MESH_PROJECTED_AREA_FOOTPRINT_RATIO: f64 = 0.05;
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
 pub struct MeshTriangle {
     pub a: usize,
     pub b: usize,

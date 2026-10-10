@@ -18,8 +18,8 @@
 //! changes a build result, and [`VerifyMode::Full`] ignores it.
 
 use crate::scene_project::{
-    ArtifactRecord, AttemptUsage, ContentHash, OperationInput, OperationKind, ProjectPath,
-    SceneProjectError, SceneProjectManifest, STATE_DIRECTORY,
+    ArtifactKind, ArtifactRecord, AttemptUsage, ContentHash, OperationInput, OperationKind,
+    ProjectPath, SceneProjectError, SceneProjectManifest, STATE_DIRECTORY,
 };
 use crate::scene_runner::{
     run_observed, CancellationToken, OperationExecutor, ProducedArtifact, RecordedOutput,
@@ -98,6 +98,8 @@ impl OperationReceipt {
 /// Why a recorded artifact was dropped during reconciliation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invalidation {
+    /// Recorded output is verified but its producer's current identity changed.
+    StaleIdentity,
     MissingOutput,
     CorruptOutput {
         expected: ContentHash,
@@ -106,11 +108,15 @@ pub enum Invalidation {
     MissingReceipt,
     UnreadableReceipt(String),
     ReceiptMismatch(String),
+    /// A sidecar file the artifact document refers to is missing, unreadable,
+    /// or does not match its recorded hash.
+    CorruptSidecar(String),
 }
 
 impl Invalidation {
     pub fn describe(&self) -> String {
         match self {
+            Self::StaleIdentity => "producing operation identity is stale".into(),
             Self::MissingOutput => "output file is missing".into(),
             Self::CorruptOutput { expected, actual } => format!(
                 "output hash {} does not match recorded {}",
@@ -122,6 +128,7 @@ impl Invalidation {
                 format!("operation receipt is unreadable: {message}")
             }
             Self::ReceiptMismatch(message) => format!("operation receipt disagrees: {message}"),
+            Self::CorruptSidecar(message) => format!("artifact sidecar is invalid: {message}"),
         }
     }
 }
@@ -290,18 +297,177 @@ impl ProjectStore {
 
         let mut report = ReconcileReport::default();
         let mut keep = Vec::with_capacity(manifest.artifacts.len());
+        let mut rejected = Vec::new();
         for artifact in &manifest.artifacts {
             match self.verify_artifact(manifest, artifact, &mut cache) {
                 Ok(()) => {
                     report.verified.push(artifact.produced_by.clone());
                     keep.push(artifact.clone());
                 }
-                Err(reason) => report
-                    .invalidated
-                    .push((artifact.produced_by.clone(), reason)),
+                Err(reason) => {
+                    report
+                        .invalidated
+                        .push((artifact.produced_by.clone(), reason));
+                    rejected.push(artifact.clone());
+                }
             }
         }
         manifest.artifacts = keep;
+
+        // Only release obsolete foreign artifacts that block a texture-bake
+        // output directory. Other stale records must remain: downstream work
+        // can reuse their original content when an upstream rebuild reproduces
+        // the same bytes. Cached status must also retain stale records.
+        if mode == VerifyMode::Full {
+            let bake_directories: Vec<(String, String)> = manifest
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == OperationKind::TextureBake)
+                .map(|operation| {
+                    (
+                        operation.id.clone(),
+                        format!("artifacts/{}", operation.id).to_ascii_lowercase(),
+                    )
+                })
+                .collect();
+            if !bake_directories.is_empty() {
+                let identities = manifest.operation_identities()?;
+                // Paths overlap when equal or one contains the other.
+                let overlaps = |a: &str, b: &str| {
+                    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+                };
+                // A file at the bake directory or one of its ancestors makes
+                // creating the directory fail, whoever recorded it; a foreign
+                // file inside the directory collides with the bake's outputs.
+                // A stale record of the bake itself inside its own directory
+                // is simply overwritten.
+                // The bake creates its directory and the `textures/`
+                // directory inside it, so a file at or above either blocks it.
+                let at_or_above = |folded: &str, directory: &str| {
+                    [directory.to_owned(), format!("{directory}/textures")]
+                        .iter()
+                        .any(|managed| {
+                            folded == managed || managed.starts_with(&format!("{folded}/"))
+                        })
+                };
+                let blocks = |owner: &str, folded: &str, producer: &str| {
+                    let (_, directory) = bake_directories
+                        .iter()
+                        .find(|(id, _)| id == owner)
+                        .expect("owner is a bake operation");
+                    at_or_above(folded, directory)
+                        || (producer != owner && folded.starts_with(&format!("{directory}/")))
+                };
+                // The document and every sidecar a record lists are reserved
+                // for its producer, so any of them can obstruct a bake.
+                let owned: Vec<Vec<(ProjectPath, String)>> = manifest
+                    .artifacts
+                    .iter()
+                    .map(|artifact| {
+                        std::iter::once(artifact.path.clone())
+                            .chain(crate::scene_artifacts::recorded_sidecar_paths(
+                                &self.root, artifact,
+                            ))
+                            .map(|path| {
+                                let folded = path.as_str().to_ascii_lowercase();
+                                (path, folded)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let obstructing: Vec<bool> = manifest
+                    .artifacts
+                    .iter()
+                    .zip(&owned)
+                    .map(|(artifact, paths)| {
+                        artifact.operation_identity != identities[&artifact.produced_by]
+                            && paths.iter().any(|(_, folded)| {
+                                bake_directories
+                                    .iter()
+                                    .any(|(owner, _)| blocks(owner, folded, &artifact.produced_by))
+                            })
+                    })
+                    .collect();
+                // Paths still owned by a retained record, a media input or an
+                // export are never deleted, even when a stale record aliases
+                // them.
+                let protected: Vec<String> = owned
+                    .iter()
+                    .zip(&obstructing)
+                    .filter(|(_, obstructs)| !**obstructs)
+                    .flat_map(|(paths, _)| paths.iter().map(|(_, folded)| folded.clone()))
+                    .chain(
+                        manifest
+                            .inputs
+                            .iter()
+                            .map(|input| input.path.as_str().to_ascii_lowercase()),
+                    )
+                    .chain(
+                        manifest
+                            .exports
+                            .iter()
+                            .map(|export| export.path.as_str().to_ascii_lowercase()),
+                    )
+                    .collect();
+                // A rejected record no longer reserves its files, but one at
+                // or above a bake directory would still make the bake fail
+                // on `create_dir_all`; remove it unless someone else owns it.
+                for artifact in &rejected {
+                    // Sidecar paths come from the document, so trust them only
+                    // when the document still matches its recorded hash.
+                    let intact = hash_file(&self.resolve(&artifact.path))
+                        .is_some_and(|(hash, _)| hash == artifact.content_hash);
+                    let sidecars = if intact {
+                        crate::scene_artifacts::recorded_sidecar_paths(&self.root, artifact)
+                    } else {
+                        Vec::new()
+                    };
+                    let paths = std::iter::once(artifact.path.clone()).chain(sidecars);
+                    for path in paths {
+                        let folded = path.as_str().to_ascii_lowercase();
+                        let obstructs = bake_directories
+                            .iter()
+                            .any(|(_, directory)| at_or_above(&folded, directory));
+                        let shared = protected.iter().any(|kept| overlaps(kept, &folded));
+                        let file = self.resolve(&path);
+                        if obstructs && !shared && file.is_file() {
+                            let _ = fs::remove_file(file);
+                        }
+                    }
+                }
+                for ((artifact, paths), obstructs) in
+                    manifest.artifacts.iter().zip(&owned).zip(&obstructing)
+                {
+                    if !obstructs {
+                        continue;
+                    }
+                    // Remove only stale files at a bake directory or its
+                    // ancestors: they are verified outputs of an obsolete
+                    // operation, so removing them is cheaper than spending
+                    // the bake's attempt on a failed `create_dir_all`.
+                    for (path, folded) in paths {
+                        let obstructs = bake_directories
+                            .iter()
+                            .any(|(_, directory)| at_or_above(folded, directory));
+                        let shared = protected.iter().any(|kept| overlaps(kept, folded));
+                        let file = self.resolve(path);
+                        if obstructs && !shared && file.is_file() {
+                            let _ = fs::remove_file(file);
+                        }
+                    }
+                    report
+                        .verified
+                        .retain(|operation| operation != &artifact.produced_by);
+                    report
+                        .invalidated
+                        .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
+                }
+                let mut obstructing = obstructing.into_iter();
+                manifest
+                    .artifacts
+                    .retain(|_| !obstructing.next().expect("one flag per artifact"));
+            }
+        }
 
         let receipts_dir = self.root.join(STATE_DIRECTORY).join("receipts");
         if let Ok(entries) = fs::read_dir(&receipts_dir) {
@@ -391,6 +557,9 @@ impl ProjectStore {
                             && length == receipt.output.byte_length => {}
                     _ => continue,
                 }
+                if self.verify_sidecars(&candidate, cache).is_err() {
+                    continue;
+                }
                 let mut next = manifest.clone();
                 next.artifacts.push(candidate);
                 next.attempt_usage
@@ -448,6 +617,96 @@ impl ProjectStore {
                 expected: artifact.content_hash.clone(),
                 actual,
             });
+        }
+        self.verify_sidecars(artifact, cache)
+    }
+
+    /// Sidecar files listed by a keyframes or surface-textures document must
+    /// match their recorded hashes.
+    fn verify_sidecars(
+        &self,
+        artifact: &ArtifactRecord,
+        cache: &mut HashCache,
+    ) -> Result<(), Invalidation> {
+        self.verify_sidecars_of(artifact.kind, &artifact.path, cache)
+    }
+
+    fn verify_sidecars_of(
+        &self,
+        kind: ArtifactKind,
+        document_path: &ProjectPath,
+        cache: &mut HashCache,
+    ) -> Result<(), Invalidation> {
+        if matches!(
+            kind,
+            ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
+        ) {
+            let bytes = fs::read(self.resolve(document_path))
+                .map_err(|error| Invalidation::CorruptSidecar(error.to_string()))?;
+            // An opaque (non-UTF-8) provider output, such as a legacy binary,
+            // lists no sidecars; it is already hash- and receipt-verified.
+            let Ok(document) = std::str::from_utf8(&bytes) else {
+                return Ok(());
+            };
+            // A document claiming a JSON interchange format must parse;
+            // opaque provider outputs remain supported even when their path
+            // ends in .json. Readers still enforce the format when consumed.
+            let sidecars = match crate::scene_artifacts::artifact_sidecars(kind, document) {
+                Ok(sidecars) => sidecars,
+                // Only a document that is not JSON at all is opaque. Any JSON
+                // value (including a scalar) or anything shaped like an object
+                // or array claims the interchange format.
+                Err(_)
+                    if !document.trim_start().starts_with('{')
+                        && !document.trim_start().starts_with('[')
+                        && serde_json::from_str::<serde::de::IgnoredAny>(document).is_err() =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(Invalidation::CorruptSidecar(error)),
+            };
+            for sidecar in sidecars {
+                let path = &sidecar.path;
+                if let Some((width, height)) = sidecar.png_rgb8 {
+                    // A missing file is reported by the hash check below.
+                    if let Ok(png) = fs::read(self.resolve(path)) {
+                        if let Err(error) =
+                            crate::scene_artifacts::validate_png_rgb8(&png, width, height)
+                        {
+                            return Err(Invalidation::CorruptSidecar(format!(
+                                "`{}` is not the declared PNG: {error}",
+                                path.as_str()
+                            )));
+                        }
+                    }
+                }
+                match cache.hash(&self.resolve(path), path.as_str()) {
+                    Some((hash, length))
+                        if hash == sidecar.content_hash
+                            && sidecar
+                                .byte_length
+                                .is_none_or(|expected| expected == length) => {}
+                    Some((hash, length)) if hash == sidecar.content_hash => {
+                        return Err(Invalidation::CorruptSidecar(format!(
+                            "`{}` has {length} bytes; its format requires {}",
+                            path.as_str(),
+                            sidecar.byte_length.unwrap_or_default()
+                        )))
+                    }
+                    Some(_) => {
+                        return Err(Invalidation::CorruptSidecar(format!(
+                            "`{}` does not match its recorded content hash",
+                            path.as_str()
+                        )))
+                    }
+                    None => {
+                        return Err(Invalidation::CorruptSidecar(format!(
+                            "`{}` is missing or unreadable",
+                            path.as_str()
+                        )))
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -618,7 +877,11 @@ impl RunObserver for Persister<'_> {
             .map_err(|error| error.to_string())
     }
 
-    fn verify_output(&mut self, produced: &ProducedArtifact) -> Result<(), String> {
+    fn verify_output(
+        &mut self,
+        kind: ArtifactKind,
+        produced: &ProducedArtifact,
+    ) -> Result<(), String> {
         let Some((hash, _)) = hash_file(&self.store.resolve(&produced.path)) else {
             return Err(format!(
                 "output `{}` is missing or unreadable",
@@ -633,7 +896,12 @@ impl RunObserver for Persister<'_> {
                 produced.content_hash.as_str()
             ));
         }
-        Ok(())
+        // Sidecars are part of the output: a document listing a missing or
+        // malformed sidecar must fail now, not at the next reconciliation.
+        let mut cache = HashCache::load(&self.store.root, VerifyMode::Full);
+        self.store
+            .verify_sidecars_of(kind, &produced.path, &mut cache)
+            .map_err(|invalidation| invalidation.describe())
     }
 
     fn wave_recorded(

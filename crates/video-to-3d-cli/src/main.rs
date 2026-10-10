@@ -10,14 +10,12 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use video_to_3d_core::scene_artifacts::BuiltInExecutor;
 use video_to_3d_core::scene_model::AssembledScene;
 use video_to_3d_core::scene_project::{
     ArtifactKind, ExportFormat, OperationExecution, SceneProjectError, SceneProjectManifest,
 };
-use video_to_3d_core::scene_runner::{
-    AttemptOutcome, CancellationToken, OperationExecutor, OperationRequest, OperationState,
-    RunOptions, RunReport,
-};
+use video_to_3d_core::scene_runner::{CancellationToken, OperationState, RunOptions, RunReport};
 use video_to_3d_core::scene_store::{Invalidation, ProjectStore, ReconcileReport, VerifyMode};
 
 /// Process exit codes. Scripts can rely on these values.
@@ -129,26 +127,6 @@ fn open(
     ProjectStore::open(manifest).map_err(project_error)
 }
 
-/// Executes operations natively. No operation kind has a native executor in
-/// this build yet (video decoding is browser-owned and provider adapters are
-/// not integrated), so every attempt reports an explicit unsupported outcome
-/// instead of fabricating output.
-struct NativeExecutor;
-
-impl OperationExecutor for NativeExecutor {
-    fn execute(&self, request: &OperationRequest, _cancel: &CancellationToken) -> AttemptOutcome {
-        let kind = serde_json::to_value(request.operation.kind).unwrap_or(Value::Null);
-        let kind = kind.as_str().unwrap_or("operation");
-        AttemptOutcome::Unsupported(match &request.provider {
-            Some(provider) => format!(
-                "provider `{}` for {kind} has no native adapter in this build",
-                provider.id
-            ),
-            None => format!("{kind} has no native executor in this build"),
-        })
-    }
-}
-
 fn run_exit(report: &RunReport) -> Exit {
     if report.is_complete() {
         return Exit::Success;
@@ -210,20 +188,26 @@ fn reconcile_json(report: &ReconcileReport) -> Value {
 
 fn invalidation_code(reason: &Invalidation) -> &'static str {
     match reason {
+        Invalidation::StaleIdentity => "stale_identity",
         Invalidation::MissingOutput => "missing_output",
         Invalidation::CorruptOutput { .. } => "corrupt_output",
         Invalidation::MissingReceipt => "missing_receipt",
         Invalidation::UnreadableReceipt(_) => "unreadable_receipt",
         Invalidation::ReceiptMismatch(_) => "receipt_mismatch",
+        Invalidation::CorruptSidecar(_) => "corrupt_sidecar",
     }
 }
 
 fn build(manifest_path: &std::path::Path, jobs: usize) -> Outcome {
     let (store, mut manifest) = open(manifest_path)?;
+    // Built-in executors exist for texture_bake; every other kind reports an
+    // explicit unsupported outcome.
+    // Reservations come from the reconciled manifest the build persists.
+    let executor = BuiltInExecutor::for_project(store.root(), manifest_path);
     let report = store
         .build(
             &mut manifest,
-            &NativeExecutor,
+            &executor,
             RunOptions {
                 max_concurrency: jobs,
             },
@@ -239,12 +223,23 @@ fn build(manifest_path: &std::path::Path, jobs: usize) -> Outcome {
         eprintln!("{line}");
     }
     let exit = run_exit(&report.run);
-    let operations: BTreeMap<&String, Value> = report
-        .run
-        .states
-        .iter()
-        .map(|(operation, state)| (operation, state_json(state)))
-        .collect();
+    let mut operations: BTreeMap<&String, Value> = BTreeMap::new();
+    for (operation, state) in &report.run.states {
+        let mut value = state_json(state);
+        // Executed work reports its receipt observations (bake diagnostics,
+        // reused/rewritten texture references) on stdout and stderr.
+        if matches!(state, OperationState::Succeeded { .. }) {
+            if let Ok(Some(receipt)) = store.read_receipt(operation) {
+                for (key, observation) in &receipt.observations {
+                    if matches!(key.as_str(), "diagnostic" | "appearance") {
+                        eprintln!("{operation}: {observation}");
+                    }
+                }
+                value["observations"] = json!(receipt.observations);
+            }
+        }
+        operations.insert(operation, value);
+    }
     Ok((
         json!({
             "command": "build",

@@ -294,3 +294,168 @@ fn exhausted_budget_outranks_a_stale_artifact() {
     assert_eq!(status.json["operations"]["assemble"]["state"], "exhausted");
     assert_eq!(status.code, 4);
 }
+
+/// Browser-produced upstream artifacts for a texture bake: one observed
+/// reference patch (frame 0, supported by frame 1) of two triangles.
+struct BakeUpstream(PathBuf);
+
+impl OperationExecutor for BakeUpstream {
+    fn execute(&self, request: &OperationRequest, _cancel: &CancellationToken) -> AttemptOutcome {
+        use video_to_3d_core::scene_artifacts::{
+            write_keyframes_artifact, SampledFrame, SurfaceMeshArtifact,
+        };
+        use video_to_3d_core::{
+            DenseGridSite, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin, EvidenceRange,
+            EvidenceScale, MeshTriangle, Point3, ReconstructionEvidenceView,
+            ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+        };
+        let root = &self.0;
+        let output = match request.operation.id.as_str() {
+            "ingest" => {
+                let pixels: Vec<Vec<u8>> = (0..2u8)
+                    .map(|seed| {
+                        (0..8 * 8 * 4)
+                            .map(|i| (i as u8).wrapping_mul(7) ^ seed)
+                            .collect()
+                    })
+                    .collect();
+                let frames: Vec<SampledFrame<'_>> = pixels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rgba)| SampledFrame {
+                        frame_index: index,
+                        timestamp_seconds: index as f64 * 0.5,
+                        width: 8,
+                        height: 8,
+                        rgba,
+                    })
+                    .collect();
+                let index = ProjectPath::new("artifacts/ingest/keyframes.json").unwrap();
+                write_keyframes_artifact(root, &index, &frames).unwrap();
+                index
+            }
+            "mesh" => {
+                let camera = |frame_index: usize, x: f32| EvidenceCamera {
+                    frame_index,
+                    authority: EvidenceCameraAuthority::CalibratedSeed,
+                    rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    translation: [x, 0.0, 0.0],
+                    confidence: Some(0.9),
+                    median_reprojection_error_pixels: Some(0.5),
+                };
+                let points: Vec<Point3> = (0..4)
+                    .map(|i| Point3 {
+                        x: (i % 2) as f32,
+                        y: (i / 2) as f32,
+                        z: 2.0,
+                        confidence: 0.9,
+                        r: 100,
+                        g: 100,
+                        b: 100,
+                    })
+                    .collect();
+                let triangles = [(0, 1, 2), (1, 3, 2)].map(|(a, b, c)| MeshTriangle {
+                    a,
+                    b,
+                    c,
+                    confidence: 0.8,
+                });
+                let evidence = ReconstructionEvidenceView::new(
+                    ReconstructionProviderDescriptor::classic(),
+                    EvidenceScale::ArbitraryMonocular,
+                    vec![camera(0, 0.0), camera(1, 0.2)],
+                    vec![SurfaceEvidenceRegion {
+                        origin: EvidenceOrigin::GeometricMultiView,
+                        reference_frame: Some(0),
+                        source_frames: vec![1],
+                        points: EvidenceRange::new(0, 4),
+                    }],
+                    &points,
+                    &triangles,
+                )
+                .unwrap();
+                let sites: Vec<DenseGridSite> = [(1, 1), (6, 1), (1, 6), (6, 6)]
+                    .map(|(x, y)| DenseGridSite { x, y })
+                    .to_vec();
+                let mesh = SurfaceMeshArtifact::from_evidence(&evidence, &sites).unwrap();
+                let path = ProjectPath::new("artifacts/mesh/surface-mesh.json").unwrap();
+                fs::create_dir_all(path.resolve(root).parent().unwrap()).unwrap();
+                fs::write(path.resolve(root), mesh.to_json()).unwrap();
+                path
+            }
+            "bake" => return AttemptOutcome::Unsupported("left to the CLI".into()),
+            id => {
+                let path = ProjectPath::new(format!("artifacts/{id}.bin")).unwrap();
+                fs::create_dir_all(path.resolve(root).parent().unwrap()).unwrap();
+                fs::write(path.resolve(root), request.identity.as_str()).unwrap();
+                path
+            }
+        };
+        let bytes = fs::read(output.resolve(root)).unwrap();
+        AttemptOutcome::Succeeded(ProducedArtifact::new(
+            output,
+            ContentHash::of_bytes(&bytes),
+            Reproducibility::Deterministic,
+        ))
+    }
+}
+
+#[test]
+fn build_bakes_surface_textures_natively() {
+    let project = Project::new("bake");
+    let (hash, length) = hash_file(&project.root.join("media/clip.webm")).unwrap();
+    let document = json!({
+        "schema_version": 1,
+        "project_id": "bake",
+        "quality_mode": "standard",
+        "inputs": [
+            { "id": "clip", "path": "media/clip.webm", "content_hash": hash.as_str(), "byte_length": length }
+        ],
+        "provider_policy": { "execution": "local_only" },
+        "operations": [
+            { "id": "ingest", "kind": "ingest_video", "inputs": [{ "media": "clip" }] },
+            { "id": "sparse", "kind": "sparse_reconstruction", "inputs": [{ "operation": "ingest" }] },
+            { "id": "dense", "kind": "dense_reconstruction", "inputs": [{ "operation": "sparse" }] },
+            { "id": "mesh", "kind": "surface_mesh", "inputs": [{ "operation": "dense" }] },
+            { "id": "bake", "kind": "texture_bake", "inputs": [{ "operation": "ingest" }, { "operation": "mesh" }] }
+        ],
+        "requested_outputs": ["surface_textures"]
+    });
+    fs::write(project.manifest(), document.to_string()).unwrap();
+    let (store, mut manifest) = ProjectStore::open(&project.manifest()).unwrap();
+    store
+        .build(
+            &mut manifest,
+            &BakeUpstream(project.root.clone()),
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    let build = cli(&["build", &path(&project)]);
+    assert_eq!(build.code, 0, "{}", build.stderr);
+    assert_eq!(build.json["executed"], json!(["bake"]));
+    let bake = &build.json["operations"]["bake"];
+    assert_eq!(bake["state"], "succeeded");
+    assert_eq!(bake["observations"]["textures_written"], "0");
+    assert!(build
+        .stderr
+        .contains("bake: Surface material bake v1: 2 of 2 accepted triangles textured"));
+    assert!(build
+        .stderr
+        .contains("bake: Appearance artifacts versus the previous bake"));
+
+    let inspect = cli(&["inspect", &path(&project)]);
+    let bake = &inspect.json["operations"]["bake"];
+    assert_eq!(bake["state"], "current");
+    assert_eq!(bake["artifact"]["kind"], "surface_textures");
+    assert_eq!(
+        bake["artifact"]["path"],
+        "artifacts/bake/surface-textures.json"
+    );
+
+    let rebuild = cli(&["build", &path(&project)]);
+    assert_eq!(rebuild.code, 0, "{}", rebuild.stderr);
+    assert_eq!(rebuild.json["executed"], json!([]));
+    assert_eq!(rebuild.json["operations"]["bake"]["state"], "reused");
+}

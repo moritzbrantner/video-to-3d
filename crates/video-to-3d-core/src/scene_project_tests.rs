@@ -352,6 +352,22 @@ fn provider_policy_combinations_fail_closed() {
 }
 
 #[test]
+fn operation_ids_must_name_project_paths() {
+    for id in ["con", "nul.x", "com1", "bake."] {
+        expect_invalid(
+            &with(standard_document(), "/operations/6/id", json!(id)),
+            "cannot name a project path",
+        );
+    }
+    parse(&with(
+        standard_document(),
+        "/operations/6/id",
+        json!("console"),
+    ))
+    .unwrap();
+}
+
+#[test]
 fn operation_graph_invariants_fail_closed() {
     expect_invalid(
         &with(
@@ -677,4 +693,39 @@ fn cloud_providers_must_declare_their_cost() {
         ),
         "must not declare a cost",
     );
+}
+
+#[test]
+fn texture_bake_consumes_exactly_one_keyframes_and_one_mesh_operation() {
+    let bake = |inputs: Value| {
+        let mut document = standard_document();
+        document["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "id": "bake", "kind": "texture_bake", "inputs": inputs }));
+        document
+    };
+    parse(&bake(
+        json!([{ "operation": "ingest" }, { "operation": "mesh" }]),
+    ))
+    .unwrap();
+    for inputs in [
+        json!([{ "operation": "ingest" }]),
+        json!([{ "operation": "mesh" }]),
+    ] {
+        expect_invalid(
+            &bake(inputs),
+            "exactly one ingest_video and one surface_mesh",
+        );
+    }
+    // Two meshes alongside the keyframes.
+    let mut document = bake(json!([
+        { "operation": "ingest" },
+        { "operation": "mesh" },
+        { "operation": "mesh2" }
+    ]));
+    document["operations"].as_array_mut().unwrap().push(
+        json!({ "id": "mesh2", "kind": "surface_mesh", "inputs": [{ "operation": "dense" }] }),
+    );
+    expect_invalid(&document, "exactly one ingest_video and one surface_mesh");
 }
