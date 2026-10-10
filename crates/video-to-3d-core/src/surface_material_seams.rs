@@ -278,10 +278,12 @@ impl<'a> CameraView<'a> {
             mid(camera[2], camera[0]),
             centroid,
         ];
+        let plane = InverseDepthPlane::through(pixels, camera.map(|point| 1.0 / point[2]))
+            .ok_or(SeamRejection::Ambiguous)?;
         let mut ambiguous = false;
         for sample in samples {
             let [u, v] = self.pixel(sample);
-            match depth.classify(u, v, sample[2]) {
+            match depth.classify(u, v, &plane) {
                 Visibility::Visible => {}
                 Visibility::Ambiguous => ambiguous = true,
                 Visibility::Occluded => return Err(SeamRejection::Occluded),
@@ -304,13 +306,54 @@ enum Visibility {
     Occluded,
 }
 
+/// Inverse camera depth of the seam triangle's plane as an affine function of
+/// pixel coordinates (exact under the pinhole projection):
+/// `1 / z = a u + b v + c`.
+struct InverseDepthPlane {
+    a: f64,
+    b: f64,
+    c: f64,
+}
+
+impl InverseDepthPlane {
+    fn through(pixels: [[f64; 2]; 3], inverse_depth: [f64; 3]) -> Option<Self> {
+        let [[u0, v0], [u1, v1], [u2, v2]] = pixels;
+        let [w0, w1, w2] = inverse_depth;
+        let det = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0);
+        let a = ((w1 - w0) * (v2 - v0) - (w2 - w0) * (v1 - v0)) / det;
+        let b = ((u1 - u0) * (w2 - w0) - (u2 - u0) * (w1 - w0)) / det;
+        let c = w0 - a * u0 - b * v0;
+        [a, b, c]
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(Self { a, b, c })
+    }
+
+    /// Nearest depth the plane reaches inside the pixel cell centered at
+    /// `(x, y)`. Every depth the buffer records for that cell was taken within
+    /// half a pixel of its center, so the triangle's own surface (and coplanar
+    /// neighbours) can never be nearer than this. `None` when the plane does
+    /// not stay in front of the camera over the cell.
+    fn nearest_depth_in_cell(&self, x: isize, y: isize) -> Option<f64> {
+        let inverse =
+            self.a * x as f64 + self.b * y as f64 + self.c + 0.5 * (self.a.abs() + self.b.abs());
+        (inverse.is_finite() && inverse > 0.0).then(|| 1.0 / inverse)
+    }
+}
+
 /// Closest accepted surface depth per pixel (centers plus conservatively
 /// stamped triangle edges); `INFINITY` is empty.
 struct DepthBuffer {
     width: usize,
     height: usize,
     depth: Vec<f64>,
+    /// Pixel and edge samples written since the last cancellation poll.
+    unpolled_work: usize,
 }
+
+/// Rasterization work (pixels tested plus edge samples) between two
+/// cancellation polls.
+const RASTER_POLL_INTERVAL: usize = 1 << 16;
 
 impl DepthBuffer {
     fn rasterize(
@@ -323,6 +366,7 @@ impl DepthBuffer {
             width,
             height,
             depth: vec![f64::INFINITY; width * height],
+            unpolled_work: 0,
         };
         for (ordinal, triangle) in evidence.triangles.iter().enumerate() {
             if ordinal % 1024 == 0 {
@@ -332,22 +376,45 @@ impl DepthBuffer {
                 .map(|index| view.to_camera(position(&evidence.points[index])));
             let polygon = clip_near(&camera);
             for fan in 1..polygon.len().saturating_sub(1) {
-                buffer.fill(view, [polygon[0], polygon[fan], polygon[fan + 1]]);
+                buffer.fill(
+                    view,
+                    [polygon[0], polygon[fan], polygon[fan + 1]],
+                    check_canceled,
+                )?;
             }
         }
         Ok(buffer)
     }
 
-    fn fill(&mut self, view: &CameraView<'_>, corners: [[f64; 3]; 3]) {
+    /// Count `work` units and poll cancellation once enough accumulated.
+    fn charge(
+        &mut self,
+        work: usize,
+        check_canceled: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.unpolled_work += work;
+        if self.unpolled_work >= RASTER_POLL_INTERVAL {
+            self.unpolled_work = 0;
+            check_canceled()?;
+        }
+        Ok(())
+    }
+
+    fn fill(
+        &mut self,
+        view: &CameraView<'_>,
+        corners: [[f64; 3]; 3],
+        check_canceled: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         let pixels = corners.map(|point| view.pixel(point));
         let inverse_depth = corners.map(|point| 1.0 / point[2]);
         let edge = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
             (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
         };
-        self.stamp_edges(pixels, inverse_depth);
+        self.stamp_edges(pixels, inverse_depth, check_canceled)?;
         let area = edge(pixels[0], pixels[1], pixels[2]);
         if !area.is_finite() || area.abs() < 1.0e-12 {
-            return;
+            return Ok(());
         }
         let bound = |axis: usize, limit: usize| {
             let low = pixels.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
@@ -360,9 +427,10 @@ impl DepthBuffer {
             (low <= high).then_some((low as usize, high as usize))
         };
         let (Some((x0, x1)), Some((y0, y1))) = (bound(0, self.width), bound(1, self.height)) else {
-            return;
+            return Ok(());
         };
         for y in y0..=y1 {
+            self.charge(x1 - x0 + 1, check_canceled)?;
             for x in x0..=x1 {
                 let p = [x as f64, y as f64];
                 let weights = [
@@ -383,6 +451,7 @@ impl DepthBuffer {
                 *slot = slot.min(1.0 / inverse);
             }
         }
+        Ok(())
     }
 
     /// Conservative coverage: sampling only pixel centers misses thin or
@@ -390,7 +459,12 @@ impl DepthBuffer {
     /// Record each edge's perspective-correct depth at the pixel nearest to
     /// every sample (spacing at most a quarter pixel), so any accepted triangle
     /// reaches the depth buffer within half a pixel of its footprint.
-    fn stamp_edges(&mut self, pixels: [[f64; 2]; 3], inverse_depth: [f64; 3]) {
+    fn stamp_edges(
+        &mut self,
+        pixels: [[f64; 2]; 3],
+        inverse_depth: [f64; 3],
+        check_canceled: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         const SPACING_PIXELS: f64 = 0.25;
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
             let (start, end) = (pixels[a], pixels[b]);
@@ -409,6 +483,7 @@ impl DepthBuffer {
                 continue;
             }
             let steps = (length / SPACING_PIXELS).ceil().max(1.0) as usize;
+            self.charge(steps + 1, check_canceled)?;
             for step in 0..=steps {
                 let t = t0 + (t1 - t0) * step as f64 / steps as f64;
                 let u = start[0] + (end[0] - start[0]) * t;
@@ -425,6 +500,7 @@ impl DepthBuffer {
                 *slot = slot.min(1.0 / inverse);
             }
         }
+        Ok(())
     }
 
     fn at(&self, x: isize, y: isize) -> f64 {
@@ -434,19 +510,29 @@ impl DepthBuffer {
         self.depth[y as usize * self.width + x as usize]
     }
 
-    fn classify(&self, u: f64, v: f64, depth: f64) -> Visibility {
+    /// Classify the sample at pixel `(u, v)` on the seam triangle's `plane`.
+    /// Each buffer cell is compared with the nearest depth the plane reaches
+    /// inside that cell, so the triangle's own (and coplanar neighbours')
+    /// depth recorded off-center never reads as an occluder on a slanted
+    /// surface, while geometry clearly in front of the plane still does.
+    fn classify(&self, u: f64, v: f64, plane: &InverseDepthPlane) -> Visibility {
         let (x, y) = (u.round() as isize, v.round() as isize);
-        let occluding = depth * (1.0 - OCCLUDED_DEPTH_TOLERANCE);
+        let Some(own) = plane.nearest_depth_in_cell(x, y) else {
+            return Visibility::Ambiguous;
+        };
         let center = self.at(x, y);
-        if center < occluding {
+        if center < own * (1.0 - OCCLUDED_DEPTH_TOLERANCE) {
             return Visibility::Occluded;
         }
-        if center < depth * (1.0 - VISIBLE_DEPTH_TOLERANCE) {
+        if center < own * (1.0 - VISIBLE_DEPTH_TOLERANCE) {
             return Visibility::Ambiguous;
         }
         for dy in -1..=1 {
             for dx in -1..=1 {
-                if self.at(x + dx, y + dy) < occluding {
+                let Some(own) = plane.nearest_depth_in_cell(x + dx, y + dy) else {
+                    return Visibility::Ambiguous;
+                };
+                if self.at(x + dx, y + dy) < own * (1.0 - OCCLUDED_DEPTH_TOLERANCE) {
                     return Visibility::Ambiguous;
                 }
             }

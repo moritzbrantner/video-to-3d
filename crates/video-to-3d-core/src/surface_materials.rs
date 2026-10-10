@@ -610,16 +610,17 @@ fn bake_with_cancel(
         let image = images[&reference];
         let (source_frames, provenance) = region_provenance(evidence, reference, &regions);
 
-        let corner_pixels = triangles
-            .iter()
-            .map(|index| {
-                let triangle = &evidence.triangles[*index];
-                [triangle.a, triangle.b, triangle.c].map(|point| {
-                    let site = grid_sites[point];
-                    [site.x as f64, site.y as f64]
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut corner_pixels = Vec::with_capacity(triangles.len());
+        for (ordinal, index) in triangles.iter().enumerate() {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
+            let triangle = &evidence.triangles[*index];
+            corner_pixels.push([triangle.a, triangle.b, triangle.c].map(|point| {
+                let site = grid_sites[point];
+                [site.x as f64, site.y as f64]
+            }));
+        }
         let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
 
         // The key covers exactly what this material's appearance depends on:
@@ -677,7 +678,10 @@ fn bake_with_cancel(
             .focal_pixels;
         let mut regions = BTreeSet::new();
         let mut seam_reference_frames = BTreeSet::new();
-        for (index, _) in &admitted {
+        for (ordinal, (index, _)) in admitted.iter().enumerate() {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
             let triangle = &evidence.triangles[*index];
             for point in [triangle.a, triangle.b, triangle.c] {
                 if let Ownership::Observed { reference, region } = ownership[point] {
@@ -792,7 +796,10 @@ fn crop_texture(
     // Projected corners carry float noise; the crop margin already covers the
     // neighbouring texel a bilinear sample reads, so snap within a tolerance.
     const SNAP: f64 = 1.0e-3;
-    for [x, y] in corner_pixels.iter().flatten() {
+    for (ordinal, [x, y]) in corner_pixels.iter().flatten().enumerate() {
+        if ordinal % (3 * 1024) == 0 {
+            check_canceled()?;
+        }
         min_x = min_x.min((x + SNAP).floor().max(0.0) as u32);
         min_y = min_y.min((y + SNAP).floor().max(0.0) as u32);
         max_x = max_x.max((x - SNAP).ceil().max(0.0) as u32);
@@ -818,17 +825,18 @@ fn crop_texture(
         check_canceled()?;
         texture_hasher.update(chunk);
     }
-    let corner_uvs = corner_pixels
-        .iter()
-        .map(|corners| {
-            corners.map(|[x, y]| {
-                [
-                    ((x - x0 as f64 + 0.5) / crop_width as f64) as f32,
-                    ((y - y0 as f64 + 0.5) / crop_height as f64) as f32,
-                ]
-            })
-        })
-        .collect();
+    let mut corner_uvs = Vec::with_capacity(corner_pixels.len());
+    for (ordinal, corners) in corner_pixels.iter().enumerate() {
+        if ordinal % 1024 == 0 {
+            check_canceled()?;
+        }
+        corner_uvs.push(corners.map(|[x, y]| {
+            [
+                ((x - x0 as f64 + 0.5) / crop_width as f64) as f32,
+                ((y - y0 as f64 + 0.5) / crop_height as f64) as f32,
+            ]
+        }));
+    }
     let texture = BakedTexture {
         crop_origin: [x0, y0],
         width: crop_width,
