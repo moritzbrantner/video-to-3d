@@ -34,7 +34,7 @@ use crate::scene_runner::{
 };
 use crate::scene_store::Reproducibility;
 use crate::surface_materials::{
-    bake_surface_materials, AppearanceInvalidation, FallbackReasons, RecordedAppearance,
+    bake_surface_materials_with_cancel, AppearanceInvalidation, FallbackReasons, RecordedAppearance,
     ReferenceImage, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
 };
 use crate::textured_glb::encode_png_rgb;
@@ -456,6 +456,21 @@ impl SurfaceTexturesArtifact {
                     material.reference_frame
                 ));
             }
+            let mut sources = BTreeSet::new();
+            for &source in &material.source_frames {
+                if !sources.insert(source) {
+                    return Err(format!(
+                        "surface textures material for frame {} cites source frame {source} more than once",
+                        material.reference_frame
+                    ));
+                }
+            }
+            if !sources.contains(&material.reference_frame) {
+                return Err(format!(
+                    "surface textures material for frame {} must cite its reference frame",
+                    material.reference_frame
+                ));
+            }
         }
         // Textured and fallback triangles partition the accepted triangles.
         // Check the count first so an untrusted `triangle_count` never sizes
@@ -538,6 +553,7 @@ impl SurfaceTexturesArtifact {
         &self,
         namespace: &str,
     ) -> Result<(Vec<SceneResource>, Vec<Material>), String> {
+        self.validate()?;
         // Scene identifiers are at most 64 bytes; reject a namespace that
         // cannot carry the longest generated suffix.
         if let Some(longest) = self
@@ -664,6 +680,14 @@ pub fn bake_texture_artifact(
     surface_mesh: &ProjectPath,
     cancel: &CancellationToken,
 ) -> Result<TextureBakeOutcome, String> {
+    let check_canceled = || {
+        if cancel.is_canceled() {
+            Err("texture bake was canceled".to_owned())
+        } else {
+            Ok(())
+        }
+    };
+    check_canceled()?;
     let read = |path: &ProjectPath| {
         fs::read_to_string(path.resolve(root))
             .map_err(|error| format!("cannot read `{}`: {error}", path.as_str()))
@@ -686,6 +710,7 @@ pub fn bake_texture_artifact(
         .collect();
     let mut pixels = Vec::new();
     for frame in &keyframes.frames {
+        check_canceled()?;
         if references.contains(&frame.frame_index) {
             pixels.push((frame, keyframes.load_pixels(root, frame.frame_index)?));
         }
@@ -699,7 +724,14 @@ pub fn bake_texture_artifact(
             rgba,
         })
         .collect();
-    let bake = bake_surface_materials(&evidence, &mesh.grid_sites, &images)?;
+    check_canceled()?;
+    let bake = bake_surface_materials_with_cancel(
+        &evidence,
+        &mesh.grid_sites,
+        &images,
+        || cancel.is_canceled(),
+    )?;
+    check_canceled()?;
 
     let previous = fs::read_to_string(output.resolve(root))
         .ok()
@@ -719,9 +751,7 @@ pub fn bake_texture_artifact(
     let mut materials = Vec::with_capacity(bake.materials.len());
     let (mut written, mut reused) = (Vec::new(), Vec::new());
     for material in &bake.materials {
-        if cancel.is_canceled() {
-            return Err("texture bake was canceled".into());
-        }
+        check_canceled()?;
         let digest = &material.appearance_key.as_str()["sha256:".len()..];
         let path = sibling(output, &format!("textures/{digest}.png"))?;
         let kept = previous_files.get(&material.appearance_key).filter(|file| {
@@ -738,6 +768,7 @@ pub fn bake_texture_artifact(
                     material.texture.height,
                     &material.texture.rgba,
                 )?;
+                check_canceled()?;
                 write_atomically(&path.resolve(root), &png)?;
                 written.push(material.reference_frame);
                 ContentHash::of_bytes(&png)
@@ -775,6 +806,7 @@ pub fn bake_texture_artifact(
     };
     artifact.validate()?;
     let document = artifact.to_json();
+    check_canceled()?;
     write_atomically(&output.resolve(root), document.as_bytes())?;
 
     // Drop sidecars the new manifest no longer references. Only files inside
@@ -884,15 +916,18 @@ impl BuiltInExecutor {
                 &loaded
             }
         };
+        // ProjectPath manifest uniqueness folds ASCII case. Match it here,
+        // including ancestor/descendant collisions, before any sidecar write.
+        let folded_directory = directory.to_ascii_lowercase();
         Ok(reserved
             .iter()
             .filter(|(owner, _)| owner != operation)
             .map(|(_, path)| path)
             .find(|path| {
-                let path = path.as_str();
-                path == directory
-                    || path.starts_with(&format!("{directory}/"))
-                    || directory.starts_with(&format!("{path}/"))
+                let folded_path = path.as_str().to_ascii_lowercase();
+                folded_path == folded_directory
+                    || folded_path.starts_with(&format!("{folded_directory}/"))
+                    || folded_directory.starts_with(&format!("{folded_path}/"))
             })
             .cloned())
     }
