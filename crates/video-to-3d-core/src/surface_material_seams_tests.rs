@@ -826,3 +826,199 @@ fn crop_corner_passes_poll_cancellation_per_bounded_triangle_count() {
         Err("texture bake was canceled".to_owned())
     );
 }
+
+/// Camera-0 samples of seam A as the rule tests them: vertices, edge
+/// midpoints and the centroid (camera 0 is the world frame).
+fn seam_a_samples(fixture: &Seams) -> [[f64; 3]; 7] {
+    let triangle = &fixture.triangles[SEAM_A];
+    let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|index| {
+        let point = &fixture.points[index];
+        [point.x as f64, point.y as f64, point.z as f64]
+    });
+    let mid = |p: [f64; 3], q: [f64; 3]| [0, 1, 2].map(|axis| (p[axis] + q[axis]) * 0.5);
+    let centroid = [0, 1, 2].map(|axis| (a[axis] + b[axis] + c[axis]) / 3.0);
+    [a, b, c, mid(a, b), mid(b, c), mid(c, a), centroid]
+}
+
+/// A 0.2 px fronto-parallel triangle centered on camera 0's ray through
+/// `sample`, at `fraction` of the sample's depth.
+fn thin_occluder_on_ray(sample: [f64; 3], fraction: f64) -> [Point3; 3] {
+    let u = FOCAL as f64 * sample[0] / sample[2] + WIDTH as f64 * 0.5;
+    let v = FOCAL as f64 * sample[1] / sample[2] + HEIGHT as f64 * 0.5;
+    let depth = sample[2] * fraction;
+    let at = |u: f64, v: f64| {
+        world(
+            ((u - WIDTH as f64 * 0.5) / FOCAL as f64 * depth) as f32,
+            ((v - HEIGHT as f64 * 0.5) / FOCAL as f64 * depth) as f32,
+            depth as f32,
+        )
+    };
+    [at(u - 0.1, v - 0.1), at(u + 0.1, v - 0.1), at(u, v + 0.1)]
+}
+
+/// Steep but non-grazing slopes (|cos| about 0.71, 0.51, 0.38 and 0.33 at
+/// seam A, all above the 0.2 grazing bound).
+const STEEP_SLOPES: [f32; 4] = [1.0, 1.732_050_8, 2.5, 3.0];
+
+#[test]
+fn a_thin_occluder_clearly_in_front_along_a_slanted_seam_sample_ray_rejects_the_seam() {
+    // On a steep plane the seam's own depth varies by several percent inside
+    // one pixel cell. Accepted geometry 7 or 8 % in front of a sample along
+    // that sample's own ray is clearly in front (beyond the 5 % tolerance) and
+    // must never read as the seam's own surface, wherever the sample falls in
+    // its cell.
+    let mut admitted = Vec::new();
+    for slope in STEEP_SLOPES {
+        let clean = slanted(slope).only_image_0();
+        assert!(
+            seam_a_view_cosine(&clean) > 0.3,
+            "slope {slope} must not be grazing"
+        );
+        // Without the occluder the seam is visible and admitted, so a
+        // rejection below is caused by the occluder alone.
+        assert!(
+            seam_material(&clean.bake(), 0).triangles.contains(&SEAM_A),
+            "slope {slope}: the unoccluded slanted seam A must be admitted"
+        );
+        for (ordinal, sample) in seam_a_samples(&clean).into_iter().enumerate() {
+            for fraction in [0.92, 0.93] {
+                let bake = slanted(slope)
+                    .only_image_0()
+                    .with_occluder(thin_occluder_on_ray(sample, fraction))
+                    .bake();
+                if !bake.fallback.triangles.contains(&SEAM_A) {
+                    admitted.push((slope, ordinal, fraction));
+                }
+            }
+        }
+    }
+    assert!(
+        admitted.is_empty(),
+        "seam A was textured although accepted geometry lies clearly in front along one of \
+         its sample rays; (slope, sample 0-2 vertices / 3-5 midpoints / 6 centroid, \
+         occluder depth fraction): {admitted:?}"
+    );
+}
+
+#[test]
+fn geometry_beyond_the_seam_planes_horizon_next_to_a_sample_fails_closed() {
+    const SLOPE: f32 = 1.732_050_8;
+    // The plane's horizon in camera 0 lies at u = 16 + 20 / SLOPE = 27.55.
+    // Point 6 (a vertex of seam B, owned by reference 1 whose camera has no
+    // image here) moves onto the plane at u = 26.6: its pixel cell 27 stays in
+    // front, but the neighbouring cell 28 straddles the horizon.
+    let with_vertex_near_horizon = || {
+        let mut fixture = slanted(SLOPE).only_image_0();
+        fixture.points[6] = on_slanted_ray(0.0, 26.6, 14.0, SLOPE);
+        fixture
+    };
+    let vertex = {
+        let point = with_vertex_near_horizon().points[6];
+        [point.x as f64, point.y as f64, point.z as f64]
+    };
+
+    // Without further geometry seam B is visible and admitted, so the
+    // rejection below is caused by the neighbouring geometry alone.
+    let clean = with_vertex_near_horizon().bake();
+    assert!(
+        seam_material(&clean, 0).triangles.contains(&SEAM_B),
+        "{:?}",
+        clean.fallback.reasons.seam
+    );
+
+    // Accepted geometry in that neighbour cell, 10 % nearer than the vertex,
+    // is an occluding depth in the vertex's one-pixel neighbourhood; the
+    // plane extrapolated across the horizon gives no depth to excuse it.
+    let mut neighbour = vertex;
+    neighbour[0] += 1.4 * vertex[2] / FOCAL as f64;
+    let bake = with_vertex_near_horizon()
+        .with_occluder(thin_occluder_on_ray(
+            neighbour,
+            0.9 * vertex[2] / neighbour[2],
+        ))
+        .bake();
+    assert!(
+        bake.materials
+            .iter()
+            .all(|material| !material.triangles.contains(&SEAM_B)),
+        "seam B must not be textured: {:?}",
+        bake.fallback.reasons.seam
+    );
+    assert!(bake.fallback.triangles.contains(&SEAM_B));
+}
+
+/// The seam fixture with camera 0's image `width` x 1 pixels: the sites keep
+/// camera 0's grid exactly reproducible (x shifted with the principal point,
+/// camera 0 moved so v = site.y), so camera 0 is a seam candidate and its seam
+/// depth buffer is rasterized, while every seam is out of its frame. The extra
+/// accepted triangle at depth 10 has camera-0 pixel corners `corners`.
+fn strip_image(width: u32, corners: [[f64; 2]; 3]) -> Seams {
+    let mut fixture = Seams::new().only_image_0();
+    for site in &mut fixture.sites {
+        site.x += (width - WIDTH) / 2;
+    }
+    // v = FOCAL (y + t_y) / DEPTH + 0.5 equals the old v = FOCAL y / DEPTH + 12.
+    let lift = (HEIGHT as f32 * 0.5 - 0.5) * DEPTH / FOCAL;
+    fixture.cameras[0].translation[1] = lift;
+    fixture.images = vec![(0, [3, 2, 1, 255].repeat(width as usize))];
+    let depth = 10.0;
+    fixture.with_occluder(corners.map(|[u, v]| {
+        world(
+            ((u - width as f64 * 0.5) / FOCAL as f64 * depth) as f32,
+            ((v - 0.5) / FOCAL as f64 * depth) as f32 - lift,
+            depth as f32,
+        )
+    }))
+}
+
+/// Polls of a bake of `strip_image(width, corners)` minus those of the same
+/// bake whose extra triangle lies entirely outside the image.
+fn extra_raster_polls(width: u32, corners: [[f64; 2]; 3]) -> usize {
+    let outside = [[-10.0, -10.0], [-9.0, -10.0], [-10.0, -9.0]];
+    let (quiet, quiet_polls) = polled_bake(&strip_image(width, outside), width, 1);
+    let (busy, busy_polls) = polled_bake(&strip_image(width, corners), width, 1);
+    for bake in [&quiet, &busy] {
+        assert_eq!(
+            bake.fallback.reasons.seam.out_of_frame,
+            2,
+            "{}",
+            bake.diagnostic()
+        );
+    }
+    busy_polls.saturating_sub(quiet_polls)
+}
+
+const STRIP_WIDTH: u32 = 1 << 20;
+
+#[test]
+fn a_raster_row_wider_than_a_poll_batch_still_polls_at_bounded_intervals() {
+    // One row of 1,048,576 pixels, covered by a triangle whose edges all stay
+    // outside the strip (no edge samples): the work is the row fill alone.
+    let w = STRIP_WIDTH as f64;
+    let extra = extra_raster_polls(
+        STRIP_WIDTH,
+        [[-4.0 * w, -5.0], [5.0 * w, -5.0], [0.5 * w, 1.0e4]],
+    );
+    let pixels = STRIP_WIDTH as usize;
+    assert!(
+        extra >= pixels / 262_144,
+        "filling one {pixels}-pixel row polled cancellation only {extra} extra times"
+    );
+}
+
+#[test]
+fn an_edge_with_more_samples_than_a_poll_batch_still_polls_at_bounded_intervals() {
+    // A horizontal edge at v = 0.3 across the whole strip (about 4,194,304
+    // quarter-pixel samples); the triangle lies above it, so no pixel center
+    // of the strip is filled and the other edges stay outside the strip.
+    let w = STRIP_WIDTH as f64;
+    let extra = extra_raster_polls(
+        STRIP_WIDTH,
+        [[-3.0 * w, 0.3], [4.0 * w, 0.3], [0.5 * w, 1.0e4]],
+    );
+    let samples = 4 * STRIP_WIDTH as usize;
+    assert!(
+        extra >= samples / 262_144,
+        "stamping one edge of about {samples} samples polled cancellation only {extra} extra times"
+    );
+}
