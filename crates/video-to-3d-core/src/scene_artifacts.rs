@@ -34,9 +34,8 @@ use crate::scene_runner::{
 };
 use crate::scene_store::Reproducibility;
 use crate::surface_materials::{
-    bake_surface_materials_with_cancel, AppearanceArtifact, AppearanceInvalidation,
-    FallbackReasons, MaterialRule, RecordedAppearance, ReferenceImage,
-    SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
+    bake_incremental, AppearanceArtifact, AppearanceInvalidation, FallbackReasons, MaterialRule,
+    RecordedAppearance, ReferenceShape, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
 };
 use crate::textured_glb::encode_png_rgb_with_cancel;
 use crate::{
@@ -47,6 +46,7 @@ use crate::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -120,8 +120,10 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary = PathBuf::from(temporary);
     fs::write(&temporary, bytes)
         .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("cannot write {}: {error}", path.display())
+    })
 }
 
 /// Read a sidecar file and check it against its recorded hash.
@@ -457,6 +459,10 @@ fn write_keyframes(
     let previous = fs::read_to_string(index.resolve(root))
         .ok()
         .and_then(|document| KeyframesArtifact::from_json(&document).ok());
+    // Sidecars this write created: removed again unless the replacement index
+    // is committed, so failed writes leave no unreferenced frames behind.
+    // Files that existed before (possibly owned by another index) are kept.
+    let mut created = CreatedFiles(Vec::new());
     for (record, frame) in artifact.frames.iter().zip({
         let mut sorted: Vec<&SampledFrame<'_>> = frames.iter().collect();
         sorted.sort_by_key(|frame| frame.frame_index);
@@ -464,11 +470,15 @@ fn write_keyframes(
     }) {
         let target = record.pixels.resolve(root);
         if read_verified(root, &record.pixels, &record.content_hash).is_err() {
+            if !target.exists() {
+                created.0.push(target.clone());
+            }
             write_atomically(&target, frame.rgba)?;
         }
     }
     let document = artifact.to_json();
     write_atomically(&index.resolve(root), document.as_bytes())?;
+    created.0.clear();
     Ok((
         artifact,
         ContentHash::of_bytes(document.as_bytes()),
@@ -1420,30 +1430,33 @@ fn bake_parsed(
         })
         .filter_map(|region| region.reference_frame)
         .collect();
-    let mut pixels = Vec::new();
-    for frame in &keyframes.frames {
-        check_canceled()?;
-        if references.contains(&frame.frame_index) {
-            pixels.push((
-                frame,
-                keyframes
-                    .load_pixels_with_cancel(root, frame.frame_index, || cancel.is_canceled())?,
-            ));
-        }
-    }
-    let images: Vec<ReferenceImage<'_>> = pixels
+    // Only shapes are known up front: the bake assigns triangles first and
+    // then loads, crops and drops one participating reference at a time, so a
+    // reference that textures nothing is never read.
+    let shapes: Vec<ReferenceShape> = keyframes
+        .frames
         .iter()
-        .map(|(frame, rgba)| ReferenceImage {
+        .filter(|frame| references.contains(&frame.frame_index))
+        .map(|frame| ReferenceShape {
             frame_index: frame.frame_index,
             width: frame.width,
             height: frame.height,
-            rgba,
+            available_bytes: None,
         })
         .collect();
     check_canceled()?;
-    let bake = bake_surface_materials_with_cancel(&evidence, &mesh.grid_sites, &images, || {
-        cancel.is_canceled()
-    })?;
+    let bake = bake_incremental(
+        &evidence,
+        &mesh.grid_sites,
+        &shapes,
+        None,
+        |frame| {
+            keyframes
+                .load_pixels_with_cancel(root, frame, || cancel.is_canceled())
+                .map(Cow::Owned)
+        },
+        || cancel.is_canceled(),
+    )?;
     check_canceled()?;
 
     let previous = fs::read_to_string(output.resolve(root))

@@ -42,6 +42,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const SURFACE_MATERIAL_BAKE_SCHEMA_VERSION: u32 = 2;
@@ -60,6 +61,33 @@ pub struct ReferenceImage<'a> {
     pub height: u32,
     /// Row-major RGBA, `width * height * 4` bytes.
     pub rgba: &'a [u8],
+}
+
+/// Frame and dimensions of a reference image whose pixels are loaded only if
+/// the bake textures something from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReferenceShape {
+    pub frame_index: usize,
+    pub width: u32,
+    pub height: u32,
+    /// Byte length of pixels already in memory, checked up front; `None` when
+    /// the pixels are loaded later (and checked then).
+    pub available_bytes: Option<usize>,
+}
+
+impl ReferenceShape {
+    fn rgba_bytes(&self) -> Option<usize> {
+        (self.width as usize)
+            .checked_mul(self.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+    }
+
+    fn malformed(&self) -> String {
+        format!(
+            "reference image for frame {} must be non-empty RGBA of {}x{} pixels",
+            self.frame_index, self.width, self.height
+        )
+    }
 }
 
 /// The rule that admitted a material's triangles into its texture.
@@ -437,6 +465,7 @@ pub fn bake_surface_materials_with_seams(
 /// cancellation. The callback is polled at bounded intervals during region,
 /// triangle, seam, and pixel processing; a canceled operation never returns a
 /// partial bake as successful.
+#[cfg(test)]
 pub(crate) fn bake_surface_materials_with_cancel(
     evidence: &ReconstructionEvidenceView<'_>,
     grid_sites: &[DenseGridSite],
@@ -451,6 +480,48 @@ fn bake_with_cancel(
     grid_sites: &[DenseGridSite],
     reference_images: &[ReferenceImage<'_>],
     seam_projection: Option<SeamProjection>,
+    is_canceled: impl FnMut() -> bool,
+) -> Result<SurfaceMaterialBake, String> {
+    let shapes: Vec<ReferenceShape> = reference_images
+        .iter()
+        .map(|image| ReferenceShape {
+            frame_index: image.frame_index,
+            width: image.width,
+            height: image.height,
+            available_bytes: Some(image.rgba.len()),
+        })
+        .collect();
+    bake_incremental(
+        evidence,
+        grid_sites,
+        &shapes,
+        seam_projection,
+        |frame| {
+            reference_images
+                .iter()
+                .find(|image| image.frame_index == frame)
+                .map(|image| Cow::Borrowed(image.rgba))
+                .ok_or_else(|| format!("reference image for frame {frame} was not supplied"))
+        },
+        is_canceled,
+    )
+}
+
+/// The bake with reference pixels loaded on demand.
+///
+/// Triangles are first assigned from `shapes` (frame and dimensions) alone;
+/// `load` is then called once per participating reference (a frame that
+/// textures at least one same-reference or seam triangle), in ascending frame
+/// order, and its pixels are dropped once that frame's materials are cropped.
+/// Peak reference memory is therefore one full image plus the crops, and a
+/// reference that textures nothing is never loaded. The output is identical
+/// to a bake over fully loaded images.
+pub(crate) fn bake_incremental<'p>(
+    evidence: &ReconstructionEvidenceView<'_>,
+    grid_sites: &[DenseGridSite],
+    shapes: &[ReferenceShape],
+    seam_projection: Option<SeamProjection>,
+    mut load: impl FnMut(usize) -> Result<Cow<'p, [u8]>, String>,
     mut is_canceled: impl FnMut() -> bool,
 ) -> Result<SurfaceMaterialBake, String> {
     let mut check_canceled = || {
@@ -469,16 +540,17 @@ fn bake_with_cancel(
         }
     }
     let mut images = BTreeMap::new();
-    for image in reference_images {
+    for image in shapes {
         check_canceled()?;
-        let expected = (image.width as usize)
-            .checked_mul(image.height as usize)
-            .and_then(|pixels| pixels.checked_mul(4));
-        if image.width == 0 || image.height == 0 || expected != Some(image.rgba.len()) {
-            return Err(format!(
-                "reference image for frame {} must be non-empty RGBA of {}x{} pixels",
-                image.frame_index, image.width, image.height
-            ));
+        let expected = image.rgba_bytes();
+        if image.width == 0
+            || image.height == 0
+            || expected.is_none()
+            || image
+                .available_bytes
+                .is_some_and(|bytes| expected != Some(bytes))
+        {
+            return Err(image.malformed());
         }
         if images.insert(image.frame_index, *image).is_some() {
             return Err(format!(
@@ -603,150 +675,178 @@ fn bake_with_cancel(
             .find(|camera| camera.frame_index == frame)
             .ok_or_else(|| format!("reference frame {frame} has no accepted evidence camera"))
     };
-    let mut materials = Vec::with_capacity(assigned.len() + seam_assigned.len());
-    for (reference, (triangles, regions)) in assigned {
-        check_canceled()?;
-        let camera = camera_for(reference)?;
-        let image = images[&reference];
-        let (source_frames, provenance) = region_provenance(evidence, reference, &regions);
-
-        let mut corner_pixels = Vec::with_capacity(triangles.len());
-        for (ordinal, index) in triangles.iter().enumerate() {
-            if ordinal % 1024 == 0 {
-                check_canceled()?;
-            }
-            let triangle = &evidence.triangles[*index];
-            corner_pixels.push([triangle.a, triangle.b, triangle.c].map(|point| {
-                let site = grid_sites[point];
-                [site.x as f64, site.y as f64]
-            }));
-        }
-        let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
-
-        // The key covers exactly what this material's appearance depends on:
-        // its camera, the reference framing and crop, the cropped pixels, and
-        // its own triangles' footprints. Dense point indices and positions are
-        // excluded, so changes in other references never alter it.
-        let mut key = Sha256::new();
-        key.update(b"video-to-3d/surface-material");
-        key.update(BAKE_REVISION.to_le_bytes());
-        hash_camera_and_texture(
-            &mut key,
-            reference,
-            camera,
-            &texture,
-            &source_frames,
-            &provenance,
-        );
-        for (ordinal, triangle) in triangles
-            .iter()
-            .map(|index| &evidence.triangles[*index])
-            .enumerate()
-        {
-            if ordinal % 1024 == 0 {
-                check_canceled()?;
-            }
-            for site in [triangle.a, triangle.b, triangle.c].map(|index| grid_sites[index]) {
-                key.update(site.x.to_le_bytes());
-                key.update(site.y.to_le_bytes());
-            }
-        }
-
-        materials.push(BakedReferenceMaterial {
-            reference_frame: reference,
-            rule: MaterialRule::SameReferenceGrid,
-            seam_reference_frames: Vec::new(),
-            focal_pixels: None,
-            camera_authority: camera.authority,
-            camera_rotation: camera.rotation,
-            camera_translation: camera.translation,
-            source_frames,
-            provenance,
-            triangles,
-            corner_uvs,
-            texture,
-            appearance_key: content_hash(key),
-        });
+    // Missing cameras fail before any reference image is loaded, in the
+    // order the materials are emitted.
+    for frame in assigned.keys().chain(seam_assigned.keys()) {
+        camera_for(*frame)?;
     }
-
-    for (camera_frame, admitted) in seam_assigned {
+    // Only references that texture something are loaded, one at a time; a
+    // camera used by both rules is loaded once. Same-reference materials still
+    // precede seam materials in the output.
+    let participating: BTreeSet<usize> = assigned
+        .keys()
+        .chain(seam_assigned.keys())
+        .copied()
+        .collect();
+    let (mut assigned, mut seam_assigned) = (assigned, seam_assigned);
+    let mut same_reference = Vec::with_capacity(assigned.len());
+    let mut seam_materials = Vec::with_capacity(seam_assigned.len());
+    for frame in participating {
         check_canceled()?;
-        let camera = camera_for(camera_frame)?;
-        let image = images[&camera_frame];
-        let focal = seam_projection
-            .expect("seam triangles are admitted only with intrinsics")
-            .focal_pixels;
-        let mut regions = BTreeSet::new();
-        let mut seam_reference_frames = BTreeSet::new();
-        let mut triangles = Vec::with_capacity(admitted.len());
-        let mut corner_pixels = Vec::with_capacity(admitted.len());
-        for (ordinal, (index, pixels)) in admitted.iter().enumerate() {
-            if ordinal % 1024 == 0 {
-                check_canceled()?;
+        let shape = images[&frame];
+        let pixels = load(frame)?;
+        if Some(pixels.len()) != shape.rgba_bytes() {
+            return Err(shape.malformed());
+        }
+        let image = ReferenceImage {
+            frame_index: frame,
+            width: shape.width,
+            height: shape.height,
+            rgba: &pixels,
+        };
+        if let Some((triangles, regions)) = assigned.remove(&frame) {
+            let reference = frame;
+            let camera = camera_for(reference)?;
+            let (source_frames, provenance) = region_provenance(evidence, reference, &regions);
+
+            let mut corner_pixels = Vec::with_capacity(triangles.len());
+            for (ordinal, index) in triangles.iter().enumerate() {
+                if ordinal % 1024 == 0 {
+                    check_canceled()?;
+                }
+                let triangle = &evidence.triangles[*index];
+                corner_pixels.push([triangle.a, triangle.b, triangle.c].map(|point| {
+                    let site = grid_sites[point];
+                    [site.x as f64, site.y as f64]
+                }));
             }
-            triangles.push(*index);
-            corner_pixels.push(*pixels);
-            let triangle = &evidence.triangles[*index];
-            for point in [triangle.a, triangle.b, triangle.c] {
-                if let Ownership::Observed { reference, region } = ownership[point] {
-                    regions.insert(region);
-                    seam_reference_frames.insert(reference);
+            let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
+
+            // The key covers exactly what this material's appearance depends on:
+            // its camera, the reference framing and crop, the cropped pixels, and
+            // its own triangles' footprints. Dense point indices and positions are
+            // excluded, so changes in other references never alter it.
+            let mut key = Sha256::new();
+            key.update(b"video-to-3d/surface-material");
+            key.update(BAKE_REVISION.to_le_bytes());
+            hash_camera_and_texture(
+                &mut key,
+                reference,
+                camera,
+                &texture,
+                &source_frames,
+                &provenance,
+            );
+            for (ordinal, triangle) in triangles
+                .iter()
+                .map(|index| &evidence.triangles[*index])
+                .enumerate()
+            {
+                if ordinal % 1024 == 0 {
+                    check_canceled()?;
+                }
+                for site in [triangle.a, triangle.b, triangle.c].map(|index| grid_sites[index]) {
+                    key.update(site.x.to_le_bytes());
+                    key.update(site.y.to_le_bytes());
                 }
             }
-        }
-        let (source_frames, provenance) = region_provenance(evidence, camera_frame, &regions);
-        let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
 
-        // Seam appearance depends on the camera and intrinsics, the cropped
-        // pixels, the seam vertices' accepted positions (they are projected),
-        // and the references owning them. Occlusion decisions enter through
-        // the admitted triangle set.
-        let mut key = Sha256::new();
-        key.update(b"video-to-3d/surface-material/seam-single-camera-projection");
-        key.update(seams::SEAM_RULE_REVISION.to_le_bytes());
-        key.update(focal.to_bits().to_le_bytes());
-        hash_camera_and_texture(
-            &mut key,
-            camera_frame,
-            camera,
-            &texture,
-            &source_frames,
-            &provenance,
-        );
-        for frame in &seam_reference_frames {
-            key.update((*frame as u64).to_le_bytes());
+            same_reference.push(BakedReferenceMaterial {
+                reference_frame: reference,
+                rule: MaterialRule::SameReferenceGrid,
+                seam_reference_frames: Vec::new(),
+                focal_pixels: None,
+                camera_authority: camera.authority,
+                camera_rotation: camera.rotation,
+                camera_translation: camera.translation,
+                source_frames,
+                provenance,
+                triangles,
+                corner_uvs,
+                texture,
+                appearance_key: content_hash(key),
+            });
         }
-        for (ordinal, triangle) in triangles
-            .iter()
-            .map(|index| &evidence.triangles[*index])
-            .enumerate()
-        {
-            if ordinal % 1024 == 0 {
-                check_canceled()?;
-            }
-            for point in [triangle.a, triangle.b, triangle.c].map(|index| &points[index]) {
-                for value in [point.x, point.y, point.z] {
-                    key.update(value.to_bits().to_le_bytes());
+        if let Some(admitted) = seam_assigned.remove(&frame) {
+            let camera_frame = frame;
+            let camera = camera_for(camera_frame)?;
+            let focal = seam_projection
+                .expect("seam triangles are admitted only with intrinsics")
+                .focal_pixels;
+            let mut regions = BTreeSet::new();
+            let mut seam_reference_frames = BTreeSet::new();
+            let mut triangles = Vec::with_capacity(admitted.len());
+            let mut corner_pixels = Vec::with_capacity(admitted.len());
+            for (ordinal, (index, pixels)) in admitted.iter().enumerate() {
+                if ordinal % 1024 == 0 {
+                    check_canceled()?;
+                }
+                triangles.push(*index);
+                corner_pixels.push(*pixels);
+                let triangle = &evidence.triangles[*index];
+                for point in [triangle.a, triangle.b, triangle.c] {
+                    if let Ownership::Observed { reference, region } = ownership[point] {
+                        regions.insert(region);
+                        seam_reference_frames.insert(reference);
+                    }
                 }
             }
-        }
+            let (source_frames, provenance) = region_provenance(evidence, camera_frame, &regions);
+            let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
 
-        materials.push(BakedReferenceMaterial {
-            reference_frame: camera_frame,
-            rule: MaterialRule::SeamSingleCameraProjection,
-            seam_reference_frames: seam_reference_frames.into_iter().collect(),
-            focal_pixels: Some(focal),
-            camera_authority: camera.authority,
-            camera_rotation: camera.rotation,
-            camera_translation: camera.translation,
-            source_frames,
-            provenance,
-            triangles,
-            corner_uvs,
-            texture,
-            appearance_key: content_hash(key),
-        });
+            // Seam appearance depends on the camera and intrinsics, the cropped
+            // pixels, the seam vertices' accepted positions (they are projected),
+            // and the references owning them. Occlusion decisions enter through
+            // the admitted triangle set.
+            let mut key = Sha256::new();
+            key.update(b"video-to-3d/surface-material/seam-single-camera-projection");
+            key.update(seams::SEAM_RULE_REVISION.to_le_bytes());
+            key.update(focal.to_bits().to_le_bytes());
+            hash_camera_and_texture(
+                &mut key,
+                camera_frame,
+                camera,
+                &texture,
+                &source_frames,
+                &provenance,
+            );
+            for frame in &seam_reference_frames {
+                key.update((*frame as u64).to_le_bytes());
+            }
+            for (ordinal, triangle) in triangles
+                .iter()
+                .map(|index| &evidence.triangles[*index])
+                .enumerate()
+            {
+                if ordinal % 1024 == 0 {
+                    check_canceled()?;
+                }
+                for point in [triangle.a, triangle.b, triangle.c].map(|index| &points[index]) {
+                    for value in [point.x, point.y, point.z] {
+                        key.update(value.to_bits().to_le_bytes());
+                    }
+                }
+            }
+
+            seam_materials.push(BakedReferenceMaterial {
+                reference_frame: camera_frame,
+                rule: MaterialRule::SeamSingleCameraProjection,
+                seam_reference_frames: seam_reference_frames.into_iter().collect(),
+                focal_pixels: Some(focal),
+                camera_authority: camera.authority,
+                camera_rotation: camera.rotation,
+                camera_translation: camera.translation,
+                source_frames,
+                provenance,
+                triangles,
+                corner_uvs,
+                texture,
+                appearance_key: content_hash(key),
+            });
+        }
     }
+    let mut materials = same_reference;
+    materials.extend(seam_materials);
 
     // In particular, an all-fallback bake must not report success if canceled.
     check_canceled()?;

@@ -30,7 +30,7 @@
 //! camera admits keeps the vertex-color fallback; it is counted under the
 //! furthest check any candidate reached.
 
-use super::{Ownership, ReferenceImage};
+use super::{Ownership, ReferenceShape};
 use crate::{DenseGridSite, EvidenceCamera, Point3, ReconstructionEvidenceView};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -96,7 +96,7 @@ pub(super) fn evaluate_seams(
     evidence: &ReconstructionEvidenceView<'_>,
     ownership: &[Ownership],
     grid_sites: Option<&[DenseGridSite]>,
-    images: &BTreeMap<usize, ReferenceImage<'_>>,
+    images: &BTreeMap<usize, ReferenceShape>,
     projection: Option<SeamProjection>,
     seams: &[usize],
     check_canceled: &mut impl FnMut() -> Result<(), String>,
