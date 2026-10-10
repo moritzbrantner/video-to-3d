@@ -525,6 +525,12 @@ fn the_relative_scale_is_anchored_at_fusion_accepted_seam_vertices() {
             .count()
     };
     assert_eq!(layer_kept(&triangles), 8, "{stats:?}");
+    // Too few anchored samples: the pair is compared uncalibrated, and the
+    // diagnostic says so.
+    assert_eq!(stats.uncalibrated_patch_pairs, vec![(0, 1)]);
+    assert!(stats
+        .diagnostic(2)
+        .contains("1 linked patch pair(s) had too few anchored overlap samples"));
 
     // A third patch fused to the layer: its seam vertices must not calibrate
     // patch 1 against patch 0.
@@ -677,4 +683,34 @@ fn scale_samples_need_an_anchored_owner_triangle() {
             .len(),
         1
     );
+}
+
+#[test]
+fn unprojectable_linked_owners_leave_the_image_unable_to_judge() {
+    let mut kept = vec![
+        (
+            corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
+            0,
+            [0, 1, 2],
+        ),
+        (
+            corners([(-1.0, -1.0, 5.0), (1.0, 1.0, 5.0), (-1.0, 1.0, 5.0)]),
+            0,
+            [0, 2, 3],
+        ),
+    ];
+    // Behind the reference camera: absent from the image.
+    kept.push((
+        corners([(3.0, 3.0, -1.0), (4.0, 3.0, -1.0), (3.0, 4.0, -1.0)]),
+        1,
+        [4, 5, 6],
+    ));
+    let footprint = Footprint::new(0, identity_camera(0.0), &kept).unwrap();
+    let outside = corners([(2.0, 2.0, 5.0), (2.5, 2.0, 5.0), (2.0, 2.5, 5.0)]);
+    assert!(footprint.ownership(&outside, 1.0, &|_| true).is_none());
+    // Without a link to the omitted component the image still judges.
+    let judged = footprint
+        .ownership(&outside, 1.0, &|component| component == 0)
+        .unwrap();
+    assert_eq!(judged.image_share, 0.0);
 }

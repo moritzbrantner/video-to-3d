@@ -65,6 +65,10 @@ const MAX_RELATIVE_DEPTH_DISAGREEMENT: f64 = 0.035;
 const MAX_RELATIVE_SCALE_SAMPLE: f64 = 0.1;
 /// Anchored overlap samples needed before a relative depth scale is removed.
 const MIN_SCALE_SAMPLES: usize = 5;
+/// Most anchored overlap samples collected per patch pair, in deterministic
+/// triangle order: two triangulations can overlap in quadratically many
+/// pieces, and a median over this many samples is already stable.
+const MAX_SCALE_SAMPLES: usize = 4096;
 
 /// World-to-camera pose of a reference view: `x_cam = rotation * x + translation`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -120,6 +124,10 @@ pub(super) struct MergeStats {
     /// triangle's plane, not in the image), as a share of the accepted mesh
     /// area before the merge.
     pub trimmed_seam_area_share: f64,
+    /// Linked (owner, candidate) patch pairs with fewer than
+    /// `MIN_SCALE_SAMPLES` anchored overlap samples, compared without
+    /// removing a relative depth scale.
+    pub uncalibrated_patch_pairs: Vec<(usize, usize)>,
     /// Retained triangles per support group (the patch each triangle was
     /// triangulated in), indexed like `membership`'s groups.
     pub retained_by_group: Vec<usize>,
@@ -132,7 +140,7 @@ pub(super) struct MergeStats {
 impl MergeStats {
     pub fn diagnostic(&self, support_groups: usize) -> String {
         format!(
-            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area, and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
+            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area, and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} linked patch pair(s) had too few anchored overlap samples to calibrate their relative depth scale and were compared uncalibrated. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
             self.fused_pairs,
             self.shared_vertices,
             self.cross_reference_triangles,
@@ -141,6 +149,7 @@ impl MergeStats {
             self.trimmed_seam_triangles,
             self.trimmed_seam_area_share * 100.0,
             self.remaining_overlap_triangles,
+            self.uncalibrated_patch_pairs.len(),
             self.meshed_patches,
             support_groups,
             self.patch_components,
@@ -312,6 +321,7 @@ pub(super) fn merge_fused_patches(
     let mut remaining_overlap_triangles = 0;
     let mut trimmed_seam_triangles = 0;
     let mut trimmed_seam_area = 0.0;
+    let mut uncalibrated_patch_pairs = Vec::new();
     let total_area: f64 = geometry.iter().flatten().map(TriangleGeometry::area).sum();
     // Kept triangles of each processed patch with a reference camera,
     // projected into that camera and indexed on a grid over its image.
@@ -405,11 +415,13 @@ pub(super) fn merge_fused_patches(
                                 &anchored,
                             )
                         })
+                        .take(MAX_SCALE_SAMPLES)
                         .collect();
                     ratios.sort_by(f64::total_cmp);
                     let scale = if ratios.len() >= MIN_SCALE_SAMPLES {
                         ratios[ratios.len() / 2]
                     } else {
+                        uncalibrated_patch_pairs.push((footprint.patch, *patch));
                         1.0
                     };
                     (footprint, scale)
@@ -421,8 +433,9 @@ pub(super) fn merge_fused_patches(
                 };
                 let linked = |component: usize| components_linked(index, component);
                 // `None` from an owner means its image could not judge the
-                // triangle (behind the camera, degenerate, or too large for
-                // the bounded index).
+                // triangle (behind the camera, degenerate, too large for the
+                // bounded query, or a linked owner triangle of that patch
+                // could not be projected).
                 let judged: Vec<Ownership> = owners
                     .iter()
                     .filter_map(|(footprint, scale)| {
@@ -614,6 +627,7 @@ pub(super) fn merge_fused_patches(
         } else {
             0.0
         },
+        uncalibrated_patch_pairs,
         retained_by_group,
         patch_components,
         meshed_patches: patch_list.len(),
@@ -655,6 +669,8 @@ pub(crate) fn working_set_bytes(vertices: usize, triangles: usize) -> usize {
         // Per-query scratch: the widest grid query and its candidate set.
         .saturating_add(MAX_GRID_CELLS * (size_of::<(i64, i64, i64)>() + size_of::<usize>()))
         .saturating_add(MAX_IMAGE_GRID_CELLS * (size_of::<(i64, i64)>() + size_of::<usize>()))
+        // Scale samples of one patch pair at a time.
+        .saturating_add(MAX_SCALE_SAMPLES * size_of::<f64>())
 }
 
 fn find(parent: &mut [usize], index: usize) -> usize {
@@ -835,6 +851,10 @@ struct Footprint {
     cells: HashMap<(i64, i64), Vec<usize>>,
     /// Kept triangles too large for the bounded index; every query checks them.
     large: Vec<usize>,
+    /// Original components of kept triangles that could not be projected
+    /// (behind the camera or degenerate in the image). The image cannot rule
+    /// out that they own a linked candidate.
+    omitted_components: BTreeSet<usize>,
 }
 
 impl Footprint {
@@ -842,14 +862,19 @@ impl Footprint {
         let mut triangles: Vec<ProjectedTriangle> = Vec::new();
         let mut components = Vec::new();
         let mut vertices = Vec::new();
+        let mut omitted_components = BTreeSet::new();
         for (corners, component, indices) in kept {
-            let Some(projected) = camera.project_triangle(corners) else {
-                continue;
-            };
-            if image_area(&projected) > GEOMETRIC_EPSILON * GEOMETRIC_EPSILON {
-                triangles.push(projected);
-                components.push(*component);
-                vertices.push(*indices);
+            match camera.project_triangle(corners) {
+                Some(projected)
+                    if image_area(&projected) > GEOMETRIC_EPSILON * GEOMETRIC_EPSILON =>
+                {
+                    triangles.push(projected);
+                    components.push(*component);
+                    vertices.push(*indices);
+                }
+                _ => {
+                    omitted_components.insert(*component);
+                }
             }
         }
         let mut edges: Vec<f64> = triangles
@@ -883,6 +908,7 @@ impl Footprint {
             cell,
             cells,
             large,
+            omitted_components,
         })
     }
 
@@ -992,8 +1018,19 @@ impl Footprint {
                 surface += plane.map_or(0.0, |plane| back_projected_area(polygon, plane));
             }
         }
+        let image_share = (image / total).min(1.0);
+        // Below the removal threshold, an unprojectable linked owner could
+        // still cover the rest: the image cannot judge, so the 3D test must.
+        if image_share < MIN_IMAGE_OWNERSHIP_SHARE
+            && self
+                .omitted_components
+                .iter()
+                .any(|component| linked(*component))
+        {
+            return None;
+        }
         Some(Ownership {
-            image_share: (image / total).min(1.0),
+            image_share,
             surface_area: surface,
         })
     }
