@@ -473,12 +473,31 @@ fn collider_mesh(collider: &CoarseCollider) -> (Vec<f32>, Vec<u32>) {
 
 /// Deterministic 8-bit RGB PNG (alpha dropped; reference frames are opaque).
 pub fn encode_png_rgb(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    encode_png_rgb_with_cancel(width, height, rgba, || false)
+}
+
+/// Input bytes compressed between cancellation polls.
+const PNG_COMPRESSION_CHUNK: usize = 64 * 1024;
+
+/// [`encode_png_rgb`] with cooperative cancellation, polled every row while
+/// filtering and every [`PNG_COMPRESSION_CHUNK`] input bytes while
+/// compressing. The output is byte-identical to the uncancelable encoder.
+pub(crate) fn encode_png_rgb_with_cancel(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
+    let canceled = || "texture encoding was canceled".to_owned();
     if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
         return Err(format!("texture pixels do not match {width}x{height} RGBA"));
     }
     let row_bytes = width as usize * 3;
     let mut raw = Vec::with_capacity((row_bytes + 1) * height as usize);
     for row in rgba.chunks_exact(width as usize * 4) {
+        if is_canceled() {
+            return Err(canceled());
+        }
         // Sub filter: each byte minus the same channel of the previous pixel.
         raw.push(1);
         let start = raw.len();
@@ -495,13 +514,46 @@ pub fn encode_png_rgb(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, S
     header.extend_from_slice(&height.to_be_bytes());
     header.extend_from_slice(&[8, 2, 0, 0, 0]);
     png_chunk(&mut png, b"IHDR", &header);
-    png_chunk(
-        &mut png,
-        b"IDAT",
-        &miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6),
-    );
+    let compressed = compress_zlib_with_cancel(&raw, 6, &mut is_canceled)?.ok_or_else(canceled)?;
+    png_chunk(&mut png, b"IDAT", &compressed);
     png_chunk(&mut png, b"IEND", &[]);
     Ok(png)
+}
+
+/// zlib compression in bounded input chunks; `Ok(None)` once canceled.
+fn compress_zlib_with_cancel(
+    input: &[u8],
+    level: u8,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> Result<Option<Vec<u8>>, String> {
+    use miniz_oxide::deflate::core::{
+        compress, create_comp_flags_from_zip_params, CompressorOxide, TDEFLFlush, TDEFLStatus,
+    };
+    let mut compressor =
+        CompressorOxide::new(create_comp_flags_from_zip_params(level.into(), 1, 0));
+    let mut output = Vec::with_capacity(input.len() / 2 + 64);
+    let mut buffer = vec![0_u8; PNG_COMPRESSION_CHUNK];
+    let mut consumed = 0;
+    loop {
+        if is_canceled() {
+            return Ok(None);
+        }
+        let end = (consumed + PNG_COMPRESSION_CHUNK).min(input.len());
+        let flush = if end == input.len() {
+            TDEFLFlush::Finish
+        } else {
+            TDEFLFlush::None
+        };
+        let (status, read, written) =
+            compress(&mut compressor, &input[consumed..end], &mut buffer, flush);
+        consumed += read;
+        output.extend_from_slice(&buffer[..written]);
+        match status {
+            TDEFLStatus::Done => return Ok(Some(output)),
+            TDEFLStatus::Okay => {}
+            status => return Err(format!("PNG compression failed: {status:?}")),
+        }
+    }
 }
 
 fn png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
@@ -511,4 +563,62 @@ fn png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     png.extend_from_slice(data);
     let crc = crc32fast::hash(&png[start..]);
     png.extend_from_slice(&crc.to_be_bytes());
+}
+
+#[cfg(test)]
+mod png_tests {
+    use super::*;
+
+    fn pixels(width: u32, height: u32) -> Vec<u8> {
+        (0..width * height)
+            .flat_map(|index| {
+                let (x, y) = (index % width, index / width);
+                [(x * 7 + y) as u8, (y * 3) as u8, (x ^ y) as u8, 255]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chunked_compression_matches_the_one_shot_encoder() {
+        // More than one compression chunk of filtered rows.
+        let (width, height) = (300, 200);
+        let rgba = pixels(width, height);
+        let png = encode_png_rgb(width, height, &rgba).unwrap();
+        let mut raw = Vec::new();
+        for row in rgba.chunks_exact(width as usize * 4) {
+            raw.push(1);
+            let start = raw.len();
+            for pixel in row.as_chunks::<4>().0 {
+                raw.extend_from_slice(&pixel[..3]);
+            }
+            for index in (start + 3..raw.len()).rev() {
+                raw[index] = raw[index].wrapping_sub(raw[index - 3]);
+            }
+        }
+        assert!(raw.len() > PNG_COMPRESSION_CHUNK);
+        let one_shot = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+        let idat_length = u32::from_be_bytes(png[33..37].try_into().unwrap()) as usize;
+        assert_eq!(&png[37..41], b"IDAT");
+        assert_eq!(&png[41..41 + idat_length], one_shot.as_slice());
+        assert_eq!(
+            miniz_oxide::inflate::decompress_to_vec_zlib(&png[41..41 + idat_length]).unwrap(),
+            raw
+        );
+    }
+
+    #[test]
+    fn encoding_stops_when_canceled_while_filtering_or_compressing() {
+        let (width, height) = (300, 200);
+        let rgba = pixels(width, height);
+        for after in [1, height as usize + 1] {
+            let mut polls = 0;
+            let error = encode_png_rgb_with_cancel(width, height, &rgba, || {
+                polls += 1;
+                polls > after
+            })
+            .unwrap_err();
+            assert!(error.contains("canceled"), "{error}");
+            assert_eq!(polls, after + 1);
+        }
+    }
 }

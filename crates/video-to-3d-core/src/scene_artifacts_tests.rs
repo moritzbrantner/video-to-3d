@@ -946,3 +946,72 @@ fn surface_mesh_parsing_polls_for_cancellation_during_validation() {
     assert!(error.contains("canceled"), "{error}");
     assert!(seen < polls, "cancellation did not stop validation early");
 }
+
+#[test]
+fn legacy_inputs_are_reported_unsupported_without_charging_the_bake() {
+    let dir = TempDir::new("legacy-inputs");
+    let fixture = Fixture::new();
+    let (keyframes, mesh) = fixture.write(&dir.0);
+    let legacy = path("inputs/legacy-keyframes.bin");
+    fs::write(legacy.resolve(&dir.0), [0xff_u8, 0x00, 0x7b, 0x80]).unwrap();
+    let legacy_mesh = path("inputs/legacy-mesh.json");
+    fs::write(legacy_mesh.resolve(&dir.0), r#"{"vertices":[]}"#).unwrap();
+    let record = |id: &str, kind: ArtifactKind, path: &ProjectPath| {
+        ResolvedInput::Artifact(crate::scene_project::ArtifactRecord {
+            id: format!("{id}.output"),
+            kind,
+            produced_by: id.into(),
+            operation_identity: ContentHash::of_bytes(id.as_bytes()),
+            path: path.clone(),
+            content_hash: ContentHash::of_bytes(&fs::read(path.resolve(&dir.0)).unwrap()),
+            provider: None,
+        })
+    };
+    let manifest = SceneProjectManifest::from_json(
+        &json!({
+            "schema_version": 1,
+            "project_id": "legacy-inputs",
+            "quality_mode": "standard",
+            "inputs": [{
+                "id": "clip", "path": "media/clip.webm",
+                "content_hash": ContentHash::of_bytes(b"clip").as_str(), "byte_length": 4
+            }],
+            "provider_policy": { "execution": "local_only" },
+            "operations": [
+                { "id": "ingest", "kind": "ingest_video", "inputs": [{ "media": "clip" }] }
+            ],
+            "requested_outputs": ["keyframes"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let executor = BuiltInExecutor::new(&dir.0, &manifest);
+    let request = |keyframes: &ProjectPath, mesh: &ProjectPath| OperationRequest {
+        operation: crate::scene_project::OperationDeclaration {
+            id: "bake".into(),
+            kind: OperationKind::TextureBake,
+            inputs: Vec::new(),
+            provider: None,
+            max_attempts: 1,
+        },
+        identity: ContentHash::of_bytes(b"bake"),
+        provider: None,
+        attempt: 1,
+        inputs: vec![
+            record("ingest", ArtifactKind::Keyframes, keyframes),
+            record("mesh", ArtifactKind::SurfaceMesh, mesh),
+        ],
+    };
+    for (keyframes, mesh, named) in [
+        (&legacy, &mesh, &legacy),
+        (&keyframes, &legacy_mesh, &legacy_mesh),
+    ] {
+        let outcome = executor.execute(&request(keyframes, mesh), &CancellationToken::new());
+        assert!(
+            matches!(&outcome, AttemptOutcome::Unsupported(message)
+                if message.contains(named.as_str()) && message.contains("not a versioned")),
+            "{outcome:?}"
+        );
+    }
+    assert!(!dir.0.join("artifacts/bake").exists());
+}

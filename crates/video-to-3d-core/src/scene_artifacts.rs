@@ -37,7 +37,7 @@ use crate::surface_materials::{
     bake_surface_materials_with_cancel, AppearanceInvalidation, FallbackReasons,
     RecordedAppearance, ReferenceImage, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
 };
-use crate::textured_glb::encode_png_rgb;
+use crate::textured_glb::encode_png_rgb_with_cancel;
 use crate::{
     DenseGridSite, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
     EvidencePointAttributes, EvidenceScale, MeshTriangle, Point3, ReconstructionEvidenceView,
@@ -63,10 +63,18 @@ fn parse_versioned<T: DeserializeOwned>(
     label: &str,
     expected: u32,
 ) -> Result<T, String> {
-    let value: serde_json::Value =
+    // Only the version is read first; every other field is skipped without
+    // building a generic JSON tree, so a dense mesh is materialized once.
+    #[derive(Deserialize)]
+    struct Version {
+        #[serde(default)]
+        schema_version: Option<serde_json::Value>,
+    }
+    let header: Version =
         serde_json::from_str(document).map_err(|error| format!("{label}: {error}"))?;
-    match value
-        .get("schema_version")
+    match header
+        .schema_version
+        .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
         Some(version) if version == u64::from(expected) => {}
@@ -77,7 +85,7 @@ fn parse_versioned<T: DeserializeOwned>(
         }
         None => return Err(format!("{label}: `schema_version` is missing")),
     }
-    serde_json::from_value(value).map_err(|error| format!("{label}: {error}"))
+    serde_json::from_str(document).map_err(|error| format!("{label}: {error}"))
 }
 
 fn to_document<T: Serialize>(value: &T) -> String {
@@ -690,23 +698,41 @@ impl SurfaceTexturesArtifact {
     }
 }
 
+/// One sidecar file a recorded artifact document refers to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactSidecar {
+    pub path: ProjectPath,
+    pub content_hash: ContentHash,
+    /// Exact byte length the document's format requires (RGBA keyframes),
+    /// when it fixes one.
+    pub byte_length: Option<u64>,
+}
+
 /// Sidecar files a recorded artifact document refers to, with their hashes.
 /// Reconciliation verifies them next to the document itself; artifact kinds
 /// without sidecars return an empty list.
 pub fn artifact_sidecars(
     kind: ArtifactKind,
     document: &str,
-) -> Result<Vec<(ProjectPath, ContentHash)>, String> {
+) -> Result<Vec<ArtifactSidecar>, String> {
     Ok(match kind {
         ArtifactKind::Keyframes => KeyframesArtifact::from_json(document)?
             .frames
             .into_iter()
-            .map(|frame| (frame.pixels, frame.content_hash))
+            .map(|frame| ArtifactSidecar {
+                byte_length: rgba_length(frame.width, frame.height).map(|length| length as u64),
+                path: frame.pixels,
+                content_hash: frame.content_hash,
+            })
             .collect(),
         ArtifactKind::SurfaceTextures => SurfaceTexturesArtifact::from_json(document)?
             .materials
             .into_iter()
-            .map(|material| (material.texture.path, material.texture.content_hash))
+            .map(|material| ArtifactSidecar {
+                path: material.texture.path,
+                content_hash: material.texture.content_hash,
+                byte_length: None,
+            })
             .collect(),
         _ => Vec::new(),
     })
@@ -750,6 +776,70 @@ pub fn bake_texture_artifact(
     surface_mesh: &ProjectPath,
     cancel: &CancellationToken,
 ) -> Result<TextureBakeOutcome, String> {
+    bake_classified(root, output, keyframes, surface_mesh, cancel).map_err(
+        |failure| match failure {
+            BakeFailure::IncompatibleInput(message) | BakeFailure::Other(message) => message,
+        },
+    )
+}
+
+/// Why a texture bake did not complete.
+enum BakeFailure {
+    /// An input is not in the versioned format the bake reads (for example an
+    /// opaque or legacy output of an earlier producer). Nothing was baked.
+    IncompatibleInput(String),
+    Other(String),
+}
+
+fn bake_classified(
+    root: &Path,
+    output: &ProjectPath,
+    keyframes: &ProjectPath,
+    surface_mesh: &ProjectPath,
+    cancel: &CancellationToken,
+) -> Result<TextureBakeOutcome, BakeFailure> {
+    // Inputs that are not the versioned documents the bake reads.
+    let incompatible = |path: &ProjectPath, label: &str, error: String| {
+        if cancel.is_canceled() {
+            BakeFailure::Other("texture bake was canceled".into())
+        } else {
+            BakeFailure::IncompatibleInput(format!(
+                "`{}` is not a versioned {label} artifact ({error}); rebuild it with a producer of that format",
+                path.as_str()
+            ))
+        }
+    };
+    let read = |path: &ProjectPath, label: &str| -> Result<String, BakeFailure> {
+        let bytes = fs::read(path.resolve(root)).map_err(|error| {
+            BakeFailure::Other(format!("cannot read `{}`: {error}", path.as_str()))
+        })?;
+        String::from_utf8(bytes)
+            .map_err(|_| incompatible(path, label, "the document is not UTF-8".into()))
+    };
+    let keyframes_artifact = KeyframesArtifact::from_json(&read(keyframes, "keyframes")?)
+        .map_err(|error| incompatible(keyframes, "keyframes", error))?;
+    let mesh_document = read(surface_mesh, "surface mesh")?;
+    let check = || {
+        if cancel.is_canceled() {
+            Err("texture bake was canceled".to_owned())
+        } else {
+            Ok(())
+        }
+    };
+    check().map_err(BakeFailure::Other)?;
+    let mesh = SurfaceMeshArtifact::from_json_with_cancel(&mesh_document, check)
+        .map_err(|error| incompatible(surface_mesh, "surface mesh", error))?;
+    drop(mesh_document);
+    bake_parsed(root, output, &keyframes_artifact, &mesh, cancel).map_err(BakeFailure::Other)
+}
+
+fn bake_parsed(
+    root: &Path,
+    output: &ProjectPath,
+    keyframes: &KeyframesArtifact,
+    mesh: &SurfaceMeshArtifact,
+    cancel: &CancellationToken,
+) -> Result<TextureBakeOutcome, String> {
     let check_canceled = || {
         if cancel.is_canceled() {
             Err("texture bake was canceled".to_owned())
@@ -758,16 +848,8 @@ pub fn bake_texture_artifact(
         }
     };
     check_canceled()?;
-    let read = |path: &ProjectPath| {
-        fs::read_to_string(path.resolve(root))
-            .map_err(|error| format!("cannot read `{}`: {error}", path.as_str()))
-    };
-    let keyframes = KeyframesArtifact::from_json(&read(keyframes)?)?;
-    check_canceled()?;
-    // Validated once here, cancel-aware; the bake below re-checks the same
-    // view with the same polling before it relies on it.
-    let mesh = SurfaceMeshArtifact::from_json_with_cancel(&read(surface_mesh)?, check_canceled)?;
-    check_canceled()?;
+    // The mesh was validated once while parsing, cancel-aware; the bake below
+    // re-checks the same view with the same polling before it relies on it.
     let evidence = mesh.evidence_view();
 
     // Only reference frames of observed regions can be textured.
@@ -834,11 +916,19 @@ pub fn bake_texture_artifact(
                 file.content_hash.clone()
             }
             None => {
-                let png = encode_png_rgb(
+                let png = encode_png_rgb_with_cancel(
                     material.texture.width,
                     material.texture.height,
                     &material.texture.rgba,
-                )?;
+                    || cancel.is_canceled(),
+                )
+                .map_err(|error| {
+                    if cancel.is_canceled() {
+                        "texture bake was canceled".to_owned()
+                    } else {
+                        error
+                    }
+                })?;
                 check_canceled()?;
                 write_atomically(&path.resolve(root), &png)?;
                 written.push(material.reference_frame);
@@ -997,7 +1087,7 @@ pub(crate) fn recorded_sidecar_paths(
         return Vec::new();
     };
     artifact_sidecars(artifact.kind, document)
-        .map(|sidecars| sidecars.into_iter().map(|(path, _)| path).collect())
+        .map(|sidecars| sidecars.into_iter().map(|sidecar| sidecar.path).collect())
         .unwrap_or_default()
 }
 
@@ -1102,7 +1192,7 @@ impl BuiltInExecutor {
                 path.as_str()
             ));
         }
-        match bake_texture_artifact(&self.root, &output, keyframes, mesh, cancel) {
+        match bake_classified(&self.root, &output, keyframes, mesh, cancel) {
             Ok(outcome) => {
                 let list = |frames: &[usize]| {
                     frames
@@ -1124,7 +1214,10 @@ impl BuiltInExecutor {
                 AttemptOutcome::Succeeded(produced)
             }
             Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
-            Err(error) => AttemptOutcome::Failed(error),
+            // Not charged against the bake's attempt budget: the input, not
+            // the bake, is wrong.
+            Err(BakeFailure::IncompatibleInput(message)) => AttemptOutcome::Unsupported(message),
+            Err(BakeFailure::Other(message)) => AttemptOutcome::Failed(message),
         }
     }
 }

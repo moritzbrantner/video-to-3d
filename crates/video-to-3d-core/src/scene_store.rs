@@ -547,9 +547,21 @@ impl ProjectStore {
                 }
                 Err(error) => return Err(Invalidation::CorruptSidecar(error)),
             };
-            for (path, expected) in sidecars {
-                match cache.hash(&self.resolve(&path), path.as_str()) {
-                    Some((hash, _)) if hash == expected => {}
+            for sidecar in sidecars {
+                let path = &sidecar.path;
+                match cache.hash(&self.resolve(path), path.as_str()) {
+                    Some((hash, length))
+                        if hash == sidecar.content_hash
+                            && sidecar
+                                .byte_length
+                                .is_none_or(|expected| expected == length) => {}
+                    Some((hash, length)) if hash == sidecar.content_hash => {
+                        return Err(Invalidation::CorruptSidecar(format!(
+                            "`{}` has {length} bytes; its format requires {}",
+                            path.as_str(),
+                            sidecar.byte_length.unwrap_or_default()
+                        )))
+                    }
                     Some(_) => {
                         return Err(Invalidation::CorruptSidecar(format!(
                             "`{}` does not match its recorded content hash",

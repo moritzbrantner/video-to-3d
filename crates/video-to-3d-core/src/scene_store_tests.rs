@@ -196,6 +196,50 @@ fn malformed_versioned_sidecar_documents_are_not_accepted_as_current() {
 }
 
 #[test]
+fn keyframe_sidecars_must_have_the_declared_rgba_length() {
+    let project = TempProject::new("short-sidecar");
+    let (store, _) = project.open();
+    let path = ProjectPath::new("artifacts/keyframes.json").unwrap();
+    let rgba = [1_u8, 2, 3, 255];
+    crate::scene_artifacts::write_keyframes_artifact(
+        &project.root,
+        &path,
+        &[crate::scene_artifacts::SampledFrame {
+            frame_index: 0,
+            timestamp_seconds: 0.0,
+            width: 1,
+            height: 1,
+            rgba: &rgba,
+        }],
+    )
+    .unwrap();
+    let artifact = ArtifactRecord {
+        id: "keyframes-output".into(),
+        kind: ArtifactKind::Keyframes,
+        produced_by: "ingest".into(),
+        operation_identity: ContentHash::of_bytes(b"identity"),
+        path: path.clone(),
+        content_hash: ContentHash::of_bytes(b"payload"),
+        provider: None,
+    };
+    let mut cache = HashCache::load(&project.root, VerifyMode::Full);
+    store.verify_sidecars(&artifact, &mut cache).unwrap();
+
+    // The same hash-correct sidecar, but the frame now claims 2×2 pixels.
+    let file = path.resolve(&project.root);
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    document["frames"][0]["width"] = json!(2);
+    document["frames"][0]["height"] = json!(2);
+    fs::write(&file, document.to_string()).unwrap();
+    let error = store.verify_sidecars(&artifact, &mut cache).unwrap_err();
+    assert!(
+        matches!(&error, Invalidation::CorruptSidecar(message) if message.contains("requires 16")),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn opaque_binary_sidecar_documents_list_no_sidecars() {
     let project = TempProject::new("binary-sidecars");
     let (store, _) = project.open();
