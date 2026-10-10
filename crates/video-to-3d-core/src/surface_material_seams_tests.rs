@@ -563,3 +563,266 @@ fn a_subpixel_occluder_in_front_of_a_seam_sample_is_not_visible() {
         "only the unoccluded camera 1 may texture seam A"
     );
 }
+
+/// Point on the plane `z = DEPTH + slope * x` along the ray of camera-`camera_x`
+/// pixel `(u, v)`: `t (1 - slope s) = DEPTH + slope camera_x`.
+fn on_slanted_ray(camera_x: f32, u: f32, v: f32, slope: f32) -> Point3 {
+    let s = (u - WIDTH as f32 * 0.5) / FOCAL;
+    let r = (v - HEIGHT as f32 * 0.5) / FOCAL;
+    let t = (DEPTH + slope * camera_x) / (1.0 - slope * s);
+    Point3 {
+        x: camera_x + s * t,
+        y: r * t,
+        z: t,
+        confidence: 0.9,
+        r: 120,
+        g: 80,
+        b: 40,
+    }
+}
+
+/// The seam fixture on a plane slanted about the vertical axis: every point
+/// stays on the ray of its own grid site (so both poses reproduce their grids
+/// exactly), and all eight triangles are coplanar. With the fixture's short
+/// focal length the plane's depth changes by several percent per pixel,
+/// although it is far from grazing.
+fn slanted(slope: f32) -> Seams {
+    let mut fixture = Seams::new();
+    for (index, site) in fixture.sites.iter().enumerate().take(8) {
+        let camera_x = if index < 4 { 0.0 } else { 1.0 };
+        fixture.points[index] = on_slanted_ray(camera_x, site.x as f32, site.y as f32, slope);
+    }
+    fixture
+}
+
+/// `|cos|` between the slanted plane's normal and camera 0's ray through the
+/// centroid of seam A, as the rule measures the grazing angle.
+fn seam_a_view_cosine(fixture: &Seams) -> f64 {
+    let triangle = &fixture.triangles[SEAM_A];
+    let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|index| {
+        let point = &fixture.points[index];
+        [point.x as f64, point.y as f64, point.z as f64]
+    });
+    let sub = |p: [f64; 3], q: [f64; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    let (u, w) = (sub(b, a), sub(c, a));
+    let normal = [
+        u[1] * w[2] - u[2] * w[1],
+        u[2] * w[0] - u[0] * w[2],
+        u[0] * w[1] - u[1] * w[0],
+    ];
+    let centroid = [0, 1, 2].map(|axis| (a[axis] + b[axis] + c[axis]) / 3.0);
+    let dot = |p: [f64; 3], q: [f64; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+    dot(normal, centroid).abs() / (dot(normal, normal) * dot(centroid, centroid)).sqrt()
+}
+
+/// Slopes of 45 and 60 degrees between the plane normal and the optical axis.
+const NON_GRAZING_SLOPES: [f32; 2] = [1.0, 1.732_050_8];
+
+#[test]
+fn a_visible_seam_on_a_slanted_connected_plane_is_admitted() {
+    for slope in NON_GRAZING_SLOPES {
+        let fixture = slanted(slope).only_image_0();
+        let cosine = seam_a_view_cosine(&fixture);
+        assert!(
+            cosine > 0.45,
+            "slope {slope}: the fixture must be clearly non-grazing (|cos| {cosine})"
+        );
+        // Nothing but the plane itself is accepted geometry, so neither the
+        // seams nor their coplanar neighbours can occlude a seam sample.
+        let bake = fixture.bake();
+        assert_eq!(
+            bake.fallback.reasons.seam,
+            SeamRejections::default(),
+            "slope {slope}: a visible seam on its own plane must not be rejected"
+        );
+        assert_eq!(seam_material(&bake, 0).triangles, vec![SEAM_A, SEAM_B]);
+        assert_eq!(bake.fallback.triangles, vec![2, 3], "slope {slope}");
+
+        // With both images every seam is still textured by some camera.
+        let bake = slanted(slope).bake();
+        assert_eq!(bake.seam_triangles(), 2, "slope {slope}: {bake:?}");
+        assert!(bake.fallback.triangles.is_empty(), "slope {slope}");
+    }
+}
+
+#[test]
+fn a_lone_visible_slanted_seam_is_not_occluded_by_its_own_depth() {
+    for slope in NON_GRAZING_SLOPES {
+        // Only seam A is accepted topology: its own depth is the only depth
+        // in camera 0's buffer.
+        let mut fixture = slanted(slope).only_image_0();
+        fixture.triangles = vec![fixture.triangles[SEAM_A]];
+        let bake = fixture.bake();
+        assert_eq!(
+            bake.fallback.reasons.seam,
+            SeamRejections::default(),
+            "slope {slope}: a seam must not occlude itself"
+        );
+        assert_eq!(seam_material(&bake, 0).triangles, vec![0]);
+        assert!(bake.fallback.triangles.is_empty(), "slope {slope}");
+    }
+}
+
+#[test]
+fn a_parallel_occluder_in_front_of_a_slanted_seam_still_occludes() {
+    for slope in NON_GRAZING_SLOPES {
+        // A quad parallel to the slanted plane at 88 % of its depth along
+        // every ray of camera 0 (scaling about the camera center keeps it
+        // parallel): 12 % clearly in front of each seam sample, beyond the
+        // 5 % occlusion tolerance, and covering the seams with margin.
+        let in_front = |u: f32, v: f32| {
+            let mut point = on_slanted_ray(0.0, u, v, slope);
+            point.x *= 0.88;
+            point.y *= 0.88;
+            point.z *= 0.88;
+            point
+        };
+        let mut fixture = slanted(slope).only_image_0();
+        let start = fixture.points.len();
+        fixture.points.extend([
+            in_front(6.0, 2.0),
+            in_front(25.0, 2.0),
+            in_front(25.0, 22.0),
+            in_front(6.0, 22.0),
+        ]);
+        fixture
+            .sites
+            .extend((0..4).map(|x| DenseGridSite { x, y: 0 }));
+        fixture.triangles.extend([
+            triangle(start, start + 1, start + 2),
+            triangle(start, start + 2, start + 3),
+        ]);
+        fixture.cameras.push(camera(2, 0.5));
+        fixture.patches.push(patch(2, 0, start, 4));
+
+        let bake = fixture.bake();
+        assert_eq!(
+            bake.fallback.reasons.seam.occluded, 2,
+            "slope {slope}: {:?}",
+            bake.fallback.reasons.seam
+        );
+        assert_eq!(bake.seam_triangles(), 0, "slope {slope}");
+        assert!(bake.fallback.triangles.contains(&SEAM_A));
+        assert!(bake.fallback.triangles.contains(&SEAM_B));
+    }
+}
+
+/// Bake with seam intrinsics through the cancellation entry point, counting
+/// how often cancellation is polled; images are `width` x `height`.
+fn polled_bake(fixture: &Seams, width: u32, height: u32) -> (SurfaceMaterialBake, usize) {
+    let images = fixture
+        .images
+        .iter()
+        .map(|(frame_index, rgba)| ReferenceImage {
+            frame_index: *frame_index,
+            width,
+            height,
+            rgba,
+        })
+        .collect::<Vec<_>>();
+    let mut polls = 0usize;
+    let bake = bake_with_cancel(
+        &fixture.evidence(),
+        &fixture.sites,
+        &images,
+        fixture
+            .focal
+            .map(|focal_pixels| SeamProjection { focal_pixels }),
+        || {
+            polls += 1;
+            false
+        },
+    )
+    .expect("uncanceled bake succeeds");
+    (bake, polls)
+}
+
+/// The seam fixture centered in a `size` x `size` image (same focal length,
+/// sites shifted with the principal point), plus an accepted background
+/// triangle at depth 10 behind the plane. `cover` selects a background that
+/// covers the whole image or one a few pixels wide.
+fn large_image_with_background(size: u32, cover: bool) -> Seams {
+    let mut fixture = Seams::new().only_image_0();
+    let (dx, dy) = ((size - WIDTH) / 2, (size - HEIGHT) / 2);
+    for site in &mut fixture.sites {
+        site.x += dx;
+        site.y += dy;
+    }
+    let rgba = (0..size * size)
+        .flat_map(|index| [(index % 251) as u8, (index % 241) as u8, 7, 255])
+        .collect();
+    fixture.images = vec![(0, rgba)];
+    let extent = if cover { 100_000.0 } else { 0.5 };
+    fixture.with_occluder([
+        world(-extent, -extent, 10.0),
+        world(extent, -extent, 10.0),
+        world(0.0, extent, 10.0),
+    ])
+}
+
+#[test]
+fn seam_depth_rasterization_polls_cancellation_at_bounded_pixel_intervals() {
+    const SIZE: u32 = 2048;
+    // The background lies behind the seams, so both bakes admit the same
+    // seams and crop the same textures; they differ only in how many pixels
+    // camera 0's seam depth buffer rasterizes for the background triangle.
+    let (small, small_polls) = polled_bake(&large_image_with_background(SIZE, false), SIZE, SIZE);
+    let (large, large_polls) = polled_bake(&large_image_with_background(SIZE, true), SIZE, SIZE);
+    assert_eq!(small.seam_triangles(), 2, "{}", small.diagnostic());
+    assert_eq!(large.seam_triangles(), 2, "{}", large.diagnostic());
+    assert_eq!(small.materials.len(), large.materials.len());
+
+    // One accepted triangle covering all 4,194,304 pixels must poll at least
+    // once per 262,144 rasterized pixels.
+    let pixels = (SIZE * SIZE) as usize;
+    assert!(
+        large_polls >= small_polls + pixels / 262_144,
+        "rasterizing {pixels} pixels added only {} cancellation polls ({small_polls} -> {large_polls})",
+        large_polls.saturating_sub(small_polls)
+    );
+}
+
+#[test]
+fn crop_corner_passes_poll_cancellation_per_bounded_triangle_count() {
+    // A 1x1 image: one row to copy and one chunk to hash, so all other work
+    // is the per-triangle corner bounds and corner UV passes.
+    let rgba = [9u8, 8, 7, 255];
+    let image = ReferenceImage {
+        frame_index: 0,
+        width: 1,
+        height: 1,
+        rgba: &rgba,
+    };
+    const TRIANGLES: usize = 262_144;
+    let corners = vec![[[0.0f64, 0.0]; 3]; TRIANGLES];
+
+    let mut polls = 0usize;
+    let (texture, uvs) = crop_texture(&image, &corners, &mut || {
+        polls += 1;
+        Ok(())
+    })
+    .expect("uncanceled crop succeeds");
+    assert_eq!((texture.width, texture.height), (1, 1));
+    assert_eq!(uvs.len(), TRIANGLES);
+    // Each of the two per-triangle passes polls at least every 4,096 triangles.
+    assert!(
+        polls >= 2 * (TRIANGLES / 4096),
+        "{TRIANGLES} triangles polled cancellation only {polls} times"
+    );
+
+    // A cancellation requested after the copy and hash polls must still abort
+    // the crop instead of finishing the corner passes.
+    let mut seen = 0usize;
+    let result = crop_texture(&image, &corners, &mut || {
+        seen += 1;
+        if seen > 2 {
+            Err("texture bake was canceled".to_owned())
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(
+        result.map(|_| ()),
+        Err("texture bake was canceled".to_owned())
+    );
+}
