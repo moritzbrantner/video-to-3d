@@ -900,52 +900,14 @@ fn a_thin_occluder_clearly_in_front_along_a_slanted_seam_sample_ray_rejects_the_
     );
 }
 
-#[test]
-fn geometry_beyond_the_seam_planes_horizon_next_to_a_sample_fails_closed() {
-    const SLOPE: f32 = 1.732_050_8;
-    // The plane's horizon in camera 0 lies at u = 16 + 20 / SLOPE = 27.55.
-    // Point 6 (a vertex of seam B, owned by reference 1 whose camera has no
-    // image here) moves onto the plane at u = 26.6: its pixel cell 27 stays in
-    // front, but the neighbouring cell 28 straddles the horizon.
-    let with_vertex_near_horizon = || {
-        let mut fixture = slanted(SLOPE).only_image_0();
-        fixture.points[6] = on_slanted_ray(0.0, 26.6, 14.0, SLOPE);
-        fixture
-    };
-    let vertex = {
-        let point = with_vertex_near_horizon().points[6];
-        [point.x as f64, point.y as f64, point.z as f64]
-    };
-
-    // Without further geometry seam B is visible and admitted, so the
-    // rejection below is caused by the neighbouring geometry alone.
-    let clean = with_vertex_near_horizon().bake();
-    assert!(
-        seam_material(&clean, 0).triangles.contains(&SEAM_B),
-        "{:?}",
-        clean.fallback.reasons.seam
-    );
-
-    // Accepted geometry in that neighbour cell, 10 % nearer than the vertex,
-    // is an occluding depth in the vertex's one-pixel neighbourhood; the
-    // plane extrapolated across the horizon gives no depth to excuse it.
-    let mut neighbour = vertex;
-    neighbour[0] += 1.4 * vertex[2] / FOCAL as f64;
-    let bake = with_vertex_near_horizon()
-        .with_occluder(thin_occluder_on_ray(
-            neighbour,
-            0.9 * vertex[2] / neighbour[2],
-        ))
-        .bake();
-    assert!(
-        bake.materials
-            .iter()
-            .all(|material| !material.triangles.contains(&SEAM_B)),
-        "seam B must not be textured: {:?}",
-        bake.fallback.reasons.seam
-    );
-    assert!(bake.fallback.triangles.contains(&SEAM_B));
-}
+// No bake-level test pins the horizon-crossing neighbour cell (Codex finding on
+// 9a5391b): a seam sample whose 3x3 neighbourhood straddles the seam plane's
+// horizon lies within about 1.5 px of it, and the 3-D centroid of a triangle on
+// the plane projects at roughly the harmonic mean of its vertices' pixel
+// distances to the horizon, so that centroid stays within about 4.5 px of it.
+// The view cosine there is about 4.5 / (focal |ray|) * k / sqrt(1 + k^2), below
+// the 0.2 grazing bound for this fixture's 20 px focal length, so every such
+// seam is already rejected as grazing before visibility is classified.
 
 /// The seam fixture with camera 0's image `width` x 1 pixels: the sites keep
 /// camera 0's grid exactly reproducible (x shifted with the principal point,
