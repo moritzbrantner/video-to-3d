@@ -78,7 +78,7 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
     // but x=2..3 is real, uniquely supported surface that must stay.
     let mut points = Vec::new();
     let mut membership = Vec::new();
-    for (start, z, patch) in [(0.0, 0.0, 0), (1.0, 0.06, 1)] {
+    for (start, z, patch) in [(0.0_f32, 0.0_f32, 0), (1.0_f32, 0.06_f32, 1)] {
         for y in 0..=1 {
             for x in 0..=2 {
                 let shared = patch == 1 && x == 1;
@@ -97,7 +97,7 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
     }
     let original_points = points.iter().map(|p| (p.x, p.y, p.z, p.r, p.g, p.b)).collect::<Vec<_>>();
     let original = triangles.clone();
-    let stats = merge_fused_patches(&points, &mut triangles, &membership, &[(1, 7), (4, 10)]);
+    let stats = merge_fused_patches(&points, &mut triangles, &membership, &[(2, 7), (5, 10)]);
     assert_eq!(stats.fused_pairs, 2);
     assert_eq!(stats.patch_components, 1);
     assert!(stats.cross_reference_triangles > 0);
@@ -106,10 +106,10 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
     assert_eq!(points.iter().map(|p| (p.x, p.y, p.z, p.r, p.g, p.b)).collect::<Vec<_>>(), original_points);
     assert!(triangles.iter().any(|t| [t.a, t.b, t.c].contains(&8)));
     let first = signature(&triangles);
-    let again = merge_fused_patches(&points, &mut original.clone(), &membership, &[(1, 7), (4, 10)]);
+    let again = merge_fused_patches(&points, &mut original.clone(), &membership, &[(2, 7), (5, 10)]);
     assert_eq!(stats, again);
     let mut replay = original;
-    merge_fused_patches(&points, &mut replay, &membership, &[(1, 7), (4, 10)]);
+    merge_fused_patches(&points, &mut replay, &membership, &[(2, 7), (5, 10)]);
     assert_eq!(first, signature(&replay));
 }
 
