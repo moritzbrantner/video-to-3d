@@ -379,6 +379,9 @@ fn edited_texture_sidecars_are_detected_and_rewritten() {
     let repaired = bake(&dir.0, &inputs);
     assert_eq!(repaired.written, vec![0]);
     assert_eq!(repaired.reused, vec![1]);
+    // The appearance diagnostic reports the repair, not a reuse.
+    assert_eq!(repaired.invalidation.reused, vec![1]);
+    assert_eq!(repaired.invalidation.invalidated, vec![0]);
     repaired.artifact.verify_textures(&dir.0).unwrap();
 }
 
@@ -841,4 +844,105 @@ fn builtin_executor_rejects_ambiguous_inputs_and_foreign_paths() {
         );
         assert!(!dir.0.join("artifacts/bake").exists());
     }
+}
+
+#[test]
+fn builtin_executor_reserves_sidecars_of_recorded_artifacts() {
+    let dir = TempDir::new("sidecar-reservation");
+    let fixture = Fixture::new();
+    let (keyframes, mesh) = fixture.write(&dir.0);
+    // Move one keyframe sidecar into the bake's output directory, as an
+    // unconstrained sidecar path of a recorded upstream artifact may be.
+    let keyframes_file = keyframes.resolve(&dir.0);
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&keyframes_file).unwrap()).unwrap();
+    let original = path(document["frames"][0]["pixels"].as_str().unwrap());
+    let moved = path("artifacts/bake/textures/frame-0.rgba");
+    fs::create_dir_all(moved.resolve(&dir.0).parent().unwrap()).unwrap();
+    fs::rename(original.resolve(&dir.0), moved.resolve(&dir.0)).unwrap();
+    document["frames"][0]["pixels"] = json!(moved.as_str());
+    fs::write(&keyframes_file, document.to_string()).unwrap();
+    let sidecar_bytes = fs::read(moved.resolve(&dir.0)).unwrap();
+
+    let hash = |path: &ProjectPath| ContentHash::of_bytes(&fs::read(path.resolve(&dir.0)).unwrap());
+    let record =
+        |id: &str, kind: ArtifactKind, path: &ProjectPath| crate::scene_project::ArtifactRecord {
+            id: format!("{id}.output"),
+            kind,
+            produced_by: id.into(),
+            operation_identity: ContentHash::of_bytes(id.as_bytes()),
+            path: path.clone(),
+            content_hash: hash(path),
+            provider: None,
+        };
+    let mut manifest = SceneProjectManifest::from_json(
+        &json!({
+            "schema_version": 1,
+            "project_id": "sidecar-reservation",
+            "quality_mode": "standard",
+            "inputs": [{
+                "id": "clip", "path": "media/clip.webm",
+                "content_hash": ContentHash::of_bytes(b"clip").as_str(), "byte_length": 4
+            }],
+            "provider_policy": { "execution": "local_only" },
+            "operations": [
+                { "id": "ingest", "kind": "ingest_video", "inputs": [{ "media": "clip" }] }
+            ],
+            "requested_outputs": ["keyframes"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let keyframes_record = record("ingest", ArtifactKind::Keyframes, &keyframes);
+    manifest.artifacts.push(keyframes_record.clone());
+    let request = OperationRequest {
+        operation: crate::scene_project::OperationDeclaration {
+            id: "bake".into(),
+            kind: OperationKind::TextureBake,
+            inputs: Vec::new(),
+            provider: None,
+            max_attempts: 1,
+        },
+        identity: ContentHash::of_bytes(b"bake"),
+        provider: None,
+        attempt: 1,
+        inputs: vec![
+            ResolvedInput::Artifact(keyframes_record),
+            ResolvedInput::Artifact(record("mesh", ArtifactKind::SurfaceMesh, &mesh)),
+        ],
+    };
+    let outcome =
+        BuiltInExecutor::new(&dir.0, &manifest).execute(&request, &CancellationToken::new());
+    assert!(
+        matches!(&outcome, AttemptOutcome::Failed(message) if message.contains(moved.as_str())),
+        "{outcome:?}"
+    );
+    assert_eq!(fs::read(moved.resolve(&dir.0)).unwrap(), sidecar_bytes);
+    assert!(!dir.0.join("artifacts/bake/surface-textures.json").exists());
+}
+
+#[test]
+fn surface_mesh_parsing_polls_for_cancellation_during_validation() {
+    let document = Fixture::new().mesh().to_json();
+    let mut polls = 0;
+    SurfaceMeshArtifact::from_json_with_cancel(&document, || {
+        polls += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert!(polls > 2, "validation polled only {polls} time(s)");
+
+    // Cancellation after the first poll stops the traversal mid-way.
+    let mut seen = 0;
+    let error = SurfaceMeshArtifact::from_json_with_cancel(&document, || {
+        seen += 1;
+        if seen > 1 {
+            Err("texture bake was canceled".into())
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert!(seen < polls, "cancellation did not stop validation early");
 }

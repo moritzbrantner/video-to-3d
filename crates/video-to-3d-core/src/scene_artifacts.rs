@@ -42,6 +42,7 @@ use crate::{
     DenseGridSite, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
     EvidencePointAttributes, EvidenceScale, MeshTriangle, Point3, ReconstructionEvidenceView,
     ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -326,17 +327,30 @@ impl SurfaceMeshArtifact {
     }
 
     pub fn from_json(document: &str) -> Result<Self, String> {
+        Self::from_json_with_cancel(document, || Ok(()))
+    }
+
+    /// Parse and validate with cooperative polling during the evidence
+    /// traversal, so a large artifact can be canceled while it is checked.
+    pub(crate) fn from_json_with_cancel(
+        document: &str,
+        poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
         let artifact: Self = parse_versioned(
             document,
             "surface mesh artifact",
             SURFACE_MESH_ARTIFACT_SCHEMA_VERSION,
         )?;
-        artifact.validate()?;
+        artifact.validate_with_cancel(poll)?;
         Ok(artifact)
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.evidence()?;
+        self.validate_with_cancel(|| Ok(()))
+    }
+
+    fn validate_with_cancel(&self, poll: impl FnMut() -> Result<(), String>) -> Result<(), String> {
+        self.evidence_view().validate_with_cancel(poll)?;
         if self.grid_sites.len() != self.points.len() {
             return Err(format!(
                 "surface mesh artifact has {} grid sites for {} points",
@@ -349,17 +363,23 @@ impl SurfaceMeshArtifact {
 
     /// Borrowed, validated evidence view over the artifact's buffers.
     pub fn evidence(&self) -> Result<ReconstructionEvidenceView<'_>, String> {
-        let view = ReconstructionEvidenceView::new(
-            self.provider.clone(),
-            self.scale,
-            self.cameras.clone(),
-            self.regions.clone(),
-            &self.points,
-            &self.triangles,
-        )?;
-        match &self.point_attributes {
-            Some(attributes) => view.with_point_attributes(attributes),
-            None => Ok(view),
+        let view = self.evidence_view();
+        view.validate()?;
+        Ok(view)
+    }
+
+    /// The evidence view without validating it; callers validate it once
+    /// (cancel-aware where the caller is cancelable).
+    fn evidence_view(&self) -> ReconstructionEvidenceView<'_> {
+        ReconstructionEvidenceView {
+            schema_version: RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+            provider: self.provider.clone(),
+            scale: self.scale,
+            cameras: self.cameras.clone(),
+            regions: self.regions.clone(),
+            points: &self.points,
+            triangles: &self.triangles,
+            point_attributes: self.point_attributes.as_deref(),
         }
     }
 
@@ -743,8 +763,12 @@ pub fn bake_texture_artifact(
             .map_err(|error| format!("cannot read `{}`: {error}", path.as_str()))
     };
     let keyframes = KeyframesArtifact::from_json(&read(keyframes)?)?;
-    let mesh = SurfaceMeshArtifact::from_json(&read(surface_mesh)?)?;
-    let evidence = mesh.evidence()?;
+    check_canceled()?;
+    // Validated once here, cancel-aware; the bake below re-checks the same
+    // view with the same polling before it relies on it.
+    let mesh = SurfaceMeshArtifact::from_json_with_cancel(&read(surface_mesh)?, check_canceled)?;
+    check_canceled()?;
+    let evidence = mesh.evidence_view();
 
     // Only reference frames of observed regions can be textured.
     let references: BTreeSet<usize> = evidence
@@ -783,7 +807,7 @@ pub fn bake_texture_artifact(
     let previous = fs::read_to_string(output.resolve(root))
         .ok()
         .and_then(|document| SurfaceTexturesArtifact::from_json(&document).ok());
-    let invalidation = bake.invalidation_against(
+    let mut invalidation = bake.invalidation_against(
         &previous
             .as_ref()
             .map(SurfaceTexturesArtifact::recorded_appearance)
@@ -841,6 +865,21 @@ pub fn bake_texture_artifact(
                 source_image_height: material.texture.source_image_height,
             },
         });
+    }
+    // A reference whose appearance key is unchanged but whose recorded
+    // sidecar no longer verified was repaired, not reused.
+    let repaired: Vec<usize> = invalidation
+        .reused
+        .iter()
+        .copied()
+        .filter(|frame| written.contains(frame))
+        .collect();
+    if !repaired.is_empty() {
+        invalidation
+            .reused
+            .retain(|frame| !repaired.contains(frame));
+        invalidation.invalidated.extend(repaired);
+        invalidation.invalidated.sort_unstable();
     }
     let artifact = SurfaceTexturesArtifact {
         schema_version: SURFACE_TEXTURES_ARTIFACT_SCHEMA_VERSION,
@@ -904,10 +943,10 @@ enum Reservations {
     ManifestFile(PathBuf),
 }
 
-/// Declared paths and their owners (media inputs, exports, and artifacts
-/// recorded by operations), which an output of another owner must never
-/// overwrite.
-fn reserved_paths(manifest: &SceneProjectManifest) -> Vec<(String, ProjectPath)> {
+/// Declared paths and their owners (media inputs, exports, artifacts
+/// recorded by operations and the sidecars those artifacts list), which an
+/// output of another owner must never overwrite.
+fn reserved_paths(root: &Path, manifest: &SceneProjectManifest) -> Vec<(String, ProjectPath)> {
     let mut reserved: Vec<(String, ProjectPath)> = manifest
         .inputs
         .iter()
@@ -925,16 +964,33 @@ fn reserved_paths(manifest: &SceneProjectManifest) -> Vec<(String, ProjectPath)>
             .iter()
             .map(|artifact| (artifact.produced_by.clone(), artifact.path.clone())),
     );
+    // Sidecar paths are unconstrained, so a recorded artifact may own files
+    // anywhere in the project, including another bake's directory. An
+    // unreadable or opaque document lists none (reconciliation judges it).
+    for artifact in &manifest.artifacts {
+        let Ok(bytes) = fs::read(artifact.path.resolve(root)) else {
+            continue;
+        };
+        let Ok(document) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if let Ok(sidecars) = artifact_sidecars(artifact.kind, document) {
+            reserved.extend(
+                sidecars
+                    .into_iter()
+                    .map(|(path, _)| (artifact.produced_by.clone(), path)),
+            );
+        }
+    }
     reserved
 }
 
 impl BuiltInExecutor {
     /// Reservations from an in-memory manifest.
     pub fn new(project_root: impl Into<PathBuf>, manifest: &SceneProjectManifest) -> Self {
-        Self {
-            root: project_root.into(),
-            reservations: Reservations::Fixed(reserved_paths(manifest)),
-        }
+        let root = project_root.into();
+        let reservations = Reservations::Fixed(reserved_paths(&root, manifest));
+        Self { root, reservations }
     }
 
     /// Reservations re-read from the project manifest at each execution; use
@@ -958,6 +1014,7 @@ impl BuiltInExecutor {
             Reservations::Fixed(reserved) => reserved,
             Reservations::ManifestFile(path) => {
                 loaded = reserved_paths(
+                    &self.root,
                     &SceneProjectManifest::load(path).map_err(|error| error.to_string())?,
                 );
                 &loaded

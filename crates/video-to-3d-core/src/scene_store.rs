@@ -516,12 +516,17 @@ impl ProjectStore {
             artifact.kind,
             ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
         ) {
-            let document = fs::read_to_string(self.resolve(&artifact.path))
+            let bytes = fs::read(self.resolve(&artifact.path))
                 .map_err(|error| Invalidation::CorruptSidecar(error.to_string()))?;
+            // An opaque (non-UTF-8) provider output, such as a legacy binary,
+            // lists no sidecars; it is already hash- and receipt-verified.
+            let Ok(document) = std::str::from_utf8(&bytes) else {
+                return Ok(());
+            };
             // A document claiming a JSON interchange format must parse;
             // opaque provider outputs remain supported even when their path
             // ends in .json. Readers still enforce the format when consumed.
-            let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, &document)
+            let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, document)
             {
                 Ok(sidecars) => sidecars,
                 Err(_)

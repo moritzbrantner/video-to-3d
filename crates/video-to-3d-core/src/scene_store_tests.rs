@@ -196,6 +196,31 @@ fn malformed_versioned_sidecar_documents_are_not_accepted_as_current() {
 }
 
 #[test]
+fn opaque_binary_sidecar_documents_list_no_sidecars() {
+    let project = TempProject::new("binary-sidecars");
+    let (store, _) = project.open();
+    fs::create_dir_all(project.file("artifacts")).unwrap();
+    let mut cache = HashCache::load(&project.root, VerifyMode::Full);
+    // Legacy keyframes and surface-texture outputs may be opaque binaries
+    // that are not UTF-8; they are hash-verified and carry no sidecars.
+    let bytes = [0xff_u8, 0xfe, 0x00, 0x7b, 0x80];
+    for kind in [ArtifactKind::Keyframes, ArtifactKind::SurfaceTextures] {
+        let path = ProjectPath::new("artifacts/legacy.bin").unwrap();
+        fs::write(path.resolve(&project.root), bytes).unwrap();
+        let artifact = ArtifactRecord {
+            id: "legacy-output".into(),
+            kind,
+            produced_by: "ingest".into(),
+            operation_identity: ContentHash::of_bytes(b"identity"),
+            path,
+            content_hash: ContentHash::of_bytes(&bytes),
+            provider: None,
+        };
+        store.verify_sidecars(&artifact, &mut cache).unwrap();
+    }
+}
+
+#[test]
 fn reconciled_stale_artifacts_release_their_output_reservations() {
     let project = TempProject::new("stale-reservation");
     build(&project, &WritingExecutor::new(&project.root));
@@ -218,16 +243,20 @@ fn reconciled_stale_artifacts_release_their_output_reservations() {
         .find(|artifact| artifact.produced_by == "assemble")
         .unwrap()
         .path = stale_path;
-    manifest.operations.push(crate::scene_project::OperationDeclaration {
-        id: "bake".into(),
-        kind: OperationKind::TextureBake,
-        inputs: vec![
-            OperationInput::Operation("ingest".into()),
-            OperationInput::Operation("mesh".into()),
-        ],
-        provider: None,
-        max_attempts: 1,
-    });
+    // texture_bake requires Standard; quality is not part of any identity.
+    manifest.quality_mode = crate::scene_project::QualityMode::Standard;
+    manifest
+        .operations
+        .push(crate::scene_project::OperationDeclaration {
+            id: "bake".into(),
+            kind: OperationKind::TextureBake,
+            inputs: vec![
+                OperationInput::Operation("ingest".into()),
+                OperationInput::Operation("mesh".into()),
+            ],
+            provider: None,
+            max_attempts: 1,
+        });
     manifest
         .operations
         .iter_mut()
