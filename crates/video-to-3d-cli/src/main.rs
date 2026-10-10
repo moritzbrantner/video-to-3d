@@ -188,6 +188,7 @@ fn reconcile_json(report: &ReconcileReport) -> Value {
 
 fn invalidation_code(reason: &Invalidation) -> &'static str {
     match reason {
+        Invalidation::StaleIdentity => "stale_identity",
         Invalidation::MissingOutput => "missing_output",
         Invalidation::CorruptOutput { .. } => "corrupt_output",
         Invalidation::MissingReceipt => "missing_receipt",
