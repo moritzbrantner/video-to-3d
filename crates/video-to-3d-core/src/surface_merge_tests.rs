@@ -924,6 +924,7 @@ fn clipping_budget_phrase(stats: &MergeStats) -> String {
 }
 
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn the_posting_bound_leaves_the_clipping_budget_reachable() {
     assert!(
         MAX_POSTINGS_PER_QUERY >= 2 * MAX_UNCOVERED_PIECES,
@@ -943,6 +944,7 @@ fn the_posting_bound_leaves_the_clipping_budget_reachable() {
 /// strip triangle genuinely overlaps more than `bound` comb triangles. The
 /// patches are fused at the coincident vertex (-1, 0, 5). Returns the fixture
 /// and the strip's two outer end vertices.
+#[allow(clippy::type_complexity)]
 fn crossing_strips(
     bound: usize,
 ) -> (
