@@ -2043,7 +2043,7 @@ fn segment_solve_stats(
     }
 }
 
-fn mesh_warning(mesh: &MeshStats) -> Option<String> {
+pub(crate) fn mesh_warning(mesh: &MeshStats) -> Option<String> {
     if !mesh.attempted {
         return None;
     }

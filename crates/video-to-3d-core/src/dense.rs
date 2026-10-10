@@ -20,6 +20,7 @@ pub struct DenseWorkingSetEstimate {
     pub dense_sample_bytes: usize,
     pub topology_bytes: usize,
     pub mesh_builder_bytes: usize,
+    /// Peak of surface fusion and the connected-surface merge that follows it.
     pub surface_fusion_bytes: usize,
     pub retained_candidate_bytes: usize,
     pub packed_output_bytes: usize,
@@ -426,9 +427,15 @@ fn estimate_working_set(
         + 3 * size_of::<f64>()
         + size_of::<bool>()
         + size_of::<usize>();
+    // The connected-surface merge runs after fusion has released its state,
+    // so the larger of the two passes is the peak; charge it.
     let surface_fusion_bytes = max_grid_samples
         .saturating_mul(per_vertex_fusion_bytes)
-        .saturating_add(max_mesh_triangles.saturating_mul(per_triangle_fusion_bytes));
+        .saturating_add(max_mesh_triangles.saturating_mul(per_triangle_fusion_bytes))
+        .max(crate::surface_merge::working_set_bytes(
+            max_grid_samples,
+            max_mesh_triangles,
+        ));
     // Recovery retains the previous best result while reconstructing a retry. Charge its final
     // dense point/site and mesh buffers even on the initial attempt so the same budget applies to
     // every candidate and remains fail-closed when recovery is needed. The retained result may
