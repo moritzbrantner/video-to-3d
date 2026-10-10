@@ -98,6 +98,8 @@ impl OperationReceipt {
 /// Why a recorded artifact was dropped during reconciliation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invalidation {
+    /// Recorded output is verified but its producer's current identity changed.
+    StaleIdentity,
     MissingOutput,
     CorruptOutput {
         expected: ContentHash,
@@ -114,6 +116,7 @@ pub enum Invalidation {
 impl Invalidation {
     pub fn describe(&self) -> String {
         match self {
+            Self::StaleIdentity => "producing operation identity is stale".into(),
             Self::MissingOutput => "output file is missing".into(),
             Self::CorruptOutput { expected, actual } => format!(
                 "output hash {} does not match recorded {}",
@@ -307,6 +310,24 @@ impl ProjectStore {
         }
         manifest.artifacts = keep;
 
+        // Free ownership of verified but stale artifacts before running new
+        // operations. Otherwise their old paths remain reserved and a rebuild
+        // can consume its attempt on an output collision with obsolete work.
+        // An upstream stale identity already makes downstream identities use
+        // 'pending', so one topological identity calculation handles both.
+        let identities = manifest.operation_identities()?;
+        manifest.artifacts.retain(|artifact| {
+            if artifact.operation_identity == identities[&artifact.produced_by] {
+                true
+            } else {
+                report.verified.retain(|operation| operation != &artifact.produced_by);
+                report
+                    .invalidated
+                    .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
+                false
+            }
+        });
+
         let receipts_dir = self.root.join(STATE_DIRECTORY).join("receipts");
         if let Ok(entries) = fs::read_dir(&receipts_dir) {
             let mut orphans: Vec<String> = entries
@@ -472,11 +493,19 @@ impl ProjectStore {
         ) {
             let document = fs::read_to_string(self.resolve(&artifact.path))
                 .map_err(|error| Invalidation::CorruptSidecar(error.to_string()))?;
-            // The document itself is hash-verified above. One that is not a
-            // sidecar-bearing format (for example an opaque provider output)
-            // has no sidecars to check; its readers reject it on use.
-            let sidecars = crate::scene_artifacts::artifact_sidecars(artifact.kind, &document)
-                .unwrap_or_default();
+            // Versioned JSON artifacts must parse before they can be reused
+            // or recovered from orphan receipts. Preserve legacy opaque .bin
+            // provider outputs, which are not versioned JSON interchange.
+            let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, &document) {
+                Ok(sidecars) => sidecars,
+                Err(_) if artifact.path.as_str().ends_with(".bin")
+                    && !document.trim_start().starts_with('{')
+                    && !document.trim_start().starts_with('[') =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(Invalidation::CorruptSidecar(error)),
+            };
             for (path, expected) in sidecars {
                 match cache.hash(&self.resolve(&path), path.as_str()) {
                     Some((hash, _)) if hash == expected => {}
