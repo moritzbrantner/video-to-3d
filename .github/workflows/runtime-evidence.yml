@@ -41,23 +41,19 @@ jobs:
           ref: ${{ env.MOONLIGHT_REV }}
           path: moonlight
 
-      - name: Install Rust and COLMAP
+      - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
           rustup default stable
           sudo apt-get update
-          # Ubuntu 26.04's colmap links libPoseLib.so without depending on its package.
-          poselib=""
-          if apt-cache show libposelib > /dev/null 2>&1; then poselib="libposelib"; fi
-          sudo apt-get install -y colmap python3-venv $poselib
-          colmap -h | head -n 4
+          sudo apt-get install -y python3-venv
 
       - name: Install Bun for the browser sampling contract
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.3
 
-      - name: Install exact COLMAP reference matcher
+      - name: Install the pinned COLMAP reference (pycolmap)
         run: |
           python3 -m venv "$RUNNER_TEMP/colmap-python"
           "$RUNNER_TEMP/colmap-python/bin/pip" install -r candidate/tools/requirements-colmap.txt

@@ -80,14 +80,15 @@ Validation:
 bun run check
 ```
 
-The COLMAP golden lane additionally requires the native `colmap` CLI and Python
-packages from `tools/requirements-colmap.txt`. Install those packages in a virtual
-environment and activate it before running `tools/run_colmap_golden.sh`.
-Extraction and mapping use the Ubuntu 24.04 COLMAP 3.9.1 CLI; matching uses
-PyCOLMAP 3.13's exact CPU mode because 3.9.1's approximate matcher varies even
-with a fixed seed and one thread. CI compares match and verified-geometry tables
-between independent quality and runtime runs, alongside the existing camera,
-point, reprojection, and pose gates. This reference dependency is development-only.
+The COLMAP golden lane additionally requires the Python packages from
+`tools/requirements-colmap.txt`. Install them in a virtual environment and activate it
+before running `tools/run_colmap_golden.sh`. One pinned PyCOLMAP runs every stage
+(extraction, exact CPU matching, incremental mapping and text export, in
+`tools/colmap_golden.py`), so the result does not depend on the runner's distribution
+`colmap` package. Mixing the two aborted the mapper on Ubuntu 26.04. Exact matching is used
+because approximate matching varies even with a fixed seed and one thread. CI compares
+match and verified-geometry tables between independent quality and runtime runs, alongside
+the existing camera, point, reprojection, and pose gates. This reference dependency is development-only.
 
 ## GitHub Pages demo
 
