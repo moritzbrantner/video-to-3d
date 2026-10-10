@@ -403,3 +403,75 @@ fn a_depth_rejection_in_the_image_is_not_overturned_by_the_3d_test() {
     assert_eq!(stats.removed_duplicate_triangles, 3, "{stats:?}");
     assert!(triangles.iter().any(|t| (t.b, t.c) == (10, 11)));
 }
+
+#[test]
+fn the_relative_scale_is_anchored_at_fusion_accepted_seam_vertices() {
+    // One patch-1 component: two wall triangles at depth 5 (one carries the
+    // fused seam vertex), joined by a connector to a densely tessellated
+    // layer at 4.8 that supplies most overlap samples. An unanchored median
+    // would take the layer's 0.96 as the patch scale and delete the layer.
+    let mut points = vec![
+        point(-1.0, -1.0, 5.0),
+        point(1.0, -1.0, 5.0),
+        point(1.0, 1.0, 5.0),
+        point(-1.0, 1.0, 5.0),
+        point(-4.0, -1.0, 5.0),
+        point(-3.0, -1.0, 5.0),
+        point(-3.5, 0.0, 5.0),
+        // 7: patch-0 seam vertex, coincident with 8.
+        point(0.9, -0.9, 5.0),
+        // Patch 1 wall: 8..=11.
+        point(0.9, -0.9, 5.0),
+        point(0.9, -0.2, 5.0),
+        point(0.4, -0.9, 5.0),
+        point(0.4, -0.2, 5.0),
+    ];
+    // Layer grid 12..=20 (3 × 3 vertices) at 4.8 over x, y ∈ [-0.9, 0.1].
+    for row in 0..3 {
+        for column in 0..3 {
+            points.push(point(
+                -0.9 + column as f32 * 0.5,
+                -0.9 + row as f32 * 0.5,
+                4.8,
+            ));
+        }
+    }
+    let membership: Vec<Option<usize>> = (0..points.len())
+        .map(|index| Some(usize::from(index >= 8)))
+        .collect();
+    let grid = |row: usize, column: usize| 12 + row * 3 + column;
+    let mut original = vec![
+        triangle(0, 1, 2),
+        triangle(0, 2, 3),
+        triangle(4, 5, 6),
+        triangle(1, 2, 7),
+        triangle(8, 9, 10),
+        triangle(9, 11, 10),
+        // Connector from the wall to the layer.
+        triangle(11, 9, grid(2, 2)),
+    ];
+    // Patch 0 keeps priority: more triangles, far from the square.
+    original.extend((0..12).map(|_| triangle(4, 5, 6)));
+    for row in 0..2 {
+        for column in 0..2 {
+            original.push(triangle(
+                grid(row, column),
+                grid(row, column + 1),
+                grid(row + 1, column + 1),
+            ));
+            original.push(triangle(
+                grid(row, column),
+                grid(row + 1, column + 1),
+                grid(row + 1, column),
+            ));
+        }
+    }
+    let cameras = [Some(identity_camera(0.0)), Some(identity_camera(0.4))];
+    let mut triangles = original.clone();
+    let stats = merge_fused_patches(&points, &mut triangles, &membership, &[(7, 8)], &cameras);
+    let layer_kept = triangles
+        .iter()
+        .filter(|t| [t.a, t.b, t.c].iter().all(|vertex| *vertex >= 12))
+        .count();
+    assert_eq!(layer_kept, 8, "{stats:?}");
+}

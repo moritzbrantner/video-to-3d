@@ -62,6 +62,8 @@ const MAX_RELATIVE_DEPTH_DISAGREEMENT: f64 = 0.035;
 /// this share before the scale is removed; per-reference scale bias is a few
 /// percent at most.
 const MAX_RELATIVE_SCALE_SAMPLE: f64 = 0.1;
+/// Anchored overlap samples needed before a relative depth scale is removed.
+const MIN_SCALE_SAMPLES: usize = 5;
 
 /// World-to-camera pose of a reference view: `x_cam = rotation * x + translation`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -297,6 +299,13 @@ pub(super) fn merge_fused_patches(
     // Kept triangles of each processed patch with a reference camera,
     // projected into that camera and indexed on a grid over its image.
     let mut footprints: Vec<Footprint> = Vec::new();
+    // Both sides of every merged fusion pair (after remapping, triangles refer
+    // to the kept side).
+    let fused_vertices: BTreeSet<usize> = pairs
+        .iter()
+        .filter(|&&(a, b)| a < points.len() && b < points.len() && canonical[a] == canonical[b])
+        .flat_map(|&(a, b)| [a, b])
+        .collect();
     // Only original components joined by a fusion-accepted pair may own each
     // other, in the image as in the 3D test: one seam pair between two
     // patches does not authorize deleting an unrelated island.
@@ -339,7 +348,10 @@ pub(super) fn merge_fused_patches(
             .collect();
         if patch_rank > 0 {
             // Fusion-linked owners, each with this patch's depth scale relative
-            // to it (the median over loosely agreeing overlaps).
+            // to it: the median over loosely agreeing overlaps of triangles at
+            // fusion-accepted seam vertices, so the scale is anchored to the
+            // surface fusion proved shared and not to whatever layer has the
+            // most overlap. Too few anchored samples leave the scale at 1.
             let owners: Vec<(&Footprint, f64)> = footprints
                 .iter()
                 .filter(|footprint| {
@@ -349,6 +361,12 @@ pub(super) fn merge_fused_patches(
                 .map(|footprint| {
                     let mut ratios: Vec<f64> = members
                         .iter()
+                        .filter(|&&index| {
+                            let triangle = &triangles[index];
+                            [triangle.a, triangle.b, triangle.c]
+                                .iter()
+                                .any(|vertex| fused_vertices.contains(vertex))
+                        })
                         .filter_map(|&index| Some((index, geometry[index].as_ref()?)))
                         .flat_map(|(index, candidate)| {
                             footprint.depth_ratios(&candidate.corners, &|component| {
@@ -357,10 +375,12 @@ pub(super) fn merge_fused_patches(
                         })
                         .collect();
                     ratios.sort_by(f64::total_cmp);
-                    (
-                        footprint,
-                        ratios.get(ratios.len() / 2).copied().unwrap_or(1.0),
-                    )
+                    let scale = if ratios.len() >= MIN_SCALE_SAMPLES {
+                        ratios[ratios.len() / 2]
+                    } else {
+                        1.0
+                    };
+                    (footprint, scale)
                 })
                 .collect();
             for &index in &members {
