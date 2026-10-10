@@ -1133,8 +1133,11 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
             .filter(|candidate| candidate.pnp_ready)
             .count();
         if registered_views.is_empty() {
+            let (from, to) = calibrated_pair
+                .as_ref()
+                .map_or((0, 0), |pair| (pair.from_frame + 1, pair.to_frame + 1));
             warnings.push(format!(
-                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but neither the initial track-based registration nor bounded direct-revisit recovery produced an additional camera pose that passed the deterministic inlier and reprojection gates. The displayed geometry remains the strongest calibrated adjacent pair; translation scale is arbitrary, and bundle adjustment requires at least one accepted additional view."
+                "Slice 3 finds {pnp_ready} other selected keyframes with enough tracked seed landmarks for a robust PnP attempt, but neither the initial track-based registration nor bounded direct-revisit recovery produced an additional camera pose that passed the deterministic inlier and reprojection gates. The displayed geometry remains the calibrated seed pair, frames {from}–{to}; translation scale is arbitrary, and bundle adjustment requires at least one accepted additional view."
             ));
         } else if multi_view.bundle_adjustment.accepted {
             let initial_rmse = multi_view
