@@ -191,7 +191,7 @@ pub(super) fn merge_fused_patches(
                 let Some(candidate) = &geometry[index] else {
                     continue;
                 };
-                let mut nearby = BTreeSet::new();
+                let mut nearby = BTreeSet::<usize>::new();
                 let bounds = candidate.grid_bounds(cell, 0.0);
                 if let Some(keys) = grid_cells(&bounds) {
                     for key in keys {
