@@ -645,6 +645,50 @@ fn texture_artifacts_must_partition_the_triangles() {
 }
 
 #[test]
+fn texture_artifacts_reject_incorrect_camera_source_associations() {
+    let dir = TempDir::new("sources");
+    let fixture = Fixture::new();
+    let inputs = fixture.write(&dir.0);
+    let original = bake(&dir.0, &inputs).artifact;
+
+    // The reference frame is itself a source, even if other frames supported
+    // the observed region. Validation also protects direct scene entry calls.
+    let mut missing = original.clone();
+    missing.materials[0].source_frames = vec![1, 2];
+    let error = missing.validate().unwrap_err();
+    assert!(error.contains("must cite its reference frame"), "{error}");
+    assert!(SurfaceTexturesArtifact::from_json(&missing.to_json()).is_err());
+    assert!(missing.scene_entries("bake").is_err());
+
+    let mut duplicate = original.clone();
+    duplicate.materials[0].source_frames = vec![0, 1, 1];
+    let error = duplicate.validate().unwrap_err();
+    assert!(error.contains("source frame 1 more than once"), "{error}");
+    assert!(SurfaceTexturesArtifact::from_json(&duplicate.to_json()).is_err());
+    assert!(duplicate.scene_entries("bake").is_err());
+
+    original.validate().unwrap();
+    scene_with(&original).validate().unwrap();
+}
+
+#[test]
+fn cancellation_before_baking_preserves_existing_inputs_and_writes_no_output() {
+    let dir = TempDir::new("cancel");
+    let fixture = Fixture::new();
+    let inputs = fixture.write(&dir.0);
+    let original = fs::read(inputs.0.resolve(&dir.0)).unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let output = path("artifacts/bake/surface-textures.json");
+    let error = bake_texture_artifact(&dir.0, &output, &inputs.0, &inputs.1, &cancel)
+        .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert!(!output.resolve(&dir.0).exists());
+    assert!(!dir.0.join("artifacts/bake/textures").exists());
+    assert_eq!(fs::read(inputs.0.resolve(&dir.0)).unwrap(), original);
+}
+
+#[test]
 fn builtin_executor_rejects_ambiguous_inputs_and_foreign_paths() {
     let dir = TempDir::new("guards");
     let fixture = Fixture::new();
@@ -708,7 +752,7 @@ fn builtin_executor_rejects_ambiguous_inputs_and_foreign_paths() {
 
     // The media input lives inside the bake's output directory: refuse to write.
     let outcome = executor.execute(
-        &request(vec![keyframes_input, mesh_input]),
+        &request(vec![keyframes_input.clone(), mesh_input.clone()]),
         &CancellationToken::new(),
     );
     assert!(
@@ -716,4 +760,28 @@ fn builtin_executor_rejects_ambiguous_inputs_and_foreign_paths() {
         "{outcome:?}"
     );
     assert!(!dir.0.join("artifacts/bake").exists());
+
+    // Manifest paths are ASCII case-folded for uniqueness. Collision
+    // preflight must apply the same rule even when tested on Linux, before
+    // a case-insensitive filesystem could overwrite media or exports.
+    for declared in [
+        "Artifacts/Bake/clip.webm",
+        "ARTIFACTS/BAKE",
+        "ARTIFACTS/BAKE/SURFACE-TEXTURES.JSON",
+        "ARTIFACTS",
+    ] {
+        let mut document = manifest_document.clone();
+        document["inputs"][0]["path"] = json!(declared);
+        let manifest = SceneProjectManifest::from_json(&document.to_string()).unwrap();
+        let executor = BuiltInExecutor::new(&dir.0, &manifest);
+        let outcome = executor.execute(
+            &request(vec![keyframes_input.clone(), mesh_input.clone()]),
+            &CancellationToken::new(),
+        );
+        assert!(
+            matches!(&outcome, AttemptOutcome::Failed(message) if message.contains(declared)),
+            "{declared}: {outcome:?}"
+        );
+        assert!(!dir.0.join("artifacts/bake").exists());
+    }
 }
