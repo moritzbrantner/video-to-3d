@@ -10,14 +10,14 @@
 //!   lower-priority patch are re-indexed onto the higher-priority patch's
 //!   vertex. Only pairs fusion accepted are merged; both points stay in the
 //!   point buffer with their own provenance, and no vertex is created or moved.
-//! - **No duplicated overlap.** A lower-priority triangle whose centroid lies on
-//!   a kept higher-priority triangle (inside it, within a fraction of the median
-//!   edge length along its normal, with aligned normals) is the same surface
-//!   meshed twice and is dropped. Triangles over the other patch's holes stay,
+//! - **No duplicated overlap.** A lower-priority triangle is removed only if
+//!   its entire area is covered by higher-priority, aligned, depth-consistent
+//!   triangles from a patch with a fusion-accepted link. Triangles spanning
+//!   holes or boundaries stay to preserve uniquely observed geometry.
 //!   so the union keeps every observed area once; a gap no patch covered stays
 //!   a gap, and a surface farther away than the tolerance is never merged.
-//! - **Cross-reference topology.** Lower-priority triangles that use a shared
-//!   vertex are kept even when they overlap, so the seam stays connected.
+//! - **Cross-reference topology.** Triangles referencing accepted shared
+//!   vertices retain cross-patch connections wherever they extend coverage.
 //!
 //! Patch priority is deterministic: more accepted triangles first, then the
 //! lower support-group index.
@@ -131,7 +131,7 @@ pub(super) fn merge_fused_patches(
     let linked_patches: BTreeSet<(usize, usize)> = pairs
         .iter()
         .filter_map(|&(a, b)| {
-            if a >= points.len() || b >= points.len() || canonical[a] == canonical[b] {
+            if a >= points.len() || b >= points.len() || canonical[a] != canonical[b] {
                 return None;
             }
             let (Some(a), Some(b)) = (group_of(a), group_of(b)) else {
@@ -372,13 +372,13 @@ impl TriangleGeometry {
         };
         let area_epsilon = self.edges.iter().copied().fold(1.0e-12, f64::max)
             * self.edges.iter().copied().fold(1.0e-12, f64::max) * 1.0e-10;
-        let mut remaining = vec![self.corners.map(project).to_vec()];
+        let mut remaining = vec![self.corners.map(|corner| project(corner)).to_vec()];
         let mut partially_covered = false;
         for surface in surfaces {
             if self.normal.dot(&surface.normal).abs() < MIN_NORMAL_ALIGNMENT {
                 continue;
             }
-            let projected = surface.corners.map(project);
+            let projected = surface.corners.map(|corner| project(corner));
             let winding = cross2(projected[1] - projected[0], projected[2] - projected[0]);
             if winding.abs() <= area_epsilon {
                 continue;
