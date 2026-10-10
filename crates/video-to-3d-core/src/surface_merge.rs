@@ -376,13 +376,13 @@ impl TriangleGeometry {
         let area_epsilon = self.edges.iter().copied().fold(1.0e-12, f64::max)
             * self.edges.iter().copied().fold(1.0e-12, f64::max)
             * 1.0e-10;
-        let mut remaining = vec![self.corners.map(|corner| project(corner)).to_vec()];
+        let mut remaining = vec![self.corners.map(&project).to_vec()];
         let mut partially_covered = false;
         for surface in surfaces {
             if self.normal.dot(&surface.normal).abs() < MIN_NORMAL_ALIGNMENT {
                 continue;
             }
-            let projected = surface.corners.map(|corner| project(corner));
+            let projected = surface.corners.map(&project);
             let winding = cross2(projected[1] - projected[0], projected[2] - projected[0]);
             if winding.abs() <= area_epsilon {
                 continue;
