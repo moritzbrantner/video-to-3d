@@ -990,7 +990,8 @@ pub struct ArtifactSidecar {
 /// `width` × `height`: signature, a single IHDR first, every chunk CRC, at
 /// most one PLTE before the pixel data, no unknown critical chunks, no
 /// ancillary chunk that changes how the RGB samples render (transparency or
-/// color management, see [`RENDERING_PNG_CHUNKS`]), contiguous IDAT chunks of
+/// color management or APNG animation, see
+/// [`RENDERING_PNG_CHUNKS`]), contiguous IDAT chunks of
 /// at most [`max_encoded_png_data`] bytes in total, IEND last, and a zlib
 /// stream inflating to exactly one filter byte (0..=4) plus `3 · width` bytes
 /// per row.
@@ -1153,9 +1154,12 @@ pub(crate) fn decode_png_rgb8_with_cancel(
 }
 
 /// Ancillary chunks whose meaning the RGB decoder does not model but which
-/// change how the samples render: transparency and color management. A PNG
+/// change how the samples render: transparency, color management and APNG
+/// animation (extra frames that replace the IDAT image on display). A PNG
 /// carrying one is not proven equal to another by equal RGB samples.
-const RENDERING_PNG_CHUNKS: [&[u8]; 6] = [b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"cICP"];
+const RENDERING_PNG_CHUNKS: [&[u8]; 9] = [
+    b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"cICP", b"acTL", b"fcTL", b"fdAT",
+];
 
 /// Largest total IDAT payload accepted for an image whose zlib stream must
 /// inflate to `decoded` bytes: zlib's conservative deflate bound (worst-case
