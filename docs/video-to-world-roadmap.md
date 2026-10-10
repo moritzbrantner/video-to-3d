@@ -8,7 +8,7 @@
 
 **Execute existing issues in dependency-first order (not numeric milestone order):**
 1. Establish synthetic scene oracle, licensed real room canary and independent E2E acceptance/Blender import checks **before** declaring implementation successful.
-2. Make the current CLI/scene runner execute the smallest full pipeline from source media; preserve cancellation, receipts and user privacy.
+2. Make the current CLI/scene runner execute the smallest full pipeline from the browser-produced sampled frames (or a prepared manifest of them with fixed sampling); the browser keeps sole ownership of video decoding and frame sampling (AGENTS.md), so there is no second native intake path. Preserve cancellation, receipts and user privacy.
 3. Native evidence interchange and first learned multi-view provider **only where measured reconstruction gates fail**; do not delay the vertical slice for a full research provider matrix.
 4. Semantic inventory, cross-frame identity tracking, consistent masks, multi-view object references and first independent object asset through existing asset-tooling.
 5. Place and validate objects in the observed world; compose environment and object hierarchy; enable hybrid preview and Blender/DCC handoff.
