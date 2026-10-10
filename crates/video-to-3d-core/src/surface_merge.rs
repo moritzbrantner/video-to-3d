@@ -108,6 +108,10 @@ pub(super) struct MergeStats {
     pub removed_duplicate_triangles: usize,
     /// Partially covered lower-priority triangles kept to preserve accepted surface.
     pub remaining_overlap_triangles: usize,
+    /// Fusion pairs whose endpoints carry different evidence origins: they
+    /// link the patches but keep separate vertices, so no corner's
+    /// provenance is relabelled.
+    pub provenance_separated_pairs: usize,
     /// Removed seam triangles that a higher-priority reference owned only in
     /// part (at least `MIN_IMAGE_OWNERSHIP_SHARE`).
     pub trimmed_seam_triangles: usize,
@@ -127,10 +131,11 @@ pub(super) struct MergeStats {
 impl MergeStats {
     pub fn diagnostic(&self, support_groups: usize) -> String {
         format!(
-            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles); {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area, and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
+            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area, and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
             self.fused_pairs,
             self.shared_vertices,
             self.cross_reference_triangles,
+            self.provenance_separated_pairs,
             self.removed_duplicate_triangles,
             self.trimmed_seam_triangles,
             self.trimmed_seam_area_share * 100.0,
@@ -148,6 +153,7 @@ pub(super) fn merge_fused_patches(
     membership: &[Option<usize>],
     pairs: &[(usize, usize)],
     reference_cameras: &[Option<ReferenceCamera>],
+    point_origins: &[Option<crate::EvidenceOrigin>],
 ) -> MergeStats {
     let group_of = |vertex: usize| membership.get(vertex).copied().flatten();
     let valid = |triangle: &MeshTriangle| {
@@ -206,16 +212,30 @@ pub(super) fn merge_fused_patches(
 
     // Shared vertices: the lower-priority side of each fused pair maps onto the
     // higher-priority side.
+    // A pair whose endpoints carry different evidence origins (geometric
+    // versus revalidated completion) still proves the patches meet there, but
+    // its vertices stay separate: sharing one index would relabel the dropped
+    // corner's provenance.
     let mut canonical: Vec<usize> = (0..points.len()).collect();
+    let mut claimed = vec![false; points.len()];
+    let mut accepted_pairs = Vec::new();
     let mut fused_pairs = 0;
+    let mut provenance_separated_pairs = 0;
     for &(first, second) in pairs {
         if first >= points.len()
             || second >= points.len()
             || group_of(first).is_none()
             || group_of(first) == group_of(second)
-            || canonical[first] != first
-            || canonical[second] != second
+            || claimed[first]
+            || claimed[second]
         {
+            continue;
+        }
+        claimed[first] = true;
+        claimed[second] = true;
+        accepted_pairs.push((first, second));
+        if point_origins.get(first) != point_origins.get(second) {
+            provenance_separated_pairs += 1;
             continue;
         }
         let (keep, drop) = if (rank_of(first), first) <= (rank_of(second), second) {
@@ -228,12 +248,9 @@ pub(super) fn merge_fused_patches(
     }
     // Only ORIGINAL mesh components containing a fusion-accepted pair may
     // deduplicate each other. The same cameras can contain unrelated islands.
-    let linked_components: BTreeSet<(usize, usize)> = pairs
+    let linked_components: BTreeSet<(usize, usize)> = accepted_pairs
         .iter()
         .filter_map(|&(a, b)| {
-            if a >= points.len() || b >= points.len() || canonical[a] != canonical[b] {
-                return None;
-            }
             let (Some(a_group), Some(b_group)) = (group_of(a), group_of(b)) else {
                 return None;
             };
@@ -246,9 +263,8 @@ pub(super) fn merge_fused_patches(
         .collect();
     // Patches with at least one fusion-accepted pair: only these may own each
     // other's overlap in the image test.
-    let linked_patches: BTreeSet<(usize, usize)> = pairs
+    let linked_patches: BTreeSet<(usize, usize)> = accepted_pairs
         .iter()
-        .filter(|&&(a, b)| a < points.len() && b < points.len() && canonical[a] == canonical[b])
         .filter_map(|&(a, b)| match (group_of(a), group_of(b)) {
             (Some(left), Some(right)) if left != right => Some((left.min(right), left.max(right))),
             _ => None,
@@ -299,13 +315,18 @@ pub(super) fn merge_fused_patches(
     // Kept triangles of each processed patch with a reference camera,
     // projected into that camera and indexed on a grid over its image.
     let mut footprints: Vec<Footprint> = Vec::new();
-    // Both sides of every merged fusion pair (after remapping, triangles refer
+    // Scale anchors per patch pair: both sides of every accepted fusion pair
+    // between exactly those two patches (after remapping, triangles may refer
     // to the kept side).
-    let fused_vertices: BTreeSet<usize> = pairs
-        .iter()
-        .filter(|&&(a, b)| a < points.len() && b < points.len() && canonical[a] == canonical[b])
-        .flat_map(|&(a, b)| [a, b])
-        .collect();
+    let mut scale_anchors: HashMap<(usize, usize), BTreeSet<usize>> = HashMap::new();
+    for &(a, b) in &accepted_pairs {
+        if let (Some(left), Some(right)) = (group_of(a), group_of(b)) {
+            scale_anchors
+                .entry((left.min(right), left.max(right)))
+                .or_default()
+                .extend([a, b]);
+        }
+    }
     // Only original components joined by a fusion-accepted pair may own each
     // other, in the image as in the 3D test: one seam pair between two
     // patches does not authorize deleting an unrelated island.
@@ -359,13 +380,15 @@ pub(super) fn merge_fused_patches(
                         .contains(&(footprint.patch.min(*patch), footprint.patch.max(*patch)))
                 })
                 .map(|footprint| {
+                    let anchors = scale_anchors
+                        .get(&(footprint.patch.min(*patch), footprint.patch.max(*patch)));
                     let mut ratios: Vec<f64> = members
                         .iter()
                         .filter(|&&index| {
                             let triangle = &triangles[index];
                             [triangle.a, triangle.b, triangle.c]
                                 .iter()
-                                .any(|vertex| fused_vertices.contains(vertex))
+                                .any(|vertex| anchors.is_some_and(|set| set.contains(vertex)))
                         })
                         .filter_map(|&index| Some((index, geometry[index].as_ref()?)))
                         .flat_map(|(index, candidate)| {
@@ -388,11 +411,18 @@ pub(super) fn merge_fused_patches(
                     continue;
                 };
                 let linked = |component: usize| components_linked(index, component);
-                let owned = owners
+                // `None` from an owner means its image could not judge the
+                // triangle (behind the camera, degenerate, or too large for
+                // the bounded index).
+                let judged: Vec<Ownership> = owners
                     .iter()
-                    .map(|(footprint, scale)| {
+                    .filter_map(|(footprint, scale)| {
                         footprint.ownership(&candidate.corners, *scale, &linked)
                     })
+                    .collect();
+                let owned = judged
+                    .iter()
+                    .copied()
                     .fold(Ownership::default(), |best, next| {
                         if next.image_share > best.image_share {
                             next
@@ -411,7 +441,7 @@ pub(super) fn merge_fused_patches(
                 }
                 // A linked owner judged this triangle in its image; its depth
                 // rejection must not be overturned by the looser 3D test.
-                if !owners.is_empty() {
+                if !judged.is_empty() {
                     if owned.image_share > OWNERSHIP_EPSILON {
                         remaining_overlap_triangles += 1;
                     }
@@ -537,6 +567,7 @@ pub(super) fn merge_fused_patches(
         cross_reference_triangles,
         removed_duplicate_triangles,
         remaining_overlap_triangles,
+        provenance_separated_pairs,
         trimmed_seam_triangles,
         trimmed_seam_area_share: if total_area > 0.0 {
             trimmed_seam_area / total_area
@@ -827,10 +858,8 @@ impl Footprint {
         corners: &[Vector3<f64>; 3],
         scale: f64,
         linked: &dyn Fn(usize) -> bool,
-    ) -> Ownership {
-        let Some((candidate, overlaps)) = self.overlaps(corners, linked) else {
-            return Ownership::default();
-        };
+    ) -> Option<Ownership> {
+        let (candidate, overlaps) = self.overlaps(corners, linked)?;
         let total = image_area(&candidate);
         let plane = self.camera.plane(corners);
         let (mut image, mut surface) = (0.0, 0.0);
@@ -855,10 +884,10 @@ impl Footprint {
                 surface += plane.map_or(0.0, |plane| back_projected_area(polygon, plane));
             }
         }
-        Ownership {
+        Some(Ownership {
             image_share: (image / total).min(1.0),
             surface_area: surface,
-        }
+        })
     }
 }
 

@@ -58,12 +58,19 @@ pub(super) fn consolidate_surface_evidence(
         return Ok(());
     }
 
-    let (membership, support_group_count, group_frames, reference_cameras) = {
+    let (membership, support_group_count, group_frames, reference_cameras, point_origins) = {
         let evidence = ReconstructionEvidenceView::from_classic(reconstruction)?;
         let (membership, count) =
             evidence_support_membership(&evidence.regions, evidence.points.len());
         let (frames, cameras) = support_group_references(&evidence, count);
-        (membership, count, frames, cameras)
+        let mut origins = vec![None; evidence.points.len()];
+        for region in &evidence.regions {
+            let end = region.points.start.saturating_add(region.points.count);
+            if let Some(range) = origins.get_mut(region.points.start..end) {
+                range.fill(Some(region.origin));
+            }
+        }
+        (membership, count, frames, cameras, origins)
     };
     if support_group_count < 2 {
         return Ok(());
@@ -103,6 +110,7 @@ pub(super) fn consolidate_surface_evidence(
         &membership,
         &pairs,
         &reference_cameras,
+        &point_origins,
     );
     refresh_mesh_after_merge(
         &mut reconstruction.mesh,
