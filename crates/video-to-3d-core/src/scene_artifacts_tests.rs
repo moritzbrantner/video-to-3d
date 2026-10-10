@@ -753,6 +753,20 @@ fn texture_artifacts_reject_incorrect_camera_source_associations() {
     assert!(SurfaceTexturesArtifact::from_json(&duplicate.to_json()).is_err());
     assert!(duplicate.scene_entries("bake").is_err());
 
+    // The crop must lie inside a non-empty source image.
+    for (origin, source) in [
+        ([1000, 1000], (100, 100)),
+        ([0, 0], (0, 0)),
+        ([u32::MAX, 0], (100, 100)),
+    ] {
+        let mut cropped = original.clone();
+        cropped.materials[0].texture.crop_origin = origin;
+        cropped.materials[0].texture.source_image_width = source.0;
+        cropped.materials[0].texture.source_image_height = source.1;
+        let error = cropped.validate().unwrap_err();
+        assert!(error.contains("outside its"), "{error}");
+    }
+
     // Observed provenance needs a supporting view besides the reference.
     let mut alone = original.clone();
     alone.materials[0].source_frames = vec![alone.materials[0].reference_frame];
@@ -1221,6 +1235,12 @@ fn png_sidecars_are_validated_completely() {
         .contains("unknown critical"));
     validate_png_rgb8(&with_chunk(b"zzZz", b"x"), 3, 2).unwrap();
     validate_png_rgb8(&with_chunk(b"PLTE", &[0, 0, 0]), 3, 2).unwrap();
+    // PLTE must hold 1..=256 RGB entries.
+    for palette in [&[][..], &[0, 0][..], &[0; 257 * 3][..]] {
+        assert!(validate_png_rgb8(&with_chunk(b"PLTE", palette), 3, 2)
+            .unwrap_err()
+            .contains("PLTE"));
+    }
     // PNG dimensions are never zero.
     assert!(!is_png_rgb8(&png, 0, 2));
 }
@@ -1259,4 +1279,35 @@ fn case_aliased_previous_textures_are_not_deleted() {
     // spelling would delete the newly referenced texture.
     assert!(upper.resolve(&dir.0).exists());
     assert!(lower.resolve(&dir.0).exists());
+}
+
+#[test]
+fn an_interrupted_bake_removes_the_textures_it_created() {
+    let dir = TempDir::new("interrupted-bake");
+    let fixture = Fixture::new();
+    let inputs = fixture.write(&dir.0);
+    // The document path is occupied by a directory, so committing fails
+    // after the textures were written.
+    let output = path("artifacts/bake/surface-textures.json");
+    fs::create_dir_all(output.resolve(&dir.0).join("blocker")).unwrap();
+    let result = bake_texture_artifact(
+        &dir.0,
+        &output,
+        &inputs.0,
+        &inputs.1,
+        &CancellationToken::new(),
+    );
+    assert!(result.is_err());
+    let textures = dir.0.join("artifacts/bake/textures");
+    // Textures were written (their directory exists) before the failure.
+    assert!(textures.is_dir());
+    let left: Vec<_> = fs::read_dir(&textures)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(left.is_empty(), "orphaned textures: {left:?}");
 }

@@ -685,6 +685,29 @@ impl SurfaceTexturesArtifact {
                     material.reference_frame
                 ));
             }
+            let texture = &material.texture;
+            let fits = |origin: u32, extent: u32, source: u32| {
+                source > 0 && origin.checked_add(extent).is_some_and(|end| end <= source)
+            };
+            if !fits(
+                texture.crop_origin[0],
+                texture.width,
+                texture.source_image_width,
+            ) || !fits(
+                texture.crop_origin[1],
+                texture.height,
+                texture.source_image_height,
+            ) {
+                return Err(format!(
+                    "surface textures material for frame {} crops {}x{} at {:?} outside its {}x{} source image",
+                    material.reference_frame,
+                    texture.width,
+                    texture.height,
+                    texture.crop_origin,
+                    texture.source_image_width,
+                    texture.source_image_height
+                ));
+            }
             if material.corner_uvs.len() != material.triangles.len() {
                 return Err(format!(
                     "surface textures material for frame {} has {} UV triples for {} triangles",
@@ -982,6 +1005,9 @@ pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), Stri
                 if seen_plte || seen_idat {
                     return Err("PNG PLTE is repeated or follows IDAT".into());
                 }
+                if data.is_empty() || !data.len().is_multiple_of(3) || data.len() > 256 * 3 {
+                    return Err("PNG PLTE must hold 1 to 256 RGB entries".into());
+                }
                 seen_plte = true;
             }
             b"IDAT" => {
@@ -1233,6 +1259,9 @@ fn bake_parsed(
 
     let mut materials = Vec::with_capacity(bake.materials.len());
     let (mut written, mut reused) = (Vec::new(), Vec::new());
+    // Textures this run created: removed again unless the new document is
+    // committed, so interrupted bakes leave no unreferenced files behind.
+    let mut created = CreatedFiles(Vec::new());
     for material in &bake.materials {
         check_canceled()?;
         let digest = &material.appearance_key.as_str()["sha256:".len()..];
@@ -1241,10 +1270,17 @@ fn bake_parsed(
             file.path == path
                 && file.width == material.texture.width
                 && file.height == material.texture.height
-                && read_verified(root, &file.path, &file.content_hash).is_ok_and(|png| {
-                    validate_png_rgb8(&png, material.texture.width, material.texture.height).is_ok()
+                && read_verified_with_cancel(root, &file.path, &file.content_hash, None, || {
+                    cancel.is_canceled()
+                })
+                .is_ok_and(|png| {
+                    !cancel.is_canceled()
+                        && validate_png_rgb8(&png, material.texture.width, material.texture.height)
+                            .is_ok()
                 })
         });
+        // A canceled read or validation must not fall through to re-encoding.
+        check_canceled()?;
         let content_hash = match kept {
             Some(file) => {
                 reused.push(material.reference_frame);
@@ -1265,7 +1301,11 @@ fn bake_parsed(
                     }
                 })?;
                 check_canceled()?;
-                write_atomically(&path.resolve(root), &png)?;
+                let file = path.resolve(root);
+                if !file.exists() {
+                    created.0.push(file.clone());
+                }
+                write_atomically(&file, &png)?;
                 written.push(material.reference_frame);
                 ContentHash::of_bytes(&png)
             }
@@ -1319,6 +1359,7 @@ fn bake_parsed(
     let document = artifact.to_json();
     check_canceled()?;
     write_atomically(&output.resolve(root), document.as_bytes())?;
+    created.0.clear();
 
     // Drop sidecars the new manifest no longer references. Only files inside
     // this operation's own texture directory are ever removed.
@@ -1346,6 +1387,18 @@ fn bake_parsed(
         reused,
         artifact,
     })
+}
+
+/// Files a bake created; removed on drop unless the list was cleared after
+/// the referencing document was committed.
+struct CreatedFiles(Vec<PathBuf>);
+
+impl Drop for CreatedFiles {
+    fn drop(&mut self) {
+        for file in &self.0 {
+            let _ = fs::remove_file(file);
+        }
+    }
 }
 
 /// Project-relative output path of a texture-bake operation.
