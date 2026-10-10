@@ -1656,3 +1656,31 @@ fn split_idat_chunks_stream_into_one_zlib_stream() {
     let empty: [&[u8]; 2] = [&[], &[]];
     assert!(validate_png_rgb8(&png_with_idat_parts(width, height, &empty), width, height).is_err());
 }
+
+#[test]
+fn animated_png_chunks_are_rejected() {
+    // Codex finding on ceeaa61: APNG control/data chunks let extra frames
+    // render differently while the IDAT samples match the expected texture.
+    let rgba: Vec<u8> = (0..6 * 4).map(|value| value as u8 * 9).collect();
+    let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
+    let mut actl = 2_u32.to_be_bytes().to_vec();
+    actl.extend_from_slice(&0_u32.to_be_bytes());
+    let mut fctl = vec![0_u8; 26];
+    fctl[7] = 3; // width
+    fctl[11] = 2; // height
+    let mut fdat = 1_u32.to_be_bytes().to_vec();
+    fdat.extend_from_slice(&[
+        0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
+    ]);
+    for (kind, data) in [
+        (b"acTL", &actl[..]),
+        (b"fcTL", &fctl[..]),
+        (b"fdAT", &fdat[..]),
+    ] {
+        assert!(
+            validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).is_err(),
+            "a PNG with {} must not verify as a static RGB texture",
+            String::from_utf8_lossy(kind)
+        );
+    }
+}
