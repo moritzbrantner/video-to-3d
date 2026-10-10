@@ -1405,3 +1405,196 @@ fn frames(artifacts: &[crate::surface_materials::AppearanceArtifact]) -> Vec<usi
         })
         .collect()
 }
+
+// Acceptance for issue #143, written before the implementation from the issue
+// and the public PNG/artifact seams (`validate_png_rgb8`,
+// `SurfaceTexturesArtifact::from_json`, `bake_texture_artifact`).
+
+/// `png` with one `kind` chunk inserted right after IHDR.
+fn png_with_chunk_after_ihdr(png: &[u8], kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    let crc = crc32fast::hash(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = png[..33].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[33..]);
+    out
+}
+
+/// A `width` x `height` 8-bit RGB PNG whose single IDAT holds `zlib` verbatim.
+fn png_with_idat(width: u32, height: u32, zlib: &[u8]) -> Vec<u8> {
+    let chunk = |png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]| {
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let crc = crc32fast::hash(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    };
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = width.to_be_bytes().to_vec();
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(&mut png, b"IHDR", &header);
+    chunk(&mut png, b"IDAT", zlib);
+    chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// A valid zlib stream of `raw` preceded by `padding` empty, non-final stored
+/// deflate blocks: it inflates to exactly `raw` however large it is.
+fn padded_zlib(raw: &[u8], padding: usize) -> Vec<u8> {
+    assert!(raw.len() <= 0xffff);
+    let mut zlib = vec![0x78, 0x01];
+    for _ in 0..padding {
+        // BFINAL = 0, BTYPE = stored, LEN = 0, NLEN = !0.
+        zlib.extend_from_slice(&[0x00, 0x00, 0x00, 0xff, 0xff]);
+    }
+    let length = raw.len() as u16;
+    zlib.push(0x01);
+    zlib.extend_from_slice(&length.to_le_bytes());
+    zlib.extend_from_slice(&(!length).to_le_bytes());
+    zlib.extend_from_slice(raw);
+    let (mut a, mut b) = (1_u32, 0_u32);
+    for byte in raw {
+        a = (a + u32::from(*byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    zlib
+}
+
+#[test]
+fn rendering_affecting_png_chunks_are_rejected() {
+    let rgba: Vec<u8> = (0..6 * 4).map(|value| value as u8 * 9).collect();
+    let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
+    validate_png_rgb8(&png, 3, 2).unwrap();
+    // tRNS for color type 2: one 16-bit RGB sample that renders transparent.
+    let transparent = png_with_chunk_after_ihdr(&png, b"tRNS", &[0, 0, 0, 9, 0, 18]);
+    assert!(
+        validate_png_rgb8(&transparent, 3, 2).is_err(),
+        "a PNG with tRNS renders differently from its RGB samples"
+    );
+    // Color-management chunks change how the same samples render.
+    let gamma = 45_455_u32.to_be_bytes();
+    let chromaticities = [0_u8; 32];
+    let profile = b"icc\0\0x\x9c\x03\0\0\0\0\x01";
+    for (kind, data) in [
+        (b"gAMA", &gamma[..]),
+        (b"cHRM", &chromaticities[..]),
+        (b"sRGB", &[0][..]),
+        (b"iCCP", &profile[..]),
+    ] {
+        assert!(
+            validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).is_err(),
+            "a PNG with {} must not verify as plain RGB",
+            String::from_utf8_lossy(kind)
+        );
+    }
+    // Ancillary chunks that do not affect rendering stay accepted.
+    validate_png_rgb8(
+        &png_with_chunk_after_ihdr(&png, b"tEXt", b"Comment\0x"),
+        3,
+        2,
+    )
+    .unwrap();
+    validate_png_rgb8(&png_with_chunk_after_ihdr(&png, b"zzZz", b"x"), 3, 2).unwrap();
+}
+
+#[test]
+fn a_cached_texture_with_transparency_is_not_reused() {
+    let dir = TempDir::new("trns-tamper");
+    let fixture = Fixture::new();
+    let inputs = fixture.write(&dir.0);
+    let first = bake(&dir.0, &inputs);
+    let material = &first.artifact.materials[0];
+    let file = texture_file(&dir.0, &first, material.reference_frame);
+    // Same RGB samples, plus a tRNS chunk that makes one color transparent;
+    // the document records the new hash, so document and sidecar agree.
+    let original = fs::read(&file).unwrap();
+    let transparent = png_with_chunk_after_ihdr(&original, b"tRNS", &[0, 0, 0, 0, 0, 0]);
+    fs::write(&file, &transparent).unwrap();
+    let mut tampered = first.artifact.clone();
+    tampered.materials[0].texture.content_hash = ContentHash::of_bytes(&transparent);
+    let output = path("artifacts/bake/surface-textures.json");
+    fs::write(output.resolve(&dir.0), tampered.to_json()).unwrap();
+
+    let rebuilt = bake(&dir.0, &inputs);
+    assert!(
+        rebuilt.written.contains(&material.reference_frame),
+        "written {:?}, reused {:?}",
+        rebuilt.written,
+        rebuilt.reused
+    );
+    assert!(!rebuilt.reused.contains(&material.reference_frame));
+    assert_eq!(
+        rebuilt.artifact.materials[0].texture.content_hash,
+        material.texture.content_hash
+    );
+    assert_eq!(
+        fs::read(texture_file(&dir.0, &rebuilt, material.reference_frame)).unwrap(),
+        original
+    );
+    rebuilt.artifact.verify_textures(&dir.0).unwrap();
+}
+
+#[test]
+fn texture_artifacts_reject_zero_crop_extents() {
+    let dir = TempDir::new("zero-extent");
+    let inputs = Fixture::new().write(&dir.0);
+    let outcome = bake(&dir.0, &inputs);
+    SurfaceTexturesArtifact::from_json(&outcome.artifact.to_json()).unwrap();
+    for (zero_width, zero_height) in [(true, false), (false, true), (true, true)] {
+        let mut artifact = outcome.artifact.clone();
+        let texture = &mut artifact.materials[0].texture;
+        if zero_width {
+            texture.width = 0;
+        }
+        if zero_height {
+            texture.height = 0;
+        }
+        let (width, height) = (texture.width, texture.height);
+        assert!(
+            SurfaceTexturesArtifact::from_json(&artifact.to_json()).is_err(),
+            "a {width}x{height} texture crop must not validate"
+        );
+        assert!(artifact.validate().is_err());
+    }
+}
+
+#[test]
+fn encoded_png_data_is_bounded_by_the_declared_image() {
+    // 1x1 RGB: one filter byte plus one pixel.
+    let raw = [0_u8, 10, 20, 30];
+    let compact = padded_zlib(&raw, 0);
+    validate_png_rgb8(&png_with_idat(1, 1, &compact), 1, 1).unwrap();
+
+    // The same pixels behind 1 MiB of empty stored blocks: still a valid zlib
+    // stream that inflates to exactly the image, but its encoded size is far
+    // beyond anything a 1x1 image needs.
+    let padded = padded_zlib(&raw, (1 << 20) / 5);
+    assert_eq!(
+        miniz_oxide::inflate::decompress_to_vec_zlib(&padded).unwrap(),
+        raw
+    );
+    assert!(
+        validate_png_rgb8(&png_with_idat(1, 1, &padded), 1, 1).is_err(),
+        "a 1x1 sidecar with {} encoded bytes must be rejected",
+        padded.len()
+    );
+
+    // Uncompressed (stored) encodings of real images stay within the bound.
+    let (width, height) = (256_u32, 256_u32);
+    let mut stored_raw = Vec::new();
+    for y in 0..height {
+        stored_raw.push(0);
+        for x in 0..width {
+            stored_raw.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8]);
+        }
+    }
+    let stored = miniz_oxide::deflate::compress_to_vec_zlib(&stored_raw, 0);
+    assert!(stored.len() > stored_raw.len());
+    validate_png_rgb8(&png_with_idat(width, height, &stored), width, height).unwrap();
+}
