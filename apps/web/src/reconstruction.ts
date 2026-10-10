@@ -864,23 +864,34 @@ function seedCoversSegment(result: ReconstructionResult, pairCount: number): boo
 function assertBootstrapContract(result: ReconstructionResult, expectedFrameCount: number): void {
   const candidates = result.seed_candidates;
   const bootstrap = result.bootstrap;
+  const adjacentPairs = Math.max(0, expectedFrameCount - 1);
+  // Every adjacent pair in order, then any wider pairs of a segment none of whose
+  // adjacent pairs seeded (#127).
   if (
     !Array.isArray(candidates) ||
-    candidates.length !== Math.max(0, expectedFrameCount - 1) ||
-    !candidates.every((candidate, index) => candidate.from_frame === index) ||
+    candidates.length < adjacentPairs ||
+    !candidates.every((candidate, index) =>
+      index < adjacentPairs
+        ? candidate.from_frame === index && candidate.to_frame === index + 1
+        : candidate.to_frame > candidate.from_frame + 1 && candidate.to_frame < expectedFrameCount,
+    ) ||
     !bootstrap ||
     typeof bootstrap.summary !== "string"
   ) {
     throw new Error("bootstrap contract mismatch: seed candidates do not cover every adjacent pair");
   }
   const pair = result.calibrated_pair;
-  const seed = pair ? candidates[pair.from_frame] : null;
+  const seed = pair
+    ? candidates.find(
+        (candidate) => candidate.from_frame === pair.from_frame && candidate.to_frame === pair.to_frame,
+      ) ?? null
+    : null;
   if (pair && (!seed || seed.rejected_gate !== null || !seed.selected)) {
     throw new Error("bootstrap contract mismatch: the calibrated seed pair is not an accepted candidate");
   }
   const expectedGate = !pair
     ? bootstrap.decisive_gate !== null && bootstrap.decisive_gate !== "registration"
-    : result.registered_views.length === 0 && !seedCoversSegment(result, candidates.length)
+    : result.registered_views.length === 0 && !seedCoversSegment(result, adjacentPairs)
       ? bootstrap.decisive_gate === "registration"
       : // Registered views, or a two-frame segment that the seed pair covers.
         bootstrap.decisive_gate === null;

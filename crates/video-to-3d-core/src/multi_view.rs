@@ -138,7 +138,8 @@ pub(super) struct MultiViewAnalysis {
     tracks: Vec<FeatureTrack>,
     seed_track_indices: HashSet<usize>,
     seed_tracks: Vec<SeedTrackLandmark>,
-    seed_pair_index: Option<usize>,
+    /// Source and target frame of the calibrated seed pair (not necessarily adjacent).
+    seed_frames: Option<[usize; 2]>,
 }
 
 impl MultiViewAnalysis {
@@ -189,26 +190,24 @@ struct TriangulatedTrack {
 pub(super) fn analyze(
     selection: &KeyframeSelection,
     adjacent_matches: &[Vec<FeatureMatch>],
-    seed_pair: Option<(usize, &[SeedLandmark])>,
+    seed_pair: Option<([usize; 2], &[SeedLandmark])>,
 ) -> MultiViewAnalysis {
     let (tracks, membership) = build_feature_tracks(adjacent_matches);
     let keyframes = selection.keyframes.clone();
-    let seed_pair_index = seed_pair.map(|(pair_index, _)| pair_index);
+    let seed_frames = seed_pair.map(|(frames, _)| frames);
     let seed_tracks = seed_pair
-        .map(|(pair_index, seed_landmarks)| {
-            collect_seed_tracks(&membership, pair_index, seed_landmarks)
-        })
+        .map(|(frames, seed_landmarks)| collect_seed_tracks(&membership, frames[0], seed_landmarks))
         .unwrap_or_default();
     let seed_track_indices = seed_tracks.iter().map(|seed| seed.track_index).collect();
     let registration_candidates = seed_pair
-        .map(|(pair_index, seed_landmarks)| {
+        .map(|(frames, seed_landmarks)| {
             // Only the seed's segment shares its geometric solve; other segments get
             // their own solve, never this one.
             registration_candidates(
-                &selection.segment_keyframes(pair_index),
+                &selection.segment_keyframes(frames[0]),
                 &tracks,
                 &membership,
-                pair_index,
+                frames,
                 seed_landmarks,
             )
         })
@@ -250,7 +249,7 @@ pub(super) fn analyze(
         tracks,
         seed_track_indices,
         seed_tracks,
-        seed_pair_index,
+        seed_frames,
     }
 }
 
@@ -262,7 +261,7 @@ pub(super) fn triangulate_new_landmarks(
     height: u32,
     focal_pixels: f64,
 ) -> NewLandmarkAnalysis {
-    let Some(seed_pair_index) = analysis.seed_pair_index else {
+    let Some(seed_frames) = analysis.seed_frames else {
         return NewLandmarkAnalysis {
             stats: NewLandmarkStats::default(),
             landmarks: Vec::new(),
@@ -275,7 +274,6 @@ pub(super) fn triangulate_new_landmarks(
         };
     }
 
-    let seed_frames = [seed_pair_index, seed_pair_index + 1];
     let camera_by_frame: HashMap<usize, &RegisteredCamera> = cameras
         .iter()
         .map(|camera| (camera.frame_index, camera))
@@ -449,7 +447,7 @@ fn registration_candidates(
     keyframes: &[usize],
     tracks: &[FeatureTrack],
     membership: &HashMap<Observation, usize>,
-    seed_pair_index: usize,
+    seed_frames: [usize; 2],
     seed_landmarks: &[SeedLandmark],
 ) -> Vec<RegistrationCandidate> {
     let seed_track_indices: Vec<(usize, usize)> = seed_landmarks
@@ -457,7 +455,7 @@ fn registration_candidates(
         .filter_map(|seed_landmark| {
             membership
                 .get(&Observation {
-                    frame_index: seed_pair_index,
+                    frame_index: seed_frames[0],
                     feature_index: seed_landmark.source_feature_index,
                 })
                 .map(|&track_index| (seed_landmark.point_index, track_index))
@@ -467,7 +465,7 @@ fn registration_candidates(
     keyframes
         .iter()
         .copied()
-        .filter(|&frame_index| frame_index != seed_pair_index && frame_index != seed_pair_index + 1)
+        .filter(|frame_index| !seed_frames.contains(frame_index))
         .map(|frame_index| {
             let correspondences = seed_track_indices
                 .iter()
@@ -783,7 +781,7 @@ mod tests {
         let (tracks, membership) = build_feature_tracks(&matches);
         let seeds = seed_landmarks(10);
 
-        let candidates = registration_candidates(&[0, 2, 3], &tracks, &membership, 0, &seeds);
+        let candidates = registration_candidates(&[0, 2, 3], &tracks, &membership, [0, 1], &seeds);
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].frame_index, 2);
@@ -804,7 +802,7 @@ mod tests {
         let analysis = analyze(
             &select_for_pairs(&[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)]),
             &matches,
-            Some((0, &seed_landmarks(8))),
+            Some(([0, 1], &seed_landmarks(8))),
         );
 
         assert_eq!(analysis.stats.registration_candidates.len(), 1);
@@ -830,7 +828,7 @@ mod tests {
         let analysis = analyze(
             &select_for_pairs(&[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)]),
             &matches,
-            Some((0, &[])),
+            Some(([0, 1], &[])),
         );
 
         let result =
@@ -965,7 +963,7 @@ mod tests {
         let analysis = analyze(
             &select_for_pairs(&[pair(0, 0.7, 0.7, false), pair(1, 0.7, 0.7, false)]),
             &matches,
-            Some((0, &[])),
+            Some(([0, 1], &[])),
         );
 
         let result =
@@ -978,7 +976,7 @@ mod tests {
 
     #[test]
     fn bundle_adjust_stats_retain_returned_camera_poses() {
-        let analysis = analyze(&select_for_pairs(&[]), &[], Some((0, &[])));
+        let analysis = analyze(&select_for_pairs(&[]), &[], Some(([0, 1], &[])));
         let cameras = vec![camera(0, 0.0), camera(1, 1.0)];
         let features = vec![Vec::<Feature>::new(), Vec::<Feature>::new()];
 
