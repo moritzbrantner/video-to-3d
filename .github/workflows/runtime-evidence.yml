@@ -49,6 +49,11 @@ jobs:
           sudo apt-get install -y colmap python3-venv
           colmap -h | head -n 4
 
+      - name: Install Bun for the browser sampling contract
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
       - name: Install exact COLMAP reference matcher
         run: |
           python3 -m venv "$RUNNER_TEMP/colmap-python"
@@ -141,6 +146,10 @@ jobs:
               | tee "$RUNNER_TEMP/golden-rust-$case_name.txt"; then
               status=1
             fi
+            # Sampling stage (#129): the exported frames against the browser's own plan.
+            if ! bun tools/check_reference_sampling.ts "$case_dir"; then
+              status=1
+            fi
             if ! bash tools/run_colmap_golden.sh \
               "$case_dir/images" \
               "$case_dir/colmap-quality" \
@@ -230,9 +239,10 @@ jobs:
             case_report="$RUNNER_TEMP/colmap-golden-$case_name.md"
             if ! python3 tools/check_reference_fixtures.py \
               --case "$case_name" \
-              --rust "$RUNNER_TEMP/golden-rust-$case_name.txt" \
+              --fixture-dir "target/golden-reference/$case_name" \
               --colmap "$RUNNER_TEMP/golden-colmap-$case_name.txt" \
-              --markdown "$case_report"; then
+              --markdown "$case_report" \
+              --json "$RUNNER_TEMP/reference-stages-$case_name.json"; then
               status=1
             fi
             if test -f "$case_report"; then
@@ -303,4 +313,7 @@ jobs:
             ${{ runner.temp }}/moonlight.md
             candidate/target/golden-reference/*/truth/truth.json
             candidate/target/golden-reference/*/rust-evidence.json
+            candidate/target/golden-reference/*/stage-report.json
+            candidate/target/golden-reference/*/sampling-report.json
+            ${{ runner.temp }}/reference-stages-*.json
           if-no-files-found: warn

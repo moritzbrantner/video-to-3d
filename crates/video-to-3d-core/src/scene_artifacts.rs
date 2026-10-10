@@ -34,8 +34,8 @@ use crate::scene_runner::{
 };
 use crate::scene_store::Reproducibility;
 use crate::surface_materials::{
-    bake_surface_materials_with_cancel, AppearanceInvalidation, FallbackReasons, RecordedAppearance,
-    ReferenceImage, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
+    bake_surface_materials_with_cancel, AppearanceInvalidation, FallbackReasons,
+    RecordedAppearance, ReferenceImage, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
 };
 use crate::textured_glb::encode_png_rgb;
 use crate::{
@@ -725,12 +725,9 @@ pub fn bake_texture_artifact(
         })
         .collect();
     check_canceled()?;
-    let bake = bake_surface_materials_with_cancel(
-        &evidence,
-        &mesh.grid_sites,
-        &images,
-        || cancel.is_canceled(),
-    )?;
+    let bake = bake_surface_materials_with_cancel(&evidence, &mesh.grid_sites, &images, || {
+        cancel.is_canceled()
+    })?;
     check_canceled()?;
 
     let previous = fs::read_to_string(output.resolve(root))

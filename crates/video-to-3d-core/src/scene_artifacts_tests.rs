@@ -680,8 +680,7 @@ fn cancellation_before_baking_preserves_existing_inputs_and_writes_no_output() {
     let cancel = CancellationToken::new();
     cancel.cancel();
     let output = path("artifacts/bake/surface-textures.json");
-    let error = bake_texture_artifact(&dir.0, &output, &inputs.0, &inputs.1, &cancel)
-        .unwrap_err();
+    let error = bake_texture_artifact(&dir.0, &output, &inputs.0, &inputs.1, &cancel).unwrap_err();
     assert!(error.contains("canceled"), "{error}");
     assert!(!output.resolve(&dir.0).exists());
     assert!(!dir.0.join("artifacts/bake/textures").exists());

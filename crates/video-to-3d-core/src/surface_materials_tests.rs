@@ -301,15 +301,10 @@ fn cancellation_interrupts_inner_triangle_work() {
     let evidence = fixture.evidence();
     let images = fixture.reference_images();
     let mut checks = 0;
-    let error = bake_surface_materials_with_cancel(
-        &evidence,
-        &fixture.sites,
-        &images,
-        || {
-            checks += 1;
-            checks >= 11
-        },
-    )
+    let error = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        checks += 1;
+        checks >= 11
+    })
     .unwrap_err();
     assert!(error.contains("canceled"), "{error}");
     assert_eq!(checks, 11, "the work should poll during triangle traversal");
@@ -324,18 +319,16 @@ fn cancellation_rejects_all_fallback_bakes() {
     let evidence = fixture.evidence();
     let images = fixture.reference_images();
     let mut checks = 0;
-    let error = bake_surface_materials_with_cancel(
-        &evidence,
-        &fixture.sites,
-        &images,
-        || {
-            checks += 1;
-            checks >= 10
-        },
-    )
+    let error = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        checks += 1;
+        checks >= 10
+    })
     .unwrap_err();
     assert!(error.contains("canceled"), "{error}");
-    assert_eq!(checks, 10, "cancellation must be checked after fallback processing");
+    assert_eq!(
+        checks, 10,
+        "cancellation must be checked after fallback processing"
+    );
 }
 
 #[test]
