@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.0",
+    "@huggingface/transformers": "4.3.1",
     "@litertjs/core": "2.5.3",
     "next": "16.3.8",
     "react": "19.3.0",
