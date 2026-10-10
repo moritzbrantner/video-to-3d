@@ -237,7 +237,7 @@ Improve reference selection and seam fusion until ordinary indoor/outdoor clips 
 
 Move from browser-only texture projection to an exportable texture/material representation while preserving exact source-camera provenance.
 
-Status: per-reference baked textures and a self-contained textured GLB export are integrated (`surface_materials`, `textured_glb`). Seam-aware multi-view blending and scene-project `texture_bake` execution remain open.
+Status: per-reference baked textures and a self-contained textured GLB export are integrated (`surface_materials`, `textured_glb`). Mixed-reference seam triangles are textured from a single accepted camera under a fail-closed projection and depth rule. Multi-view blending and scene-project `texture_bake` execution remain open.
 
 ## 3.4 Geometry confidence field
 

@@ -34,8 +34,9 @@ use crate::scene_runner::{
 };
 use crate::scene_store::Reproducibility;
 use crate::surface_materials::{
-    bake_surface_materials_with_cancel, AppearanceInvalidation, FallbackReasons,
-    RecordedAppearance, ReferenceImage, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
+    bake_surface_materials_with_cancel, AppearanceArtifact, AppearanceInvalidation,
+    FallbackReasons, MaterialRule, RecordedAppearance, ReferenceImage,
+    SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
 };
 use crate::textured_glb::encode_png_rgb_with_cancel;
 use crate::{
@@ -864,6 +865,7 @@ impl SurfaceTexturesArtifact {
             .iter()
             .map(|material| RecordedAppearance {
                 reference_frame: material.reference_frame,
+                rule: MaterialRule::SameReferenceGrid,
                 appearance_key: material.appearance_key.clone(),
             })
             .collect()
@@ -1399,6 +1401,14 @@ fn bake_parsed(
     let mut created = CreatedFiles(Vec::new());
     for material in &bake.materials {
         check_canceled()?;
+        // This artifact records same-reference materials only; the bake runs
+        // without seam intrinsics, so a seam material would be a contract bug.
+        if material.rule != MaterialRule::SameReferenceGrid {
+            return Err(format!(
+                "texture bake produced a {:?} material for frame {}, which surface-textures artifacts cannot record",
+                material.rule, material.reference_frame
+            ));
+        }
         let digest = &material.appearance_key.as_str()["sha256:".len()..];
         let path = sibling(output, &format!("textures/{digest}.png"))?;
         let kept = previous_files.get(&material.appearance_key).filter(|file| {
@@ -1483,16 +1493,16 @@ fn bake_parsed(
     }
     // A reference whose appearance key is unchanged but whose recorded
     // sidecar no longer verified was repaired, not reused.
-    let repaired: Vec<usize> = invalidation
+    let repaired: Vec<AppearanceArtifact> = invalidation
         .reused
         .iter()
         .copied()
-        .filter(|frame| written.contains(frame))
+        .filter(|artifact| written.contains(&artifact.reference_frame))
         .collect();
     if !repaired.is_empty() {
         invalidation
             .reused
-            .retain(|frame| !repaired.contains(frame));
+            .retain(|artifact| !repaired.contains(artifact));
         invalidation.invalidated.extend(repaired);
         invalidation.invalidated.sort_unstable();
     }

@@ -10,27 +10,43 @@
 //! - Geometry is read-only. Every accepted triangle appears exactly once in the
 //!   output, either textured or in the fallback; no vertex or triangle is
 //!   created, moved, repaired, or dropped.
-//! - A triangle is textured only when all three vertices belong to observed
-//!   geometry (geometric multi-view or revalidated completion) of the same
-//!   reference view, the reference image is available, and the triangle has a
-//!   non-degenerate footprint inside that image. Everything else keeps the
-//!   fallback and is counted by reason.
-//! - Every material names its reference camera, camera authority and pose,
-//!   supporting source frames, and provenance classes.
+//! - A triangle is textured by the same-reference rule only when all three
+//!   vertices belong to observed geometry (geometric multi-view or revalidated
+//!   completion) of the same reference view, the reference image is
+//!   available, and the triangle has a non-degenerate footprint inside that
+//!   image.
+//! - A mixed-reference (seam) triangle with three observed vertices is
+//!   textured only by the fail-closed single-camera projection rule of
+//!   [`seams`]: one accepted camera must see all three vertices through its
+//!   accepted pose, pass a depth test against the accepted geometry, and
+//!   reproduce its own accepted grid sites. Cameras are never blended.
+//! - Everything else keeps the fallback and is counted by reason; rejected
+//!   seam triangles are additionally counted by the furthest rule check.
+//! - Every material names its camera, the rule that admitted it, camera
+//!   authority and pose, supporting source frames, and provenance classes.
 //! - Every material carries an appearance key derived only from inputs that
 //!   affect its own appearance (reference camera, cropped reference pixels,
 //!   and its own triangles' reference-image footprints). Reprojection or
 //!   framing changes of one reference therefore invalidate only that
 //!   reference's material.
 
+#[path = "surface_material_seams.rs"]
+mod seams;
+
+pub use seams::{SeamProjection, POSE_CONSISTENCY_PIXELS};
+
 use crate::scene_project::ContentHash;
-use crate::{DenseGridSite, EvidenceCameraAuthority, EvidenceOrigin, ReconstructionEvidenceView};
+use crate::{
+    DenseGridSite, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
+    ReconstructionEvidenceView,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SURFACE_MATERIAL_BAKE_SCHEMA_VERSION: u32 = 1;
-/// Bump whenever the bake semantics change so recorded appearance keys go stale.
+pub const SURFACE_MATERIAL_BAKE_SCHEMA_VERSION: u32 = 2;
+/// Bump whenever the same-reference bake semantics change so recorded
+/// appearance keys go stale. Seam materials use their own rule revision.
 const BAKE_REVISION: u32 = 1;
 /// Texels kept around the used footprint so bilinear sampling at a triangle
 /// edge never reads outside the cropped reference image.
@@ -46,10 +62,44 @@ pub struct ReferenceImage<'a> {
     pub rgba: &'a [u8],
 }
 
+/// The rule that admitted a material's triangles into its texture.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialRule {
+    /// All three vertices are observed geometry of the material's reference
+    /// view; corners are addressed by their accepted reference-grid sites.
+    #[default]
+    SameReferenceGrid,
+    /// Mixed-reference seam triangle admitted by one accepted camera that sees
+    /// all three vertices; corners are projected through its accepted pose.
+    SeamSingleCameraProjection,
+}
+
+impl MaterialRule {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SameReferenceGrid => "",
+            Self::SeamSingleCameraProjection => "seam ",
+        }
+    }
+}
+
+/// Identifies one appearance artifact: the camera frame and the admitting rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct AppearanceArtifact {
+    pub reference_frame: usize,
+    pub rule: MaterialRule,
+}
+
 /// Appearance key recorded by an earlier bake.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedAppearance {
     pub reference_frame: usize,
+    /// Absent in bakes from before seam texturing: those were same-reference.
+    #[serde(default)]
+    pub rule: MaterialRule,
     pub appearance_key: ContentHash,
 }
 
@@ -70,7 +120,16 @@ pub struct BakedTexture {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BakedReferenceMaterial {
+    /// Frame of the camera whose reference image textures this material.
     pub reference_frame: usize,
+    /// The rule that admitted every triangle of this material.
+    pub rule: MaterialRule,
+    /// Seam materials: the reference views owning the textured seam vertices.
+    /// Empty for same-reference materials.
+    pub seam_reference_frames: Vec<usize>,
+    /// Seam materials: focal length (pixels, principal point at the image
+    /// center) used to project the seam vertices.
+    pub focal_pixels: Option<f32>,
     pub camera_authority: EvidenceCameraAuthority,
     /// World-to-camera rotation (row-major) of the reference camera.
     pub camera_rotation: [f32; 9],
@@ -89,11 +148,54 @@ pub struct BakedReferenceMaterial {
     pub appearance_key: ContentHash,
 }
 
+/// Why no accepted camera admitted a mixed-reference seam triangle, counted
+/// by the furthest check of the single-camera projection rule any camera
+/// reached. The counts sum to [`FallbackReasons::mixed_reference`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeamRejections {
+    /// No intrinsics were supplied, or no accepted camera with a reference
+    /// image owns observed points to check its projection against.
+    pub no_candidate_camera: usize,
+    /// Candidate cameras do not reproduce their own accepted grid sites.
+    pub pose_inconsistent: usize,
+    /// A vertex lies behind every otherwise eligible camera.
+    pub behind_camera: usize,
+    /// A vertex projects outside every otherwise eligible reference image.
+    pub out_of_frame: usize,
+    /// Degenerate projected footprint or grazing viewing angle.
+    pub grazing_view: usize,
+    /// Accepted geometry lies clearly in front of the triangle.
+    pub occluded: usize,
+    /// Visibility cannot be decided at pixel resolution (depth inside the
+    /// tolerance band, or next to an occluding depth edge).
+    pub ambiguous: usize,
+}
+
+impl SeamRejections {
+    fn count(&mut self, reason: seams::SeamRejection) {
+        use seams::SeamRejection as R;
+        *match reason {
+            R::NoCandidateCamera => &mut self.no_candidate_camera,
+            R::PoseInconsistent => &mut self.pose_inconsistent,
+            R::BehindCamera => &mut self.behind_camera,
+            R::OutOfFrame => &mut self.out_of_frame,
+            R::GrazingView => &mut self.grazing_view,
+            R::Occluded => &mut self.occluded,
+            R::Ambiguous => &mut self.ambiguous,
+        } += 1;
+    }
+}
+
 /// Why an accepted triangle keeps the untextured fallback.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FallbackReasons {
-    /// Vertices belong to different reference views.
+    /// Vertices belong to different reference views and no single accepted
+    /// camera passed the seam rule (broken down in `seam`).
     pub mixed_reference: usize,
+    /// Absent in bakes from before seam texturing.
+    #[serde(default)]
+    pub seam: SeamRejections,
     /// A vertex has no observed reference view (learned or generative evidence).
     pub unobserved_reference: usize,
     /// The reference image was not supplied.
@@ -124,10 +226,10 @@ pub struct FallbackSurface {
 /// Which recorded appearance artifacts a bake keeps, replaces, adds or drops.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct AppearanceInvalidation {
-    pub reused: Vec<usize>,
-    pub invalidated: Vec<usize>,
-    pub added: Vec<usize>,
-    pub removed: Vec<usize>,
+    pub reused: Vec<AppearanceArtifact>,
+    pub invalidated: Vec<AppearanceArtifact>,
+    pub added: Vec<AppearanceArtifact>,
+    pub removed: Vec<AppearanceArtifact>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -153,11 +255,21 @@ impl SurfaceMaterialBake {
             .sum()
     }
 
+    /// Triangles textured by the seam rule.
+    pub fn seam_triangles(&self) -> usize {
+        self.materials
+            .iter()
+            .filter(|material| material.rule == MaterialRule::SeamSingleCameraProjection)
+            .map(|material| material.triangles.len())
+            .sum()
+    }
+
     pub fn recorded_appearance(&self) -> Vec<RecordedAppearance> {
         self.materials
             .iter()
             .map(|material| RecordedAppearance {
                 reference_frame: material.reference_frame,
+                rule: material.rule,
                 appearance_key: material.appearance_key.clone(),
             })
             .collect()
@@ -165,56 +277,85 @@ impl SurfaceMaterialBake {
 
     /// Compare against appearance keys recorded by an earlier bake.
     pub fn invalidation_against(&self, previous: &[RecordedAppearance]) -> AppearanceInvalidation {
-        let previous: BTreeMap<usize, &ContentHash> = previous
+        let previous: BTreeMap<AppearanceArtifact, &ContentHash> = previous
             .iter()
-            .map(|record| (record.reference_frame, &record.appearance_key))
+            .map(|record| {
+                (
+                    AppearanceArtifact {
+                        reference_frame: record.reference_frame,
+                        rule: record.rule,
+                    },
+                    &record.appearance_key,
+                )
+            })
             .collect();
         let mut result = AppearanceInvalidation::default();
+        let mut current = BTreeSet::new();
         for material in &self.materials {
-            match previous.get(&material.reference_frame) {
-                Some(key) if **key == material.appearance_key => {
-                    result.reused.push(material.reference_frame)
-                }
-                Some(_) => result.invalidated.push(material.reference_frame),
-                None => result.added.push(material.reference_frame),
+            let artifact = material.artifact();
+            current.insert(artifact);
+            match previous.get(&artifact) {
+                Some(key) if **key == material.appearance_key => result.reused.push(artifact),
+                Some(_) => result.invalidated.push(artifact),
+                None => result.added.push(artifact),
             }
         }
-        let current: BTreeSet<usize> = self
-            .materials
-            .iter()
-            .map(|material| material.reference_frame)
-            .collect();
         result.removed = previous
             .keys()
             .copied()
-            .filter(|frame| !current.contains(frame))
+            .filter(|artifact| !current.contains(artifact))
             .collect();
         result
     }
 
     pub fn diagnostic(&self) -> String {
-        let frames = self
-            .materials
-            .iter()
-            .map(|material| material.reference_frame.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let frames = |rule: MaterialRule| {
+            self.materials
+                .iter()
+                .filter(|material| material.rule == rule)
+                .map(|material| material.reference_frame.to_string())
+                .collect::<Vec<_>>()
+        };
+        let references = frames(MaterialRule::SameReferenceGrid);
+        let seam_cameras = frames(MaterialRule::SeamSingleCameraProjection);
         let reasons = &self.fallback.reasons;
+        let seam = &reasons.seam;
         let textured = if self.materials.is_empty() {
             "no reference view textured any accepted triangle".to_owned()
         } else {
-            format!(
-                "{} reference material(s) from frame(s) {frames}",
-                self.materials.len()
-            )
+            let mut textured = format!(
+                "{} reference material(s) from frame(s) {}",
+                references.len(),
+                if references.is_empty() {
+                    "none".to_owned()
+                } else {
+                    references.join(", ")
+                }
+            );
+            if !seam_cameras.is_empty() {
+                textured.push_str(&format!(
+                    ", {} seam triangle(s) in {} seam material(s) from camera frame(s) {} by the single-camera projection rule",
+                    self.seam_triangles(),
+                    seam_cameras.len(),
+                    seam_cameras.join(", ")
+                ));
+            }
+            textured
         };
         format!(
-            "Surface material bake v{}: {} of {} accepted triangles textured ({textured}); {} keep the vertex-color fallback ({} mixed reference, {} unobserved reference, {} missing reference image, {} missing grid site, {} degenerate footprint). Geometry is unchanged: {} points and {} triangles exported as accepted.",
+            "Surface material bake v{}: {} of {} accepted triangles textured ({textured}); {} keep the vertex-color fallback ({} mixed reference [seam rule: {} no candidate camera, {} pose inconsistent, {} behind camera, {} out of frame, {} grazing view, {} occluded, {} ambiguous], {} unobserved reference, {} missing reference image, {} missing grid site, {} degenerate footprint). Geometry is unchanged: {} points and {} triangles exported as accepted.",
             self.schema_version,
             self.textured_triangles(),
             self.triangle_count,
             self.fallback.triangles.len(),
             reasons.mixed_reference,
+            seam.no_candidate_camera,
+            seam.pose_inconsistent,
+            seam.behind_camera,
+            seam.out_of_frame,
+            seam.grazing_view,
+            seam.occluded,
+            seam.ambiguous,
             reasons.unobserved_reference,
             reasons.missing_reference_image,
             reasons.missing_grid_site,
@@ -225,15 +366,26 @@ impl SurfaceMaterialBake {
     }
 }
 
+impl BakedReferenceMaterial {
+    pub fn artifact(&self) -> AppearanceArtifact {
+        AppearanceArtifact {
+            reference_frame: self.reference_frame,
+            rule: self.rule,
+        }
+    }
+}
+
 impl AppearanceInvalidation {
     pub fn diagnostic(&self) -> String {
-        let list = |frames: &[usize]| {
-            if frames.is_empty() {
+        let list = |artifacts: &[AppearanceArtifact]| {
+            if artifacts.is_empty() {
                 "none".to_owned()
             } else {
-                frames
+                artifacts
                     .iter()
-                    .map(usize::to_string)
+                    .map(|artifact| {
+                        format!("{}{}", artifact.rule.label(), artifact.reference_frame)
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             }
@@ -248,26 +400,57 @@ impl AppearanceInvalidation {
     }
 }
 
-/// Bake reference-view materials for the accepted topology of `evidence`.
-///
-/// `grid_sites[i]` is the pixel of dense point `i` in its own reference image.
-/// Structural contract violations (invalid evidence, malformed or duplicate
-/// reference images) are errors; every per-triangle problem falls back.
+/// Bake reference-view materials for the accepted topology of `evidence`
+/// without camera intrinsics: every mixed-reference seam triangle keeps the
+/// fallback (counted as `no_candidate_camera`).
 pub fn bake_surface_materials(
     evidence: &ReconstructionEvidenceView<'_>,
     grid_sites: &[DenseGridSite],
     reference_images: &[ReferenceImage<'_>],
 ) -> Result<SurfaceMaterialBake, String> {
-    bake_surface_materials_with_cancel(evidence, grid_sites, reference_images, || false)
+    bake_surface_materials_with_seams(evidence, grid_sites, reference_images, None)
 }
 
-/// The same deterministic bake with cooperative cancellation. The callback is
-/// polled at bounded intervals during region, triangle, and pixel processing;
-/// a canceled operation never returns a partial bake as successful.
+/// Bake reference-view materials for the accepted topology of `evidence`.
+///
+/// `grid_sites[i]` is the pixel of dense point `i` in its own reference image.
+/// `seam_projection` carries the pinhole intrinsics of the accepted cameras;
+/// without it no seam triangle is textured. Structural contract violations
+/// (invalid evidence, malformed or duplicate reference images, invalid
+/// intrinsics) are errors; every per-triangle problem falls back.
+pub fn bake_surface_materials_with_seams(
+    evidence: &ReconstructionEvidenceView<'_>,
+    grid_sites: &[DenseGridSite],
+    reference_images: &[ReferenceImage<'_>],
+    seam_projection: Option<SeamProjection>,
+) -> Result<SurfaceMaterialBake, String> {
+    bake_with_cancel(
+        evidence,
+        grid_sites,
+        reference_images,
+        seam_projection,
+        || false,
+    )
+}
+
+/// The deterministic bake without seam intrinsics, with cooperative
+/// cancellation. The callback is polled at bounded intervals during region,
+/// triangle, seam, and pixel processing; a canceled operation never returns a
+/// partial bake as successful.
 pub(crate) fn bake_surface_materials_with_cancel(
     evidence: &ReconstructionEvidenceView<'_>,
     grid_sites: &[DenseGridSite],
     reference_images: &[ReferenceImage<'_>],
+    is_canceled: impl FnMut() -> bool,
+) -> Result<SurfaceMaterialBake, String> {
+    bake_with_cancel(evidence, grid_sites, reference_images, None, is_canceled)
+}
+
+fn bake_with_cancel(
+    evidence: &ReconstructionEvidenceView<'_>,
+    grid_sites: &[DenseGridSite],
+    reference_images: &[ReferenceImage<'_>],
+    seam_projection: Option<SeamProjection>,
     mut is_canceled: impl FnMut() -> bool,
 ) -> Result<SurfaceMaterialBake, String> {
     let mut check_canceled = || {
@@ -280,6 +463,11 @@ pub(crate) fn bake_surface_materials_with_cancel(
     check_canceled()?;
     evidence.validate_with_cancel(&mut check_canceled)?;
     check_canceled()?;
+    if let Some(projection) = seam_projection {
+        if !projection.focal_pixels.is_finite() || projection.focal_pixels <= 0.0 {
+            return Err("seam projection focal length must be finite and positive".into());
+        }
+    }
     let mut images = BTreeMap::new();
     for image in reference_images {
         check_canceled()?;
@@ -329,6 +517,7 @@ pub(crate) fn bake_surface_materials_with_cancel(
     let mut fallback = FallbackSurface::default();
     // reference frame -> (triangle indices, contributing regions)
     let mut assigned: BTreeMap<usize, (Vec<usize>, BTreeSet<usize>)> = BTreeMap::new();
+    let mut seam_candidates = Vec::new();
     for (triangle_index, triangle) in evidence.triangles.iter().enumerate() {
         if triangle_index % 1024 == 0 {
             check_canceled()?;
@@ -352,7 +541,9 @@ pub(crate) fn bake_surface_materials_with_cancel(
             .iter()
             .any(|reference| *reference != references[0])
         {
-            reasons.mixed_reference += 1;
+            // Decided by the seam rule below.
+            seam_candidates.push(triangle_index);
+            continue;
         } else if !images.contains_key(&references[0]) {
             reasons.missing_reference_image += 1;
         } else if !grid_mapped
@@ -379,80 +570,58 @@ pub(crate) fn bake_surface_materials_with_cancel(
         fallback.triangles.push(triangle_index);
     }
 
-    let mut materials = Vec::with_capacity(assigned.len());
-    for (reference, (triangles, regions)) in assigned {
-        check_canceled()?;
-        let camera = evidence
+    // camera frame -> admitted seam triangles with their corner pixels
+    let mut seam_assigned: BTreeMap<usize, Vec<(usize, CornerPixels)>> = BTreeMap::new();
+    let seam_results = seams::evaluate_seams(
+        evidence,
+        &ownership,
+        grid_mapped.then_some(grid_sites),
+        &images,
+        seam_projection,
+        &seam_candidates,
+        &mut check_canceled,
+    )?;
+    for (triangle_index, result) in seam_candidates.iter().zip(seam_results) {
+        match result {
+            Ok(admission) => seam_assigned
+                .entry(admission.camera_frame)
+                .or_default()
+                .push((*triangle_index, admission.corner_pixels)),
+            Err(reason) => {
+                fallback.reasons.mixed_reference += 1;
+                fallback.reasons.seam.count(reason);
+                fallback.triangles.push(*triangle_index);
+            }
+        }
+    }
+    fallback.triangles.sort_unstable();
+
+    let camera_for = |frame: usize| {
+        evidence
             .cameras
             .iter()
-            .find(|camera| camera.frame_index == reference)
-            .ok_or_else(|| {
-                format!("reference frame {reference} has no accepted evidence camera")
-            })?;
+            .find(|camera| camera.frame_index == frame)
+            .ok_or_else(|| format!("reference frame {frame} has no accepted evidence camera"))
+    };
+    let mut materials = Vec::with_capacity(assigned.len() + seam_assigned.len());
+    for (reference, (triangles, regions)) in assigned {
+        check_canceled()?;
+        let camera = camera_for(reference)?;
         let image = images[&reference];
-        let mut source_frames = BTreeSet::from([reference]);
-        let mut provenance = Vec::new();
-        for region in regions.iter().map(|index| &evidence.regions[*index]) {
-            source_frames.extend(region.source_frames.iter().copied());
-            if !provenance.contains(&region.origin) {
-                provenance.push(region.origin);
-            }
-        }
-        provenance.sort_by_key(|origin| *origin as u8);
+        let (source_frames, provenance) = region_provenance(evidence, reference, &regions);
 
-        let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
-        for (ordinal, triangle) in triangles
-            .iter()
-            .map(|index| &evidence.triangles[*index])
-            .enumerate()
-        {
-            if ordinal % 1024 == 0 {
-                check_canceled()?;
-            }
-            for site in [triangle.a, triangle.b, triangle.c].map(|index| grid_sites[index]) {
-                min_x = min_x.min(site.x);
-                min_y = min_y.min(site.y);
-                max_x = max_x.max(site.x);
-                max_y = max_y.max(site.y);
-            }
-        }
-        let x0 = min_x.saturating_sub(CROP_MARGIN_PIXELS);
-        let y0 = min_y.saturating_sub(CROP_MARGIN_PIXELS);
-        let x1 = (max_x + CROP_MARGIN_PIXELS).min(image.width - 1);
-        let y1 = (max_y + CROP_MARGIN_PIXELS).min(image.height - 1);
-        let (crop_width, crop_height) = (x1 - x0 + 1, y1 - y0 + 1);
-        let mut rgba = Vec::with_capacity(crop_width as usize * crop_height as usize * 4);
-        for y in y0..=y1 {
-            if (y - y0) % 64 == 0 {
-                check_canceled()?;
-            }
-            let row = (y as usize * image.width as usize + x0 as usize) * 4;
-            rgba.extend_from_slice(&image.rgba[row..row + crop_width as usize * 4]);
-        }
-        let mut texture_hasher = Sha256::new();
-        texture_hasher.update(crop_width.to_le_bytes());
-        texture_hasher.update(crop_height.to_le_bytes());
-        for chunk in rgba.chunks(1024 * 1024) {
-            check_canceled()?;
-            texture_hasher.update(chunk);
-        }
-        let texture_hash = content_hash(texture_hasher);
-
-        // Grid sites address pixel centers of the reference image.
-        let mut corner_uvs = Vec::with_capacity(triangles.len());
+        let mut corner_pixels = Vec::with_capacity(triangles.len());
         for (ordinal, index) in triangles.iter().enumerate() {
             if ordinal % 1024 == 0 {
                 check_canceled()?;
             }
             let triangle = &evidence.triangles[*index];
-            corner_uvs.push([triangle.a, triangle.b, triangle.c].map(|point| {
+            corner_pixels.push([triangle.a, triangle.b, triangle.c].map(|point| {
                 let site = grid_sites[point];
-                [
-                    ((site.x - x0) as f32 + 0.5) / crop_width as f32,
-                    ((site.y - y0) as f32 + 0.5) / crop_height as f32,
-                ]
+                [site.x as f64, site.y as f64]
             }));
         }
+        let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
 
         // The key covers exactly what this material's appearance depends on:
         // its camera, the reference framing and crop, the cropped pixels, and
@@ -461,21 +630,14 @@ pub(crate) fn bake_surface_materials_with_cancel(
         let mut key = Sha256::new();
         key.update(b"video-to-3d/surface-material");
         key.update(BAKE_REVISION.to_le_bytes());
-        key.update((reference as u64).to_le_bytes());
-        key.update([camera.authority as u8]);
-        for value in camera.rotation.iter().chain(&camera.translation) {
-            key.update(value.to_bits().to_le_bytes());
-        }
-        for value in [image.width, image.height, x0, y0] {
-            key.update(value.to_le_bytes());
-        }
-        key.update(texture_hash.as_str().as_bytes());
-        for frame in &source_frames {
-            key.update((*frame as u64).to_le_bytes());
-        }
-        for origin in &provenance {
-            key.update([*origin as u8]);
-        }
+        hash_camera_and_texture(
+            &mut key,
+            reference,
+            camera,
+            &texture,
+            &source_frames,
+            &provenance,
+        );
         for (ordinal, triangle) in triangles
             .iter()
             .map(|index| &evidence.triangles[*index])
@@ -492,22 +654,96 @@ pub(crate) fn bake_surface_materials_with_cancel(
 
         materials.push(BakedReferenceMaterial {
             reference_frame: reference,
+            rule: MaterialRule::SameReferenceGrid,
+            seam_reference_frames: Vec::new(),
+            focal_pixels: None,
             camera_authority: camera.authority,
             camera_rotation: camera.rotation,
             camera_translation: camera.translation,
-            source_frames: source_frames.into_iter().collect(),
+            source_frames,
             provenance,
             triangles,
             corner_uvs,
-            texture: BakedTexture {
-                crop_origin: [x0, y0],
-                width: crop_width,
-                height: crop_height,
-                source_image_width: image.width,
-                source_image_height: image.height,
-                content_hash: texture_hash,
-                rgba,
-            },
+            texture,
+            appearance_key: content_hash(key),
+        });
+    }
+
+    for (camera_frame, admitted) in seam_assigned {
+        check_canceled()?;
+        let camera = camera_for(camera_frame)?;
+        let image = images[&camera_frame];
+        let focal = seam_projection
+            .expect("seam triangles are admitted only with intrinsics")
+            .focal_pixels;
+        let mut regions = BTreeSet::new();
+        let mut seam_reference_frames = BTreeSet::new();
+        let mut triangles = Vec::with_capacity(admitted.len());
+        let mut corner_pixels = Vec::with_capacity(admitted.len());
+        for (ordinal, (index, pixels)) in admitted.iter().enumerate() {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
+            triangles.push(*index);
+            corner_pixels.push(*pixels);
+            let triangle = &evidence.triangles[*index];
+            for point in [triangle.a, triangle.b, triangle.c] {
+                if let Ownership::Observed { reference, region } = ownership[point] {
+                    regions.insert(region);
+                    seam_reference_frames.insert(reference);
+                }
+            }
+        }
+        let (source_frames, provenance) = region_provenance(evidence, camera_frame, &regions);
+        let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
+
+        // Seam appearance depends on the camera and intrinsics, the cropped
+        // pixels, the seam vertices' accepted positions (they are projected),
+        // and the references owning them. Occlusion decisions enter through
+        // the admitted triangle set.
+        let mut key = Sha256::new();
+        key.update(b"video-to-3d/surface-material/seam-single-camera-projection");
+        key.update(seams::SEAM_RULE_REVISION.to_le_bytes());
+        key.update(focal.to_bits().to_le_bytes());
+        hash_camera_and_texture(
+            &mut key,
+            camera_frame,
+            camera,
+            &texture,
+            &source_frames,
+            &provenance,
+        );
+        for frame in &seam_reference_frames {
+            key.update((*frame as u64).to_le_bytes());
+        }
+        for (ordinal, triangle) in triangles
+            .iter()
+            .map(|index| &evidence.triangles[*index])
+            .enumerate()
+        {
+            if ordinal % 1024 == 0 {
+                check_canceled()?;
+            }
+            for point in [triangle.a, triangle.b, triangle.c].map(|index| &points[index]) {
+                for value in [point.x, point.y, point.z] {
+                    key.update(value.to_bits().to_le_bytes());
+                }
+            }
+        }
+
+        materials.push(BakedReferenceMaterial {
+            reference_frame: camera_frame,
+            rule: MaterialRule::SeamSingleCameraProjection,
+            seam_reference_frames: seam_reference_frames.into_iter().collect(),
+            focal_pixels: Some(focal),
+            camera_authority: camera.authority,
+            camera_rotation: camera.rotation,
+            camera_translation: camera.translation,
+            source_frames,
+            provenance,
+            triangles,
+            corner_uvs,
+            texture,
             appearance_key: content_hash(key),
         });
     }
@@ -522,6 +758,128 @@ pub(crate) fn bake_surface_materials_with_cancel(
         fallback,
     })
 }
+
+/// Supporting source frames (plus `camera_frame`) and sorted provenance
+/// classes of the contributing regions.
+fn region_provenance(
+    evidence: &ReconstructionEvidenceView<'_>,
+    camera_frame: usize,
+    regions: &BTreeSet<usize>,
+) -> (Vec<usize>, Vec<EvidenceOrigin>) {
+    let mut source_frames = BTreeSet::from([camera_frame]);
+    let mut provenance = Vec::new();
+    for region in regions.iter().map(|index| &evidence.regions[*index]) {
+        source_frames.extend(region.source_frames.iter().copied());
+        if let Some(reference) = region.reference_frame {
+            source_frames.insert(reference);
+        }
+        if !provenance.contains(&region.origin) {
+            provenance.push(region.origin);
+        }
+    }
+    provenance.sort_by_key(|origin| *origin as u8);
+    (source_frames.into_iter().collect(), provenance)
+}
+
+/// Normalized texture coordinates of triangle corners `[a, b, c]`.
+type CornerUvs = [[f32; 2]; 3];
+
+/// Crop the used footprint (plus margin) out of `image` and map the corner
+/// pixels (pixel `x` centered at coordinate `x`) to normalized crop UVs.
+fn crop_texture(
+    image: &ReferenceImage<'_>,
+    corner_pixels: &[CornerPixels],
+    check_canceled: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(BakedTexture, Vec<CornerUvs>), String> {
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    // Projected corners carry float noise; the crop margin already covers the
+    // neighbouring texel a bilinear sample reads, so snap within a tolerance.
+    const SNAP: f64 = 1.0e-3;
+    for (ordinal, [x, y]) in corner_pixels.iter().flatten().enumerate() {
+        if ordinal % (3 * 1024) == 0 {
+            check_canceled()?;
+        }
+        min_x = min_x.min((x + SNAP).floor().max(0.0) as u32);
+        min_y = min_y.min((y + SNAP).floor().max(0.0) as u32);
+        max_x = max_x.max((x - SNAP).ceil().max(0.0) as u32);
+        max_y = max_y.max((y - SNAP).ceil().max(0.0) as u32);
+    }
+    let x0 = min_x.saturating_sub(CROP_MARGIN_PIXELS);
+    let y0 = min_y.saturating_sub(CROP_MARGIN_PIXELS);
+    let x1 = (max_x + CROP_MARGIN_PIXELS).min(image.width - 1);
+    let y1 = (max_y + CROP_MARGIN_PIXELS).min(image.height - 1);
+    let (crop_width, crop_height) = (x1 - x0 + 1, y1 - y0 + 1);
+    let mut rgba = Vec::with_capacity(crop_width as usize * crop_height as usize * 4);
+    for y in y0..=y1 {
+        if (y - y0) % 64 == 0 {
+            check_canceled()?;
+        }
+        let row = (y as usize * image.width as usize + x0 as usize) * 4;
+        rgba.extend_from_slice(&image.rgba[row..row + crop_width as usize * 4]);
+    }
+    let mut texture_hasher = Sha256::new();
+    texture_hasher.update(crop_width.to_le_bytes());
+    texture_hasher.update(crop_height.to_le_bytes());
+    for chunk in rgba.chunks(1024 * 1024) {
+        check_canceled()?;
+        texture_hasher.update(chunk);
+    }
+    let mut corner_uvs = Vec::with_capacity(corner_pixels.len());
+    for (ordinal, corners) in corner_pixels.iter().enumerate() {
+        if ordinal % 1024 == 0 {
+            check_canceled()?;
+        }
+        corner_uvs.push(corners.map(|[x, y]| {
+            [
+                ((x - x0 as f64 + 0.5) / crop_width as f64) as f32,
+                ((y - y0 as f64 + 0.5) / crop_height as f64) as f32,
+            ]
+        }));
+    }
+    let texture = BakedTexture {
+        crop_origin: [x0, y0],
+        width: crop_width,
+        height: crop_height,
+        source_image_width: image.width,
+        source_image_height: image.height,
+        content_hash: content_hash(texture_hasher),
+        rgba,
+    };
+    Ok((texture, corner_uvs))
+}
+
+fn hash_camera_and_texture(
+    key: &mut Sha256,
+    frame: usize,
+    camera: &EvidenceCamera,
+    texture: &BakedTexture,
+    source_frames: &[usize],
+    provenance: &[EvidenceOrigin],
+) {
+    key.update((frame as u64).to_le_bytes());
+    key.update([camera.authority as u8]);
+    for value in camera.rotation.iter().chain(&camera.translation) {
+        key.update(value.to_bits().to_le_bytes());
+    }
+    for value in [
+        texture.source_image_width,
+        texture.source_image_height,
+        texture.crop_origin[0],
+        texture.crop_origin[1],
+    ] {
+        key.update(value.to_le_bytes());
+    }
+    key.update(texture.content_hash.as_str().as_bytes());
+    for frame in source_frames {
+        key.update((*frame as u64).to_le_bytes());
+    }
+    for origin in provenance {
+        key.update([*origin as u8]);
+    }
+}
+
+/// Continuous pixel coordinates of triangle corners `[a, b, c]`.
+type CornerPixels = [[f64; 2]; 3];
 
 fn footprint_double_area(a: DenseGridSite, b: DenseGridSite, c: DenseGridSite) -> i64 {
     let (ax, ay) = (a.x as i64, a.y as i64);
@@ -540,3 +898,7 @@ fn content_hash(hasher: Sha256) -> ContentHash {
 #[cfg(test)]
 #[path = "surface_materials_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "surface_material_seams_tests.rs"]
+mod seam_tests;

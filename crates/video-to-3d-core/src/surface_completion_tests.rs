@@ -303,3 +303,158 @@ fn accepted_plane_reconstruction_has_confidence_and_a_containing_collider() {
         }
     }
 }
+
+/// The built-in reconstruction result for `frames` with the given registered
+/// cameras, dense patches and mesh, as the classic pipeline assembles it before
+/// `finalize_reconstruction`: camera 0 and 1 are the calibrated seed pair,
+/// every further camera a registered view with its retained pose.
+fn classic_result(
+    cameras: &[RegisteredCamera],
+    dense: crate::dense::DenseAnalysis,
+    mesh: crate::mesh::MeshAnalysis,
+) -> crate::ReconstructionResult {
+    // An uncalibrated result carries every non-geometry field.
+    let flat = FrameInput {
+        width: 48,
+        height: 32,
+        rgba: [120, 120, 120, 255].repeat(48 * 32),
+    };
+    let mut result = crate::reconstruct(&crate::ReconstructionRequest {
+        frames: vec![flat.clone(), flat],
+        options: crate::ReconstructionOptions::default(),
+    })
+    .expect("uncalibrated shell");
+    let flatten = |camera: &RegisteredCamera| {
+        let r = camera.rotation;
+        (
+            [0, 1, 2].map(|row| [0, 1, 2].map(|col| r[(row, col)] as f32)),
+            [0, 1, 2].map(|axis| camera.translation[axis] as f32),
+        )
+    };
+    let (_, seed_translation) = flatten(&cameras[1]);
+    result.calibrated_pair = Some(crate::CalibratedPairStats {
+        from_frame: cameras[0].frame_index,
+        to_frame: cameras[1].frame_index,
+        matches: 100,
+        inliers: 90,
+        inlier_ratio: 0.9,
+        focal_pixels: 60.0,
+        median_sampson_error_pixels: 0.3,
+        median_reprojection_error_pixels: 0.5,
+        median_triangulation_angle_degrees: 4.0,
+        relative_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        translation_direction: seed_translation,
+    });
+    result.registered_views = cameras[2..]
+        .iter()
+        .map(|camera| {
+            let (rows, translation) = flatten(camera);
+            crate::RegisteredViewStats {
+                frame_index: camera.frame_index,
+                correspondences: 50,
+                inliers: 45,
+                inlier_ratio: 0.9,
+                median_reprojection_error_pixels: 0.5,
+                rotation: rows.concat().try_into().unwrap(),
+                translation,
+                recovered_from_revisit: false,
+            }
+        })
+        .collect();
+    result.multi_view.bundle_adjustment.final_cameras = cameras.to_vec();
+    result.dense_points = dense.points;
+    result.dense_grid_sites = dense.grid_sites;
+    result.dense_point_attributes = dense.point_attributes;
+    result.dense = dense.stats;
+    result.mesh_triangles = mesh.triangles;
+    result.mesh = mesh.stats;
+    result
+}
+
+#[test]
+fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
+    use crate::surface_materials::{
+        bake_surface_materials_with_seams, MaterialRule, ReferenceImage, SeamProjection,
+    };
+    use crate::ReconstructionEvidenceView;
+
+    // A slow pan over one textured plane: overlapping reference patches,
+    // triangulated per reference by the mesh stage and connected by surface
+    // fusion and the merge into shared seam vertices.
+    let width = 68;
+    let height = 48;
+    let focal = 60.0;
+    let depth = 4.0;
+    let frames = vec![
+        plane_frame(width, height, focal, 0.0, depth),
+        plane_frame(width, height, focal, 0.25, depth),
+        plane_frame(width, height, focal, -0.22, depth),
+    ];
+    let cameras = vec![camera(0, 0.0), camera(1, 0.25), camera(2, -0.22)];
+    let sparse = plane_sparse_points(width, height, focal, depth);
+    let dense = estimate_depth_points(&frames, &cameras, &sparse, focal);
+    assert!(
+        dense.stats.reference_patches.len() >= 2,
+        "fixture must produce overlapping reference patches"
+    );
+    let mesh = crate::mesh::reconstruct_dense_mesh(
+        &dense.points,
+        &dense.grid_sites,
+        &dense.stats,
+        &cameras,
+        width,
+        height,
+        focal,
+    );
+    let mut reconstruction = classic_result(&cameras, dense, mesh);
+    crate::surface_fusion::consolidate_surface_evidence(&mut reconstruction)
+        .expect("surface consolidation succeeds");
+
+    let evidence = ReconstructionEvidenceView::from_classic(&reconstruction)
+        .expect("connected surface is valid classic evidence");
+    let images = frames
+        .iter()
+        .enumerate()
+        .map(|(frame_index, frame)| ReferenceImage {
+            frame_index,
+            width: frame.width,
+            height: frame.height,
+            rgba: &frame.rgba,
+        })
+        .collect::<Vec<_>>();
+    let bake = bake_surface_materials_with_seams(
+        &evidence,
+        &reconstruction.dense_grid_sites,
+        &images,
+        Some(SeamProjection {
+            focal_pixels: focal as f32,
+        }),
+    )
+    .expect("seam bake succeeds");
+
+    // The connected surface really contains mixed-reference triangles...
+    let seams = bake.seam_triangles() + bake.fallback.reasons.mixed_reference;
+    assert!(
+        seams > 0,
+        "the connected surface must contain mixed-reference triangles: {}",
+        bake.diagnostic()
+    );
+    // ...and the single-camera rule textures at least one that a camera sees.
+    assert!(
+        bake.seam_triangles() > 0,
+        "no seam triangle of a fronto-parallel plane seen by all cameras was textured: {}",
+        bake.diagnostic()
+    );
+    for material in bake
+        .materials
+        .iter()
+        .filter(|material| material.rule == MaterialRule::SeamSingleCameraProjection)
+    {
+        assert!(material.seam_reference_frames.len() >= 2);
+        assert_eq!(material.focal_pixels, Some(focal as f32));
+    }
+    assert_eq!(
+        bake.textured_triangles() + bake.fallback.triangles.len(),
+        reconstruction.mesh_triangles.len()
+    );
+}

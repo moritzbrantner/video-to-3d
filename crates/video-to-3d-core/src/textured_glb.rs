@@ -5,7 +5,10 @@
 //! `TEXCOORD_0`; the untextured fallback becomes one primitive with vertex
 //! colors. Positions are exported exactly as accepted, only re-expressed in the
 //! glTF frame. Material, image, and asset `extras.video_to_3d` carry the
-//! reference camera, provenance, appearance key, and fallback reasons.
+//! texturing camera, the rule that admitted the material's triangles
+//! (`same_reference_grid` or `seam_single_camera_projection`, the latter with
+//! the seam's reference frames and focal length), provenance, appearance key,
+//! and fallback reasons.
 //!
 //! Frame: reconstruction coordinates follow the camera convention of the seed
 //! camera (+X right, +Y down, +Z forward). glTF is +Y up with cameras looking
@@ -23,7 +26,9 @@
 
 use crate::coarse_collision::CoarseCollider;
 use crate::geometry_confidence::GeometryConfidenceField;
-use crate::surface_materials::{SurfaceMaterialBake, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION};
+use crate::surface_materials::{
+    MaterialRule, SurfaceMaterialBake, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
+};
 use crate::ReconstructionEvidenceView;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -245,8 +250,17 @@ pub fn encode_textured_glb_with_collider(
         let texture = &material.texture;
         let png = encode_png_rgb(texture.width, texture.height, &texture.rgba)?;
         let image_view = gltf.view(&png, None);
-        let provenance = json!({
+        let name = match material.rule {
+            MaterialRule::SameReferenceGrid => {
+                format!("reference-frame-{}", material.reference_frame)
+            }
+            MaterialRule::SeamSingleCameraProjection => {
+                format!("seam-camera-frame-{}", material.reference_frame)
+            }
+        };
+        let mut provenance = json!({
             "reference_frame": material.reference_frame,
+            "rule": material.rule,
             "camera_authority": material.camera_authority,
             "camera_rotation_world_to_camera": material.camera_rotation,
             "camera_translation_world_to_camera": material.camera_translation,
@@ -259,18 +273,24 @@ pub fn encode_textured_glb_with_collider(
             "source_image_size": [texture.source_image_width, texture.source_image_height],
             "triangles": material.triangles.len(),
         });
+        if material.rule == MaterialRule::SeamSingleCameraProjection {
+            provenance["seam_reference_frames"] = json!(material.seam_reference_frames);
+            provenance["focal_pixels"] = json!(material.focal_pixels);
+            provenance["principal_point"] = json!("image_center");
+        }
         images.push(json!({
-            "name": format!("reference-frame-{}", material.reference_frame),
+            "name": name,
             "bufferView": image_view,
             "mimeType": "image/png",
             "extras": { "video_to_3d": {
                 "reference_frame": material.reference_frame,
+                "rule": material.rule,
                 "texture_content_hash": texture.content_hash,
             }},
         }));
         textures.push(json!({ "sampler": 0, "source": images.len() - 1 }));
         materials.push(json!({
-            "name": format!("reference-frame-{}", material.reference_frame),
+            "name": name,
             "pbrMetallicRoughness": {
                 "baseColorTexture": { "index": textures.len() - 1 },
                 "metallicFactor": 0.0,
@@ -379,6 +399,7 @@ pub fn encode_textured_glb_with_collider(
                 "points": points.len(),
                 "triangles": triangles.len(),
                 "textured_triangles": bake.textured_triangles(),
+                "seam_textured_triangles": bake.seam_triangles(),
                 "fallback_triangles": bake.fallback.triangles.len(),
                 "collision": collision,
             }},

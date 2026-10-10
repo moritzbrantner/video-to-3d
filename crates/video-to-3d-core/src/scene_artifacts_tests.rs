@@ -349,8 +349,8 @@ fn reframing_one_reference_rewrites_only_its_texture() {
     let second = bake(&dir.0, &inputs);
     assert_eq!(second.written, vec![1]);
     assert_eq!(second.reused, vec![0]);
-    assert_eq!(second.invalidation.reused, vec![0]);
-    assert_eq!(second.invalidation.invalidated, vec![1]);
+    assert_eq!(frames(&second.invalidation.reused), vec![0]);
+    assert_eq!(frames(&second.invalidation.invalidated), vec![1]);
     assert_eq!(
         fs::metadata(&kept).unwrap().modified().unwrap(),
         kept_modified
@@ -380,8 +380,8 @@ fn edited_texture_sidecars_are_detected_and_rewritten() {
     assert_eq!(repaired.written, vec![0]);
     assert_eq!(repaired.reused, vec![1]);
     // The appearance diagnostic reports the repair, not a reuse.
-    assert_eq!(repaired.invalidation.reused, vec![1]);
-    assert_eq!(repaired.invalidation.invalidated, vec![0]);
+    assert_eq!(frames(&repaired.invalidation.reused), vec![1]);
+    assert_eq!(frames(&repaired.invalidation.invalidated), vec![0]);
     repaired.artifact.verify_textures(&dir.0).unwrap();
 }
 
@@ -1389,4 +1389,19 @@ fn an_interrupted_bake_removes_the_textures_it_created() {
         })
         .unwrap_or_default();
     assert!(left.is_empty(), "orphaned textures: {left:?}");
+}
+
+/// Reference frames of same-reference appearance artifacts (the only rule a
+/// surface-textures artifact records).
+fn frames(artifacts: &[crate::surface_materials::AppearanceArtifact]) -> Vec<usize> {
+    artifacts
+        .iter()
+        .map(|artifact| {
+            assert_eq!(
+                artifact.rule,
+                crate::surface_materials::MaterialRule::SameReferenceGrid
+            );
+            artifact.reference_frame
+        })
+        .collect()
 }
