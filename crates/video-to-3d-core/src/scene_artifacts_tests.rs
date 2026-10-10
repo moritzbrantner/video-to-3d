@@ -1275,7 +1275,9 @@ fn png_sidecars_are_validated_completely() {
     assert!(validate_png_rgb8(&with_chunk(b"ZZZZ", b"x"), 3, 2)
         .unwrap_err()
         .contains("unknown critical"));
-    validate_png_rgb8(&with_chunk(b"zzZz", b"x"), 3, 2).unwrap();
+    // Unknown ancillary chunks may affect rendering in some decoders, so a
+    // sidecar carrying one is not trusted (#143 static-image allowlist).
+    assert!(validate_png_rgb8(&with_chunk(b"zzZz", b"x"), 3, 2).is_err());
     validate_png_rgb8(&with_chunk(b"PLTE", &[0, 0, 0]), 3, 2).unwrap();
     // PLTE must hold 1..=256 RGB entries.
     for palette in [&[][..], &[0, 0][..], &[0; 257 * 3][..]] {
@@ -1500,7 +1502,46 @@ fn rendering_affecting_png_chunks_are_rejected() {
         2,
     )
     .unwrap();
-    validate_png_rgb8(&png_with_chunk_after_ihdr(&png, b"zzZz", b"x"), 3, 2).unwrap();
+}
+
+#[test]
+fn only_text_and_time_ancillary_chunks_are_trusted() {
+    // Codex finding on 4559b45 (eXIf orientation): a denylist keeps missing
+    // chunks that change how the same samples render. Sidecars therefore
+    // accept only the textual and timestamp ancillary chunks, besides the
+    // suggested PLTE, and reject every other ancillary chunk, known or not.
+    let rgba: Vec<u8> = (0..6 * 4).map(|value| value as u8 * 9).collect();
+    let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
+    let time = [0x07, 0xea, 10, 10, 12, 0, 0];
+    for (kind, data) in [
+        (b"tEXt", &b"Comment\0x"[..]),
+        (b"zTXt", &b"Comment\0\0x\x9c\x03\0\0\0\0\x01"[..]),
+        (b"iTXt", &b"Comment\0\0\0\0\0x"[..]),
+        (b"tIME", &time[..]),
+    ] {
+        validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).unwrap_or_else(
+            |error| {
+                panic!(
+                    "{} must stay accepted: {error}",
+                    String::from_utf8_lossy(kind)
+                )
+            },
+        );
+    }
+    let exif = b"MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0";
+    for (kind, data) in [
+        (b"eXIf", &exif[..]),
+        (b"pHYs", &[0, 0, 0, 1, 0, 0, 0, 2, 0][..]),
+        (b"sBIT", &[8, 8, 8][..]),
+        (b"bKGD", &[0, 0, 0, 0, 0, 0][..]),
+        (b"zzZz", &b"x"[..]),
+    ] {
+        assert!(
+            validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).is_err(),
+            "a PNG with {} must not verify as a static RGB texture",
+            String::from_utf8_lossy(kind)
+        );
+    }
 }
 
 #[test]
