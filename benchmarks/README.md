@@ -74,13 +74,13 @@ Each fixture's baseline records the checks that fail today, each with the issue 
 
 `stage-report.json` (`schema: video-to-3d/reference-stage-report/v1`) has `case`, the measurement `tolerances`, and `stages.<stage>` with `available`, `blocked_by` when not available, `metrics` (the values checks read) and stage detail: `pairs` (features), `candidates` (seed), `registered_frames`, `references` (dense, per reference: points, scale bias, median error, coverage), the mesh cell size, and the texture fallback reasons. `sampling-report.json` has the same `available` / `metrics` shape. `check_reference_fixtures.py --json` writes the evaluated result: `status`, `first_failing_stage`, `errors`, and per stage every check's bound, value, outcome and expected-failure record. All three are uploaded with the golden job's evidence.
 
-#### Baseline recorded 2026-10-09
+#### Baseline recorded 2026-10-09, updated 2026-10-10 (#126)
 
 | Fixture | Target status | First failing stage | Expected failures | COLMAP reference (expected) |
 | --- | --- | --- | --- | --- |
 | `slow-lateral-pan` | Expected failure | `seed`: no adjacent pair passes the residual-parallax gate (0.0–0.38 px against 0.55 px); sampling and features pass (worst-pair match precision 0.96) | seed, and registration, dense, mesh and texture behind it (#127) | registers |
 | `pure-rotation` | Pass | — (no seed pair, decisive gate `baseline`, 0 registered) | none | no model |
-| `overlapping-references` | Expected failure | `mesh`: 0 cross-reference triangles, 0 shared vertices, 3 unconnected reference patches, 38 % of covered cells meshed twice. Everything before it passes: 10/18 registered (orientation error ≤ 2.1°), dense depth within 0.7 % after a 3–4 % per-reference scale bias, texels within 0.74 px | mesh topology (#126); the true surface has 1 component, the mesh 59 (reported) | registers |
+| `overlapping-references` | Pass (since #126) | — Before #126 the mesh failed: 0 cross-reference triangles, 3 unconnected reference patches, 38 % of covered cells meshed twice. Now overlap ownership in the owning reference camera's image leaves 8.5 % duplicated cells, with 166 cross-reference triangles and one patch-graph component; everything before the mesh still passes (10/18 registered, orientation error ≤ 2.1°, dense depth within 0.7 % after a 3–4 % per-reference scale bias, texels within 0.75 px) | none. Reported, not gated: trimmed seams are not re-stitched, so the mesh has 136 components (true surface: 1) | registers |
 
 COLMAP is reported next to its expected outcome but never gates these fixtures: it is a reference implementation, not ground truth.
 

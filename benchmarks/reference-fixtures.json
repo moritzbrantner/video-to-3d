@@ -227,16 +227,9 @@
       },
       "baseline": {
         "recorded": "2026-10-10",
-        "first_failing_stage": "mesh",
-        "expected_failures": [
-          {
-            "stage": "mesh",
-            "check": "duplicated_coverage_share",
-            "issue": 126,
-            "reason": "Partially overlapping accepted triangles still cover the same surface; trimming them without discarding uniquely supported boundaries remains unresolved."
-          }
-        ],
-        "notes": "Cross-reference triangles now connect all three meshed reference patches; original surface holes and dense discontinuity rejections remain observable. Full-area overlap pruning preserves supported boundaries but still leaves excessive duplicated coverage; #126 remains an expected mesh failure until a provenance-preserving seam correction passes the unchanged 0.1 maximum."
+        "first_failing_stage": null,
+        "expected_failures": [],
+        "notes": "Every stage passes. Overlap ownership is decided in the higher-priority reference camera's image with a 5 % relative depth bound: duplicated coverage 0.085 (max 0.1), unsupported share 0.088, surface coverage 0.389, 166 cross-reference triangles, one patch-graph component. Seam triangles at least 80 % owned are trimmed (0.6 % of the accepted mesh area, reported in the merge diagnostic); the trimmed seams are not re-stitched, so the reported mesh has more connected components (136) than before the trim (40)."
       }
     }
   ]

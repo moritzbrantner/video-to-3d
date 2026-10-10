@@ -58,9 +58,12 @@ pub(super) fn consolidate_surface_evidence(
         return Ok(());
     }
 
-    let (membership, support_group_count) = {
+    let (membership, support_group_count, reference_centers) = {
         let evidence = ReconstructionEvidenceView::from_classic(reconstruction)?;
-        evidence_support_membership(&evidence.regions, evidence.points.len())
+        let (membership, count) =
+            evidence_support_membership(&evidence.regions, evidence.points.len());
+        let centers = support_group_reference_cameras(&evidence, count);
+        (membership, count, centers)
     };
     if support_group_count < 2 {
         return Ok(());
@@ -99,12 +102,56 @@ pub(super) fn consolidate_surface_evidence(
         &mut reconstruction.mesh_triangles,
         &membership,
         &pairs,
+        &reference_centers,
     );
     reconstruction.mesh.accepted_triangles = reconstruction.mesh_triangles.len();
     reconstruction
         .warnings
         .push(merge.diagnostic(support_group_count));
     Ok(())
+}
+
+/// World-to-camera pose of each support group's reference camera, in support-group order
+/// (the same first-seen region order `evidence_support_membership` assigns).
+fn support_group_reference_cameras(
+    evidence: &ReconstructionEvidenceView<'_>,
+    group_count: usize,
+) -> Vec<Option<crate::surface_merge::ReferenceCamera>> {
+    let mut seen = HashMap::<EvidenceSupportKey, usize>::new();
+    let mut centers = vec![None; group_count];
+    for region in &evidence.regions {
+        let Some(reference_frame) = region.reference_frame else {
+            continue;
+        };
+        let mut source_frames = region.source_frames.clone();
+        source_frames.sort_unstable();
+        let next = seen.len();
+        let group = *seen
+            .entry(EvidenceSupportKey {
+                reference_frame,
+                source_frames,
+            })
+            .or_insert(next);
+        if group >= group_count || centers[group].is_some() {
+            continue;
+        }
+        centers[group] = evidence
+            .cameras
+            .iter()
+            .find(|camera| camera.frame_index == reference_frame)
+            .and_then(|camera| {
+                let r = camera.rotation.map(f64::from);
+                let rotation = nalgebra::Matrix3::from_row_slice(&r);
+                let t = Vector3::from(camera.translation.map(f64::from));
+                (rotation.iter().chain(t.iter()).all(|v| v.is_finite())).then_some(
+                    crate::surface_merge::ReferenceCamera {
+                        rotation,
+                        translation: t,
+                    },
+                )
+            });
+    }
+    centers
 }
 
 fn evidence_support_membership(
