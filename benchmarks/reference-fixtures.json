@@ -141,48 +141,41 @@
         "texture": "default"
       },
       "baseline": {
-        "recorded": "2026-10-09",
-        "first_failing_stage": "seed",
+        "recorded": "2026-10-10",
+        "first_failing_stage": "mesh",
         "expected_failures": [
           {
-            "stage": "seed",
-            "check": "seed_selected",
-            "issue": 127,
-            "reason": "No adjacent pair passes the residual-parallax gate (0.0–0.38 px against 0.55 px), so no seed pair is accepted."
-          },
-          {
-            "stage": "seed",
-            "check": "rotation_error_degrees",
-            "issue": 127,
-            "reason": "No seed pair to score."
-          },
-          {
-            "stage": "seed",
-            "check": "translation_direction_error_degrees",
-            "issue": 127,
-            "reason": "No seed pair to score."
-          },
-          {
-            "stage": "registration",
-            "issue": 127,
-            "reason": "No camera registers without a seed pair."
-          },
-          {
-            "stage": "dense",
-            "issue": 127,
-            "reason": "Blocked: no registered cameras."
+            "stage": "mesh",
+            "check": "cross_reference_triangles",
+            "issue": 126,
+            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
           },
           {
             "stage": "mesh",
-            "issue": 127,
-            "reason": "Blocked: no registered cameras."
+            "check": "shared_vertices",
+            "issue": 126,
+            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
           },
           {
-            "stage": "texture",
-            "issue": 127,
-            "reason": "Blocked: no registered cameras."
+            "stage": "mesh",
+            "check": "duplicated_coverage_share",
+            "issue": 126,
+            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
+          },
+          {
+            "stage": "mesh",
+            "check": "reference_patch_components",
+            "issue": 126,
+            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
+          },
+          {
+            "stage": "mesh",
+            "check": "unsupported_triangle_share",
+            "issue": 138,
+            "reason": "26 % of the triangles lie more than 5 cm off the true surface; the cause is not yet measured."
           }
-        ]
+        ],
+        "notes": "Since #127 no adjacent pair needs to seed: the segment tries wider pairs over composed, sub-pixel-refined matches gated by a least-median pure-rotation fit, and seeds from frames 5-11 (6 intervals, 0.6° translation-direction error). All 18 views register (normalized pose RMSE 0.0065, worst orientation error 0.33°); dense depth and texture pass. The pure-rotation control still stops at the baseline gate: its wide pairs fit a rotation to about 0.1 px."
       }
     },
     {

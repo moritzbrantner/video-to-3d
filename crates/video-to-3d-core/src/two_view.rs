@@ -233,39 +233,67 @@ pub(super) fn evaluate_two_view(
     height: u32,
     focal_pixels: f64,
 ) -> TwoViewOutcome {
+    let points: Vec<PixelCorrespondence> = matches
+        .iter()
+        .map(|feature_match| {
+            let source = &source_features[feature_match.a];
+            let target = &target_features[feature_match.b];
+            PixelCorrespondence {
+                source_feature_index: feature_match.a,
+                descriptor_distance: feature_match.distance,
+                source: [source.x as f64, source.y as f64],
+                target: [target.x as f64, target.y as f64],
+            }
+        })
+        .collect();
+    evaluate_two_view_points(&points, width, height, focal_pixels)
+}
+
+/// One correspondence at (possibly sub-pixel) image positions.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PixelCorrespondence {
+    pub source_feature_index: usize,
+    pub descriptor_distance: f32,
+    pub source: [f64; 2],
+    pub target: [f64; 2],
+}
+
+/// [`evaluate_two_view`] on explicit image positions, so refined (sub-pixel) matches pass
+/// through exactly the same gates.
+pub(super) fn evaluate_two_view_points(
+    points: &[PixelCorrespondence],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+) -> TwoViewOutcome {
     let mut evidence = TwoViewEvidence {
-        matches: matches.len(),
+        matches: points.len(),
         ..TwoViewEvidence::default()
     };
     let reject = |evidence: TwoViewEvidence, gate| TwoViewOutcome {
         evidence,
         result: Err(gate),
     };
-    if matches.len() < RANSAC_SAMPLE_SIZE || focal_pixels <= 0.0 {
+    if points.len() < RANSAC_SAMPLE_SIZE || focal_pixels <= 0.0 {
         return reject(evidence, TwoViewRejection::Matches);
     }
-
     let center_x = width as f64 * 0.5;
     let center_y = height as f64 * 0.5;
-    let correspondences: Vec<Correspondence> = matches
+    let correspondences: Vec<Correspondence> = points
         .iter()
-        .map(|feature_match| {
-            let source = &source_features[feature_match.a];
-            let target = &target_features[feature_match.b];
-            Correspondence {
-                source_feature_index: feature_match.a,
-                descriptor_distance: feature_match.distance,
-                x1: Vector3::new(
-                    (source.x as f64 - center_x) / focal_pixels,
-                    (source.y as f64 - center_y) / focal_pixels,
-                    1.0,
-                ),
-                x2: Vector3::new(
-                    (target.x as f64 - center_x) / focal_pixels,
-                    (target.y as f64 - center_y) / focal_pixels,
-                    1.0,
-                ),
-            }
+        .map(|point| Correspondence {
+            source_feature_index: point.source_feature_index,
+            descriptor_distance: point.descriptor_distance,
+            x1: Vector3::new(
+                (point.source[0] - center_x) / focal_pixels,
+                (point.source[1] - center_y) / focal_pixels,
+                1.0,
+            ),
+            x2: Vector3::new(
+                (point.target[0] - center_x) / focal_pixels,
+                (point.target[1] - center_y) / focal_pixels,
+                1.0,
+            ),
         })
         .collect();
 
@@ -398,7 +426,7 @@ pub(super) fn evaluate_two_view(
         rotation: pose.rotation,
         translation: pose.translation,
         camera_center: pose.camera_center,
-        matches: matches.len(),
+        matches: points.len(),
         inliers: best_inliers.len(),
         median_sampson_error_pixels,
         median_reprojection_error_pixels: pose.median_reprojection_error_pixels,
@@ -434,6 +462,86 @@ fn required_ransac_iterations(inlier_ratio: f64) -> usize {
         usize::MAX
     }
 }
+
+/// Least-median-of-squares pure-rotation fit over every correspondence: the median
+/// angular residual, in pixels, of the best rotation from deterministic two-point
+/// samples (each refined by Kabsch on its half-best correspondences). Unlike the
+/// residual over essential inliers, it does not depend on which essential hypothesis
+/// won, which is arbitrary when the pair has no baseline.
+pub(super) fn least_median_rotation_residual_pixels(
+    points: &[PixelCorrespondence],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+) -> Option<f64> {
+    if points.len() < 8 || focal_pixels <= 0.0 {
+        return None;
+    }
+    let (cx, cy) = (width as f64 * 0.5, height as f64 * 0.5);
+    let bearing = |[x, y]: [f64; 2]| {
+        Vector3::new((x - cx) / focal_pixels, (y - cy) / focal_pixels, 1.0).normalize()
+    };
+    let rays: Vec<(Vector3<f64>, Vector3<f64>)> = points
+        .iter()
+        .map(|point| (bearing(point.source), bearing(point.target)))
+        .collect();
+    let kabsch = |indices: &[usize]| -> Option<Matrix3<f64>> {
+        let mut covariance = Matrix3::<f64>::zeros();
+        for &index in indices {
+            covariance += rays[index].1 * rays[index].0.transpose();
+        }
+        let svd = covariance.svd(true, true);
+        let mut u = svd.u?;
+        let v_t = svd.v_t?;
+        if (u * v_t).determinant() < 0.0 {
+            for row in 0..3 {
+                u[(row, 2)] = -u[(row, 2)];
+            }
+        }
+        Some(u * v_t)
+    };
+    let residuals = |rotation: &Matrix3<f64>| -> Vec<f64> {
+        rays.iter()
+            .map(|(source, target)| (rotation * source).dot(target).clamp(-1.0, 1.0).acos())
+            .collect()
+    };
+    let mut best: Option<f64> = None;
+    let mut state = 0xD1B5_4A32_D192_ED03u64;
+    for _ in 0..LEAST_MEDIAN_ROTATION_SAMPLES {
+        let mut pick = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) % rays.len() as u64) as usize
+        };
+        let (first, second) = (pick(), pick());
+        if first == second {
+            continue;
+        }
+        let Some(rotation) = kabsch(&[first, second]) else {
+            continue;
+        };
+        // Refine on the better half, then score by the median over all.
+        let mut order: Vec<(f64, usize)> = residuals(&rotation)
+            .into_iter()
+            .enumerate()
+            .map(|(index, residual)| (residual, index))
+            .collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let half: Vec<usize> = order[..order.len() / 2 + 1].iter().map(|(_, i)| *i).collect();
+        let Some(refined) = kabsch(&half) else {
+            continue;
+        };
+        let mut all = residuals(&refined);
+        let median = median_f64(&mut all) * focal_pixels;
+        if median.is_finite() && best.is_none_or(|current| median < current) {
+            best = Some(median);
+        }
+    }
+    best
+}
+
+const LEAST_MEDIAN_ROTATION_SAMPLES: usize = 200;
 
 fn deterministic_sample(len: usize, iteration: usize) -> Vec<usize> {
     if len == RANSAC_SAMPLE_SIZE {
@@ -1019,6 +1127,93 @@ mod tests {
             "residual {residual}"
         );
         assert!(outcome.evidence.pose.is_none());
+    }
+
+    /// Exact (sub-pixel) correspondences of a 40-point scene with depth relief.
+    fn pixel_correspondences(
+        rotation: Matrix3<f64>,
+        translation: Vector3<f64>,
+    ) -> Vec<PixelCorrespondence> {
+        let (width, height, focal) = (640.0, 480.0, 500.0);
+        let pixel = |bearing: Vector3<f64>| {
+            [
+                bearing.x * focal + width * 0.5,
+                bearing.y * focal + height * 0.5,
+            ]
+        };
+        (0..40)
+            .map(|index| {
+                let point = Vector3::new(
+                    (index % 8) as f64 * 0.25 - 0.9,
+                    (index / 8) as f64 * 0.25 - 0.5,
+                    4.0 + (index % 3) as f64 * 0.6,
+                );
+                PixelCorrespondence {
+                    source_feature_index: index,
+                    descriptor_distance: 0.1,
+                    source: pixel(project(point, Matrix3::identity(), Vector3::zeros())),
+                    target: pixel(project(point, rotation, translation)),
+                }
+            })
+            .collect()
+    }
+
+    fn yaw(angle: f64) -> Matrix3<f64> {
+        Matrix3::new(
+            angle.cos(),
+            0.0,
+            angle.sin(),
+            0.0,
+            1.0,
+            0.0,
+            -angle.sin(),
+            0.0,
+            angle.cos(),
+        )
+    }
+
+    #[test]
+    fn least_median_rotation_fit_separates_rotation_from_a_small_step() {
+        // A wide pure rotation is explained exactly, even with a third of the matches
+        // wrong; the residual over essential inliers could not promise that.
+        let mut rotation = pixel_correspondences(yaw(0.12), Vector3::zeros());
+        for (index, point) in rotation.iter_mut().enumerate().take(13) {
+            point.target[0] += 20.0 + index as f64;
+        }
+        let residual =
+            least_median_rotation_residual_pixels(&rotation, 640, 480, 500.0).unwrap();
+        assert!(residual < 0.05, "rotation residual {residual}");
+
+        // A 0.3 lateral step over 4–5.2 m relief leaves parallax no rotation absorbs.
+        let step = pixel_correspondences(yaw(0.02), Vector3::new(-0.3, 0.0, 0.0));
+        let residual = least_median_rotation_residual_pixels(&step, 640, 480, 500.0).unwrap();
+        assert!(
+            residual > MIN_SEED_ROTATION_RESIDUAL_PIXELS,
+            "translation residual {residual}"
+        );
+        // Deterministic.
+        assert_eq!(
+            least_median_rotation_residual_pixels(&step, 640, 480, 500.0),
+            Some(residual)
+        );
+        assert_eq!(
+            least_median_rotation_residual_pixels(&step[..7], 640, 480, 500.0),
+            None
+        );
+    }
+
+    #[test]
+    fn point_correspondences_pass_the_same_gates_as_features() {
+        let translation = Vector3::new(-0.6, 0.02, 0.03);
+        let points = pixel_correspondences(Matrix3::identity(), translation);
+        let outcome = evaluate_two_view_points(&points, 640, 480, 500.0);
+        let estimate = outcome.result.expect("translating pair is accepted");
+        assert_eq!(estimate.matches, points.len());
+        assert!(estimate.translation.dot(&translation.normalize()).abs() > 0.95);
+
+        let rotation = pixel_correspondences(yaw(0.09), Vector3::zeros());
+        let outcome = evaluate_two_view_points(&rotation, 640, 480, 500.0);
+        assert_eq!(outcome.result.err(), Some(TwoViewRejection::Baseline));
     }
 
     #[test]

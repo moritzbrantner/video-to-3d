@@ -114,18 +114,17 @@ impl<'a> RevisitContext<'a> {
 pub(super) fn analyze(
     context: &RevisitContext<'_>,
     keyframes: &[usize],
-    seed_pair_index: Option<usize>,
+    seed_frames: Option<[usize; 2]>,
     seed_segment: &[usize],
 ) -> RevisitStats {
     let mut frames = keyframes.to_vec();
-    if let Some(seed_pair_index) = seed_pair_index {
-        frames.push(seed_pair_index);
-        frames.push(seed_pair_index + 1);
+    if let Some(seed_frames) = seed_frames {
+        frames.extend(seed_frames);
     }
     frames.sort_unstable();
     frames.dedup();
 
-    let pairs = preselect_pairs(&frames, seed_pair_index, seed_segment);
+    let pairs = preselect_pairs(&frames, seed_frames, seed_segment);
     let mut candidates = Vec::new();
     let mut seed_evidence = Vec::new();
 
@@ -148,13 +147,15 @@ pub(super) fn analyze(
             matches: matches.len(),
             overlap_ratio,
         });
-        if let Some(seed_pair_index) = seed_pair_index {
-            if from_frame == seed_pair_index {
+        // Seed evidence pairs the seed's source frame with another frame; the
+        // seed's own target frame is already part of the calibrated pair.
+        if let Some([seed_source, seed_target]) = seed_frames {
+            if from_frame == seed_source && to_frame != seed_target {
                 seed_evidence.push(SeedRevisitEvidence {
                     target_frame: to_frame,
                     matches,
                 });
-            } else if to_frame == seed_pair_index {
+            } else if to_frame == seed_source && from_frame != seed_target {
                 seed_evidence.push(SeedRevisitEvidence {
                     target_frame: from_frame,
                     matches: matches
@@ -192,7 +193,7 @@ pub(super) fn analyze(
 
 pub(super) fn recover_failed_registrations(
     stats: &mut RevisitStats,
-    seed_pair_index: usize,
+    seed_frames: [usize; 2],
     estimate: &two_view::TwoViewEstimate,
     candidate_frames: &[usize],
     registered_frames: &HashSet<usize>,
@@ -207,7 +208,7 @@ pub(super) fn recover_failed_registrations(
         if !candidate_frames.contains(&frame_index) || registered_frames.contains(&frame_index) {
             continue;
         }
-        debug_assert!(frame_index.abs_diff(seed_pair_index) > 1);
+        debug_assert!(frame_index.abs_diff(seed_frames[0]) > 1 && frame_index != seed_frames[1]);
         let Some(target_features) = context.features.get(frame_index) else {
             continue;
         };
@@ -217,7 +218,7 @@ pub(super) fn recover_failed_registrations(
 
         stats.recoveries.push(RevisitRecoveryStats {
             frame_index,
-            source_frame_index: seed_pair_index,
+            source_frame_index: seed_frames[0],
             matches: evidence.matches.len(),
             correspondences: correspondences.len(),
             accepted: pose.is_some(),
@@ -247,7 +248,7 @@ pub(super) fn recover_failed_registrations(
 
 pub(super) fn close_registered_drift(
     stats: &mut RevisitStats,
-    seed_pair_index: usize,
+    seed_frames: [usize; 2],
     estimate: &two_view::TwoViewEstimate,
     registered_cameras: &[RegisteredCamera],
     context: &RevisitContext<'_>,
@@ -265,7 +266,7 @@ pub(super) fn close_registered_drift(
         let Some(current_camera) = camera_by_frame.get(&frame_index).copied() else {
             continue;
         };
-        debug_assert!(frame_index.abs_diff(seed_pair_index) > 1);
+        debug_assert!(frame_index.abs_diff(seed_frames[0]) > 1 && frame_index != seed_frames[1]);
         let Some(target_features) = context.features.get(frame_index) else {
             continue;
         };
@@ -296,7 +297,7 @@ pub(super) fn close_registered_drift(
 
         stats.closures.push(RevisitClosureStats {
             frame_index,
-            source_frame_index: seed_pair_index,
+            source_frame_index: seed_frames[0],
             matches: evidence.matches.len(),
             correspondences: correspondences.len(),
             accepted,
@@ -427,13 +428,13 @@ fn rotation_delta_degrees(left: &Matrix3<f64>, right: &Matrix3<f64>) -> f64 {
 /// that priority.
 fn preselect_pairs(
     frames: &[usize],
-    seed_pair_index: Option<usize>,
+    seed_frames: Option<[usize; 2]>,
     seed_segment: &[usize],
 ) -> Vec<(usize, usize)> {
     let in_seed_segment = |frame: usize| {
         seed_segment.is_empty()
             || seed_segment.contains(&frame)
-            || seed_pair_index.is_some_and(|seed| frame == seed || frame == seed + 1)
+            || seed_frames.is_some_and(|seed| seed.contains(&frame))
     };
     let mut pairs = Vec::new();
     for (left_offset, &from_frame) in frames.iter().enumerate() {
@@ -446,8 +447,9 @@ fn preselect_pairs(
     }
 
     pairs.sort_by(|left, right| {
-        let left_seed = seed_pair_index.is_some_and(|seed| left.0 == seed || left.1 == seed);
-        let right_seed = seed_pair_index.is_some_and(|seed| right.0 == seed || right.1 == seed);
+        let seed_source = seed_frames.map(|frames| frames[0]);
+        let left_seed = seed_source.is_some_and(|seed| left.0 == seed || left.1 == seed);
+        let right_seed = seed_source.is_some_and(|seed| right.0 == seed || right.1 == seed);
         let left_segment = in_seed_segment(left.0) && in_seed_segment(left.1);
         let right_segment = in_seed_segment(right.0) && in_seed_segment(right.1);
         right_segment
@@ -609,7 +611,7 @@ mod tests {
         let features = vec![base.clone(), base.clone(), base.clone()];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let stats = analyze(&context, &[0, 1, 2], Some(0), &[]);
+        let stats = analyze(&context, &[0, 1, 2], Some([0, 1]), &[]);
 
         assert_eq!(stats.evaluated_pairs, 1);
         assert_eq!(stats.candidates.len(), 1);
@@ -621,7 +623,7 @@ mod tests {
     #[test]
     fn revisit_analysis_bounds_pair_evaluations_before_matching() {
         let frames: Vec<usize> = (0..18).collect();
-        let pairs = preselect_pairs(&frames, Some(0), &[]);
+        let pairs = preselect_pairs(&frames, Some([0, 1]), &[]);
 
         assert_eq!(pairs.len(), MAX_REVISIT_PAIR_EVALUATIONS);
         assert!(pairs.iter().all(|(from, to)| *to > *from + 1));
@@ -634,7 +636,7 @@ mod tests {
         // 10..=29. Distant cross-segment seed pairs must not crowd out in-segment pairs.
         let frames: Vec<usize> = (4..30).collect();
         let seed_segment: Vec<usize> = (4..10).collect();
-        let pairs = preselect_pairs(&frames, Some(6), &seed_segment);
+        let pairs = preselect_pairs(&frames, Some([6, 7]), &seed_segment);
 
         assert_eq!(pairs.len(), MAX_REVISIT_PAIR_EVALUATIONS);
         let in_segment = |frame: usize| (4..10).contains(&frame);
@@ -646,7 +648,7 @@ mod tests {
             .take(in_segment_pairs)
             .all(|&(from, to)| in_segment(from) && in_segment(to)));
         assert!(pairs.contains(&(4, 8)));
-        assert_eq!(pairs, preselect_pairs(&frames, Some(6), &seed_segment));
+        assert_eq!(pairs, preselect_pairs(&frames, Some([6, 7]), &seed_segment));
     }
 
     #[test]
@@ -660,10 +662,10 @@ mod tests {
         ];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let mut stats = analyze(&context, &[0, 3], Some(0), &[]);
+        let mut stats = analyze(&context, &[0, 3], Some([0, 1]), &[]);
         let recovered = recover_failed_registrations(
             &mut stats,
-            0,
+            [0, 1],
             &estimate,
             &[3],
             &HashSet::from([0, 1]),
@@ -688,7 +690,7 @@ mod tests {
         ];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let mut stats = analyze(&context, &[0, 3], Some(0), &[]);
+        let mut stats = analyze(&context, &[0, 3], Some([0, 1]), &[]);
         let drifted_center = Vector3::new(0.69, -0.06, 0.11);
         let registered = vec![
             RegisteredCamera {
@@ -708,7 +710,7 @@ mod tests {
             },
         ];
 
-        let closures = close_registered_drift(&mut stats, 0, &estimate, &registered, &context);
+        let closures = close_registered_drift(&mut stats, [0, 1], &estimate, &registered, &context);
 
         assert_eq!(stats.closures.len(), 1);
         assert!(stats.closures[0].accepted);
@@ -728,14 +730,14 @@ mod tests {
         ];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let mut stats = analyze(&context, &[0, 3], Some(0), &[]);
+        let mut stats = analyze(&context, &[0, 3], Some([0, 1]), &[]);
         let registered = vec![RegisteredCamera {
             frame_index: 3,
             rotation: Matrix3::identity(),
             translation: -Vector3::new(1.8, -0.08, 0.12),
         }];
 
-        let closures = close_registered_drift(&mut stats, 0, &estimate, &registered, &context);
+        let closures = close_registered_drift(&mut stats, [0, 1], &estimate, &registered, &context);
 
         assert_eq!(stats.closures.len(), 1);
         assert!(!stats.closures[0].accepted);
@@ -750,7 +752,7 @@ mod tests {
         let features = vec![base.clone(), base.clone(), base.clone(), base];
         let context =
             RevisitContext::new(&features, 640, 480, 500.0, ReconstructionOptions::default());
-        let stats = analyze(&context, &[1, 2, 3], Some(2), &[]);
+        let stats = analyze(&context, &[1, 2, 3], Some([2, 3]), &[]);
 
         assert!(stats
             .candidates

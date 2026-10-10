@@ -69,7 +69,7 @@ pub(super) fn optimize(
     let original_cameras = cameras.to_vec();
     let mut stats = BundleAdjustmentStats::default();
 
-    let Some(seed_pair_index) = analysis.seed_pair_index else {
+    let Some(fixed_frames) = analysis.seed_frames else {
         return BundleAdjustmentResult {
             stats,
             cameras: original_cameras,
@@ -120,7 +120,6 @@ pub(super) fn optimize(
     );
     let landmark_observations = observation_indices_by_landmark(landmarks.len(), &observations);
     let camera_observations = observation_indices_by_camera(cameras.len(), &observations);
-    let fixed_frames = [seed_pair_index, seed_pair_index + 1];
     let optimizable_landmarks = landmark_observations
         .iter()
         .filter(|indices| indices.len() >= MIN_LANDMARK_OBSERVATIONS)

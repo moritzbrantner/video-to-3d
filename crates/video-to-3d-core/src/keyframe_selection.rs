@@ -76,6 +76,32 @@ pub(crate) struct KeyframeSelection {
 }
 
 impl KeyframeSelection {
+    /// Make every usable frame of `segment` a keyframe. The parallax budget measures the
+    /// residual after a 2D global-motion fit, which a slow lateral step over a façade
+    /// barely moves; once a wide seed pair has proven translation in the segment, every
+    /// usable frame there is a registration candidate (#127). Returns how many frames
+    /// were promoted.
+    pub(crate) fn promote_segment_frames(&mut self, segment: usize) -> usize {
+        let mut promoted = 0;
+        for frame in &mut self.stats.frames {
+            if frame.segment == segment && frame.decision == FrameDecision::Redundant {
+                frame.decision = FrameDecision::Keyframe;
+                self.keyframes.push(frame.frame_index);
+                promoted += 1;
+            }
+        }
+        self.keyframes.sort_unstable();
+        self.keyframes.dedup();
+        if let Some(span) = self.stats.segments.get_mut(segment) {
+            span.keyframes = self
+                .keyframes
+                .iter()
+                .filter(|&&keyframe| self.stats.frames[keyframe].segment == segment)
+                .count();
+        }
+        promoted
+    }
+
     /// Keyframes in the segment that contains `frame_index`.
     pub(crate) fn segment_keyframes(&self, frame_index: usize) -> Vec<usize> {
         let Some(segment) = self
@@ -679,6 +705,25 @@ mod tests {
         let selection = select(&pairs, &evidence, &jump);
         assert_eq!(selection.stats.segments.len(), 2);
         assert_eq!(selection.stats.segments[0].ends_with, Some(SegmentBreak::MotionJump));
+    }
+
+    #[test]
+    fn a_wide_seed_promotes_only_usable_frames_of_its_segment() {
+        // Weak residual parallax everywhere: the budget selects only the anchor.
+        let mut evidence = frames(6);
+        evidence[3].clipped_fraction = 0.6;
+        let pairs: Vec<PairStats> = (0..5).map(|from| pair(from, 0.8, 0.05, true)).collect();
+        let mut selection = run(&pairs, &evidence);
+        assert_eq!(selection.keyframes, vec![0]);
+
+        assert_eq!(selection.promote_segment_frames(0), 4);
+        assert_eq!(selection.keyframes, vec![0, 1, 2, 4, 5]);
+        assert_eq!(selection.stats.frames[3].decision, FrameDecision::PoorExposure);
+        assert_eq!(selection.stats.segments[0].keyframes, 5);
+        // Idempotent; an unknown segment changes nothing.
+        assert_eq!(selection.promote_segment_frames(0), 0);
+        assert_eq!(selection.promote_segment_frames(7), 0);
+        assert_eq!(selection.keyframes, vec![0, 1, 2, 4, 5]);
     }
 
     #[test]
