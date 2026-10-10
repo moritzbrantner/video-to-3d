@@ -1275,7 +1275,9 @@ fn png_sidecars_are_validated_completely() {
     assert!(validate_png_rgb8(&with_chunk(b"ZZZZ", b"x"), 3, 2)
         .unwrap_err()
         .contains("unknown critical"));
-    validate_png_rgb8(&with_chunk(b"zzZz", b"x"), 3, 2).unwrap();
+    // Unknown ancillary chunks may affect rendering in some decoders, so a
+    // sidecar carrying one is not trusted (#143 static-image allowlist).
+    assert!(validate_png_rgb8(&with_chunk(b"zzZz", b"x"), 3, 2).is_err());
     validate_png_rgb8(&with_chunk(b"PLTE", &[0, 0, 0]), 3, 2).unwrap();
     // PLTE must hold 1..=256 RGB entries.
     for palette in [&[][..], &[0, 0][..], &[0; 257 * 3][..]] {
@@ -1404,4 +1406,322 @@ fn frames(artifacts: &[crate::surface_materials::AppearanceArtifact]) -> Vec<usi
             artifact.reference_frame
         })
         .collect()
+}
+
+// Acceptance for issue #143, written before the implementation from the issue
+// and the public PNG/artifact seams (`validate_png_rgb8`,
+// `SurfaceTexturesArtifact::from_json`, `bake_texture_artifact`).
+
+/// `png` with one `kind` chunk inserted right after IHDR.
+fn png_with_chunk_after_ihdr(png: &[u8], kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    let crc = crc32fast::hash(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = png[..33].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[33..]);
+    out
+}
+
+/// A `width` x `height` 8-bit RGB PNG whose single IDAT holds `zlib` verbatim.
+fn png_with_idat(width: u32, height: u32, zlib: &[u8]) -> Vec<u8> {
+    let chunk = |png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]| {
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let crc = crc32fast::hash(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    };
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = width.to_be_bytes().to_vec();
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(&mut png, b"IHDR", &header);
+    chunk(&mut png, b"IDAT", zlib);
+    chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// A valid zlib stream of `raw` preceded by `padding` empty, non-final stored
+/// deflate blocks: it inflates to exactly `raw` however large it is.
+fn padded_zlib(raw: &[u8], padding: usize) -> Vec<u8> {
+    assert!(raw.len() <= 0xffff);
+    let mut zlib = vec![0x78, 0x01];
+    for _ in 0..padding {
+        // BFINAL = 0, BTYPE = stored, LEN = 0, NLEN = !0.
+        zlib.extend_from_slice(&[0x00, 0x00, 0x00, 0xff, 0xff]);
+    }
+    let length = raw.len() as u16;
+    zlib.push(0x01);
+    zlib.extend_from_slice(&length.to_le_bytes());
+    zlib.extend_from_slice(&(!length).to_le_bytes());
+    zlib.extend_from_slice(raw);
+    let (mut a, mut b) = (1_u32, 0_u32);
+    for byte in raw {
+        a = (a + u32::from(*byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    zlib
+}
+
+#[test]
+fn rendering_affecting_png_chunks_are_rejected() {
+    let rgba: Vec<u8> = (0..6 * 4).map(|value| value as u8 * 9).collect();
+    let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
+    validate_png_rgb8(&png, 3, 2).unwrap();
+    // tRNS for color type 2: one 16-bit RGB sample that renders transparent.
+    let transparent = png_with_chunk_after_ihdr(&png, b"tRNS", &[0, 0, 0, 9, 0, 18]);
+    assert!(
+        validate_png_rgb8(&transparent, 3, 2).is_err(),
+        "a PNG with tRNS renders differently from its RGB samples"
+    );
+    // Color-management chunks change how the same samples render.
+    let gamma = 45_455_u32.to_be_bytes();
+    let chromaticities = [0_u8; 32];
+    let profile = b"icc\0\0x\x9c\x03\0\0\0\0\x01";
+    for (kind, data) in [
+        (b"gAMA", &gamma[..]),
+        (b"cHRM", &chromaticities[..]),
+        (b"sRGB", &[0][..]),
+        (b"iCCP", &profile[..]),
+    ] {
+        assert!(
+            validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).is_err(),
+            "a PNG with {} must not verify as plain RGB",
+            String::from_utf8_lossy(kind)
+        );
+    }
+    // Ancillary chunks that do not affect rendering stay accepted.
+    validate_png_rgb8(
+        &png_with_chunk_after_ihdr(&png, b"tEXt", b"Comment\0x"),
+        3,
+        2,
+    )
+    .unwrap();
+}
+
+#[test]
+fn only_text_and_time_ancillary_chunks_are_trusted() {
+    // Codex finding on 4559b45 (eXIf orientation): a denylist keeps missing
+    // chunks that change how the same samples render. Sidecars therefore
+    // accept only the textual and timestamp ancillary chunks, besides the
+    // suggested PLTE, and reject every other ancillary chunk, known or not.
+    let rgba: Vec<u8> = (0..6 * 4).map(|value| value as u8 * 9).collect();
+    let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
+    let time = [0x07, 0xea, 10, 10, 12, 0, 0];
+    for (kind, data) in [
+        (b"tEXt", &b"Comment\0x"[..]),
+        (b"zTXt", &b"Comment\0\0x\x9c\x03\0\0\0\0\x01"[..]),
+        (b"iTXt", &b"Comment\0\0\0\0\0x"[..]),
+        (b"tIME", &time[..]),
+    ] {
+        validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).unwrap_or_else(
+            |error| {
+                panic!(
+                    "{} must stay accepted: {error}",
+                    String::from_utf8_lossy(kind)
+                )
+            },
+        );
+    }
+    let exif = b"MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0";
+    for (kind, data) in [
+        (b"eXIf", &exif[..]),
+        (b"pHYs", &[0, 0, 0, 1, 0, 0, 0, 2, 0][..]),
+        (b"sBIT", &[8, 8, 8][..]),
+        (b"bKGD", &[0, 0, 0, 0, 0, 0][..]),
+        (b"zzZz", &b"x"[..]),
+    ] {
+        assert!(
+            validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).is_err(),
+            "a PNG with {} must not verify as a static RGB texture",
+            String::from_utf8_lossy(kind)
+        );
+    }
+}
+
+#[test]
+fn a_cached_texture_with_transparency_is_not_reused() {
+    let dir = TempDir::new("trns-tamper");
+    let fixture = Fixture::new();
+    let inputs = fixture.write(&dir.0);
+    let first = bake(&dir.0, &inputs);
+    let material = &first.artifact.materials[0];
+    let file = texture_file(&dir.0, &first, material.reference_frame);
+    // Same RGB samples, plus a tRNS chunk that makes one color transparent;
+    // the document records the new hash, so document and sidecar agree.
+    let original = fs::read(&file).unwrap();
+    let transparent = png_with_chunk_after_ihdr(&original, b"tRNS", &[0, 0, 0, 0, 0, 0]);
+    fs::write(&file, &transparent).unwrap();
+    let mut tampered = first.artifact.clone();
+    tampered.materials[0].texture.content_hash = ContentHash::of_bytes(&transparent);
+    let output = path("artifacts/bake/surface-textures.json");
+    fs::write(output.resolve(&dir.0), tampered.to_json()).unwrap();
+
+    let rebuilt = bake(&dir.0, &inputs);
+    assert!(
+        rebuilt.written.contains(&material.reference_frame),
+        "written {:?}, reused {:?}",
+        rebuilt.written,
+        rebuilt.reused
+    );
+    assert!(!rebuilt.reused.contains(&material.reference_frame));
+    assert_eq!(
+        rebuilt.artifact.materials[0].texture.content_hash,
+        material.texture.content_hash
+    );
+    assert_eq!(
+        fs::read(texture_file(&dir.0, &rebuilt, material.reference_frame)).unwrap(),
+        original
+    );
+    rebuilt.artifact.verify_textures(&dir.0).unwrap();
+}
+
+#[test]
+fn texture_artifacts_reject_zero_crop_extents() {
+    let dir = TempDir::new("zero-extent");
+    let inputs = Fixture::new().write(&dir.0);
+    let outcome = bake(&dir.0, &inputs);
+    SurfaceTexturesArtifact::from_json(&outcome.artifact.to_json()).unwrap();
+    for (zero_width, zero_height) in [(true, false), (false, true), (true, true)] {
+        let mut artifact = outcome.artifact.clone();
+        let texture = &mut artifact.materials[0].texture;
+        if zero_width {
+            texture.width = 0;
+        }
+        if zero_height {
+            texture.height = 0;
+        }
+        let (width, height) = (texture.width, texture.height);
+        assert!(
+            SurfaceTexturesArtifact::from_json(&artifact.to_json()).is_err(),
+            "a {width}x{height} texture crop must not validate"
+        );
+        assert!(artifact.validate().is_err());
+    }
+}
+
+#[test]
+fn encoded_png_data_is_bounded_by_the_declared_image() {
+    // 1x1 RGB: one filter byte plus one pixel.
+    let raw = [0_u8, 10, 20, 30];
+    let compact = padded_zlib(&raw, 0);
+    validate_png_rgb8(&png_with_idat(1, 1, &compact), 1, 1).unwrap();
+
+    // The same pixels behind 1 MiB of empty stored blocks: still a valid zlib
+    // stream that inflates to exactly the image, but its encoded size is far
+    // beyond anything a 1x1 image needs.
+    let padded = padded_zlib(&raw, (1 << 20) / 5);
+    assert_eq!(
+        miniz_oxide::inflate::decompress_to_vec_zlib(&padded).unwrap(),
+        raw
+    );
+    assert!(
+        validate_png_rgb8(&png_with_idat(1, 1, &padded), 1, 1).is_err(),
+        "a 1x1 sidecar with {} encoded bytes must be rejected",
+        padded.len()
+    );
+
+    // Uncompressed (stored) encodings of real images stay within the bound.
+    let (width, height) = (256_u32, 256_u32);
+    let mut stored_raw = Vec::new();
+    for y in 0..height {
+        stored_raw.push(0);
+        for x in 0..width {
+            stored_raw.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8]);
+        }
+    }
+    let stored = miniz_oxide::deflate::compress_to_vec_zlib(&stored_raw, 0);
+    assert!(stored.len() > stored_raw.len());
+    validate_png_rgb8(&png_with_idat(width, height, &stored), width, height).unwrap();
+}
+
+/// A `width` x `height` 8-bit RGB PNG whose IDAT chunks hold `parts` in order.
+fn png_with_idat_parts(width: u32, height: u32, parts: &[&[u8]]) -> Vec<u8> {
+    let single = png_with_idat(width, height, &[]);
+    // Signature + IHDR, then one IDAT per part, then IEND.
+    let mut png = single[..33].to_vec();
+    for part in parts {
+        png.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(b"IDAT");
+        png.extend_from_slice(part);
+        let crc = crc32fast::hash(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    }
+    png.extend_from_slice(&single[single.len() - 12..]);
+    png
+}
+
+#[test]
+fn split_idat_chunks_stream_into_one_zlib_stream() {
+    let (width, height) = (300_u32, 200_u32);
+    let mut raw = Vec::new();
+    for y in 0..height {
+        raw.push(0);
+        for x in 0..width {
+            raw.extend_from_slice(&[x as u8, y as u8, (x * y) as u8]);
+        }
+    }
+    // Stored so the stream spans several inflate input chunks.
+    let zlib = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 0);
+    let (head, tail) = zlib.split_at(zlib.len() / 3);
+    let (middle, tail) = tail.split_at(70_000);
+    let parts: [&[u8]; 6] = [&[], &head[..1], &head[1..], middle, &[], tail];
+    let pixels = decode_png_rgb8_with_cancel(
+        &png_with_idat_parts(width, height, &parts),
+        width,
+        height,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(
+        pixels,
+        raw.chunks_exact(width as usize * 3 + 1)
+            .flat_map(|line| line[1..].to_vec())
+            .collect::<Vec<_>>()
+    );
+    // Trailing data in a later IDAT is still rejected.
+    let trailing: [&[u8]; 3] = [&zlib, &[], &[0]];
+    assert!(validate_png_rgb8(
+        &png_with_idat_parts(width, height, &trailing),
+        width,
+        height
+    )
+    .is_err());
+    // Only empty IDAT chunks hold no stream.
+    let empty: [&[u8]; 2] = [&[], &[]];
+    assert!(validate_png_rgb8(&png_with_idat_parts(width, height, &empty), width, height).is_err());
+}
+
+#[test]
+fn animated_png_chunks_are_rejected() {
+    // Codex finding on ceeaa61: APNG control/data chunks let extra frames
+    // render differently while the IDAT samples match the expected texture.
+    let rgba: Vec<u8> = (0..6 * 4).map(|value| value as u8 * 9).collect();
+    let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
+    let mut actl = 2_u32.to_be_bytes().to_vec();
+    actl.extend_from_slice(&0_u32.to_be_bytes());
+    let mut fctl = [0_u8; 26];
+    fctl[7] = 3; // width
+    fctl[11] = 2; // height
+    let mut fdat = 1_u32.to_be_bytes().to_vec();
+    fdat.extend_from_slice(&[
+        0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
+    ]);
+    for (kind, data) in [
+        (b"acTL", &actl[..]),
+        (b"fcTL", &fctl[..]),
+        (b"fdAT", &fdat[..]),
+    ] {
+        assert!(
+            validate_png_rgb8(&png_with_chunk_after_ihdr(&png, kind, data), 3, 2).is_err(),
+            "a PNG with {} must not verify as a static RGB texture",
+            String::from_utf8_lossy(kind)
+        );
+    }
 }
