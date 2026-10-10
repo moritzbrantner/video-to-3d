@@ -984,3 +984,76 @@ fn an_edge_with_more_samples_than_a_poll_batch_still_polls_at_bounded_intervals(
         "stamping one edge of about {samples} samples polled cancellation only {extra} extra times"
     );
 }
+
+/// The seam fixture plus `count` accepted triangles owned by reference 2
+/// (whose camera supplies no image), each covering camera 0's whole image at
+/// depth 10, behind the seam plane (depth 4). They never occlude a seam; they
+/// only crowd camera 0's coverage of every pixel.
+fn crowded_behind(count: usize) -> Seams {
+    let mut fixture = Seams::new().only_image_0();
+    let depth = 10.0_f32;
+    let at = |u: f32, v: f32| {
+        world(
+            (u - WIDTH as f32 * 0.5) / FOCAL * depth,
+            (v - HEIGHT as f32 * 0.5) / FOCAL * depth,
+            depth,
+        )
+    };
+    let start = fixture.points.len();
+    for index in 0..count {
+        // Slightly different full-frame triangles, so none is a duplicate.
+        let jitter = index as f32 * 1.0e-3;
+        let base = fixture.points.len();
+        fixture.points.extend([
+            at(-40.0 - jitter, -40.0),
+            at(3.0 * WIDTH as f32 + 40.0, -40.0 + jitter),
+            at(-40.0, 3.0 * HEIGHT as f32 + 40.0 + jitter),
+        ]);
+        fixture.sites.extend([
+            DenseGridSite { x: 0, y: 0 },
+            DenseGridSite { x: 1, y: 0 },
+            DenseGridSite { x: 0, y: 1 },
+        ]);
+        fixture.triangles.push(triangle(base, base + 1, base + 2));
+    }
+    fixture.cameras.push(camera(2, 0.5));
+    fixture
+        .patches
+        .push(patch(2, 0, start, fixture.points.len() - start));
+    fixture
+}
+
+#[test]
+fn coverage_beyond_a_pixel_proportional_budget_fails_closed() {
+    // A few full-frame triangles behind the plane leave both seams visible.
+    let light = crowded_behind(2).bake();
+    for seam in [SEAM_A, SEAM_B] {
+        assert!(
+            seam_material(&light, 0).triangles.contains(&seam),
+            "seam {seam}: {}",
+            light.diagnostic()
+        );
+    }
+
+    // 400 full-frame triangles mean 400 coverage entries per pixel of the
+    // 32x24 image. Visibility bookkeeping must stay proportional to the image
+    // (at most 64 entries per pixel on average), so the camera cannot decide
+    // visibility here: its seams fail closed as ambiguous instead of being
+    // admitted or allocating per triangle and pixel.
+    let crowded = crowded_behind(400).bake();
+    for seam in [SEAM_A, SEAM_B] {
+        assert!(
+            crowded
+                .materials
+                .iter()
+                .all(|material| !material.triangles.contains(&seam)),
+            "seam {seam} was textured although coverage exceeded the budget"
+        );
+        assert!(crowded.fallback.triangles.contains(&seam));
+    }
+    assert_eq!(
+        crowded.fallback.reasons.seam.ambiguous, 2,
+        "{:?}",
+        crowded.fallback.reasons.seam
+    );
+}
