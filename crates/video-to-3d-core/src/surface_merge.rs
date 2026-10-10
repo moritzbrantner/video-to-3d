@@ -23,16 +23,17 @@
 //! lower support-group index.
 
 use crate::{MeshTriangle, Point3};
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
 use std::collections::{BTreeSet, HashMap};
 
 const GEOMETRIC_EPSILON: f64 = 1.0e-9;
 /// Largest distance along the kept triangle's normal, as a fraction of the
 /// median accepted edge length, at which a triangle counts as the same surface.
-const MAX_OVERLAP_DISTANCE_FRACTION: f64 = 0.5;
-/// Barycentric slack so a centroid on a shared edge of two kept triangles is
-/// still inside one of them.
-const BARYCENTRIC_SLACK: f64 = 1.0e-6;
+const MAX_OVERLAP_DISTANCE_FRACTION: f64 = 0.9;
+/// Maximum grid cells occupied by one triangle before falling back to the exact list.
+const MAX_GRID_CELLS: usize = 512;
+/// Fail closed rather than processing a pathological number of clipping fragments.
+const MAX_UNCOVERED_PIECES: usize = 128;
 const MIN_NORMAL_ALIGNMENT: f64 = 0.94;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,8 +44,7 @@ pub(super) struct MergeStats {
     /// Lower-priority triangles dropped because a kept patch already meshes
     /// that surface.
     pub removed_duplicate_triangles: usize,
-    /// Lower-priority triangles that still overlap a kept patch because they
-    /// carry a shared seam vertex.
+    /// Partially covered lower-priority triangles kept to preserve accepted surface.
     pub remaining_overlap_triangles: usize,
     /// Connected components of the patch graph (patches joined by
     /// cross-reference triangles); `0` without meshed patches.
@@ -55,7 +55,7 @@ pub(super) struct MergeStats {
 impl MergeStats {
     pub fn diagnostic(&self, support_groups: usize) -> String {
         format!(
-            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles); {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface and {} seam triangle(s) still overlap it. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
+            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles); {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
             self.fused_pairs,
             self.shared_vertices,
             self.cross_reference_triangles,
@@ -126,18 +126,32 @@ pub(super) fn merge_fused_patches(
         canonical[drop] = keep;
         fused_pairs += 1;
     }
-    let mut uses_shared = vec![false; triangles.len()];
-    for (index, triangle) in triangles.iter_mut().enumerate() {
+    // Only patch pairs with an explicitly fusion-accepted correspondence may
+    // deduplicate faces. Proximity alone is not evidence of a shared surface.
+    let linked_patches: BTreeSet<(usize, usize)> = pairs
+        .iter()
+        .filter_map(|&(a, b)| {
+            if a >= points.len() || b >= points.len() || canonical[a] == canonical[b] {
+                return None;
+            }
+            let (Some(a), Some(b)) = (group_of(a), group_of(b)) else {
+                return None;
+            };
+            (a != b).then_some((a.min(b), a.max(b)))
+        })
+        .collect();
+    for triangle in triangles.iter_mut() {
         let mapped = [triangle.a, triangle.b, triangle.c].map(|vertex| canonical[vertex]);
-        // A collapsed triangle keeps its own vertices instead.
-        if mapped[0] == mapped[1] || mapped[1] == mapped[2] || mapped[0] == mapped[2] {
-            continue;
+        // Never replace valid topology with a degenerate triangle.
+        if mapped[0] != mapped[1] && mapped[1] != mapped[2] && mapped[0] != mapped[2] {
+            [triangle.a, triangle.b, triangle.c] = mapped;
         }
-        uses_shared[index] = mapped != [triangle.a, triangle.b, triangle.c];
-        [triangle.a, triangle.b, triangle.c] = mapped;
     }
 
-    // Drop lower-priority triangles that mesh a kept surface a second time.
+    // Reject only faces whose ENTIRE projected area is supported by the union
+    // of higher-priority patch triangles. A centroid test silently discards
+    // valid corners and holes. Use a bounded triangle-AABB index (including
+    // interiors of large triangles), and an exact planar polygon subtraction.
     let position = |vertex: usize| {
         let point = points[vertex];
         Vector3::new(f64::from(point.x), f64::from(point.y), f64::from(point.z))
@@ -155,63 +169,62 @@ pub(super) fn merge_fused_patches(
     let Some(&median_edge) = edges.get(edges.len() / 2) else {
         return MergeStats::default();
     };
+    // Reference-scale drift can exceed half an edge, but only a confirmed
+    // fused patch pair can use this bounded normal-distance allowance.
     let tolerance = median_edge * MAX_OVERLAP_DISTANCE_FRACTION;
-    let cell = median_edge.max(GEOMETRIC_EPSILON);
-    let cell_of = |point: Vector3<f64>| {
-        (
-            (point.x / cell).floor() as i64,
-            (point.y / cell).floor() as i64,
-            (point.z / cell).floor() as i64,
-        )
-    };
-
+    let cell = (median_edge * 2.0).max(GEOMETRIC_EPSILON);
     let mut keep = vec![true; triangles.len()];
     let mut kept_cells: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    let mut large_surfaces = Vec::new();
+    let mut all_kept = Vec::new();
     let mut removed_duplicate_triangles = 0;
     let mut remaining_overlap_triangles = 0;
+
     for (patch_rank, patch) in order.iter().enumerate() {
-        let members: Vec<usize> = (0..triangles.len())
-            .filter(|index| patch_of[*index] == Some(*patch))
+        let members: Vec<usize> = patch_of
+            .iter()
+            .enumerate()
+            .filter_map(|(index, owner)| (*owner == Some(*patch)).then_some(index))
             .collect();
         if patch_rank > 0 {
             for &index in &members {
                 let Some(candidate) = &geometry[index] else {
                     continue;
                 };
-                let (cx, cy, cz) = cell_of(candidate.centroid);
-                let reach = (tolerance / cell).ceil() as i64 + 1;
-                let mut covered = false;
-                'search: for dz in -reach..=reach {
-                    for dy in -reach..=reach {
-                        for dx in -reach..=reach {
-                            let Some(kept) = kept_cells.get(&(cx + dx, cy + dy, cz + dz)) else {
-                                continue;
-                            };
-                            for &other in kept {
-                                let Some(surface) = &geometry[other] else {
-                                    continue;
-                                };
-                                if surface.covers(candidate, tolerance) {
-                                    covered = true;
-                                    break 'search;
-                                }
-                            }
+                let mut nearby = BTreeSet::new();
+                let bounds = candidate.grid_bounds(cell, 0.0);
+                if let Some(keys) = grid_cells(&bounds) {
+                    for key in keys {
+                        if let Some(indices) = kept_cells.get(&key) {
+                            nearby.extend(indices);
                         }
                     }
-                }
-                if !covered {
-                    continue;
-                }
-                if uses_shared[index] {
-                    remaining_overlap_triangles += 1;
+                    nearby.extend(&large_surfaces);
                 } else {
+                    nearby.extend(&all_kept);
+                }
+                let candidates = nearby
+                    .into_iter()
+                    .filter(|&other| {
+                        let Some(other_patch) = patch_of[other] else {
+                            return false;
+                        };
+                        linked_patches.contains(&(usize::min(*patch, other_patch), usize::max(*patch, other_patch)))
+                    })
+                    .filter_map(|other| geometry[other].as_ref());
+                let (covered, partially_covered) = candidate.covered_by(candidates, tolerance);
+                if covered {
                     keep[index] = false;
                     removed_duplicate_triangles += 1;
+                } else if partially_covered {
+                    // In the absence of proven full coverage keep the original
+                    // face: it may be the only evidence at a hole or boundary.
+                    remaining_overlap_triangles += 1;
                 }
             }
         }
-        // Index every vertex cell of the kept triangles so a centroid finds
-        // large triangles too.
+        // Do not index this patch until it has been processed: triangles of a
+        // single camera patch cannot erase each other.
         for &index in &members {
             if !keep[index] {
                 continue;
@@ -219,12 +232,13 @@ pub(super) fn merge_fused_patches(
             let Some(surface) = &geometry[index] else {
                 continue;
             };
-            let mut cells = BTreeSet::new();
-            for corner in surface.corners.iter().chain([&surface.centroid]) {
-                cells.insert(cell_of(*corner));
-            }
-            for key in cells {
-                kept_cells.entry(key).or_default().push(index);
+            all_kept.push(index);
+            if let Some(keys) = grid_cells(&surface.grid_bounds(cell, tolerance)) {
+                for key in keys {
+                    kept_cells.entry(key).or_default().push(index);
+                }
+            } else {
+                large_surfaces.push(index);
             }
         }
     }
@@ -293,7 +307,6 @@ pub(super) fn merge_fused_patches(
 
 struct TriangleGeometry {
     corners: [Vector3<f64>; 3],
-    centroid: Vector3<f64>,
     normal: Vector3<f64>,
     edges: [f64; 3],
 }
@@ -313,7 +326,6 @@ impl TriangleGeometry {
         }
         Some(Self {
             corners,
-            centroid: (corners[0] + corners[1] + corners[2]) / 3.0,
             normal: normal / length,
             edges: [
                 (corners[1] - corners[0]).norm(),
@@ -323,33 +335,169 @@ impl TriangleGeometry {
         })
     }
 
-    /// Whether `other`'s centroid lies on this triangle: within `tolerance`
-    /// along this normal, inside it, and with aligned normals.
-    fn covers(&self, other: &TriangleGeometry, tolerance: f64) -> bool {
-        if self.normal.dot(&other.normal).abs() < MIN_NORMAL_ALIGNMENT {
-            return false;
-        }
-        let offset = other.centroid - self.corners[0];
-        if self.normal.dot(&offset).abs() > tolerance {
-            return false;
-        }
-        let projected = other.centroid - self.normal * self.normal.dot(&offset);
-        let [a, b, c] = self.corners;
-        let area = |p: Vector3<f64>, q: Vector3<f64>, r: Vector3<f64>| {
-            (q - p).cross(&(r - p)).dot(&self.normal)
-        };
-        let total = area(a, b, c);
-        if total.abs() <= GEOMETRIC_EPSILON {
-            return false;
-        }
-        [
-            area(projected, b, c),
-            area(a, projected, c),
-            area(a, b, projected),
-        ]
-        .iter()
-        .all(|part| part / total >= -BARYCENTRIC_SLACK)
+    fn grid_bounds(&self, cell: f64, padding: f64) -> [(i64, i64); 3] {
+        std::array::from_fn(|axis| {
+            let low = self
+                .corners
+                .iter()
+                .map(|point| point[axis])
+                .fold(f64::INFINITY, f64::min);
+            let high = self
+                .corners
+                .iter()
+                .map(|point| point[axis])
+                .fold(f64::NEG_INFINITY, f64::max);
+            (
+                ((low - padding) / cell).floor() as i64,
+                ((high + padding) / cell).floor() as i64,
+            )
+        })
     }
+
+    /// Subtract supported higher-priority triangles from the candidate's area.
+    /// Each subtraction is a planar polygon clipping operation, but the removed
+    /// region must also agree in normal and depth at EVERY polygon corner.
+    /// No output geometry is generated: partial coverage always keeps the face.
+    fn covered_by<'a>(
+        &self,
+        surfaces: impl Iterator<Item = &'a TriangleGeometry>,
+        tolerance: f64,
+    ) -> (bool, bool) {
+        let origin = self.corners[0];
+        let u = (self.corners[1] - origin).normalize();
+        let v = self.normal.cross(&u);
+        let project = |point: Vector3<f64>| {
+            let relative = point - origin;
+            Vector2::new(relative.dot(&u), relative.dot(&v))
+        };
+        let area_epsilon = self.edges.iter().copied().fold(1.0e-12, f64::max)
+            * self.edges.iter().copied().fold(1.0e-12, f64::max) * 1.0e-10;
+        let mut remaining = vec![self.corners.map(project).to_vec()];
+        let mut partially_covered = false;
+        for surface in surfaces {
+            if self.normal.dot(&surface.normal).abs() < MIN_NORMAL_ALIGNMENT {
+                continue;
+            }
+            let projected = surface.corners.map(project);
+            let winding = cross2(projected[1] - projected[0], projected[2] - projected[0]);
+            if winding.abs() <= area_epsilon {
+                continue;
+            }
+            let orientation = winding.signum();
+            let mut next = Vec::new();
+            for polygon in remaining {
+                let mut inside = polygon;
+                let mut outside = Vec::new();
+                for edge in 0..3 {
+                    let (included, excluded) = split_polygon(
+                        &inside,
+                        projected[edge],
+                        projected[(edge + 1) % 3],
+                        orientation,
+                    );
+                    if polygon_area(&excluded) > area_epsilon {
+                        outside.push(excluded);
+                    }
+                    inside = included;
+                    if inside.is_empty() {
+                        break;
+                    }
+                }
+                if polygon_area(&inside) > area_epsilon {
+                    // Project back onto the candidate's plane and compare
+                    // signed distances to the kept surface. Endpoint checks
+                    // bound the entire linear distance over this convex piece.
+                    let supported = inside.iter().all(|p| {
+                        let point = origin + u * p.x + v * p.y;
+                        (point - surface.corners[0]).dot(&surface.normal).abs() <= tolerance
+                    });
+                    if supported {
+                        partially_covered = true;
+                    } else {
+                        outside.push(inside);
+                    }
+                }
+                next.extend(outside);
+                if next.len() > MAX_UNCOVERED_PIECES {
+                    return (false, partially_covered);
+                }
+            }
+            remaining = next;
+            if remaining.is_empty() {
+                return (true, true);
+            }
+        }
+        (false, partially_covered)
+    }
+}
+
+/// Enumerate all occupied AABB cells, including the triangle interior. If the
+/// finite grid would be too large, let the caller use the exact unindexed list.
+fn grid_cells(bounds: &[(i64, i64); 3]) -> Option<Vec<(i64, i64, i64)>> {
+    let mut count = 1_usize;
+    for &(first, last) in bounds {
+        let span: usize = last.checked_sub(first)?.checked_add(1)?.try_into().ok()?;
+        count = count.checked_mul(span)?;
+        if count > MAX_GRID_CELLS {
+            return None;
+        }
+    }
+    let mut cells = Vec::with_capacity(count);
+    for z in bounds[2].0..=bounds[2].1 {
+        for y in bounds[1].0..=bounds[1].1 {
+            for x in bounds[0].0..=bounds[0].1 {
+                cells.push((x, y, z));
+            }
+        }
+    }
+    Some(cells)
+}
+
+fn cross2(a: Vector2<f64>, b: Vector2<f64>) -> f64 {
+    a.x * b.y - a.y * b.x
+}
+
+fn polygon_area(points: &[Vector2<f64>]) -> f64 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+    (0..points.len())
+        .map(|index| cross2(points[index], points[(index + 1) % points.len()]))
+        .sum::<f64>()
+        .abs()
+        * 0.5
+}
+
+fn split_polygon(
+    polygon: &[Vector2<f64>],
+    a: Vector2<f64>,
+    b: Vector2<f64>,
+    orientation: f64,
+) -> (Vec<Vector2<f64>>, Vec<Vector2<f64>>) {
+    let signed = |point: Vector2<f64>| orientation * cross2(b - a, point - a);
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+    if polygon.is_empty() {
+        return (included, excluded);
+    }
+    for index in 0..polygon.len() {
+        let previous = polygon[(index + polygon.len() - 1) % polygon.len()];
+        let current = polygon[index];
+        let before = signed(previous);
+        let after = signed(current);
+        if (before < 0.0 && after > 0.0) || (before > 0.0 && after < 0.0) {
+            let intersection = previous + (current - previous) * (before / (before - after));
+            included.push(intersection);
+            excluded.push(intersection);
+        }
+        if after >= 0.0 {
+            included.push(current);
+        }
+        if after <= 0.0 {
+            excluded.push(current);
+        }
+    }
+    (included, excluded)
 }
 
 #[cfg(test)]
