@@ -333,6 +333,64 @@ fn reconciled_stale_artifacts_release_their_output_reservations() {
 }
 
 #[test]
+fn a_stale_file_at_the_bake_directory_is_removed_when_released() {
+    let project = TempProject::new("stale-ancestor");
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, mut manifest) = project.open();
+    // A foreign, otherwise verified artifact is stale, and its recorded path
+    // lies inside an independent bake's managed output directory.
+    // The stale output is a regular file exactly where the bake needs its
+    // directory.
+    let stale_path = ProjectPath::new("artifacts/bake").unwrap();
+    fs::rename(
+        project.file("artifacts/assemble.bin"),
+        stale_path.resolve(&project.root),
+    )
+    .unwrap();
+    let mut receipt = store.read_receipt("assemble").unwrap().unwrap();
+    receipt.output.path = stale_path.clone();
+    store.write_receipt(&receipt).unwrap();
+    manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.produced_by == "assemble")
+        .unwrap()
+        .path = stale_path;
+    // texture_bake requires Standard; quality is not part of any identity.
+    manifest.quality_mode = crate::scene_project::QualityMode::Standard;
+    manifest
+        .operations
+        .push(crate::scene_project::OperationDeclaration {
+            id: "bake".into(),
+            kind: OperationKind::TextureBake,
+            inputs: vec![
+                OperationInput::Operation("ingest".into()),
+                OperationInput::Operation("mesh".into()),
+            ],
+            provider: None,
+            max_attempts: 1,
+        });
+    manifest
+        .operations
+        .iter_mut()
+        .find(|operation| operation.id == "assemble")
+        .unwrap()
+        .max_attempts = 2;
+    store.save_manifest(&manifest).unwrap();
+    let report = store.reconcile(&mut manifest, VerifyMode::Full).unwrap();
+    assert!(report.invalidated.iter().any(|(operation, reason)| {
+        operation == "assemble" && *reason == Invalidation::StaleIdentity
+    }));
+    assert!(!manifest
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.produced_by == "assemble"));
+    assert_eq!(report.verified.len(), 4);
+
+    assert!(!project.file("artifacts/bake").exists());
+}
+
+#[test]
 fn stale_artifacts_whose_sidecars_obstruct_a_bake_are_released() {
     let project = TempProject::new("stale-sidecar-reservation");
     build(&project, &WritingExecutor::new(&project.root));

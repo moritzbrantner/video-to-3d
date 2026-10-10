@@ -334,10 +334,13 @@ impl ProjectStore {
                     }
                     // The document and every sidecar it lists are reserved
                     // for its producer, so any of them can obstruct a bake.
-                    let paths: Vec<String> = std::iter::once(artifact.path.clone())
+                    let owned: Vec<ProjectPath> = std::iter::once(artifact.path.clone())
                         .chain(crate::scene_artifacts::recorded_sidecar_paths(
                             &self.root, artifact,
                         ))
+                        .collect();
+                    let paths: Vec<String> = owned
+                        .iter()
                         .map(|path| path.as_str().to_ascii_lowercase())
                         .collect();
                     let obstructs_bake = bake_directories.iter().any(|(owner, directory)| {
@@ -349,6 +352,21 @@ impl ProjectStore {
                             })
                     });
                     if obstructs_bake {
+                        // A stale file AT the bake directory or one of its
+                        // ancestors would make creating the directory fail;
+                        // it is a verified output of an obsolete operation,
+                        // so remove it rather than spend the bake's attempt.
+                        for (path, folded) in owned.iter().zip(&paths) {
+                            let blocks = bake_directories.iter().any(|(owner, directory)| {
+                                artifact.produced_by != *owner
+                                    && (folded == directory
+                                        || directory.starts_with(&format!("{folded}/")))
+                            });
+                            let file = self.resolve(path);
+                            if blocks && file.is_file() {
+                                let _ = fs::remove_file(file);
+                            }
+                        }
                         report
                             .verified
                             .retain(|operation| operation != &artifact.produced_by);
@@ -554,20 +572,16 @@ impl ProjectStore {
             for sidecar in sidecars {
                 let path = &sidecar.path;
                 if let Some((width, height)) = sidecar.png_rgb8 {
-                    let mut header = [0_u8; 33];
-                    let read = fs::File::open(self.resolve(path))
-                        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut header));
-                    // A missing file is reported by the hash check below; a
-                    // file too short for a PNG header is not the PNG.
-                    let not_png = match read {
-                        Ok(()) => !crate::scene_artifacts::is_png_rgb8(&header, width, height),
-                        Err(error) => error.kind() == std::io::ErrorKind::UnexpectedEof,
-                    };
-                    if not_png {
-                        return Err(Invalidation::CorruptSidecar(format!(
-                            "`{}` is not the declared {width}x{height} 8-bit RGB PNG",
-                            path.as_str()
-                        )));
+                    // A missing file is reported by the hash check below.
+                    if let Ok(png) = fs::read(self.resolve(path)) {
+                        if let Err(error) =
+                            crate::scene_artifacts::validate_png_rgb8(&png, width, height)
+                        {
+                            return Err(Invalidation::CorruptSidecar(format!(
+                                "`{}` is not the declared PNG: {error}",
+                                path.as_str()
+                            )));
+                        }
                     }
                 }
                 match cache.hash(&self.resolve(path), path.as_str()) {

@@ -1095,20 +1095,126 @@ fn rewriting_keyframes_removes_only_unreferenced_superseded_sidecars() {
         &[frame(0, &[1, 2, 3, 255]), frame(1, &[4, 5, 6, 255])],
     )
     .unwrap();
-    // A sibling index shares frame 1's content-addressed sidecar.
-    let sibling_index = path("inputs/other-keyframes.json");
-    write_keyframes_artifact(&dir.0, &sibling_index, &[frame(1, &[4, 5, 6, 255])]).unwrap();
+    // Another recorded keyframes artifact, anywhere in the project, lists
+    // frame 1's content-addressed sidecar.
+    let other = path("elsewhere/other.idx");
+    fs::create_dir_all(dir.0.join("elsewhere")).unwrap();
+    let (mut other_artifact, _) =
+        write_keyframes_artifact(&dir.0, &other, &[frame(1, &[4, 5, 6, 255])]).unwrap();
+    other_artifact.frames[0].pixels = first.frames[1].pixels.clone();
+    fs::write(other.resolve(&dir.0), other_artifact.to_json()).unwrap();
+    let manifest_document = json!({
+        "schema_version": 1,
+        "project_id": "superseded",
+        "quality_mode": "standard",
+        "inputs": [{
+            "id": "clip", "path": "media/clip.webm",
+            "content_hash": ContentHash::of_bytes(b"clip").as_str(), "byte_length": 4
+        }],
+        "provider_policy": { "execution": "local_only" },
+        "operations": [
+            { "id": "ingest", "kind": "ingest_video", "inputs": [{ "media": "clip" }] },
+            { "id": "ingest2", "kind": "ingest_video", "inputs": [{ "media": "clip" }] }
+        ],
+        "requested_outputs": ["keyframes"]
+    });
+    let mut manifest = SceneProjectManifest::from_json(&manifest_document.to_string()).unwrap();
+    manifest
+        .artifacts
+        .push(crate::scene_project::ArtifactRecord {
+            id: "ingest2.output".into(),
+            kind: ArtifactKind::Keyframes,
+            produced_by: "ingest2".into(),
+            operation_identity: ContentHash::of_bytes(b"ingest2"),
+            path: other.clone(),
+            content_hash: ContentHash::of_bytes(&fs::read(other.resolve(&dir.0)).unwrap()),
+            provider: None,
+        });
 
-    let (second, _) =
-        write_keyframes_artifact(&dir.0, &index, &[frame(2, &[7, 8, 9, 255])]).unwrap();
+    // The plain writer never deletes.
+    write_keyframes_artifact(&dir.0, &index, &[frame(2, &[7, 8, 9, 255])]).unwrap();
     let exists = |artifact: &KeyframesArtifact, at: usize| {
         artifact.frames[at].pixels.resolve(&dir.0).exists()
     };
+    assert!(exists(&first, 0) && exists(&first, 1));
+
+    // The project writer removes what no recorded artifact still lists.
+    let (_, _) = write_keyframes_artifact(&dir.0, &index, &first_frames()).unwrap();
+    let (second, _) =
+        write_project_keyframes_artifact(&dir.0, &manifest, &index, &[frame(2, &[7, 8, 9, 255])])
+            .unwrap();
     assert!(!exists(&first, 0), "superseded sidecar was kept");
     assert!(
         exists(&first, 1),
-        "a sidecar another index lists was removed"
+        "a sidecar another recorded artifact lists was removed"
     );
     assert!(exists(&second, 0));
     second.load_pixels(&dir.0, 2).unwrap();
+}
+
+fn first_frames() -> Vec<SampledFrame<'static>> {
+    let frame = |frame_index: usize, rgba: &'static [u8]| SampledFrame {
+        frame_index,
+        timestamp_seconds: frame_index as f64,
+        width: 1,
+        height: 1,
+        rgba,
+    };
+    vec![frame(0, &[1, 2, 3, 255]), frame(1, &[4, 5, 6, 255])]
+}
+
+#[test]
+fn png_sidecars_are_validated_completely() {
+    let rgba: Vec<u8> = (0..6 * 4).map(|value| value as u8 * 9).collect();
+    let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
+    validate_png_rgb8(&png, 3, 2).unwrap();
+    assert!(validate_png_rgb8(&png, 2, 3).is_err());
+    // Header only: no pixel stream.
+    assert!(validate_png_rgb8(&png[..33], 3, 2).is_err());
+    // A flipped byte inside IDAT breaks its CRC.
+    let mut corrupt = png.clone();
+    corrupt[45] ^= 0xff;
+    assert!(validate_png_rgb8(&corrupt, 3, 2)
+        .unwrap_err()
+        .contains("CRC"));
+    // Trailing data after IEND.
+    let mut trailing = png.clone();
+    trailing.push(0);
+    assert!(validate_png_rgb8(&trailing, 3, 2).is_err());
+}
+
+#[test]
+fn surface_mesh_rejects_mismatched_grid_sites_before_copying() {
+    let fixture = Fixture::new();
+    let evidence = ReconstructionEvidenceView::new(
+        ReconstructionProviderDescriptor::classic(),
+        EvidenceScale::ArbitraryMonocular,
+        fixture.cameras.clone(),
+        fixture.regions.clone(),
+        &fixture.points,
+        &fixture.triangles,
+    )
+    .unwrap();
+    let error = SurfaceMeshArtifact::from_evidence(&evidence, &fixture.sites[..3]).unwrap_err();
+    assert!(error.contains("grid sites"), "{error}");
+}
+
+#[test]
+fn case_aliased_previous_textures_are_not_deleted() {
+    let dir = TempDir::new("texture-alias");
+    let inputs = Fixture::new().write(&dir.0);
+    let output = path("artifacts/bake/surface-textures.json");
+    let first = bake(&dir.0, &inputs);
+    // The previous artifact named the same texture with different case.
+    let mut previous = first.artifact.clone();
+    let lower = previous.materials[0].texture.path.clone();
+    let upper = ProjectPath::new(lower.as_str().replace(".png", ".PNG")).unwrap();
+    fs::copy(lower.resolve(&dir.0), upper.resolve(&dir.0)).unwrap();
+    previous.materials[0].texture.path = upper.clone();
+    fs::write(output.resolve(&dir.0), previous.to_json()).unwrap();
+    bake(&dir.0, &inputs);
+    // On a case-insensitive filesystem these are one file; deleting the old
+    // spelling would delete the newly referenced texture.
+    assert!(upper.resolve(&dir.0).exists());
+    assert!(lower.resolve(&dir.0).exists());
 }

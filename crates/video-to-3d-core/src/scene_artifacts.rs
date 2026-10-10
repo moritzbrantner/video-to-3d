@@ -140,6 +140,30 @@ fn read_verified(root: &Path, path: &ProjectPath, hash: &ContentHash) -> Result<
 /// Bytes read and hashed between cancellation polls.
 const VERIFIED_READ_CHUNK: usize = 1 << 20;
 
+/// Read a whole file in bounded chunks, polling cancellation before each.
+fn read_with_cancel(
+    root: &Path,
+    path: &ProjectPath,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let cannot_read = |error: std::io::Error| format!("cannot read `{}`: {error}", path.as_str());
+    let mut file = fs::File::open(path.resolve(root)).map_err(cannot_read)?;
+    let length = file.metadata().map_err(cannot_read)?.len() as usize;
+    let mut bytes = Vec::with_capacity(length);
+    let mut chunk = vec![0_u8; VERIFIED_READ_CHUNK];
+    loop {
+        if is_canceled() {
+            return Err("texture bake was canceled".into());
+        }
+        let read = file.read(&mut chunk).map_err(cannot_read)?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+}
+
 /// [`read_verified`] streamed in bounded chunks with cooperative
 /// cancellation, rejecting a file of the wrong length before reading it.
 fn read_verified_with_cancel(
@@ -327,6 +351,57 @@ pub fn write_keyframes_artifact(
     index: &ProjectPath,
     frames: &[SampledFrame<'_>],
 ) -> Result<(KeyframesArtifact, ContentHash), String> {
+    write_keyframes(root, index, frames).map(|(artifact, hash, _)| (artifact, hash))
+}
+
+/// [`write_keyframes_artifact`] inside a scene project: after the replacement
+/// index is committed, the previous version's sidecars are removed when they
+/// are provably unreferenced, i.e. inside this index's `frames/` directory,
+/// not listed by the new version, and not listed by any keyframes artifact
+/// the manifest records (sidecar paths are otherwise unconstrained, so only
+/// the project's records can establish that no other artifact uses a file).
+pub fn write_project_keyframes_artifact(
+    root: &Path,
+    manifest: &SceneProjectManifest,
+    index: &ProjectPath,
+    frames: &[SampledFrame<'_>],
+) -> Result<(KeyframesArtifact, ContentHash), String> {
+    let (artifact, hash, previous) = write_keyframes(root, index, frames)?;
+    if let Some(previous) = previous {
+        let mut referenced: BTreeSet<String> = artifact
+            .frames
+            .iter()
+            .map(|frame| frame.pixels.as_str().to_ascii_lowercase())
+            .collect();
+        for record in &manifest.artifacts {
+            if record.kind == ArtifactKind::Keyframes
+                && !record.path.as_str().eq_ignore_ascii_case(index.as_str())
+            {
+                referenced.extend(
+                    recorded_sidecar_paths(root, record)
+                        .iter()
+                        .map(|path| path.as_str().to_ascii_lowercase()),
+                );
+            }
+        }
+        let frames_directory =
+            format!("{}/", sibling(index, "frames")?.as_str()).to_ascii_lowercase();
+        for frame in &previous.frames {
+            let folded = frame.pixels.as_str().to_ascii_lowercase();
+            if folded.starts_with(&frames_directory) && !referenced.contains(&folded) {
+                let _ = fs::remove_file(frame.pixels.resolve(root));
+            }
+        }
+    }
+    Ok((artifact, hash))
+}
+
+#[allow(clippy::type_complexity)]
+fn write_keyframes(
+    root: &Path,
+    index: &ProjectPath,
+    frames: &[SampledFrame<'_>],
+) -> Result<(KeyframesArtifact, ContentHash, Option<KeyframesArtifact>), String> {
     // Validate the complete replacement first. Sidecars are content-addressed,
     // so writing them never changes a file an existing index refers to.
     let mut records = Vec::with_capacity(frames.len());
@@ -370,55 +445,11 @@ pub fn write_keyframes_artifact(
     }
     let document = artifact.to_json();
     write_atomically(&index.resolve(root), document.as_bytes())?;
-    if let Some(previous) = previous {
-        remove_superseded_keyframes(root, index, &previous, &artifact)?;
-    }
-    Ok((artifact, ContentHash::of_bytes(document.as_bytes())))
-}
-
-/// After a replacement index is committed, remove the sidecars the previous
-/// version listed that are provably unreferenced: inside this index's own
-/// `frames/` directory, not listed by the new version, and not listed by any
-/// other keyframes index in the same directory (which shares `frames/`).
-fn remove_superseded_keyframes(
-    root: &Path,
-    index: &ProjectPath,
-    previous: &KeyframesArtifact,
-    current: &KeyframesArtifact,
-) -> Result<(), String> {
-    let frames_directory = format!("{}/", sibling(index, "frames")?.as_str());
-    let mut referenced: BTreeSet<String> = current
-        .frames
-        .iter()
-        .map(|frame| frame.pixels.as_str().to_owned())
-        .collect();
-    let index_file = index.resolve(root);
-    if let Some(directory) = index_file.parent() {
-        for entry in fs::read_dir(directory).into_iter().flatten().flatten() {
-            let other = entry.path();
-            if other == index_file || other.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            let Ok(document) = fs::read_to_string(&other) else {
-                continue;
-            };
-            if let Ok(sharing) = KeyframesArtifact::from_json(&document) {
-                referenced.extend(
-                    sharing
-                        .frames
-                        .iter()
-                        .map(|frame| frame.pixels.as_str().to_owned()),
-                );
-            }
-        }
-    }
-    for frame in &previous.frames {
-        let path = frame.pixels.as_str();
-        if path.starts_with(&frames_directory) && !referenced.contains(path) {
-            let _ = fs::remove_file(frame.pixels.resolve(root));
-        }
-    }
-    Ok(())
+    Ok((
+        artifact,
+        ContentHash::of_bytes(document.as_bytes()),
+        previous,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +481,14 @@ impl SurfaceMeshArtifact {
         evidence: &ReconstructionEvidenceView<'_>,
         grid_sites: &[DenseGridSite],
     ) -> Result<Self, String> {
+        // Cheap invariant first, before any buffer is copied.
+        if grid_sites.len() != evidence.points.len() {
+            return Err(format!(
+                "surface mesh artifact has {} grid sites for {} points",
+                grid_sites.len(),
+                evidence.points.len()
+            ));
+        }
         evidence.validate()?;
         let artifact = Self {
             schema_version: SURFACE_MESH_ARTIFACT_SCHEMA_VERSION,
@@ -857,6 +896,77 @@ pub struct ArtifactSidecar {
     pub png_rgb8: Option<(u32, u32)>,
 }
 
+/// Check that `png` is a complete, decodable 8-bit RGB, non-interlaced PNG of
+/// `width` × `height`: signature, IHDR first, every chunk CRC, contiguous
+/// IDAT chunks, IEND last, and a zlib stream inflating to exactly one filter
+/// byte (0..=4) plus `3 · width` bytes per row.
+pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), String> {
+    if !is_png_rgb8(png, width, height) {
+        return Err(format!("not a {width}x{height} 8-bit RGB PNG"));
+    }
+    let row = (width as usize)
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or("PNG row size overflows")?;
+    let expected = row
+        .checked_mul(height as usize)
+        .ok_or("PNG image size overflows")?;
+    let mut cursor = 8;
+    let mut idat = Vec::new();
+    let mut seen_idat = false;
+    let mut idat_ended = false;
+    let mut first = true;
+    loop {
+        let header = png.get(cursor..cursor + 8).ok_or("PNG ends before IEND")?;
+        let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let kind = &header[4..8];
+        let end = cursor
+            .checked_add(12)
+            .and_then(|end| end.checked_add(length))
+            .filter(|end| *end <= png.len())
+            .ok_or("PNG chunk exceeds the file")?;
+        let data = &png[cursor + 8..cursor + 8 + length];
+        let crc = u32::from_be_bytes(png[end - 4..end].try_into().unwrap());
+        if crc32fast::hash(&png[cursor + 4..cursor + 8 + length]) != crc {
+            return Err(format!(
+                "PNG chunk {} has a wrong CRC",
+                String::from_utf8_lossy(kind)
+            ));
+        }
+        if first && kind != b"IHDR" {
+            return Err("PNG does not start with IHDR".into());
+        }
+        first = false;
+        match kind {
+            b"IDAT" => {
+                if idat_ended {
+                    return Err("PNG IDAT chunks are not contiguous".into());
+                }
+                seen_idat = true;
+                idat.extend_from_slice(data);
+            }
+            b"IEND" => {
+                if end != png.len() {
+                    return Err("PNG has data after IEND".into());
+                }
+                break;
+            }
+            _ => {
+                if seen_idat {
+                    idat_ended = true;
+                }
+            }
+        }
+        cursor = end;
+    }
+    let raw = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&idat, expected)
+        .map_err(|_| "PNG pixel stream does not inflate to the declared size".to_owned())?;
+    if raw.len() != expected || raw.chunks_exact(row).any(|line| line[0] > 4) {
+        return Err("PNG pixel stream does not match the declared image".into());
+    }
+    Ok(())
+}
+
 /// Whether `header` (at least the first 33 bytes of a file) starts a PNG
 /// whose IHDR declares an 8-bit RGB, non-interlaced image of these dimensions.
 pub fn is_png_rgb8(header: &[u8], width: u32, height: u32) -> bool {
@@ -973,9 +1083,8 @@ fn bake_classified(
         }
     };
     let read = |path: &ProjectPath, label: &str| -> Result<String, BakeFailure> {
-        let bytes = fs::read(path.resolve(root)).map_err(|error| {
-            BakeFailure::Other(format!("cannot read `{}`: {error}", path.as_str()))
-        })?;
+        let bytes =
+            read_with_cancel(root, path, || cancel.is_canceled()).map_err(BakeFailure::Other)?;
         String::from_utf8(bytes)
             .map_err(|_| incompatible(path, label, "the document is not UTF-8".into()))
     };
@@ -1155,13 +1264,17 @@ fn bake_parsed(
     // Drop sidecars the new manifest no longer references. Only files inside
     // this operation's own texture directory are ever removed.
     let texture_directory = format!("{}/", sibling(output, "textures")?.as_str());
-    let current: BTreeSet<&ProjectPath> = artifact
+    // Paths fold ASCII case, as manifest paths do: on a case-insensitive
+    // filesystem `ABC.png` and `abc.png` are one file.
+    let current: BTreeSet<String> = artifact
         .materials
         .iter()
-        .map(|material| &material.texture.path)
+        .map(|material| material.texture.path.as_str().to_ascii_lowercase())
         .collect();
+    let texture_directory = texture_directory.to_ascii_lowercase();
     for file in previous_files.values() {
-        if !current.contains(&file.path) && file.path.as_str().starts_with(&texture_directory) {
+        let folded = file.path.as_str().to_ascii_lowercase();
+        if !current.contains(&folded) && folded.starts_with(&texture_directory) {
             let _ = fs::remove_file(file.path.resolve(root));
         }
     }
