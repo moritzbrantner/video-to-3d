@@ -200,8 +200,34 @@ fn reconciled_stale_artifacts_release_their_output_reservations() {
     let project = TempProject::new("stale-reservation");
     build(&project, &WritingExecutor::new(&project.root));
     let (store, mut manifest) = project.open();
-    // Same hashes and receipts, but a changed operation identity. This output
-    // must not reserve its old path for another operation in the next build.
+    // A foreign, otherwise verified artifact is stale, and its recorded path
+    // lies inside an independent bake's managed output directory.
+    let stale_path = ProjectPath::new("artifacts/bake/legacy.bin").unwrap();
+    fs::create_dir_all(project.file("artifacts/bake")).unwrap();
+    fs::rename(
+        project.file("artifacts/assemble.bin"),
+        stale_path.resolve(&project.root),
+    )
+    .unwrap();
+    let mut receipt = store.read_receipt("assemble").unwrap().unwrap();
+    receipt.output.path = stale_path.clone();
+    store.write_receipt(&receipt).unwrap();
+    manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.produced_by == "assemble")
+        .unwrap()
+        .path = stale_path;
+    manifest.operations.push(crate::scene_project::OperationDeclaration {
+        id: "bake".into(),
+        kind: OperationKind::TextureBake,
+        inputs: vec![
+            OperationInput::Operation("ingest".into()),
+            OperationInput::Operation("mesh".into()),
+        ],
+        provider: None,
+        max_attempts: 1,
+    });
     manifest
         .operations
         .iter_mut()
@@ -223,7 +249,10 @@ fn reconciled_stale_artifacts_release_their_output_reservations() {
     let executor = WritingExecutor::new(&project.root);
     let report = build(&project, &executor);
     assert!(report.run.is_complete());
-    assert_eq!(executor.executed(), BTreeSet::from(["assemble".to_owned()]));
+    assert_eq!(
+        executor.executed(),
+        BTreeSet::from(["assemble".to_owned(), "bake".to_owned()])
+    );
 }
 
 #[test]
