@@ -662,6 +662,19 @@ fn texture_artifacts_reject_incompatible_versions_provenance_and_fallbacks() {
         .contains("unsupported bake schema"));
     assert!(SurfaceTexturesArtifact::from_json(&old.to_json()).is_err());
 
+    // A material texturing no triangle would export observed provenance
+    // without supporting geometry.
+    let mut empty = artifact.clone();
+    let moved = std::mem::take(&mut empty.materials[0].triangles);
+    empty.materials[0].corner_uvs.clear();
+    empty.fallback_triangles.extend(moved);
+    empty.fallback_triangles.sort_unstable();
+    assert!(empty
+        .validate()
+        .unwrap_err()
+        .contains("textures no triangle"));
+    assert!(SurfaceTexturesArtifact::from_json(&empty.to_json()).is_err());
+
     let mut learned = artifact.clone();
     learned.materials[0].provenance = vec![EvidenceOrigin::LearnedMultiView];
     assert!(learned
@@ -1014,4 +1027,26 @@ fn legacy_inputs_are_reported_unsupported_without_charging_the_bake() {
         );
     }
     assert!(!dir.0.join("artifacts/bake").exists());
+}
+
+#[test]
+fn keyframe_pixels_load_in_cancelable_chunks() {
+    let dir = TempDir::new("cancel-pixels");
+    let (keyframes, _) = Fixture::new().write(&dir.0);
+    let artifact =
+        KeyframesArtifact::from_json(&fs::read_to_string(keyframes.resolve(&dir.0)).unwrap())
+            .unwrap();
+    let mut polls = 0;
+    let rgba = artifact
+        .load_pixels_with_cancel(&dir.0, 1, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(rgba, artifact.load_pixels(&dir.0, 1).unwrap());
+    assert!(polls >= 1);
+    let error = artifact
+        .load_pixels_with_cancel(&dir.0, 1, || true)
+        .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
 }

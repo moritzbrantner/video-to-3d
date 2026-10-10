@@ -185,6 +185,10 @@ fn malformed_versioned_sidecar_documents_are_not_accepted_as_current() {
         r#"{"schema_version":2,"frames":[]}"#,
         r#"{"schema_version":1,"frames":[{"frame_index":0}]}"#,
         "{",
+        // JSON scalars claim the interchange format too.
+        "null",
+        r#""legacy""#,
+        "42",
     ] {
         fs::write(path.resolve(&project.root), content).unwrap();
         let error = store.verify_sidecars(&artifact, &mut cache).unwrap_err();

@@ -539,9 +539,13 @@ impl ProjectStore {
             let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, document)
             {
                 Ok(sidecars) => sidecars,
+                // Only a document that is not JSON at all is opaque. Any JSON
+                // value (including a scalar) or anything shaped like an object
+                // or array claims the interchange format.
                 Err(_)
                     if !document.trim_start().starts_with('{')
-                        && !document.trim_start().starts_with('[') =>
+                        && !document.trim_start().starts_with('[')
+                        && serde_json::from_str::<serde::de::IgnoredAny>(document).is_err() =>
                 {
                     Vec::new()
                 }

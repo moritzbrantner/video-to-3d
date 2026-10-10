@@ -137,6 +137,59 @@ fn read_verified(root: &Path, path: &ProjectPath, hash: &ContentHash) -> Result<
     Ok(bytes)
 }
 
+/// Bytes read and hashed between cancellation polls.
+const VERIFIED_READ_CHUNK: usize = 1 << 20;
+
+/// [`read_verified`] streamed in bounded chunks with cooperative
+/// cancellation, rejecting a file of the wrong length before reading it.
+fn read_verified_with_cancel(
+    root: &Path,
+    path: &ProjectPath,
+    hash: &ContentHash,
+    expected_length: Option<usize>,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let cannot_read = |error: std::io::Error| format!("cannot read `{}`: {error}", path.as_str());
+    let mut file = fs::File::open(path.resolve(root)).map_err(cannot_read)?;
+    let length = file.metadata().map_err(cannot_read)?.len() as usize;
+    if expected_length.is_some_and(|expected| expected != length) {
+        return Err(format!(
+            "`{}` has {length} bytes; its format requires {}",
+            path.as_str(),
+            expected_length.unwrap_or_default()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(length);
+    let mut hasher = Sha256::new();
+    let mut chunk = vec![0_u8; VERIFIED_READ_CHUNK];
+    loop {
+        if is_canceled() {
+            return Err("texture bake was canceled".into());
+        }
+        let read = file.read(&mut chunk).map_err(cannot_read)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if hash.as_str() != format!("sha256:{digest}") {
+        return Err(format!(
+            "`{}` does not match its recorded content hash {}",
+            path.as_str(),
+            hash.as_str()
+        ));
+    }
+    Ok(bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Keyframes
 
@@ -223,13 +276,41 @@ impl KeyframesArtifact {
 
     /// Read and verify the pixels of one frame.
     pub fn load_pixels(&self, root: &Path, frame_index: usize) -> Result<Vec<u8>, String> {
+        self.load_pixels_with_cancel(root, frame_index, || false)
+    }
+
+    /// [`Self::load_pixels`], streaming and hashing the sidecar in bounded
+    /// chunks with cooperative cancellation.
+    pub(crate) fn load_pixels_with_cancel(
+        &self,
+        root: &Path,
+        frame_index: usize,
+        is_canceled: impl FnMut() -> bool,
+    ) -> Result<Vec<u8>, String> {
         let frame = self
             .frames
             .iter()
             .find(|frame| frame.frame_index == frame_index)
             .ok_or_else(|| format!("keyframes artifact has no frame {frame_index}"))?;
-        let rgba = read_verified(root, &frame.pixels, &frame.content_hash)?;
-        if Some(rgba.len()) != rgba_length(frame.width, frame.height) {
+        let expected = rgba_length(frame.width, frame.height);
+        let rgba = read_verified_with_cancel(
+            root,
+            &frame.pixels,
+            &frame.content_hash,
+            expected,
+            is_canceled,
+        )
+        .map_err(|error| {
+            if error.contains("format requires") {
+                format!(
+                    "keyframe {frame_index} pixels are not {}x{} RGBA",
+                    frame.width, frame.height
+                )
+            } else {
+                error
+            }
+        })?;
+        if Some(rgba.len()) != expected {
             return Err(format!(
                 "keyframe {frame_index} pixels are not {}x{} RGBA",
                 frame.width, frame.height
@@ -473,6 +554,12 @@ impl SurfaceTexturesArtifact {
             if !frames.insert(material.reference_frame) {
                 return Err(format!(
                     "surface textures artifact lists reference frame {} twice",
+                    material.reference_frame
+                ));
+            }
+            if material.triangles.is_empty() {
+                return Err(format!(
+                    "surface textures material for frame {} textures no triangle",
                     material.reference_frame
                 ));
             }
@@ -868,7 +955,11 @@ fn bake_parsed(
     for frame in &keyframes.frames {
         check_canceled()?;
         if references.contains(&frame.frame_index) {
-            pixels.push((frame, keyframes.load_pixels(root, frame.frame_index)?));
+            pixels.push((
+                frame,
+                keyframes
+                    .load_pixels_with_cancel(root, frame.frame_index, || cancel.is_canceled())?,
+            ));
         }
     }
     let images: Vec<ReferenceImage<'_>> = pixels
