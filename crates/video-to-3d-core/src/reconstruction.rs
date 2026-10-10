@@ -991,7 +991,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         let span = &multi_view.keyframe_selection.segments[segment];
         let promoted = promoted_keyframes.get(&segment).copied().unwrap_or(0);
         warnings.push(format!(
-            "No adjacent frame pair of frames {}–{} had measurable parallax, so their calibrated seed pair spans frames {}–{} ({} sampling intervals): matches composed along the tracked links and refined to sub-pixel positions leave {} px after the best pure rotation (requires more than {:.2} px), and the pair passed every two-view gate with a {:.2}° median triangulation angle. {promoted} further frame(s) of that span became registration keyframes.",
+            "No adjacent frame pair of frames {}–{} passed every seed gate, so their calibrated seed pair spans frames {}–{} ({} sampling intervals): matches composed along the tracked links and refined to sub-pixel positions leave {} px after the best pure rotation (requires more than {:.2} px), and the pair passed every two-view gate with a {:.2}° median triangulation angle. {promoted} further frame(s) of that span became registration keyframes.",
             span.first_frame + 1,
             span.last_frame + 1,
             pair.from_frame + 1,
@@ -1288,6 +1288,8 @@ fn wide_seed_candidate(
             })
         })
         .collect();
+    // The candidate reports the correspondences actually evaluated.
+    seed.matches = points.len();
     if points.len() < two_view::MIN_SEED_INLIERS {
         // Too few matches survived sub-pixel refinement (e.g. near the border)
         // to fit anything: a correspondence limit, not a missing baseline.

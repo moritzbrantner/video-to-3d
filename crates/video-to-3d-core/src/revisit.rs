@@ -439,7 +439,9 @@ fn preselect_pairs(
     let mut pairs = Vec::new();
     for (left_offset, &from_frame) in frames.iter().enumerate() {
         for &to_frame in frames.iter().skip(left_offset + 1) {
-            if to_frame <= from_frame + 1 {
+            // Adjacent pairs are tracked already; the calibrated seed pair
+            // (which may be wider) is already the seed, not a revisit.
+            if to_frame <= from_frame + 1 || seed_frames == Some([from_frame, to_frame]) {
                 continue;
             }
             pairs.push((from_frame, to_frame));
@@ -624,6 +626,7 @@ mod tests {
     fn revisit_analysis_bounds_pair_evaluations_before_matching() {
         let frames: Vec<usize> = (0..18).collect();
         let pairs = preselect_pairs(&frames, Some([0, 1]), &[]);
+        assert!(!preselect_pairs(&frames, Some([0, 3]), &[]).contains(&(0, 3)));
 
         assert_eq!(pairs.len(), MAX_REVISIT_PAIR_EVALUATIONS);
         assert!(pairs.iter().all(|(from, to)| *to > *from + 1));
