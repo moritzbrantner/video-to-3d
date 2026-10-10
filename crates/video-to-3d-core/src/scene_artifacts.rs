@@ -678,6 +678,13 @@ impl SurfaceTexturesArtifact {
                     material.appearance_key.as_str()
                 ));
             }
+            // No PNG has a zero extent, so neither can a recorded crop.
+            if material.texture.width == 0 || material.texture.height == 0 {
+                return Err(format!(
+                    "surface textures material for frame {} has an empty {}x{} texture crop",
+                    material.reference_frame, material.texture.width, material.texture.height
+                ));
+            }
             if u64::from(material.texture.width) * u64::from(material.texture.height)
                 > MAX_TEXTURE_PIXELS
             {
@@ -981,9 +988,12 @@ pub struct ArtifactSidecar {
 
 /// Check that `png` is a complete, decodable 8-bit RGB, non-interlaced PNG of
 /// `width` × `height`: signature, a single IHDR first, every chunk CRC, at
-/// most one PLTE before the pixel data, no unknown critical chunks, contiguous
-/// IDAT chunks, IEND last, and a zlib stream inflating to exactly one filter
-/// byte (0..=4) plus `3 · width` bytes per row.
+/// most one PLTE before the pixel data, no unknown critical chunks, no
+/// ancillary chunk that changes how the RGB samples render (transparency or
+/// color management, see [`RENDERING_PNG_CHUNKS`]), contiguous IDAT chunks of
+/// at most [`max_encoded_png_data`] bytes in total, IEND last, and a zlib
+/// stream inflating to exactly one filter byte (0..=4) plus `3 · width` bytes
+/// per row.
 pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), String> {
     decode_png_rgb8_with_cancel(png, width, height, || false).map(drop)
 }
@@ -1012,8 +1022,12 @@ pub(crate) fn decode_png_rgb8_with_cancel(
     let expected = row
         .checked_mul(height as usize)
         .ok_or("PNG image size overflows")?;
+    let encoded_limit = max_encoded_png_data(expected);
     let mut cursor = 8;
-    let mut idat = Vec::new();
+    // IDAT chunks are contiguous, so they span one byte range of the file;
+    // inflation streams their payloads from there instead of copying them.
+    let mut idat_span: Option<(usize, usize)> = None;
+    let mut idat_bytes = 0_usize;
     let mut seen_idat = false;
     let mut idat_ended = false;
     let mut first = true;
@@ -1061,7 +1075,14 @@ pub(crate) fn decode_png_rgb8_with_cancel(
                     return Err("PNG IDAT chunks are not contiguous".into());
                 }
                 seen_idat = true;
-                idat.extend_from_slice(data);
+                idat_bytes = idat_bytes.saturating_add(length);
+                if idat_bytes > encoded_limit {
+                    return Err(format!(
+                        "PNG pixel data exceeds the {encoded_limit}-byte encoded limit of a {width}x{height} image"
+                    ));
+                }
+                let start = idat_span.map_or(cursor, |(start, _)| start);
+                idat_span = Some((start, end));
             }
             b"IEND" => {
                 if !data.is_empty() {
@@ -1071,6 +1092,12 @@ pub(crate) fn decode_png_rgb8_with_cancel(
                     return Err("PNG has data after IEND".into());
                 }
                 break;
+            }
+            _ if RENDERING_PNG_CHUNKS.contains(&kind) => {
+                return Err(format!(
+                    "PNG has a {} chunk, which changes how its RGB samples render",
+                    String::from_utf8_lossy(kind)
+                ));
             }
             _ if kind[0].is_ascii_uppercase() => {
                 return Err(format!(
@@ -1086,7 +1113,12 @@ pub(crate) fn decode_png_rgb8_with_cancel(
         }
         cursor = end;
     }
-    let raw = inflate_zlib_exact(&idat, expected, &mut is_canceled)?;
+    let (idat_start, idat_end) = idat_span.ok_or("PNG has no IDAT chunk")?;
+    let raw = inflate_zlib_exact(
+        png_chunk_payloads(&png[idat_start..idat_end]),
+        expected,
+        &mut is_canceled,
+    )?;
     if raw.chunks_exact(row).any(|line| line[0] > 4) {
         return Err("PNG pixel stream does not match the declared image".into());
     }
@@ -1120,6 +1152,32 @@ pub(crate) fn decode_png_rgb8_with_cancel(
     Ok(pixels)
 }
 
+/// Ancillary chunks whose meaning the RGB decoder does not model but which
+/// change how the samples render: transparency and color management. A PNG
+/// carrying one is not proven equal to another by equal RGB samples.
+const RENDERING_PNG_CHUNKS: [&[u8]; 6] = [b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"cICP"];
+
+/// Largest total IDAT payload accepted for an image whose zlib stream must
+/// inflate to `decoded` bytes: zlib's conservative deflate bound (worst-case
+/// expansion of stored or fixed-Huffman blocks plus the zlib wrapper) and
+/// 1 KiB of slack, so uncompressed encodings of real images still pass.
+pub(crate) fn max_encoded_png_data(decoded: usize) -> usize {
+    decoded
+        .saturating_add(decoded.div_ceil(8))
+        .saturating_add(decoded.div_ceil(64))
+        .saturating_add(11 + 1024)
+}
+
+/// Payloads of the consecutive, already validated chunks in `chunks`.
+fn png_chunk_payloads(mut chunks: &[u8]) -> impl Iterator<Item = &[u8]> {
+    std::iter::from_fn(move || {
+        let length = u32::from_be_bytes(chunks.get(..4)?.try_into().ok()?) as usize;
+        let data = chunks.get(8..8 + length)?;
+        chunks = &chunks[12 + length..];
+        Some(data)
+    })
+}
+
 fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
     let estimate = i16::from(left) + i16::from(up) - i16::from(up_left);
     let (a, b, c) = (
@@ -1136,10 +1194,11 @@ fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
     }
 }
 
-/// Inflate a zlib stream that must produce exactly `expected` bytes, feeding
-/// it in bounded chunks and polling `is_canceled` between them.
-fn inflate_zlib_exact(
-    stream: &[u8],
+/// Inflate a zlib stream, split across `parts` (the IDAT payloads, borrowed
+/// in place), that must produce exactly `expected` bytes, feeding it in
+/// bounded chunks and polling `is_canceled` between them.
+fn inflate_zlib_exact<'a>(
+    parts: impl Iterator<Item = &'a [u8]>,
     expected: usize,
     is_canceled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<u8>, String> {
@@ -1152,19 +1211,19 @@ fn inflate_zlib_exact(
     // alone), one scratch chunk at a time.
     let mut out = Vec::new();
     let mut scratch = vec![0_u8; CHUNK];
-    let mut consumed = 0;
+    let mut pieces = parts.flat_map(|part| part.chunks(CHUNK)).peekable();
+    let mut input = pieces.next().unwrap_or_default();
     loop {
         if is_canceled() {
             return Err("PNG decoding was canceled".into());
         }
-        let end = (consumed + CHUNK).min(stream.len());
-        let flush = if end == stream.len() {
+        let flush = if pieces.peek().is_none() {
             MZFlush::Finish
         } else {
             MZFlush::None
         };
-        let result = inflate(&mut state, &stream[consumed..end], &mut scratch, flush);
-        consumed += result.bytes_consumed;
+        let result = inflate(&mut state, input, &mut scratch, flush);
+        input = &input[result.bytes_consumed..];
         if out.len() + result.bytes_written > expected {
             return Err(mismatch());
         }
@@ -1174,9 +1233,12 @@ fn inflate_zlib_exact(
             Ok(_) if result.bytes_consumed > 0 || result.bytes_written > 0 => {}
             _ => return Err(mismatch()),
         }
+        if input.is_empty() {
+            input = pieces.next().unwrap_or_default();
+        }
     }
     // Exactly one complete zlib stream: no trailing data after it.
-    if out.len() != expected || consumed != stream.len() {
+    if out.len() != expected || !input.is_empty() || pieces.next().is_some() {
         return Err(mismatch());
     }
     Ok(out)

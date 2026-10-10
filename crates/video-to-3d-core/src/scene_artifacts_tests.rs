@@ -1598,3 +1598,61 @@ fn encoded_png_data_is_bounded_by_the_declared_image() {
     assert!(stored.len() > stored_raw.len());
     validate_png_rgb8(&png_with_idat(width, height, &stored), width, height).unwrap();
 }
+
+/// A `width` x `height` 8-bit RGB PNG whose IDAT chunks hold `parts` in order.
+fn png_with_idat_parts(width: u32, height: u32, parts: &[&[u8]]) -> Vec<u8> {
+    let single = png_with_idat(width, height, &[]);
+    // Signature + IHDR, then one IDAT per part, then IEND.
+    let mut png = single[..33].to_vec();
+    for part in parts {
+        png.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(b"IDAT");
+        png.extend_from_slice(part);
+        let crc = crc32fast::hash(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    }
+    png.extend_from_slice(&single[single.len() - 12..]);
+    png
+}
+
+#[test]
+fn split_idat_chunks_stream_into_one_zlib_stream() {
+    let (width, height) = (300_u32, 200_u32);
+    let mut raw = Vec::new();
+    for y in 0..height {
+        raw.push(0);
+        for x in 0..width {
+            raw.extend_from_slice(&[x as u8, y as u8, (x * y) as u8]);
+        }
+    }
+    // Stored so the stream spans several inflate input chunks.
+    let zlib = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 0);
+    let (head, tail) = zlib.split_at(zlib.len() / 3);
+    let (middle, tail) = tail.split_at(70_000);
+    let parts: [&[u8]; 6] = [&[], &head[..1], &head[1..], middle, &[], tail];
+    let pixels = decode_png_rgb8_with_cancel(
+        &png_with_idat_parts(width, height, &parts),
+        width,
+        height,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(
+        pixels,
+        raw.chunks_exact(width as usize * 3 + 1)
+            .flat_map(|line| line[1..].to_vec())
+            .collect::<Vec<_>>()
+    );
+    // Trailing data in a later IDAT is still rejected.
+    let trailing: [&[u8]; 3] = [&zlib, &[], &[0]];
+    assert!(validate_png_rgb8(
+        &png_with_idat_parts(width, height, &trailing),
+        width,
+        height
+    )
+    .is_err());
+    // Only empty IDAT chunks hold no stream.
+    let empty: [&[u8]; 2] = [&[], &[]];
+    assert!(validate_png_rgb8(&png_with_idat_parts(width, height, &empty), width, height).is_err());
+}
