@@ -678,10 +678,14 @@ fn bake_with_cancel(
             .focal_pixels;
         let mut regions = BTreeSet::new();
         let mut seam_reference_frames = BTreeSet::new();
-        for (ordinal, (index, _)) in admitted.iter().enumerate() {
+        let mut triangles = Vec::with_capacity(admitted.len());
+        let mut corner_pixels = Vec::with_capacity(admitted.len());
+        for (ordinal, (index, pixels)) in admitted.iter().enumerate() {
             if ordinal % 1024 == 0 {
                 check_canceled()?;
             }
+            triangles.push(*index);
+            corner_pixels.push(*pixels);
             let triangle = &evidence.triangles[*index];
             for point in [triangle.a, triangle.b, triangle.c] {
                 if let Ownership::Observed { reference, region } = ownership[point] {
@@ -691,11 +695,6 @@ fn bake_with_cancel(
             }
         }
         let (source_frames, provenance) = region_provenance(evidence, camera_frame, &regions);
-        let triangles = admitted.iter().map(|(index, _)| *index).collect::<Vec<_>>();
-        let corner_pixels = admitted
-            .iter()
-            .map(|(_, pixels)| *pixels)
-            .collect::<Vec<_>>();
         let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
 
         // Seam appearance depends on the camera and intrinsics, the cropped
