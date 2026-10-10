@@ -278,7 +278,7 @@ pub(crate) fn bake_surface_materials_with_cancel(
         }
     };
     check_canceled()?;
-    evidence.validate()?;
+    evidence.validate_with_cancel(&mut check_canceled)?;
     check_canceled()?;
     let mut images = BTreeMap::new();
     for image in reference_images {
