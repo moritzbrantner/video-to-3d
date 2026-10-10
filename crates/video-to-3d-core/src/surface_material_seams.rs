@@ -19,7 +19,10 @@
 //!    clearly in front of the triangle's plane there, and ambiguous when the
 //!    depth difference falls inside the tolerance band, or when accepted
 //!    geometry in its one-pixel neighbourhood is clearly in front of the plane
-//!    or lies where the plane is beyond its horizon.
+//!    or lies where the plane is beyond its horizon. A camera whose accepted
+//!    geometry would exceed its coverage budget (on average
+//!    `COVERAGE_ENTRIES_PER_PIXEL` entries per image pixel) cannot decide
+//!    visibility, so every triangle reaching this check is ambiguous.
 //!
 //! The rule never blends cameras and never creates, moves or repairs
 //! geometry. Among passing cameras the one owning most vertices wins, then the
@@ -76,6 +79,10 @@ pub(super) struct SeamAdmission {
     pub corner_pixels: [[f64; 2]; 3],
 }
 
+/// One camera's verdict on a seam triangle: its corner pixels and projected
+/// double area when admitted.
+type CameraVerdict = Result<([[f64; 2]; 3], f64), SeamRejection>;
+
 #[derive(Clone, Copy)]
 struct Candidate {
     owned: usize,
@@ -121,14 +128,23 @@ pub(super) fn evaluate_seams(
             }
             continue;
         }
+        // `None` when the camera's coverage exceeds its budget: the camera
+        // cannot decide visibility, so its depth test fails closed.
         let coverage = CoverageIndex::build(&view, evidence, check_canceled)?;
+        let mut meter = WorkMeter::new(VISIBILITY_POLL_INTERVAL);
         for (slot, triangle_index) in seams.iter().enumerate() {
             if slot % 1024 == 0 {
                 check_canceled()?;
             }
             let triangle = &evidence.triangles[*triangle_index];
             let corners = [triangle.a, triangle.b, triangle.c];
-            match view.admit(evidence, &coverage, corners) {
+            match view.admit(
+                evidence,
+                coverage.as_ref(),
+                corners,
+                &mut meter,
+                check_canceled,
+            )? {
                 Ok((corner_pixels, double_area)) => {
                     let owned = corners
                         .iter()
@@ -241,16 +257,20 @@ impl<'a> CameraView<'a> {
         Some(median <= POSE_CONSISTENCY_PIXELS)
     }
 
-    /// Apply checks 2-5 of the rule for one camera.
+    /// Apply checks 2-5 of the rule for one camera. Without a coverage index
+    /// (its budget was exceeded) the depth test cannot be decided and every
+    /// triangle reaching it is ambiguous. The outer error is cancellation.
     fn admit(
         &self,
         evidence: &ReconstructionEvidenceView<'_>,
-        coverage: &CoverageIndex,
+        coverage: Option<&CoverageIndex>,
         corners: [usize; 3],
-    ) -> Result<([[f64; 2]; 3], f64), SeamRejection> {
+        meter: &mut WorkMeter,
+        check_canceled: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<CameraVerdict, String> {
         let camera = corners.map(|index| self.to_camera(position(&evidence.points[index])));
         if !camera.iter().all(|point| Self::in_front(*point)) {
-            return Err(SeamRejection::BehindCamera);
+            return Ok(Err(SeamRejection::BehindCamera));
         }
         let pixels = camera.map(|point| self.pixel(point));
         let (max_x, max_y) = ((self.width - 1) as f64, (self.height - 1) as f64);
@@ -258,7 +278,7 @@ impl<'a> CameraView<'a> {
             .iter()
             .any(|[u, v]| !(0.0..=max_x).contains(u) || !(0.0..=max_y).contains(v))
         {
-            return Err(SeamRejection::OutOfFrame);
+            return Ok(Err(SeamRejection::OutOfFrame));
         }
         let double_area = ((pixels[1][0] - pixels[0][0]) * (pixels[2][1] - pixels[0][1])
             - (pixels[1][1] - pixels[0][1]) * (pixels[2][0] - pixels[0][0]))
@@ -268,7 +288,7 @@ impl<'a> CameraView<'a> {
             [0, 1, 2].map(|axis| (camera[0][axis] + camera[1][axis] + camera[2][axis]) / 3.0);
         let cosine = dot(normal, centroid).abs() / (norm(normal) * norm(centroid));
         if !(double_area >= MIN_FOOTPRINT_DOUBLE_AREA && cosine >= MIN_VIEW_COSINE) {
-            return Err(SeamRejection::GrazingView);
+            return Ok(Err(SeamRejection::GrazingView));
         }
         let mid = |a: [f64; 3], b: [f64; 3]| [0, 1, 2].map(|axis| (a[axis] + b[axis]) * 0.5);
         let samples = [
@@ -280,21 +300,26 @@ impl<'a> CameraView<'a> {
             mid(camera[2], camera[0]),
             centroid,
         ];
-        let plane = InverseDepthPlane::through(pixels, camera.map(|point| 1.0 / point[2]))
-            .ok_or(SeamRejection::Ambiguous)?;
+        let Some(plane) = InverseDepthPlane::through(pixels, camera.map(|point| 1.0 / point[2]))
+        else {
+            return Ok(Err(SeamRejection::Ambiguous));
+        };
+        let Some(coverage) = coverage else {
+            return Ok(Err(SeamRejection::Ambiguous));
+        };
         let mut ambiguous = false;
         for sample in samples {
             let [u, v] = self.pixel(sample);
-            match coverage.classify(u, v, &plane) {
+            match coverage.classify(u, v, &plane, meter, check_canceled)? {
                 Visibility::Visible => {}
                 Visibility::Ambiguous => ambiguous = true,
-                Visibility::Occluded => return Err(SeamRejection::Occluded),
+                Visibility::Occluded => return Ok(Err(SeamRejection::Occluded)),
             }
         }
         if ambiguous {
-            return Err(SeamRejection::Ambiguous);
+            return Ok(Err(SeamRejection::Ambiguous));
         }
-        Ok((pixels, double_area))
+        Ok(Ok((pixels, double_area)))
     }
 }
 
@@ -349,9 +374,52 @@ struct RasterTriangle {
 /// listed in both cells.
 const CELL_MARGIN: f64 = 1.0e-6;
 
-/// Rasterization work (cells registered or counted, rows scanned) between
-/// two cancellation polls.
+/// Rasterization work (cells registered or counted, rows scanned, prefix
+/// sums) between two cancellation polls.
 const RASTER_POLL_INTERVAL: usize = 1 << 16;
+
+/// Coverage entries one camera may hold per image pixel on average. A
+/// camera whose accepted geometry would register more entries than
+/// `COVERAGE_ENTRIES_PER_PIXEL * width * height` gets no coverage index: it
+/// cannot decide visibility, so every seam reaching its depth test fails
+/// closed as ambiguous. This keeps visibility bookkeeping proportional to the
+/// image instead of to triangles times pixels.
+const COVERAGE_ENTRIES_PER_PIXEL: usize = 64;
+
+/// Coverage entries visited (each clipped against its cell) between two
+/// cancellation polls while classifying visibility samples.
+const VISIBILITY_POLL_INTERVAL: usize = 1 << 10;
+
+/// Counts work and polls cancellation once per full interval.
+struct WorkMeter {
+    interval: usize,
+    unpolled: usize,
+}
+
+impl WorkMeter {
+    fn new(interval: usize) -> Self {
+        Self {
+            interval,
+            unpolled: 0,
+        }
+    }
+
+    /// Charge `work` units, polling once per full interval. Callers charge
+    /// bounded chunks before doing them, so no unpolled loop runs longer
+    /// than one interval.
+    fn charge(
+        &mut self,
+        work: usize,
+        check_canceled: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.unpolled += work;
+        while self.unpolled >= self.interval {
+            self.unpolled -= self.interval;
+            check_canceled()?;
+        }
+        Ok(())
+    }
+}
 
 /// The cells of one row a triangle's footprint touches.
 struct Span {
@@ -372,27 +440,33 @@ struct CoverageIndex {
     /// Triangles of cell `i` are `entries[offsets[i]..offsets[i + 1]]`.
     offsets: Vec<usize>,
     entries: Vec<u32>,
-    /// Work done since the last cancellation poll.
-    unpolled_work: usize,
+    meter: WorkMeter,
 }
 
 impl CoverageIndex {
+    /// `None` when the coverage would exceed
+    /// [`COVERAGE_ENTRIES_PER_PIXEL`] entries per pixel on average; the
+    /// entries are counted while the spans are recorded and the build stops
+    /// as soon as the budget is exceeded, so neither the spans nor the entries
+    /// ever grow beyond it.
     fn build(
         view: &CameraView<'_>,
         evidence: &ReconstructionEvidenceView<'_>,
         check_canceled: &mut impl FnMut() -> Result<(), String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Option<Self>, String> {
         let (width, height) = (view.width as usize, view.height as usize);
         let cells = width * height;
+        let budget = cells.saturating_mul(COVERAGE_ENTRIES_PER_PIXEL);
         let mut index = Self {
             width,
             height,
             triangles: Vec::new(),
             offsets: vec![0; cells + 1],
             entries: Vec::new(),
-            unpolled_work: 0,
+            meter: WorkMeter::new(RASTER_POLL_INTERVAL),
         };
         let mut spans = Vec::new();
+        let mut total = 0_usize;
         for (ordinal, triangle) in evidence.triangles.iter().enumerate() {
             if ordinal % 1024 == 0 {
                 check_canceled()?;
@@ -411,31 +485,43 @@ impl CoverageIndex {
                 let ordinal = u32::try_from(index.triangles.len()).map_err(|_| {
                     "too many accepted triangles for the seam visibility index".to_owned()
                 })?;
+                let recorded = spans.len();
                 index.push_spans(&corners, ordinal, &mut spans, check_canceled)?;
+                total = spans[recorded..]
+                    .iter()
+                    .fold(total, |total, span| total + (span.last - span.first + 1));
+                if total > budget {
+                    return Ok(None);
+                }
                 index.triangles.push(RasterTriangle { corners });
             }
         }
 
         // Count per cell, turn counts into inclusive ends (the last one
         // carries the total into the sentinel), then fill each cell from its
-        // end so `offsets[i]` becomes its start.
+        // end so `offsets[i]` becomes its start. The prefix scan runs in
+        // chunks of one poll interval, each charged before its work.
         for span in &spans {
             index.for_cells(span, check_canceled, |offsets, _, cell| offsets[cell] += 1)?;
         }
-        for row in 0..height {
-            index.charge(width, check_canceled)?;
-            for cell in row * width..(row + 1) * width {
+        let mut first = 0;
+        while first < cells {
+            let end = cells.min(first + RASTER_POLL_INTERVAL);
+            index.meter.charge(end - first, check_canceled)?;
+            for cell in first..end {
                 index.offsets[cell + 1] += index.offsets[cell];
             }
+            first = end;
         }
-        index.entries = vec![0; index.offsets[cells]];
+        debug_assert_eq!(index.offsets[cells], total);
+        index.entries = vec![0; total];
         for span in &spans {
             index.for_cells(span, check_canceled, |offsets, entries, cell| {
                 offsets[cell] -= 1;
                 entries[offsets[cell]] = span.triangle;
             })?;
         }
-        Ok(index)
+        Ok(Some(index))
     }
 
     /// Record the cells each row of `corners`' footprint touches.
@@ -460,7 +546,7 @@ impl CoverageIndex {
         }
         let last_column = self.width as f64 - 1.0;
         for row in first_row as usize..=last_row as usize {
-            self.charge(1, check_canceled)?;
+            self.meter.charge(1, check_canceled)?;
             let strip = clip_axis(corners, 1, row as f64 - 0.5 - CELL_MARGIN, 1.0);
             let strip = clip_axis(&strip, 1, row as f64 + 0.5 + CELL_MARGIN, -1.0);
             let (left, right) = strip
@@ -495,7 +581,7 @@ impl CoverageIndex {
         let mut first = span.first;
         while first <= span.last {
             let last = span.last.min(first + RASTER_POLL_INTERVAL - 1);
-            self.charge(last - first + 1, check_canceled)?;
+            self.meter.charge(last - first + 1, check_canceled)?;
             for column in first..=last {
                 visit(&mut self.offsets, &mut self.entries, base + column);
             }
@@ -504,30 +590,15 @@ impl CoverageIndex {
         Ok(())
     }
 
-    /// Count `work` units and poll cancellation once per full interval.
-    fn charge(
-        &mut self,
-        work: usize,
-        check_canceled: &mut impl FnMut() -> Result<(), String>,
-    ) -> Result<(), String> {
-        self.unpolled_work += work;
-        while self.unpolled_work >= RASTER_POLL_INTERVAL {
-            self.unpolled_work -= RASTER_POLL_INTERVAL;
-            check_canceled()?;
-        }
-        Ok(())
-    }
-
-    fn cell(&self, x: isize, y: isize) -> impl Iterator<Item = &RasterTriangle> {
+    /// The entries (accepted triangle ordinals) registered in cell `(x, y)`.
+    fn cell(&self, x: isize, y: isize) -> &[u32] {
         let range = if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
             0..0
         } else {
             let cell = y as usize * self.width + x as usize;
             self.offsets[cell]..self.offsets[cell + 1]
         };
-        self.entries[range]
-            .iter()
-            .map(|triangle| &self.triangles[*triangle as usize])
+        &self.entries[range]
     }
 
     /// Classify the sample at pixel `(u, v)` on the seam triangle's `plane`.
@@ -545,7 +616,18 @@ impl CoverageIndex {
     /// neighbouring cells geometry clearly in front is ambiguous. Geometry
     /// where the plane lies beyond its horizon has no plane depth to compare
     /// with and fails closed as ambiguous.
-    fn classify(&self, u: f64, v: f64, plane: &InverseDepthPlane) -> Visibility {
+    ///
+    /// A crowded cell's entries are visited in chunks of
+    /// [`VISIBILITY_POLL_INTERVAL`], each charged to `meter` before it is
+    /// clipped, so cancellation is polled at bounded intervals.
+    fn classify(
+        &self,
+        u: f64,
+        v: f64,
+        plane: &InverseDepthPlane,
+        meter: &mut WorkMeter,
+        check_canceled: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<Visibility, String> {
         let (x, y) = (u.round() as isize, v.round() as isize);
         let mut ambiguous = false;
         for dy in -1..=1 {
@@ -556,35 +638,39 @@ impl CoverageIndex {
                     [cx as f64 - 0.5, cy as f64 - 0.5],
                     [cx as f64 + 0.5, cy as f64 + 0.5],
                 );
-                for triangle in self.cell(cx, cy) {
-                    let mut part = triangle.corners.to_vec();
-                    for axis in 0..2 {
-                        part = clip_axis(&part, axis, low[axis], 1.0);
-                        part = clip_axis(&part, axis, high[axis], -1.0);
-                    }
-                    for [pu, pv, inverse] in part {
-                        let plane_inverse = plane.at(pu, pv);
-                        if !(plane_inverse.is_finite() && plane_inverse > 0.0) {
-                            ambiguous = true;
-                        } else if inverse * (1.0 - OCCLUDED_DEPTH_TOLERANCE) > plane_inverse {
-                            if own_cell {
-                                return Visibility::Occluded;
+                for chunk in self.cell(cx, cy).chunks(VISIBILITY_POLL_INTERVAL) {
+                    meter.charge(chunk.len(), check_canceled)?;
+                    for triangle in chunk {
+                        let triangle = &self.triangles[*triangle as usize];
+                        let mut part = triangle.corners.to_vec();
+                        for axis in 0..2 {
+                            part = clip_axis(&part, axis, low[axis], 1.0);
+                            part = clip_axis(&part, axis, high[axis], -1.0);
+                        }
+                        for [pu, pv, inverse] in part {
+                            let plane_inverse = plane.at(pu, pv);
+                            if !(plane_inverse.is_finite() && plane_inverse > 0.0) {
+                                ambiguous = true;
+                            } else if inverse * (1.0 - OCCLUDED_DEPTH_TOLERANCE) > plane_inverse {
+                                if own_cell {
+                                    return Ok(Visibility::Occluded);
+                                }
+                                ambiguous = true;
+                            } else if own_cell
+                                && inverse * (1.0 - VISIBLE_DEPTH_TOLERANCE) > plane_inverse
+                            {
+                                ambiguous = true;
                             }
-                            ambiguous = true;
-                        } else if own_cell
-                            && inverse * (1.0 - VISIBLE_DEPTH_TOLERANCE) > plane_inverse
-                        {
-                            ambiguous = true;
                         }
                     }
                 }
             }
         }
-        if ambiguous {
+        Ok(if ambiguous {
             Visibility::Ambiguous
         } else {
             Visibility::Visible
-        }
+        })
     }
 }
 
