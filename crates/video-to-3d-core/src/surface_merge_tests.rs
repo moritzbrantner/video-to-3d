@@ -220,8 +220,14 @@ fn square_footprint(camera: ReferenceCamera) -> Footprint {
         0,
         camera,
         &[
-            corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
-            corners([(-1.0, -1.0, 5.0), (1.0, 1.0, 5.0), (-1.0, 1.0, 5.0)]),
+            (
+                corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
+                0,
+            ),
+            (
+                corners([(-1.0, -1.0, 5.0), (1.0, 1.0, 5.0), (-1.0, 1.0, 5.0)]),
+                0,
+            ),
         ],
     )
     .unwrap()
@@ -232,22 +238,28 @@ fn image_ownership_tolerates_reference_scale_but_not_another_surface() {
     let footprint = square_footprint(identity_camera(0.0));
     // Inside both kept triangles, 1 % farther: the same surface.
     let same = corners([(-0.5, -0.5, 5.05), (0.6, -0.4, 5.05), (0.1, 0.7, 5.05)]);
-    assert!((footprint.ownership(&same, 1.0).image_share - 1.0).abs() < 1.0e-9);
+    assert!((footprint.ownership(&same, 1.0, &|_| true).image_share - 1.0).abs() < 1.0e-9);
     // A layer 4 % in front (0.2 m before a wall 5 m away) is a separate surface.
     let layer = corners([(-0.5, -0.5, 4.8), (0.6, -0.4, 4.8), (0.1, 0.7, 4.8)]);
-    assert_eq!(footprint.ownership(&layer, 1.0).image_share, 0.0);
+    assert_eq!(footprint.ownership(&layer, 1.0, &|_| true).image_share, 0.0);
     // Unless the whole patch is 4 % nearer: a relative depth scale, removed
     // before the bound applies.
-    let ratios = footprint.depth_ratios(&layer);
+    let ratios = footprint.depth_ratios(&layer, &|_| true);
     assert!(!ratios.is_empty());
     assert!(ratios.iter().all(|ratio| (ratio - 0.96).abs() < 1.0e-9));
-    assert!((footprint.ownership(&layer, 0.96).image_share - 1.0).abs() < 1.0e-9);
+    assert!((footprint.ownership(&layer, 0.96, &|_| true).image_share - 1.0).abs() < 1.0e-9);
     // 12 % farther: a separate surface, never owned.
     let behind = corners([(-0.5, -0.5, 5.6), (0.6, -0.4, 5.6), (0.1, 0.7, 5.6)]);
-    assert_eq!(footprint.ownership(&behind, 1.0).image_share, 0.0);
+    assert_eq!(
+        footprint.ownership(&behind, 1.0, &|_| true).image_share,
+        0.0
+    );
     // Behind the camera.
     let flipped = corners([(-0.5, -0.5, -5.0), (0.6, -0.4, -5.0), (0.1, 0.7, -5.0)]);
-    assert_eq!(footprint.ownership(&flipped, 1.0).image_share, 0.0);
+    assert_eq!(
+        footprint.ownership(&flipped, 1.0, &|_| true).image_share,
+        0.0
+    );
 }
 
 #[test]
@@ -255,14 +267,14 @@ fn image_ownership_measures_the_share_on_the_footprint() {
     let footprint = square_footprint(identity_camera(0.0));
     // Half of this triangle's projected area lies beyond x = 1.
     let seam = corners([(0.0, -0.5, 5.0), (2.0, -0.5, 5.0), (1.0, 0.5, 5.0)]);
-    let owned = footprint.ownership(&seam, 1.0);
+    let owned = footprint.ownership(&seam, 1.0, &|_| true);
     assert!((owned.image_share - 0.5).abs() < 1.0e-9);
     // Fronto-parallel, so the owned surface area is half of the 3D area too.
     assert!((owned.surface_area - 0.5).abs() < 1.0e-9);
     // Tilted in depth, the image share and the surface share differ; the
     // surface area is measured on the triangle's own plane.
     let tilted = corners([(0.0, -0.5, 4.9), (2.0, -0.5, 5.1), (1.0, 0.5, 5.0)]);
-    let owned = footprint.ownership(&tilted, 1.0);
+    let owned = footprint.ownership(&tilted, 1.0, &|_| true);
     let full = (tilted[1] - tilted[0])
         .cross(&(tilted[2] - tilted[0]))
         .norm()
@@ -270,15 +282,20 @@ fn image_ownership_measures_the_share_on_the_footprint() {
     assert!(owned.image_share > 0.4 && owned.image_share < 0.6);
     assert!(owned.surface_area > 0.0 && owned.surface_area < full);
     let outside = corners([(1.5, -0.5, 5.0), (2.5, -0.5, 5.0), (2.0, 0.5, 5.0)]);
-    assert_eq!(footprint.ownership(&outside, 1.0).image_share, 0.0);
+    assert_eq!(
+        footprint.ownership(&outside, 1.0, &|_| true).image_share,
+        0.0
+    );
 }
 
 #[test]
 fn owned_overlap_is_removed_and_unique_surface_is_kept() {
-    // Patch 0 (three triangles, higher priority): the square at depth 5 plus
-    // one triangle elsewhere. Patch 1, seen from a camera 0.4 to the side: a
-    // triangle inside the square at 1 % depth disagreement, a seam triangle
-    // half on the square, and a triangle beyond the square.
+    // Patch 0 (four triangles, higher priority): the square at depth 5, one
+    // triangle elsewhere, and a triangle carrying the seam vertex 12.
+    // Patch 1: component X, linked to the square by the fused pair (12, 7),
+    // holds a triangle inside the square at 1 % depth disagreement and one
+    // reaching far beyond it; island Y lies inside the square at the same
+    // depth but no accepted correspondence links it.
     let points = vec![
         point(-1.0, -1.0, 5.0),
         point(1.0, -1.0, 5.0),
@@ -290,69 +307,99 @@ fn owned_overlap_is_removed_and_unique_surface_is_kept() {
         point(-0.5, -0.5, 5.05),
         point(0.6, -0.4, 5.05),
         point(0.1, 0.7, 5.05),
-        point(0.0, -0.5, 5.0),
-        point(2.0, -0.5, 5.0),
-        point(1.0, 0.5, 5.0),
         point(3.0, -0.5, 5.0),
-        point(4.0, -0.5, 5.0),
         point(3.5, 0.5, 5.0),
-        // A fusion-accepted seam pair (one point per patch) links the patches.
-        point(-3.5, 0.6, 5.0),
-        point(-3.5, 0.6, 5.0),
+        point(-0.5, -0.5, 5.05),
+        point(-0.6, 0.2, 5.0),
+        point(-0.2, 0.2, 5.0),
+        point(-0.4, 0.6, 5.0),
     ];
     let membership: Vec<Option<usize>> = (0..points.len())
-        .map(|index| Some(usize::from((7..16).contains(&index) || index == 17)))
+        .map(|index| Some(usize::from((7..12).contains(&index) || index >= 13)))
         .collect();
-    let link = [(16, 17)];
     let original = vec![
         triangle(0, 1, 2),
         triangle(0, 2, 3),
         triangle(4, 5, 6),
+        triangle(0, 1, 12),
         triangle(7, 8, 9),
-        triangle(10, 11, 12),
+        triangle(8, 10, 11),
         triangle(13, 14, 15),
     ];
+    let link = [(12, 7)];
     let cameras = [Some(identity_camera(0.0)), Some(identity_camera(0.4))];
 
     let mut triangles = original.clone();
     let stats = merge_fused_patches(&points, &mut triangles, &membership, &link, &cameras);
-    // The inner triangle is owned; the seam triangle (50 %) and the unique
-    // one stay, and nothing of patch 0 is touched.
+    // Only the linked inner triangle is owned; the far-reaching one and the
+    // unlinked island stay, and nothing of patch 0 is touched.
     assert_eq!(stats.removed_duplicate_triangles, 1);
-    assert_eq!(stats.trimmed_seam_triangles, 0);
-    assert_eq!(stats.remaining_overlap_triangles, 1);
-    assert_eq!(
-        signature(&triangles),
-        signature(&[
-            original[0],
-            original[1],
-            original[2],
-            original[4],
-            original[5]
-        ])
-    );
-
-    // A seam triangle at least MIN_IMAGE_OWNERSHIP_SHARE owned (here 84 %) is
-    // trimmed and its unowned area is reported.
-    let mut points = points;
-    points[11] = point(1.4, -0.5, 5.0);
-    points[12] = point(0.7, 0.5, 5.0);
-    let mut triangles = original.clone();
-    let stats = merge_fused_patches(&points, &mut triangles, &membership, &link, &cameras);
-    assert_eq!(stats.removed_duplicate_triangles, 2);
-    assert_eq!(stats.trimmed_seam_triangles, 1);
-    assert!(stats.trimmed_seam_area_share > 0.0 && stats.trimmed_seam_area_share < 0.05);
+    assert_eq!(stats.retained_by_group, vec![4, 2]);
     assert!(triangles.iter().any(|t| (t.a, t.b, t.c) == (13, 14, 15)));
+    assert!(triangles.iter().any(|t| (t.b, t.c) == (10, 11)));
+    assert!(!triangles.iter().any(|t| (t.b, t.c) == (8, 9)));
 
-    assert_eq!(stats.retained_by_group, vec![3, 1]);
-
-    // Without a fusion-accepted pair between the patches nothing is owned,
-    // and without reference cameras the fail-closed 3D path keeps everything
-    // as well.
+    // Without a fusion-accepted pair nothing is owned, with or without
+    // reference cameras (the fail-closed 3D path is used without them).
     for cameras in [&cameras[..], &[]] {
         let mut triangles = original.clone();
         let stats = merge_fused_patches(&points, &mut triangles, &membership, &[], cameras);
         assert_eq!(stats.removed_duplicate_triangles, 0);
         assert_eq!(triangles.len(), original.len());
     }
+}
+
+#[test]
+fn a_depth_rejection_in_the_image_is_not_overturned_by_the_3d_test() {
+    // Patch 1 sees the square wall (three triangles, which fix its depth
+    // scale) and, linked as well, a parallel layer 4 % in front of it. The
+    // image gate rejects the layer as another surface; the 3D test (tolerance
+    // ~0.9 edge, here about 1.8) must not delete it anyway.
+    let points = vec![
+        point(-1.0, -1.0, 5.0),
+        point(1.0, -1.0, 5.0),
+        point(1.0, 1.0, 5.0),
+        point(-1.0, 1.0, 5.0),
+        point(-4.0, -1.0, 5.0),
+        point(-3.0, -1.0, 5.0),
+        point(-3.5, 0.0, 5.0),
+        // Seam vertices of patch 0, coincident with patch-1 vertices.
+        point(-0.5, -0.5, 4.8),
+        point(0.9, -0.9, 5.0),
+        // Patch 1: the layer, then a strip on the wall.
+        point(-0.5, -0.5, 4.8),
+        point(0.0, -0.4, 4.8),
+        point(-0.3, 0.0, 4.8),
+        point(0.9, -0.9, 5.0),
+        point(0.9, 0.9, 5.0),
+        point(0.2, -0.9, 5.0),
+        point(0.2, 0.9, 5.0),
+        point(0.5, 0.0, 5.0),
+    ];
+    let membership: Vec<Option<usize>> = (0..points.len())
+        .map(|index| Some(usize::from(index >= 9)))
+        .collect();
+    let original = vec![
+        triangle(0, 1, 2),
+        triangle(0, 2, 3),
+        triangle(4, 5, 6),
+        triangle(0, 1, 7),
+        triangle(1, 2, 8),
+        triangle(9, 10, 11),
+        triangle(12, 13, 16),
+        triangle(12, 16, 14),
+        triangle(13, 15, 16),
+    ];
+    let cameras = [Some(identity_camera(0.0)), Some(identity_camera(0.4))];
+    let mut triangles = original.clone();
+    let stats = merge_fused_patches(
+        &points,
+        &mut triangles,
+        &membership,
+        &[(7, 9), (8, 12)],
+        &cameras,
+    );
+    // The wall strip is owned; the layer stays.
+    assert_eq!(stats.removed_duplicate_triangles, 3, "{stats:?}");
+    assert!(triangles.iter().any(|t| (t.b, t.c) == (10, 11)));
 }

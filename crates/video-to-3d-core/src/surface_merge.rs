@@ -297,6 +297,39 @@ pub(super) fn merge_fused_patches(
     // Kept triangles of each processed patch with a reference camera,
     // projected into that camera and indexed on a grid over its image.
     let mut footprints: Vec<Footprint> = Vec::new();
+    // Only original components joined by a fusion-accepted pair may own each
+    // other, in the image as in the 3D test: one seam pair between two
+    // patches does not authorize deleting an unrelated island.
+    let mut cluster_parent: HashMap<usize, usize> = HashMap::new();
+    fn cluster_root(parent: &mut HashMap<usize, usize>, node: usize) -> usize {
+        let mut root = node;
+        while let Some(&next) = parent.get(&root).filter(|&&next| next != root) {
+            root = next;
+        }
+        parent.insert(node, root);
+        root
+    }
+    for &(left, right) in &linked_components {
+        let (left, right) = (
+            cluster_root(&mut cluster_parent, left),
+            cluster_root(&mut cluster_parent, right),
+        );
+        cluster_parent.insert(left, right);
+    }
+    let cluster_of: HashMap<usize, usize> = cluster_parent
+        .keys()
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|node| (node, cluster_root(&mut cluster_parent, node)))
+        .collect();
+    let components_linked = |candidate: usize, component: usize| {
+        let own = component_by_triangle[candidate];
+        own != component
+            && cluster_of
+                .get(&own)
+                .is_some_and(|cluster| cluster_of.get(&component) == Some(cluster))
+    };
 
     for (patch_rank, patch) in order.iter().enumerate() {
         let members: Vec<usize> = patch_of
@@ -316,8 +349,12 @@ pub(super) fn merge_fused_patches(
                 .map(|footprint| {
                     let mut ratios: Vec<f64> = members
                         .iter()
-                        .filter_map(|&index| geometry[index].as_ref())
-                        .flat_map(|candidate| footprint.depth_ratios(&candidate.corners))
+                        .filter_map(|&index| Some((index, geometry[index].as_ref()?)))
+                        .flat_map(|(index, candidate)| {
+                            footprint.depth_ratios(&candidate.corners, &|component| {
+                                components_linked(index, component)
+                            })
+                        })
                         .collect();
                     ratios.sort_by(f64::total_cmp);
                     (
@@ -330,9 +367,12 @@ pub(super) fn merge_fused_patches(
                 let Some(candidate) = &geometry[index] else {
                     continue;
                 };
+                let linked = |component: usize| components_linked(index, component);
                 let owned = owners
                     .iter()
-                    .map(|(footprint, scale)| footprint.ownership(&candidate.corners, *scale))
+                    .map(|(footprint, scale)| {
+                        footprint.ownership(&candidate.corners, *scale, &linked)
+                    })
                     .fold(Ownership::default(), |best, next| {
                         if next.image_share > best.image_share {
                             next
@@ -346,6 +386,14 @@ pub(super) fn merge_fused_patches(
                     if owned.image_share < 1.0 - OWNERSHIP_EPSILON {
                         trimmed_seam_triangles += 1;
                         trimmed_seam_area += (candidate.area() - owned.surface_area).max(0.0);
+                    }
+                    continue;
+                }
+                // A linked owner judged this triangle in its image; its depth
+                // rejection must not be overturned by the looser 3D test.
+                if !owners.is_empty() {
+                    if owned.image_share > OWNERSHIP_EPSILON {
+                        remaining_overlap_triangles += 1;
                     }
                     continue;
                 }
@@ -383,10 +431,14 @@ pub(super) fn merge_fused_patches(
         // Do not index this patch until it has been processed: triangles of a
         // single camera patch cannot erase each other.
         if let Some(camera) = reference_cameras.get(*patch).copied().flatten() {
-            let kept: Vec<[Vector3<f64>; 3]> = members
+            let kept: Vec<([Vector3<f64>; 3], usize)> = members
                 .iter()
                 .filter(|&&index| keep[index])
-                .filter_map(|&index| geometry[index].as_ref().map(|surface| surface.corners))
+                .filter_map(|&index| {
+                    geometry[index]
+                        .as_ref()
+                        .map(|surface| (surface.corners, component_by_triangle[index]))
+                })
                 .collect();
             if let Some(footprint) = Footprint::new(*patch, camera, &kept) {
                 footprints.push(footprint);
@@ -638,17 +690,25 @@ struct Footprint {
     patch: usize,
     camera: ReferenceCamera,
     triangles: Vec<[(Vector2<f64>, f64); 3]>,
+    /// Original mesh component of each kept triangle.
+    components: Vec<usize>,
     cell: f64,
     cells: HashMap<(i64, i64), Vec<usize>>,
 }
 
 impl Footprint {
-    fn new(patch: usize, camera: ReferenceCamera, kept: &[[Vector3<f64>; 3]]) -> Option<Self> {
-        let triangles: Vec<[(Vector2<f64>, f64); 3]> = kept
+    fn new(
+        patch: usize,
+        camera: ReferenceCamera,
+        kept: &[([Vector3<f64>; 3], usize)],
+    ) -> Option<Self> {
+        let (triangles, components): (Vec<ProjectedTriangle>, Vec<usize>) = kept
             .iter()
-            .filter_map(|corners| camera.project_triangle(corners))
-            .filter(|projected| image_area(projected) > GEOMETRIC_EPSILON * GEOMETRIC_EPSILON)
-            .collect();
+            .filter_map(|(corners, component)| {
+                Some((camera.project_triangle(corners)?, *component))
+            })
+            .filter(|(projected, _)| image_area(projected) > GEOMETRIC_EPSILON * GEOMETRIC_EPSILON)
+            .unzip();
         let mut edges: Vec<f64> = triangles
             .iter()
             .flat_map(|t| (0..3).map(move |i| (t[(i + 1) % 3].0 - t[i].0).norm()))
@@ -667,6 +727,7 @@ impl Footprint {
             patch,
             camera,
             triangles,
+            components,
             cell,
             cells,
         })
@@ -677,6 +738,7 @@ impl Footprint {
     fn overlaps(
         &self,
         corners: &[Vector3<f64>; 3],
+        linked: &dyn Fn(usize) -> bool,
     ) -> Option<(ProjectedTriangle, Vec<Overlap<'_>>)> {
         let candidate = self.camera.project_triangle(corners)?;
         if image_area(&candidate) <= GEOMETRIC_EPSILON * GEOMETRIC_EPSILON {
@@ -692,6 +754,9 @@ impl Footprint {
         let polygon: Vec<Vector2<f64>> = candidate.iter().map(|corner| corner.0).collect();
         let mut overlaps = Vec::new();
         for index in nearby {
+            if !linked(self.components[index]) {
+                continue;
+            }
             let kept = &self.triangles[index];
             let winding = cross2(kept[1].0 - kept[0].0, kept[2].0 - kept[0].0);
             let mut inside = polygon.clone();
@@ -716,8 +781,12 @@ impl Footprint {
 
     /// Candidate-to-owner depth ratios at the centroids of overlaps that agree
     /// within `MAX_RELATIVE_SCALE_SAMPLE`.
-    fn depth_ratios(&self, corners: &[Vector3<f64>; 3]) -> Vec<f64> {
-        let Some((candidate, overlaps)) = self.overlaps(corners) else {
+    fn depth_ratios(
+        &self,
+        corners: &[Vector3<f64>; 3],
+        linked: &dyn Fn(usize) -> bool,
+    ) -> Vec<f64> {
+        let Some((candidate, overlaps)) = self.overlaps(corners, linked) else {
             return Vec::new();
         };
         overlaps
@@ -733,8 +802,13 @@ impl Footprint {
     /// The share of the candidate's projected area lying on kept triangles at
     /// the same depth once the candidate's relative depth `scale` is removed,
     /// and the surface area of those owned parts on the candidate's plane.
-    fn ownership(&self, corners: &[Vector3<f64>; 3], scale: f64) -> Ownership {
-        let Some((candidate, overlaps)) = self.overlaps(corners) else {
+    fn ownership(
+        &self,
+        corners: &[Vector3<f64>; 3],
+        scale: f64,
+        linked: &dyn Fn(usize) -> bool,
+    ) -> Ownership {
+        let Some((candidate, overlaps)) = self.overlaps(corners, linked) else {
             return Ownership::default();
         };
         let total = image_area(&candidate);
