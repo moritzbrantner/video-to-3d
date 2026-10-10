@@ -1057,3 +1057,40 @@ fn coverage_beyond_a_pixel_proportional_budget_fails_closed() {
         crowded.fallback.reasons.seam
     );
 }
+
+#[test]
+fn coverage_spans_stop_before_an_append_would_exceed_the_budget() {
+    // Acceptance for #155 (finding 1 of the #125 review): every full-frame
+    // triangle registers all 32 x 24 = 768 cells, so the 64th brings the
+    // recorded entries exactly to the 49,152-entry budget and the 65th would
+    // exceed it. The build must stop before that append instead of recording
+    // the whole fan first and comparing afterwards, so the recorded span
+    // cells (and with them the span count and the vector's growth) never
+    // pass the budget.
+    let crowded = crowded_behind(400).bake();
+    assert_eq!(
+        crowded.fallback.reasons.seam.ambiguous, 2,
+        "{:?}",
+        crowded.fallback.reasons.seam
+    );
+    let probe = seams::coverage_probe();
+    assert_eq!(probe.budget, (WIDTH * HEIGHT) as usize * 64);
+    assert!(
+        probe.peak_span_cells <= probe.budget,
+        "the coverage build recorded {} span cells against a budget of {}",
+        probe.peak_span_cells,
+        probe.budget
+    );
+    assert!(probe.exceeded, "the build must report the exceeded budget");
+
+    // Under the budget the probe reports the whole, untruncated coverage.
+    let light = crowded_behind(2).bake();
+    assert_eq!(light.fallback.reasons.seam.ambiguous, 0);
+    let probe = seams::coverage_probe();
+    assert!(!probe.exceeded);
+    assert!(
+        probe.peak_span_cells >= 2 * (WIDTH * HEIGHT) as usize,
+        "two full-frame triangles register every cell twice, got {}",
+        probe.peak_span_cells
+    );
+}
