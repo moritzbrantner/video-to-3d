@@ -71,6 +71,11 @@
         "bun",
         "run",
         "benchmark:wasm-boundary"
+      ],
+      "benchmark": [
+        "bun",
+        "run",
+        "benchmark:wasm-boundary"
       ]
     }
   },
