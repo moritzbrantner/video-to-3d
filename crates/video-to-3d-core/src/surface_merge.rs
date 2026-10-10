@@ -40,8 +40,8 @@ const GEOMETRIC_EPSILON: f64 = 1.0e-9;
 /// Largest distance along the kept triangle's normal, as a fraction of the
 /// median accepted edge length, at which a triangle counts as the same surface.
 const MAX_OVERLAP_DISTANCE_FRACTION: f64 = 0.9;
-/// Most 3D grid cells one candidate's query may visit before it checks the
-/// exact list of kept triangles instead.
+/// Most 3D grid cells one candidate's query may visit on one grid level
+/// before it checks the exact list of kept triangles instead.
 const MAX_GRID_CELLS: usize = 1728;
 /// Fail closed rather than processing a pathological number of clipping fragments.
 const MAX_UNCOVERED_PIECES: usize = 128;
@@ -314,8 +314,8 @@ pub(super) fn merge_fused_patches(
     let tolerance = median_edge * MAX_OVERLAP_DISTANCE_FRACTION;
     let cell = (median_edge * 2.0).max(GEOMETRIC_EPSILON);
     let mut keep = vec![true; triangles.len()];
-    let mut kept_cells: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
-    let mut large_surfaces = Vec::new();
+    // Kept triangles of processed patches, one posting per triangle.
+    let mut kept_grid = LevelGrid::<3>::new(cell);
     let mut all_kept = Vec::new();
     let mut removed_duplicate_triangles = 0;
     let mut remaining_overlap_triangles = 0;
@@ -445,7 +445,7 @@ pub(super) fn merge_fused_patches(
                 // for the bounded query); components it could not project are
                 // left unjudged individually.
                 let mut judged_patches = BTreeSet::new();
-                let mut unjudged_components: HashMap<usize, Vec<usize>> = HashMap::new();
+                let mut unjudged_triangles: HashMap<usize, Vec<usize>> = HashMap::new();
                 let judged: Vec<Ownership> = owners
                     .iter()
                     .filter_map(|(footprint, scale)| {
@@ -454,7 +454,7 @@ pub(super) fn merge_fused_patches(
                         if unjudged.is_empty() {
                             judged_patches.insert(footprint.patch);
                         } else {
-                            unjudged_components.insert(footprint.patch, unjudged);
+                            unjudged_triangles.insert(footprint.patch, unjudged);
                         }
                         Some(ownership)
                     })
@@ -488,30 +488,20 @@ pub(super) fn merge_fused_patches(
                     continue;
                 }
                 let mut nearby = BTreeSet::<usize>::new();
-                let bounds = candidate
-                    .grid_bounds(cell, 0.0)
-                    .map(|(low, high)| (low.saturating_sub(MAX_ANCHOR_CELL_SPAN), high));
-                if let Some(keys) = grid_cells(&bounds) {
-                    for key in keys {
-                        if let Some(indices) = kept_cells.get(&key) {
-                            nearby.extend(indices);
-                        }
-                    }
-                    nearby.extend(&large_surfaces);
-                } else {
+                let (low, high) = candidate.aabb(0.0);
+                if !kept_grid.query(low, high, MAX_GRID_CELLS, &mut nearby) {
                     nearby.extend(&all_kept);
                 }
                 let candidates = nearby
                     .into_iter()
                     .filter(|&other| {
-                        let component = component_by_triangle[other];
                         // The same (transitive) link the image test uses.
-                        components_linked(index, component)
+                        components_linked(index, component_by_triangle[other])
                             && match patch_of[other] {
                                 Some(owner) if judged_patches.contains(&owner) => false,
-                                Some(owner) => unjudged_components
+                                Some(owner) => unjudged_triangles
                                     .get(&owner)
-                                    .is_none_or(|components| components.contains(&component)),
+                                    .is_none_or(|unjudged| unjudged.contains(&other)),
                                 None => true,
                             }
                     })
@@ -540,6 +530,7 @@ pub(super) fn merge_fused_patches(
                             surface.corners,
                             component_by_triangle[index],
                             [triangle.a, triangle.b, triangle.c],
+                            index,
                         )
                     })
                 })
@@ -556,21 +547,8 @@ pub(super) fn merge_fused_patches(
                 continue;
             };
             all_kept.push(index);
-            // One posting per triangle, at the cell of its padded lower
-            // corner; queries widen their range by the bounded span instead,
-            // so the index never holds more entries than triangles.
-            let bounds = surface.grid_bounds(cell, tolerance);
-            if bounds.iter().all(|&(low, high)| {
-                high.checked_sub(low)
-                    .is_some_and(|span| span <= MAX_ANCHOR_CELL_SPAN)
-            }) {
-                kept_cells
-                    .entry(bounds.map(|(low, _)| low).into())
-                    .or_default()
-                    .push(index);
-            } else {
-                large_surfaces.push(index);
-            }
+            let (low, high) = surface.aabb(tolerance);
+            kept_grid.insert(index, low, high);
         }
     }
     let group_count = membership
@@ -669,6 +647,9 @@ pub(crate) fn working_set_bytes(vertices: usize, triangles: usize) -> usize {
     const fn hash_entry(payload: usize) -> usize {
         payload + 4 * size_of::<usize>() + 32
     }
+    const fn btree_entry(payload: usize) -> usize {
+        payload + 4 * size_of::<usize>() + 32
+    }
     let per_vertex = 3 * size_of::<usize>() // component parent/by vertex, canonical
         + size_of::<bool>() // claimed
         + size_of::<Option<crate::EvidenceOrigin>>() // point origins
@@ -685,15 +666,14 @@ pub(crate) fn working_set_bytes(vertices: usize, triangles: usize) -> usize {
         + size_of::<KeptTriangle>() // footprint input
         + size_of::<ProjectedTriangle>() + size_of::<usize>() + size_of::<[usize; 3]>() // footprint
         + 2 * size_of::<usize>() // image posting or exact-list entry, 3D likewise
-        + hash_entry(size_of::<(i64, i64)>() + size_of::<Vec<usize>>()) // image bucket
-        + hash_entry(size_of::<(i64, i64, i64)>() + size_of::<Vec<usize>>()) // 3D bucket
+        + hash_entry(size_of::<(i32, [i64; 2])>() + size_of::<Vec<usize>>()) // image bucket
+        + hash_entry(size_of::<(i32, [i64; 3])>() + size_of::<Vec<usize>>()) // 3D bucket
         + hash_entry(2 * size_of::<usize>()); // per-patch triangle counts and ranks
     vertices
         .saturating_mul(per_vertex)
         .saturating_add(triangles.saturating_mul(per_triangle))
-        // Per-query scratch: the widest grid query and its candidate set.
-        .saturating_add(MAX_GRID_CELLS * (size_of::<(i64, i64, i64)>() + size_of::<usize>()))
-        .saturating_add(MAX_IMAGE_GRID_CELLS * (size_of::<(i64, i64)>() + size_of::<usize>()))
+        // Per-query scratch: the candidate set of the widest query.
+        .saturating_add(triangles.saturating_mul(btree_entry(size_of::<usize>())))
         // Scale samples of one patch pair at a time.
         .saturating_add(MAX_SCALE_SAMPLES * size_of::<f64>())
 }
@@ -749,23 +729,22 @@ impl TriangleGeometry {
             * 0.5
     }
 
-    fn grid_bounds(&self, cell: f64, padding: f64) -> [(i64, i64); 3] {
-        std::array::from_fn(|axis| {
-            let low = self
-                .corners
+    fn aabb(&self, padding: f64) -> ([f64; 3], [f64; 3]) {
+        let low = std::array::from_fn(|axis| {
+            self.corners
                 .iter()
                 .map(|point| point[axis])
-                .fold(f64::INFINITY, f64::min);
-            let high = self
-                .corners
+                .fold(f64::INFINITY, f64::min)
+                - padding
+        });
+        let high = std::array::from_fn(|axis| {
+            self.corners
                 .iter()
                 .map(|point| point[axis])
-                .fold(f64::NEG_INFINITY, f64::max);
-            (
-                ((low - padding) / cell).floor() as i64,
-                ((high + padding) / cell).floor() as i64,
-            )
-        })
+                .fold(f64::NEG_INFINITY, f64::max)
+                + padding
+        });
+        (low, high)
     }
 
     /// Subtract supported higher-priority triangles from the candidate's area.
@@ -847,17 +826,17 @@ impl TriangleGeometry {
 }
 
 const OWNERSHIP_EPSILON: f64 = 1.0e-9;
-/// Most image grid cells one projected candidate's query may span before the
-/// image cannot judge it (the 3D path still does).
+/// Most image grid cells one projected candidate's query may visit on one
+/// grid level before the image cannot judge it (the 3D path still does).
 const MAX_IMAGE_GRID_CELLS: usize = 4096;
 /// Indexed triangles span at most this many cells beyond their anchor cell
-/// on every axis; larger ones go to an exact list that every query checks.
-/// Both grids therefore hold one posting per triangle.
+/// on every axis of their [`LevelGrid`] level, so both grids hold one
+/// posting per triangle.
 const MAX_ANCHOR_CELL_SPAN: i64 = 3;
 
 /// A kept triangle handed to a [`Footprint`]: world corners, original mesh
-/// component and (remapped) vertex indices.
-type KeptTriangle = ([Vector3<f64>; 3], usize, [usize; 3]);
+/// component, (remapped) vertex indices and its index in the mesh.
+type KeptTriangle = ([Vector3<f64>; 3], usize, [usize; 3], usize);
 
 /// The kept triangles of one reference patch in its own reference image.
 /// Grid triangles of one patch tile its footprint without overlap, so owned
@@ -871,15 +850,12 @@ struct Footprint {
     components: Vec<usize>,
     /// Vertex indices of each kept triangle.
     vertices: Vec<[usize; 3]>,
-    cell: f64,
-    /// One posting per indexed triangle, at its anchor (lowest) cell.
-    cells: HashMap<(i64, i64), Vec<usize>>,
-    /// Kept triangles too large for the bounded index; every query checks them.
-    large: Vec<usize>,
-    /// Original components of kept triangles that could not be projected
-    /// (behind the camera or degenerate in the image). The image cannot rule
-    /// out that they own a linked candidate.
-    omitted_components: BTreeSet<usize>,
+    /// One posting per kept triangle.
+    grid: LevelGrid<2>,
+    /// Kept triangles that could not be projected (behind the camera or
+    /// degenerate in the image), as (original component, mesh index). The
+    /// image cannot rule out that they own a linked candidate.
+    omitted: Vec<(usize, usize)>,
 }
 
 impl Footprint {
@@ -887,8 +863,8 @@ impl Footprint {
         let mut triangles: Vec<ProjectedTriangle> = Vec::new();
         let mut components = Vec::new();
         let mut vertices = Vec::new();
-        let mut omitted_components = BTreeSet::new();
-        for (corners, component, indices) in kept {
+        let mut omitted = Vec::new();
+        for (corners, component, indices, mesh_index) in kept {
             match camera.project_triangle(corners) {
                 Some(projected)
                     if image_area(&projected) > GEOMETRIC_EPSILON * GEOMETRIC_EPSILON =>
@@ -897,9 +873,7 @@ impl Footprint {
                     components.push(*component);
                     vertices.push(*indices);
                 }
-                _ => {
-                    omitted_components.insert(*component);
-                }
+                _ => omitted.push((*component, *mesh_index)),
             }
         }
         let mut edges: Vec<f64> = triangles
@@ -908,21 +882,10 @@ impl Footprint {
             .collect();
         edges.sort_by(f64::total_cmp);
         let cell = (edges.get(edges.len() / 2)? * 2.0).max(GEOMETRIC_EPSILON);
-        let mut cells: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-        let mut large = Vec::new();
+        let mut grid = LevelGrid::<2>::new(cell);
         for (index, triangle) in triangles.iter().enumerate() {
-            let bounds = image_bounds(triangle, cell);
-            if bounds.iter().all(|&(low, high)| {
-                high.checked_sub(low)
-                    .is_some_and(|span| span <= MAX_ANCHOR_CELL_SPAN)
-            }) {
-                cells
-                    .entry((bounds[0].0, bounds[1].0))
-                    .or_default()
-                    .push(index);
-            } else {
-                large.push(index);
-            }
+            let (low, high) = image_aabb(triangle);
+            grid.insert(index, low, high);
         }
         Some(Self {
             patch,
@@ -930,10 +893,8 @@ impl Footprint {
             triangles,
             components,
             vertices,
-            cell,
-            cells,
-            large,
-            omitted_components,
+            grid,
+            omitted,
         })
     }
 
@@ -971,14 +932,14 @@ impl Footprint {
         include: &dyn Fn(usize) -> bool,
         visit: &mut dyn FnMut(Vec<Vector2<f64>>, usize) -> bool,
     ) -> Option<()> {
-        let keys = image_cells(candidate, self.cell)?;
-        let nearby: BTreeSet<usize> = keys
-            .iter()
-            .filter_map(|key| self.cells.get(key))
-            .flatten()
-            .chain(&self.large)
-            .copied()
-            .collect();
+        let mut nearby = BTreeSet::new();
+        let (low, high) = image_aabb(candidate);
+        if !self
+            .grid
+            .query(low, high, MAX_IMAGE_GRID_CELLS, &mut nearby)
+        {
+            return None;
+        }
         let polygon: Vec<Vector2<f64>> = candidate.iter().map(|corner| corner.0).collect();
         for index in nearby {
             if !include(index) {
@@ -1048,8 +1009,8 @@ impl Footprint {
     /// The share of the candidate's projected area lying on kept triangles at
     /// the same depth once the candidate's relative depth `scale` is removed,
     /// and the surface area of those owned parts on the candidate's plane;
-    /// with the linked components this image could not judge (unprojectable
-    /// owner triangles), when the share is below the removal threshold.
+    /// with the mesh indices of linked owner triangles this image could not
+    /// judge (unprojectable), when the share is below the removal threshold.
     fn ownership(
         &self,
         corners: &[Vector3<f64>; 3],
@@ -1087,10 +1048,10 @@ impl Footprint {
         // could still cover the rest: the image cannot judge it, so the 3D
         // test must (for those components only).
         let unjudged = if image_share < MIN_IMAGE_OWNERSHIP_SHARE {
-            self.omitted_components
+            self.omitted
                 .iter()
-                .copied()
-                .filter(|component| linked(*component))
+                .filter(|(component, _)| linked(*component))
+                .map(|&(_, mesh_index)| mesh_index)
                 .collect()
         } else {
             Vec::new()
@@ -1158,62 +1119,134 @@ fn inverse_depth(triangle: &[(Vector2<f64>, f64); 3], point: Vector2<f64>) -> Op
     (inverse.is_finite() && inverse > 0.0).then_some(inverse)
 }
 
-fn image_bounds(triangle: &[(Vector2<f64>, f64); 3], cell: f64) -> [(i64, i64); 2] {
-    std::array::from_fn(|axis| {
-        let values = triangle.map(|corner| corner.0[axis]);
-        let low = values.iter().copied().fold(f64::INFINITY, f64::min);
-        let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        ((low / cell).floor() as i64, (high / cell).floor() as i64)
-    })
-}
-
-/// Anchor cells an indexed triangle overlapping the candidate can sit in:
-/// the candidate's cells widened downwards by [`MAX_ANCHOR_CELL_SPAN`].
-fn image_cells(triangle: &[(Vector2<f64>, f64); 3], cell: f64) -> Option<Vec<(i64, i64)>> {
-    let bounds = image_bounds(triangle, cell)
-        .map(|(low, high)| (low.saturating_sub(MAX_ANCHOR_CELL_SPAN), high));
-    let columns: usize = bounds[0]
-        .1
-        .checked_sub(bounds[0].0)?
-        .checked_add(1)?
-        .try_into()
-        .ok()?;
-    let rows: usize = bounds[1]
-        .1
-        .checked_sub(bounds[1].0)?
-        .checked_add(1)?
-        .try_into()
-        .ok()?;
-    if columns.checked_mul(rows)? > MAX_IMAGE_GRID_CELLS {
-        return None;
-    }
-    Some(
-        (bounds[1].0..=bounds[1].1)
-            .flat_map(|y| (bounds[0].0..=bounds[0].1).map(move |x| (x, y)))
-            .collect(),
-    )
-}
-
-/// Enumerate all occupied AABB cells, including the triangle interior. If the
-/// finite grid would be too large, let the caller use the exact unindexed list.
-fn grid_cells(bounds: &[(i64, i64); 3]) -> Option<Vec<(i64, i64, i64)>> {
-    let mut count = 1_usize;
-    for &(first, last) in bounds {
-        let span: usize = last.checked_sub(first)?.checked_add(1)?.try_into().ok()?;
-        count = count.checked_mul(span)?;
-        if count > MAX_GRID_CELLS {
-            return None;
+fn image_aabb(triangle: &ProjectedTriangle) -> ([f64; 2], [f64; 2]) {
+    let mut low = [f64::INFINITY; 2];
+    let mut high = [f64::NEG_INFINITY; 2];
+    for (corner, _) in triangle {
+        for axis in 0..2 {
+            low[axis] = low[axis].min(corner[axis]);
+            high[axis] = high[axis].max(corner[axis]);
         }
     }
-    let mut cells = Vec::with_capacity(count);
-    for z in bounds[2].0..=bounds[2].1 {
-        for y in bounds[1].0..=bounds[1].1 {
-            for x in bounds[0].0..=bounds[0].1 {
-                cells.push((x, y, z));
+    (low, high)
+}
+
+/// Most levels of a [`LevelGrid`]; level `l` has cells `2^l` times the base.
+const MAX_GRID_LEVELS: i32 = 48;
+
+/// A multi-level uniform grid holding exactly one posting per item: an item
+/// is stored at the finest level where its AABB spans at most
+/// [`MAX_ANCHOR_CELL_SPAN`] cells beyond its anchor (lowest) cell on every
+/// axis. A query visits, per used level, the cells its own AABB covers
+/// widened downwards by that span, so large items cost no global scan.
+struct LevelGrid<const D: usize> {
+    cell: f64,
+    cells: HashMap<(i32, [i64; D]), Vec<usize>>,
+    /// One past the coarsest level in use.
+    levels: i32,
+    /// Items whose bounds are not finite; every query returns them.
+    unindexed: Vec<usize>,
+}
+
+impl<const D: usize> LevelGrid<D> {
+    fn new(cell: f64) -> Self {
+        Self {
+            cell,
+            cells: HashMap::new(),
+            levels: 0,
+            unindexed: Vec::new(),
+        }
+    }
+
+    fn range(&self, low: [f64; D], high: [f64; D], level: i32) -> Option<[(i64, i64); D]> {
+        let size = self.cell * 2.0_f64.powi(level);
+        let mut range = [(0, 0); D];
+        for axis in 0..D {
+            let (first, last) = ((low[axis] / size).floor(), (high[axis] / size).floor());
+            if !first.is_finite() || !last.is_finite() || first > last {
+                return None;
+            }
+            range[axis] = (first as i64, last as i64);
+        }
+        Some(range)
+    }
+
+    fn insert(&mut self, item: usize, low: [f64; D], high: [f64; D]) {
+        for level in 0..MAX_GRID_LEVELS {
+            let Some(range) = self.range(low, high, level) else {
+                break;
+            };
+            if range
+                .iter()
+                .all(|&(first, last)| last.saturating_sub(first) <= MAX_ANCHOR_CELL_SPAN)
+            {
+                self.cells
+                    .entry((level, range.map(|(first, _)| first)))
+                    .or_default()
+                    .push(item);
+                self.levels = self.levels.max(level + 1);
+                return;
             }
         }
+        self.unindexed.push(item);
     }
-    Some(cells)
+
+    /// Add every item whose cells may overlap the box to `out`; `false` when
+    /// one level would need more than `max_cells` cells (the caller then
+    /// needs its exact fallback).
+    fn query(
+        &self,
+        low: [f64; D],
+        high: [f64; D],
+        max_cells: usize,
+        out: &mut BTreeSet<usize>,
+    ) -> bool {
+        out.extend(&self.unindexed);
+        for level in 0..self.levels {
+            let Some(range) = self.range(low, high, level) else {
+                return false;
+            };
+            let range =
+                range.map(|(first, last)| (first.saturating_sub(MAX_ANCHOR_CELL_SPAN), last));
+            let mut count = 1_usize;
+            for &(first, last) in &range {
+                let Some(span) = last
+                    .checked_sub(first)
+                    .and_then(|span| usize::try_from(span).ok())
+                    .and_then(|span| span.checked_add(1))
+                else {
+                    return false;
+                };
+                count = count.saturating_mul(span);
+            }
+            if count > max_cells {
+                return false;
+            }
+            let mut key = range.map(|(first, _)| first);
+            loop {
+                if let Some(items) = self.cells.get(&(level, key)) {
+                    out.extend(items);
+                }
+                // Odometer over the D axes.
+                let mut axis = 0;
+                loop {
+                    if axis == D {
+                        break;
+                    }
+                    if key[axis] < range[axis].1 {
+                        key[axis] += 1;
+                        break;
+                    }
+                    key[axis] = range[axis].0;
+                    axis += 1;
+                }
+                if axis == D {
+                    break;
+                }
+            }
+        }
+        true
+    }
 }
 
 fn cross2(a: Vector2<f64>, b: Vector2<f64>) -> f64 {

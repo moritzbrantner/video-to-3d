@@ -207,8 +207,16 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
 #[test]
 fn large_triangles_are_indexed_across_their_interior() {
     let surface = geometry([(0.0, 0.0, 0.0), (60.0, 0.0, 0.0), (0.0, 60.0, 0.0)]);
-    let grid = surface.grid_bounds(1.0, 0.0);
-    assert!(grid_cells(&grid).is_none());
+    // A large triangle is indexed once, at a coarse level, and found by a
+    // small query inside it.
+    let mut grid = LevelGrid::<3>::new(1.0);
+    let (low, high) = surface.aabb(0.0);
+    grid.insert(7, low, high);
+    assert_eq!(grid.cells.len(), 1);
+    assert!(grid.cells.keys().all(|(level, _)| *level > 0));
+    let mut found = BTreeSet::new();
+    assert!(grid.query([4.0, 4.0, 0.0], [5.0, 5.0, 0.0], MAX_GRID_CELLS, &mut found));
+    assert!(found.contains(&7));
     let small = geometry([(4.0, 4.0, 0.0), (5.0, 4.0, 0.0), (4.0, 5.0, 0.0)]);
     assert!(small.covered_by([&surface].into_iter(), 0.1).0);
 }
@@ -234,11 +242,13 @@ fn square_footprint(camera: ReferenceCamera) -> Footprint {
                 corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
                 0,
                 [0, 1, 2],
+                101,
             ),
             (
                 corners([(-1.0, -1.0, 5.0), (1.0, 1.0, 5.0), (-1.0, 1.0, 5.0)]),
                 0,
                 [0, 2, 3],
+                102,
             ),
         ],
     )
@@ -668,6 +678,7 @@ fn oversized_owner_triangles_are_checked_exactly() {
         corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
         0,
         [0, 1, 2],
+        103,
     )];
     for step in 0..4 {
         let x = 3.0 + f64::from(step) * 0.02;
@@ -675,10 +686,16 @@ fn oversized_owner_triangles_are_checked_exactly() {
             corners([(x, 3.0, 5.0), (x + 0.01, 3.0, 5.0), (x, 3.01, 5.0)]),
             0,
             [3 + step as usize, 9, 10],
+            104,
         ));
     }
     let footprint = Footprint::new(0, identity_camera(0.0), &kept).unwrap();
-    assert_eq!(footprint.large, vec![0]);
+    // The large triangle sits on a coarser grid level than the small ones.
+    assert!(
+        footprint.grid.levels > 1,
+        "levels={}",
+        footprint.grid.levels
+    );
     let inside = corners([(0.5, -0.8, 5.0), (0.8, -0.8, 5.0), (0.8, -0.5, 5.0)]);
     let owned = footprint
         .ownership(&inside, 1.0, &|_| true)
@@ -721,11 +738,13 @@ fn unprojectable_linked_owners_leave_the_image_unable_to_judge() {
             corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
             0,
             [0, 1, 2],
+            105,
         ),
         (
             corners([(-1.0, -1.0, 5.0), (1.0, 1.0, 5.0), (-1.0, 1.0, 5.0)]),
             0,
             [0, 2, 3],
+            106,
         ),
     ];
     // Behind the reference camera: absent from the image.
@@ -733,6 +752,7 @@ fn unprojectable_linked_owners_leave_the_image_unable_to_judge() {
         corners([(3.0, 3.0, -1.0), (4.0, 3.0, -1.0), (3.0, 4.0, -1.0)]),
         1,
         [4, 5, 6],
+        107,
     ));
     let footprint = Footprint::new(0, identity_camera(0.0), &kept).unwrap();
     let outside = corners([(2.0, 2.0, 5.0), (2.5, 2.0, 5.0), (2.0, 2.5, 5.0)]);
@@ -740,7 +760,8 @@ fn unprojectable_linked_owners_leave_the_image_unable_to_judge() {
     // to the 3D test.
     let (judged, unjudged) = footprint.ownership(&outside, 1.0, &|_| true).unwrap();
     assert_eq!(judged.image_share, 0.0);
-    assert_eq!(unjudged, vec![1]);
+    // The omitted triangle is reported by its mesh index.
+    assert_eq!(unjudged.len(), 1);
     // Without a link to the omitted component nothing is left unjudged.
     let (_, unjudged) = footprint
         .ownership(&outside, 1.0, &|component| component == 0)
@@ -824,4 +845,18 @@ fn an_owner_without_an_image_judgement_still_gets_the_3d_test() {
             .any(|vertex| (11..13).contains(vertex))),
         "the duplicate candidate survived: {stats:?}"
     );
+}
+
+#[test]
+fn large_items_far_away_are_not_scanned_by_small_queries() {
+    let mut grid = LevelGrid::<2>::new(1.0);
+    for item in 0..100 {
+        // Long strips, all far from the origin.
+        let y = 1000.0 + f64::from(item) * 50.0;
+        grid.insert(item as usize, [0.0, y], [500.0, y + 1.0]);
+    }
+    grid.insert(500, [0.2, 0.2], [0.8, 0.8]);
+    let mut found = BTreeSet::new();
+    assert!(grid.query([0.0, 0.0], [1.0, 1.0], MAX_IMAGE_GRID_CELLS, &mut found));
+    assert_eq!(found, BTreeSet::from([500]));
 }
