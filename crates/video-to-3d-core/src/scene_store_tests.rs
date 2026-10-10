@@ -285,6 +285,79 @@ fn reconciled_stale_artifacts_release_their_output_reservations() {
 }
 
 #[test]
+fn stale_artifacts_whose_sidecars_obstruct_a_bake_are_released() {
+    let project = TempProject::new("stale-sidecar-reservation");
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, mut manifest) = project.open();
+    // A stale keyframes artifact recorded outside the bake directory lists a
+    // sidecar inside `artifacts/bake/`.
+    let staging = ProjectPath::new("artifacts/bake/keyframes.json").unwrap();
+    let rgba = [10_u8, 20, 30, 255];
+    crate::scene_artifacts::write_keyframes_artifact(
+        &project.root,
+        &staging,
+        &[crate::scene_artifacts::SampledFrame {
+            frame_index: 0,
+            timestamp_seconds: 0.0,
+            width: 1,
+            height: 1,
+            rgba: &rgba,
+        }],
+    )
+    .unwrap();
+    let document_path = ProjectPath::new("artifacts/ingest-keyframes.json").unwrap();
+    fs::rename(
+        staging.resolve(&project.root),
+        document_path.resolve(&project.root),
+    )
+    .unwrap();
+    let (hash, length) = hash_file(&document_path.resolve(&project.root)).unwrap();
+    let mut receipt = store.read_receipt("ingest").unwrap().unwrap();
+    receipt.output.path = document_path.clone();
+    receipt.output.content_hash = hash.clone();
+    receipt.output.byte_length = length;
+    store.write_receipt(&receipt).unwrap();
+    let record = manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.produced_by == "ingest")
+        .unwrap();
+    record.path = document_path;
+    record.content_hash = hash;
+    assert_eq!(record.kind, ArtifactKind::Keyframes);
+    manifest.quality_mode = crate::scene_project::QualityMode::Standard;
+    manifest
+        .operations
+        .push(crate::scene_project::OperationDeclaration {
+            id: "bake".into(),
+            kind: OperationKind::TextureBake,
+            inputs: vec![
+                OperationInput::Operation("ingest".into()),
+                OperationInput::Operation("mesh".into()),
+            ],
+            provider: None,
+            max_attempts: 1,
+        });
+    // Changing the declaration makes ingest stale.
+    manifest
+        .operations
+        .iter_mut()
+        .find(|operation| operation.id == "ingest")
+        .unwrap()
+        .max_attempts = 2;
+    store.save_manifest(&manifest).unwrap();
+
+    let report = store.reconcile(&mut manifest, VerifyMode::Full).unwrap();
+    assert!(report.invalidated.iter().any(|(operation, reason)| {
+        operation == "ingest" && *reason == Invalidation::StaleIdentity
+    }));
+    assert!(!manifest
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.produced_by == "ingest"));
+}
+
+#[test]
 fn tampered_output_invalidates_exactly_the_affected_work() {
     let project = TempProject::new("tamper");
     build(&project, &WritingExecutor::new(&project.root));

@@ -968,21 +968,37 @@ fn reserved_paths(root: &Path, manifest: &SceneProjectManifest) -> Vec<(String, 
     // anywhere in the project, including another bake's directory. An
     // unreadable or opaque document lists none (reconciliation judges it).
     for artifact in &manifest.artifacts {
-        let Ok(bytes) = fs::read(artifact.path.resolve(root)) else {
-            continue;
-        };
-        let Ok(document) = std::str::from_utf8(&bytes) else {
-            continue;
-        };
-        if let Ok(sidecars) = artifact_sidecars(artifact.kind, document) {
-            reserved.extend(
-                sidecars
-                    .into_iter()
-                    .map(|(path, _)| (artifact.produced_by.clone(), path)),
-            );
-        }
+        reserved.extend(
+            recorded_sidecar_paths(root, artifact)
+                .into_iter()
+                .map(|path| (artifact.produced_by.clone(), path)),
+        );
     }
     reserved
+}
+
+/// Sidecar paths a recorded artifact's document lists. An unreadable,
+/// opaque (non-UTF-8) or unparsable document lists none; reconciliation
+/// judges its validity separately.
+pub(crate) fn recorded_sidecar_paths(
+    root: &Path,
+    artifact: &crate::scene_project::ArtifactRecord,
+) -> Vec<ProjectPath> {
+    if !matches!(
+        artifact.kind,
+        ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
+    ) {
+        return Vec::new();
+    }
+    let Ok(bytes) = fs::read(artifact.path.resolve(root)) else {
+        return Vec::new();
+    };
+    let Ok(document) = std::str::from_utf8(&bytes) else {
+        return Vec::new();
+    };
+    artifact_sidecars(artifact.kind, document)
+        .map(|sidecars| sidecars.into_iter().map(|(path, _)| path).collect())
+        .unwrap_or_default()
 }
 
 impl BuiltInExecutor {

@@ -329,16 +329,26 @@ impl ProjectStore {
             if !bake_directories.is_empty() {
                 let identities = manifest.operation_identities()?;
                 manifest.artifacts.retain(|artifact| {
-                    let path = artifact.path.as_str().to_ascii_lowercase();
+                    if artifact.operation_identity == identities[&artifact.produced_by] {
+                        return true;
+                    }
+                    // The document and every sidecar it lists are reserved
+                    // for its producer, so any of them can obstruct a bake.
+                    let paths: Vec<String> = std::iter::once(artifact.path.clone())
+                        .chain(crate::scene_artifacts::recorded_sidecar_paths(
+                            &self.root, artifact,
+                        ))
+                        .map(|path| path.as_str().to_ascii_lowercase())
+                        .collect();
                     let obstructs_bake = bake_directories.iter().any(|(owner, directory)| {
                         artifact.produced_by != *owner
-                            && (path == *directory
-                                || path.starts_with(&format!("{directory}/"))
-                                || directory.starts_with(&format!("{path}/")))
+                            && paths.iter().any(|path| {
+                                path == directory
+                                    || path.starts_with(&format!("{directory}/"))
+                                    || directory.starts_with(&format!("{path}/"))
+                            })
                     });
-                    if obstructs_bake
-                        && artifact.operation_identity != identities[&artifact.produced_by]
-                    {
+                    if obstructs_bake {
                         report
                             .verified
                             .retain(|operation| operation != &artifact.produced_by);
