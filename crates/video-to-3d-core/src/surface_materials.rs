@@ -778,13 +778,16 @@ fn region_provenance(
     (source_frames.into_iter().collect(), provenance)
 }
 
+/// Normalized texture coordinates of triangle corners `[a, b, c]`.
+type CornerUvs = [[f32; 2]; 3];
+
 /// Crop the used footprint (plus margin) out of `image` and map the corner
 /// pixels (pixel `x` centered at coordinate `x`) to normalized crop UVs.
 fn crop_texture(
     image: &ReferenceImage<'_>,
     corner_pixels: &[CornerPixels],
     check_canceled: &mut impl FnMut() -> Result<(), String>,
-) -> Result<(BakedTexture, Vec<[[f32; 2]; 3]>), String> {
+) -> Result<(BakedTexture, Vec<CornerUvs>), String> {
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
     // Projected corners carry float noise; the crop margin already covers the
     // neighbouring texel a bilinear sample reads, so snap within a tolerance.

@@ -440,7 +440,7 @@ fn build_bakes_surface_textures_natively() {
     assert_eq!(bake["observations"]["textures_written"], "0");
     assert!(build
         .stderr
-        .contains("bake: Surface material bake v1: 2 of 2 accepted triangles textured"));
+        .contains("bake: Surface material bake v2: 2 of 2 accepted triangles textured"));
     assert!(build
         .stderr
         .contains("bake: Appearance artifacts versus the previous bake"));

@@ -230,7 +230,13 @@ impl<'a> CameraView<'a> {
             return None;
         }
         residuals.sort_by(f64::total_cmp);
-        Some(residuals[residuals.len() / 2] <= POSE_CONSISTENCY_PIXELS)
+        let middle = residuals.len() / 2;
+        let median = if residuals.len() % 2 == 0 {
+            0.5 * (residuals[middle - 1] + residuals[middle])
+        } else {
+            residuals[middle]
+        };
+        Some(median <= POSE_CONSISTENCY_PIXELS)
     }
 
     /// Apply checks 2-5 of the rule for one camera.
@@ -298,7 +304,8 @@ enum Visibility {
     Occluded,
 }
 
-/// Closest accepted surface depth per pixel center; `INFINITY` is empty.
+/// Closest accepted surface depth per pixel (centers plus conservatively
+/// stamped triangle edges); `INFINITY` is empty.
 struct DepthBuffer {
     width: usize,
     height: usize,
@@ -337,6 +344,7 @@ impl DepthBuffer {
         let edge = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
             (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
         };
+        self.stamp_edges(pixels, inverse_depth);
         let area = edge(pixels[0], pixels[1], pixels[2]);
         if !area.is_finite() || area.abs() < 1.0e-12 {
             return;
@@ -377,6 +385,48 @@ impl DepthBuffer {
         }
     }
 
+    /// Conservative coverage: sampling only pixel centers misses thin or
+    /// subpixel triangles, which would let a hidden seam pass as visible.
+    /// Record each edge's perspective-correct depth at the pixel nearest to
+    /// every sample (spacing at most a quarter pixel), so any accepted triangle
+    /// reaches the depth buffer within half a pixel of its footprint.
+    fn stamp_edges(&mut self, pixels: [[f64; 2]; 3], inverse_depth: [f64; 3]) {
+        const SPACING_PIXELS: f64 = 0.25;
+        for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+            let (start, end) = (pixels[a], pixels[b]);
+            // Only the part of the edge over the image (plus a pixel) can
+            // stamp, which bounds the work by the image size.
+            let Some((t0, t1)) = clip_segment(
+                start,
+                end,
+                [-1.0, -1.0],
+                [self.width as f64, self.height as f64],
+            ) else {
+                continue;
+            };
+            let length = (t1 - t0) * (end[0] - start[0]).hypot(end[1] - start[1]);
+            if !length.is_finite() {
+                continue;
+            }
+            let steps = (length / SPACING_PIXELS).ceil().max(1.0) as usize;
+            for step in 0..=steps {
+                let t = t0 + (t1 - t0) * step as f64 / steps as f64;
+                let u = start[0] + (end[0] - start[0]) * t;
+                let v = start[1] + (end[1] - start[1]) * t;
+                let inverse = inverse_depth[a] + (inverse_depth[b] - inverse_depth[a]) * t;
+                if inverse <= 0.0 {
+                    continue;
+                }
+                let (x, y) = (u.round(), v.round());
+                if x < 0.0 || y < 0.0 || x >= self.width as f64 || y >= self.height as f64 {
+                    continue;
+                }
+                let slot = &mut self.depth[y as usize * self.width + x as usize];
+                *slot = slot.min(1.0 / inverse);
+            }
+        }
+    }
+
     fn at(&self, x: isize, y: isize) -> f64 {
         if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
             return f64::INFINITY;
@@ -403,6 +453,41 @@ impl DepthBuffer {
         }
         Visibility::Visible
     }
+}
+
+/// Parameter range `[t0, t1]` of the segment `start + t (end - start)`,
+/// `t` in `[0, 1]`, inside the box `[low, high]` (Liang-Barsky).
+fn clip_segment(
+    start: [f64; 2],
+    end: [f64; 2],
+    low: [f64; 2],
+    high: [f64; 2],
+) -> Option<(f64, f64)> {
+    if !start.iter().chain(&end).all(|value| value.is_finite()) {
+        return None;
+    }
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for axis in 0..2 {
+        let delta = end[axis] - start[axis];
+        for (p, q) in [
+            (-delta, start[axis] - low[axis]),
+            (delta, high[axis] - start[axis]),
+        ] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return None;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+            }
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
 }
 
 /// Clip a camera-space triangle against the near plane (Sutherland-Hodgman).
