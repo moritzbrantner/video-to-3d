@@ -166,6 +166,64 @@ fn cold_build_writes_receipts_and_rebuild_reuses_everything() {
 }
 
 #[test]
+fn malformed_versioned_sidecar_documents_are_not_accepted_as_current() {
+    let project = TempProject::new("bad-sidecars");
+    let (store, _) = project.open();
+    fs::create_dir_all(project.file("inputs")).unwrap();
+    let path = ProjectPath::new("inputs/keyframes.json").unwrap();
+    let artifact = ArtifactRecord {
+        id: "keyframes-output".into(),
+        kind: ArtifactKind::Keyframes,
+        produced_by: "ingest".into(),
+        operation_identity: ContentHash::of_bytes(b"identity"),
+        path: path.clone(),
+        content_hash: ContentHash::of_bytes(b"payload"),
+        provider: None,
+    };
+    let mut cache = HashCache::load(&project.root, VerifyMode::Full);
+    for content in [
+        r#"{"schema_version":2,"frames":[]}"#,
+        r#"{"schema_version":1,"frames":[{"frame_index":0}]}"#,
+        "{",
+    ] {
+        fs::write(path.resolve(&project.root), content).unwrap();
+        let error = store.verify_sidecars(&artifact, &mut cache).unwrap_err();
+        assert!(
+            matches!(error, Invalidation::CorruptSidecar(_)),
+            "{content}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn reconciled_stale_artifacts_release_their_output_reservations() {
+    let project = TempProject::new("stale-reservation");
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, mut manifest) = project.open();
+    // Same hashes and receipts, but a changed operation identity. This output
+    // must not reserve its old path for another operation in the next build.
+    manifest
+        .operations
+        .iter_mut()
+        .find(|operation| operation.id == "assemble")
+        .unwrap()
+        .max_attempts = 2;
+    store.save_manifest(&manifest).unwrap();
+    let report = store.reconcile(&mut manifest, VerifyMode::Full).unwrap();
+    assert!(report.invalidated.iter().any(|(operation, reason)| {
+        operation == "assemble" && *reason == Invalidation::StaleIdentity
+    }));
+    assert!(!manifest.artifacts.iter().any(|artifact| artifact.produced_by == "assemble"));
+    assert_eq!(report.verified.len(), 4);
+
+    store.save_manifest(&manifest).unwrap();
+    let executor = WritingExecutor::new(&project.root);
+    let report = build(&project, &executor);
+    assert!(report.run.is_complete());
+    assert_eq!(executor.executed(), BTreeSet::from(["assemble".to_owned()]));
+}
+
+#[test]
 fn tampered_output_invalidates_exactly_the_affected_work() {
     let project = TempProject::new("tamper");
     build(&project, &WritingExecutor::new(&project.root));
