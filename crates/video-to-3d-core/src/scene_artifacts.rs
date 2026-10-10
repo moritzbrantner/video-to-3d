@@ -434,6 +434,12 @@ impl SurfaceTexturesArtifact {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.bake_schema_version != SURFACE_MATERIAL_BAKE_SCHEMA_VERSION {
+            return Err(format!(
+                "surface textures artifact: unsupported bake schema version {} (expected {})",
+                self.bake_schema_version, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION
+            ));
+        }
         let mut frames = BTreeSet::new();
         for material in &self.materials {
             if !frames.insert(material.reference_frame) {
@@ -471,6 +477,32 @@ impl SurfaceTexturesArtifact {
                     material.reference_frame
                 ));
             }
+            let mut origins = Vec::new();
+            for &origin in &material.provenance {
+                if !matches!(
+                    origin,
+                    EvidenceOrigin::GeometricMultiView | EvidenceOrigin::RevalidatedCompletion
+                ) {
+                    return Err(format!(
+                        "surface textures material for frame {} cannot claim non-observed provenance {origin:?}",
+                        material.reference_frame
+                    ));
+                }
+                if origins.contains(&origin) {
+                    return Err(format!(
+                        "surface textures material for frame {} repeats provenance {origin:?}",
+                        material.reference_frame
+                    ));
+                }
+                origins.push(origin);
+            }
+        }
+        if self.fallback_reasons.total() != self.fallback_triangles.len() {
+            return Err(format!(
+                "surface textures artifact has {} fallback reason(s) for {} fallback triangle(s)",
+                self.fallback_reasons.total(),
+                self.fallback_triangles.len()
+            ));
         }
         // Textured and fallback triangles partition the accepted triangles.
         // Check the count first so an untrusted `triangle_count` never sizes
@@ -576,6 +608,13 @@ impl SurfaceTexturesArtifact {
         let mut materials = Vec::with_capacity(self.materials.len());
         for material in &self.materials {
             let texture_id = surface_texture_id(namespace, material.reference_frame);
+            crate::scene_model::validate_identifier(&texture_id)
+                .map_err(|error| error.to_string())?;
+            crate::scene_model::validate_identifier(&surface_material_id(
+                namespace,
+                material.reference_frame,
+            ))
+            .map_err(|error| error.to_string())?;
             let mut provenance: Vec<SceneProvenance> = material
                 .provenance
                 .iter()
