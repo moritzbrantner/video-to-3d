@@ -385,6 +385,32 @@ fn edited_texture_sidecars_are_detected_and_rewritten() {
     repaired.artifact.verify_textures(&dir.0).unwrap();
 }
 
+#[test]
+fn a_coherently_replaced_texture_is_not_reused() {
+    let dir = TempDir::new("coherent-tamper");
+    let fixture = Fixture::new();
+    let inputs = fixture.write(&dir.0);
+    let first = bake(&dir.0, &inputs);
+    // Replace texture 0 with another well-formed PNG of the same size and
+    // record its hash, so document and sidecar agree.
+    let material = &first.artifact.materials[0];
+    let (width, height) = (material.texture.width, material.texture.height);
+    let other = vec![200_u8; width as usize * height as usize * 4];
+    let png = crate::textured_glb::encode_png_rgb(width, height, &other).unwrap();
+    fs::write(texture_file(&dir.0, &first, material.reference_frame), &png).unwrap();
+    let mut tampered = first.artifact.clone();
+    tampered.materials[0].texture.content_hash = ContentHash::of_bytes(&png);
+    let output = path("artifacts/bake/surface-textures.json");
+    fs::write(output.resolve(&dir.0), tampered.to_json()).unwrap();
+
+    let rebuilt = bake(&dir.0, &inputs);
+    assert!(rebuilt.written.contains(&material.reference_frame));
+    assert_eq!(
+        rebuilt.artifact.materials[0].texture.content_hash,
+        material.texture.content_hash
+    );
+}
+
 fn scene_with(artifact: &SurfaceTexturesArtifact) -> AssembledScene {
     let mut scene = AssembledScene::new(SceneFrame {
         unit: SceneUnit::ArbitraryMonocular,
@@ -766,6 +792,14 @@ fn texture_artifacts_reject_incorrect_camera_source_associations() {
         let error = cropped.validate().unwrap_err();
         assert!(error.contains("outside its"), "{error}");
     }
+
+    // Triangles need at least three points.
+    let mut pointless = original.clone();
+    pointless.point_count = 2;
+    assert!(pointless
+        .validate()
+        .unwrap_err()
+        .contains("over 2 point(s)"));
 
     // Observed provenance needs a supporting view besides the reference.
     let mut alone = original.clone();
@@ -1241,6 +1275,23 @@ fn png_sidecars_are_validated_completely() {
             .unwrap_err()
             .contains("PLTE"));
     }
+    // Decoding inverts the encoder's filters exactly.
+    let rgb = decode_png_rgb8_with_cancel(&png, 3, 2, || false).unwrap();
+    let expected: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel[..3].to_vec())
+        .collect();
+    assert_eq!(rgb, expected);
+    assert!(decode_png_rgb8_with_cancel(&png, 3, 2, || true)
+        .unwrap_err()
+        .contains("canceled"));
+    // IEND carries no data.
+    let mut iend = png[..png.len() - 12].to_vec();
+    iend.extend_from_slice(&1_u32.to_be_bytes());
+    iend.extend_from_slice(b"IEND");
+    iend.push(0);
+    iend.extend_from_slice(&crc32fast::hash(b"IEND\0").to_be_bytes());
+    assert!(validate_png_rgb8(&iend, 3, 2).unwrap_err().contains("IEND"));
     // PNG dimensions are never zero.
     assert!(!is_png_rgb8(&png, 0, 2));
 }

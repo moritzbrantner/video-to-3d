@@ -526,6 +526,39 @@ fn stale_own_obstruction_is_released(stale: &str) {
 }
 
 #[test]
+fn a_rejected_record_at_the_bake_directory_is_removed() {
+    let project = TempProject::new("rejected-obstruction");
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, mut manifest) = project.open();
+    let stale_path = ProjectPath::new("artifacts/bake").unwrap();
+    fs::rename(
+        project.file("artifacts/assemble.bin"),
+        stale_path.resolve(&project.root),
+    )
+    .unwrap();
+    let mut receipt = store.read_receipt("assemble").unwrap().unwrap();
+    receipt.output.path = stale_path.clone();
+    store.write_receipt(&receipt).unwrap();
+    manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.produced_by == "assemble")
+        .unwrap()
+        .path = stale_path;
+    // Corrupt it: reconciliation rejects the record before the obstruction
+    // scan sees it.
+    fs::write(project.file("artifacts/bake"), b"corrupt").unwrap();
+    manifest.quality_mode = crate::scene_project::QualityMode::Standard;
+    manifest.operations.push(bake_declaration());
+    store.save_manifest(&manifest).unwrap();
+    let report = store.reconcile(&mut manifest, VerifyMode::Full).unwrap();
+    assert!(report.invalidated.iter().any(|(operation, reason)| {
+        operation == "assemble" && matches!(reason, Invalidation::CorruptOutput { .. })
+    }));
+    assert!(!project.file("artifacts/bake").exists());
+}
+
+#[test]
 fn released_obstructions_keep_files_other_entries_own() {
     let project = TempProject::new("stale-shared-obstruction");
     build(&project, &WritingExecutor::new(&project.root));

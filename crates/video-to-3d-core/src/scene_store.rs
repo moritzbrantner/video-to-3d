@@ -297,15 +297,19 @@ impl ProjectStore {
 
         let mut report = ReconcileReport::default();
         let mut keep = Vec::with_capacity(manifest.artifacts.len());
+        let mut rejected = Vec::new();
         for artifact in &manifest.artifacts {
             match self.verify_artifact(manifest, artifact, &mut cache) {
                 Ok(()) => {
                     report.verified.push(artifact.produced_by.clone());
                     keep.push(artifact.clone());
                 }
-                Err(reason) => report
-                    .invalidated
-                    .push((artifact.produced_by.clone(), reason)),
+                Err(reason) => {
+                    report
+                        .invalidated
+                        .push((artifact.produced_by.clone(), reason));
+                    rejected.push(artifact.clone());
+                }
             }
         }
         manifest.artifacts = keep;
@@ -405,6 +409,25 @@ impl ProjectStore {
                             .map(|export| export.path.as_str().to_ascii_lowercase()),
                     )
                     .collect();
+                // A rejected record no longer reserves its files, but one at
+                // or above a bake directory would still make the bake fail
+                // on `create_dir_all`; remove it unless someone else owns it.
+                for artifact in &rejected {
+                    let paths = std::iter::once(artifact.path.clone()).chain(
+                        crate::scene_artifacts::recorded_sidecar_paths(&self.root, artifact),
+                    );
+                    for path in paths {
+                        let folded = path.as_str().to_ascii_lowercase();
+                        let obstructs = bake_directories
+                            .iter()
+                            .any(|(_, directory)| at_or_above(&folded, directory));
+                        let shared = protected.iter().any(|kept| overlaps(kept, &folded));
+                        let file = self.resolve(&path);
+                        if obstructs && !shared && file.is_file() {
+                            let _ = fs::remove_file(file);
+                        }
+                    }
+                }
                 for ((artifact, paths), obstructs) in
                     manifest.artifacts.iter().zip(&owned).zip(&obstructing)
                 {

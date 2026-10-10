@@ -783,6 +783,13 @@ impl SurfaceTexturesArtifact {
                 self.fallback_triangles.len()
             ));
         }
+        // A triangle needs three points.
+        if self.triangle_count > 0 && self.point_count < 3 {
+            return Err(format!(
+                "surface textures artifact claims {} triangle(s) over {} point(s)",
+                self.triangle_count, self.point_count
+            ));
+        }
         // Textured and fallback triangles partition the accepted triangles.
         // Check the count first so an untrusted `triangle_count` never sizes
         // an allocation beyond the listed indices.
@@ -956,6 +963,18 @@ pub struct ArtifactSidecar {
 /// IDAT chunks, IEND last, and a zlib stream inflating to exactly one filter
 /// byte (0..=4) plus `3 · width` bytes per row.
 pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), String> {
+    decode_png_rgb8_with_cancel(png, width, height, || false).map(drop)
+}
+
+/// [`validate_png_rgb8`] that also returns the decoded, unfiltered RGB
+/// pixels (row-major, `3 · width` bytes per row), inflating in bounded chunks
+/// and polling `is_canceled` between them.
+pub(crate) fn decode_png_rgb8_with_cancel(
+    png: &[u8],
+    width: u32,
+    height: u32,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
     if !is_png_rgb8(png, width, height) {
         return Err(format!("not a {width}x{height} 8-bit RGB PNG"));
     }
@@ -1018,6 +1037,9 @@ pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), Stri
                 idat.extend_from_slice(data);
             }
             b"IEND" => {
+                if !data.is_empty() {
+                    return Err("PNG IEND carries data".into());
+                }
                 if end != png.len() {
                     return Err("PNG has data after IEND".into());
                 }
@@ -1037,12 +1059,103 @@ pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), Stri
         }
         cursor = end;
     }
-    let raw = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&idat, expected)
-        .map_err(|_| "PNG pixel stream does not inflate to the declared size".to_owned())?;
-    if raw.len() != expected || raw.chunks_exact(row).any(|line| line[0] > 4) {
+    let raw = inflate_zlib_exact(&idat, expected, &mut is_canceled)?;
+    if raw.chunks_exact(row).any(|line| line[0] > 4) {
         return Err("PNG pixel stream does not match the declared image".into());
     }
-    Ok(())
+    // Undo the per-row filters (3 bytes per pixel).
+    let stride = row - 1;
+    let mut pixels = vec![0_u8; stride * height as usize];
+    for (y, line) in raw.chunks_exact(row).enumerate() {
+        if is_canceled() {
+            return Err("PNG decoding was canceled".into());
+        }
+        let (done, rest) = pixels.split_at_mut(y * stride);
+        let previous = (y > 0).then(|| &done[(y - 1) * stride..]);
+        let current = &mut rest[..stride];
+        for x in 0..stride {
+            let left = if x >= 3 { current[x - 3] } else { 0 };
+            let up = previous.map_or(0, |previous| previous[x]);
+            let up_left = match previous {
+                Some(previous) if x >= 3 => previous[x - 3],
+                _ => 0,
+            };
+            let predictor = match line[0] {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                _ => paeth(left, up, up_left),
+            };
+            current[x] = line[x + 1].wrapping_add(predictor);
+        }
+    }
+    Ok(pixels)
+}
+
+fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
+    let estimate = i16::from(left) + i16::from(up) - i16::from(up_left);
+    let (a, b, c) = (
+        (estimate - i16::from(left)).abs(),
+        (estimate - i16::from(up)).abs(),
+        (estimate - i16::from(up_left)).abs(),
+    );
+    if a <= b && a <= c {
+        left
+    } else if b <= c {
+        up
+    } else {
+        up_left
+    }
+}
+
+/// Inflate a zlib stream that must produce exactly `expected` bytes, feeding
+/// it in bounded chunks and polling `is_canceled` between them.
+fn inflate_zlib_exact(
+    stream: &[u8],
+    expected: usize,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
+    use miniz_oxide::inflate::stream::{inflate, InflateState};
+    use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+    const CHUNK: usize = 1 << 16;
+    let mismatch = || "PNG pixel stream does not inflate to the declared size".to_owned();
+    let mut state = InflateState::new_boxed(DataFormat::Zlib);
+    // One spare byte detects a stream longer than declared.
+    let mut out = vec![0_u8; expected + 1];
+    let (mut consumed, mut written) = (0, 0);
+    loop {
+        if is_canceled() {
+            return Err("PNG decoding was canceled".into());
+        }
+        let end = (consumed + CHUNK).min(stream.len());
+        let flush = if end == stream.len() {
+            MZFlush::Finish
+        } else {
+            MZFlush::None
+        };
+        let result = inflate(
+            &mut state,
+            &stream[consumed..end],
+            &mut out[written..],
+            flush,
+        );
+        consumed += result.bytes_consumed;
+        written += result.bytes_written;
+        if written > expected {
+            return Err(mismatch());
+        }
+        match result.status {
+            Ok(MZStatus::StreamEnd) => break,
+            Ok(_) if result.bytes_consumed > 0 || result.bytes_written > 0 => {}
+            _ => return Err(mismatch()),
+        }
+    }
+    if written != expected {
+        return Err(mismatch());
+    }
+    out.truncate(expected);
+    Ok(out)
 }
 
 /// Whether `header` (at least the first 33 bytes of a file) starts a PNG
@@ -1274,9 +1387,22 @@ fn bake_parsed(
                     cancel.is_canceled()
                 })
                 .is_ok_and(|png| {
-                    !cancel.is_canceled()
-                        && validate_png_rgb8(&png, material.texture.width, material.texture.height)
-                            .is_ok()
+                    // The cached PNG must decode to exactly the pixels this
+                    // bake produced; format and hash alone do not bind it to
+                    // the appearance key.
+                    decode_png_rgb8_with_cancel(
+                        &png,
+                        material.texture.width,
+                        material.texture.height,
+                        || cancel.is_canceled(),
+                    )
+                    .is_ok_and(|rgb| {
+                        rgb.len() * 4 == material.texture.rgba.len() * 3
+                            && rgb
+                                .chunks_exact(3)
+                                .zip(material.texture.rgba.chunks_exact(4))
+                                .all(|(cached, expected)| cached == &expected[..3])
+                    })
                 })
         });
         // A canceled read or validation must not fall through to re-encoding.
