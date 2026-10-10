@@ -13,7 +13,12 @@ fn point(x: f32, y: f32, z: f32) -> Point3 {
 }
 
 fn triangle(a: usize, b: usize, c: usize) -> MeshTriangle {
-    MeshTriangle { a, b, c, confidence: 0.9 }
+    MeshTriangle {
+        a,
+        b,
+        c,
+        confidence: 0.9,
+    }
 }
 
 fn geometry(corners: [(f64, f64, f64); 3]) -> TriangleGeometry {
@@ -32,7 +37,10 @@ fn union_coverage_handles_a_different_diagonal_and_large_triangles() {
     // contains its centroid plus all corners. One triangle may be much larger
     // than the spatial cell, which must not hide its interior.
     let inner = geometry([(0.2, 0.2, 0.05), (1.8, 0.3, 0.05), (1.4, 1.7, 0.05)]);
-    assert_eq!(inner.covered_by([&left, &right].into_iter(), 0.1), (true, true));
+    assert_eq!(
+        inner.covered_by([&left, &right].into_iter(), 0.1),
+        (true, true)
+    );
 }
 
 #[test]
@@ -52,19 +60,33 @@ fn normal_and_depth_disagreement_are_not_coverage() {
     let distant = geometry([(0.1, 0.1, 1.0), (1.0, 0.1, 1.0), (0.1, 1.0, 1.0)]);
     assert_eq!(distant.covered_by([&kept].into_iter(), 0.1), (false, false));
     let orthogonal = geometry([(0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)]);
-    assert_eq!(orthogonal.covered_by([&kept].into_iter(), 0.1), (false, false));
+    assert_eq!(
+        orthogonal.covered_by([&kept].into_iter(), 0.1),
+        (false, false)
+    );
 }
 
 #[test]
 fn no_accepted_fusion_pair_means_no_dedup_even_for_coincident_sheets() {
     let points = vec![
-        point(0.0, 0.0, 0.0), point(1.0, 0.0, 0.0), point(0.0, 1.0, 0.0),
-        point(0.0, 0.0, 0.0), point(1.0, 0.0, 0.0), point(0.0, 1.0, 0.0),
+        point(0.0, 0.0, 0.0),
+        point(1.0, 0.0, 0.0),
+        point(0.0, 1.0, 0.0),
+        point(0.0, 0.0, 0.0),
+        point(1.0, 0.0, 0.0),
+        point(0.0, 1.0, 0.0),
     ];
     let original = vec![triangle(0, 1, 2), triangle(3, 4, 5)];
     let mut triangles = original.clone();
-    let stats = merge_fused_patches(&points, &mut triangles, &[Some(0); 3].into_iter()
-        .chain([Some(1); 3]).collect::<Vec<_>>(), &[]);
+    let stats = merge_fused_patches(
+        &points,
+        &mut triangles,
+        &[Some(0); 3]
+            .into_iter()
+            .chain([Some(1); 3])
+            .collect::<Vec<_>>(),
+        &[],
+    );
     assert_eq!(stats.removed_duplicate_triangles, 0);
     assert_eq!(stats.cross_reference_triangles, 0);
     assert_eq!(stats.patch_components, 2);
@@ -82,7 +104,11 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
         for y in 0..=1 {
             for x in 0..=2 {
                 let shared = patch == 1 && x == 1;
-                points.push(point(start + x as f32, y as f32, if shared { 0.0 } else { z }));
+                points.push(point(
+                    start + x as f32,
+                    y as f32,
+                    if shared { 0.0 } else { z },
+                ));
                 membership.push(Some(patch));
             }
         }
@@ -95,7 +121,10 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
             triangles.push(triangle(start + 1, start + 4, start + 3));
         }
     }
-    let original_points = points.iter().map(|p| (p.x, p.y, p.z, p.r, p.g, p.b)).collect::<Vec<_>>();
+    let original_points = points
+        .iter()
+        .map(|p| (p.x, p.y, p.z, p.r, p.g, p.b))
+        .collect::<Vec<_>>();
     let original = triangles.clone();
     let stats = merge_fused_patches(&points, &mut triangles, &membership, &[(2, 7), (5, 10)]);
     assert_eq!(stats.fused_pairs, 2);
@@ -103,10 +132,21 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
     assert!(stats.cross_reference_triangles > 0);
     assert_eq!(stats.removed_duplicate_triangles, 2);
     assert_eq!(triangles.len(), original.len() - 2);
-    assert_eq!(points.iter().map(|p| (p.x, p.y, p.z, p.r, p.g, p.b)).collect::<Vec<_>>(), original_points);
+    assert_eq!(
+        points
+            .iter()
+            .map(|p| (p.x, p.y, p.z, p.r, p.g, p.b))
+            .collect::<Vec<_>>(),
+        original_points
+    );
     assert!(triangles.iter().any(|t| [t.a, t.b, t.c].contains(&8)));
     let first = signature(&triangles);
-    let again = merge_fused_patches(&points, &mut original.clone(), &membership, &[(2, 7), (5, 10)]);
+    let again = merge_fused_patches(
+        &points,
+        &mut original.clone(),
+        &membership,
+        &[(2, 7), (5, 10)],
+    );
     assert_eq!(stats, again);
     let mut replay = original;
     merge_fused_patches(&points, &mut replay, &membership, &[(2, 7), (5, 10)]);

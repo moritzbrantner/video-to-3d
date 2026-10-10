@@ -209,7 +209,10 @@ pub(super) fn merge_fused_patches(
                         let Some(other_patch) = patch_of[other] else {
                             return false;
                         };
-                        linked_patches.contains(&(usize::min(*patch, other_patch), usize::max(*patch, other_patch)))
+                        linked_patches.contains(&(
+                            usize::min(*patch, other_patch),
+                            usize::max(*patch, other_patch),
+                        ))
                     })
                     .filter_map(|other| geometry[other].as_ref());
                 let (covered, partially_covered) = candidate.covered_by(candidates, tolerance);
@@ -371,7 +374,8 @@ impl TriangleGeometry {
             Vector2::new(relative.dot(&u), relative.dot(&v))
         };
         let area_epsilon = self.edges.iter().copied().fold(1.0e-12, f64::max)
-            * self.edges.iter().copied().fold(1.0e-12, f64::max) * 1.0e-10;
+            * self.edges.iter().copied().fold(1.0e-12, f64::max)
+            * 1.0e-10;
         let mut remaining = vec![self.corners.map(|corner| project(corner)).to_vec()];
         let mut partially_covered = false;
         for surface in surfaces {
