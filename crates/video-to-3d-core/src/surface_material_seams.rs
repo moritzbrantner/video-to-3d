@@ -421,6 +421,39 @@ impl WorkMeter {
     }
 }
 
+/// What the most recent [`CoverageIndex::build`] on this thread recorded.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct CoverageProbe {
+    pub budget: usize,
+    /// Span cells (coverage entries) recorded when the build finished or
+    /// stopped.
+    pub peak_span_cells: usize,
+    pub exceeded: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COVERAGE_PROBE: std::cell::Cell<CoverageProbe> =
+        const { std::cell::Cell::new(CoverageProbe { budget: 0, peak_span_cells: 0, exceeded: false }) };
+}
+
+#[cfg(test)]
+pub(super) fn coverage_probe() -> CoverageProbe {
+    COVERAGE_PROBE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_coverage_probe(budget: usize, peak_span_cells: usize, exceeded: bool) {
+    COVERAGE_PROBE.with(|probe| {
+        probe.set(CoverageProbe {
+            budget,
+            peak_span_cells,
+            exceeded,
+        })
+    });
+}
+
 /// The cells of one row a triangle's footprint touches.
 struct Span {
     row: usize,
@@ -447,8 +480,9 @@ impl CoverageIndex {
     /// `None` when the coverage would exceed
     /// [`COVERAGE_ENTRIES_PER_PIXEL`] entries per pixel on average; the
     /// entries are counted while the spans are recorded and the build stops
-    /// as soon as the budget is exceeded, so neither the spans nor the entries
-    /// ever grow beyond it.
+    /// before the first span that would exceed the budget, so neither the spans
+    /// nor the entries ever grow beyond it. Totalling happens per recorded
+    /// row inside [`Self::push_spans`], which charges every row to the meter.
     fn build(
         view: &CameraView<'_>,
         evidence: &ReconstructionEvidenceView<'_>,
@@ -485,12 +519,16 @@ impl CoverageIndex {
                 let ordinal = u32::try_from(index.triangles.len()).map_err(|_| {
                     "too many accepted triangles for the seam visibility index".to_owned()
                 })?;
-                let recorded = spans.len();
-                index.push_spans(&corners, ordinal, &mut spans, check_canceled)?;
-                total = spans[recorded..]
-                    .iter()
-                    .fold(total, |total, span| total + (span.last - span.first + 1));
-                if total > budget {
+                let within_budget = index.push_spans(
+                    &corners,
+                    ordinal,
+                    &mut spans,
+                    (&mut total, budget),
+                    check_canceled,
+                )?;
+                if !within_budget {
+                    #[cfg(test)]
+                    record_coverage_probe(budget, total, true);
                     return Ok(None);
                 }
                 index.triangles.push(RasterTriangle { corners });
@@ -514,6 +552,8 @@ impl CoverageIndex {
             first = end;
         }
         debug_assert_eq!(index.offsets[cells], total);
+        #[cfg(test)]
+        record_coverage_probe(budget, total, false);
         index.entries = vec![0; total];
         for span in &spans {
             index.for_cells(span, check_canceled, |offsets, entries, cell| {
@@ -524,14 +564,17 @@ impl CoverageIndex {
         Ok(Some(index))
     }
 
-    /// Record the cells each row of `corners`' footprint touches.
+    /// Record the cells each row of `corners`' footprint touches, adding
+    /// them to the running `total`. Returns `false`, without recording the
+    /// offending span, as soon as a span would take `total` past `budget`.
     fn push_spans(
         &mut self,
         corners: &[[f64; 3]; 3],
         triangle: u32,
         spans: &mut Vec<Span>,
+        (total, budget): (&mut usize, usize),
         check_canceled: &mut impl FnMut() -> Result<(), String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let (low, high) = corners
             .iter()
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), p| {
@@ -542,7 +585,7 @@ impl CoverageIndex {
             .floor()
             .min(self.height as f64 - 1.0);
         if first_row > last_row {
-            return Ok(());
+            return Ok(true);
         }
         let last_column = self.width as f64 - 1.0;
         for row in first_row as usize..=last_row as usize {
@@ -557,15 +600,20 @@ impl CoverageIndex {
             let first = (left - 0.5 - CELL_MARGIN).ceil().max(0.0);
             let last = (right + 0.5 + CELL_MARGIN).floor().min(last_column);
             if first <= last {
+                let (first, last) = (first as usize, last as usize);
+                match total.checked_add(last - first + 1) {
+                    Some(grown) if grown <= budget => *total = grown,
+                    _ => return Ok(false),
+                }
                 spans.push(Span {
                     row,
-                    first: first as usize,
-                    last: last as usize,
+                    first,
+                    last,
                     triangle,
                 });
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Visit the cells of `span` in chunks of at most one poll interval,
