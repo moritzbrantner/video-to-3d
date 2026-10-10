@@ -355,6 +355,9 @@ pub fn write_keyframes_artifact(
         frames: records,
     };
     artifact.validate()?;
+    let previous = fs::read_to_string(index.resolve(root))
+        .ok()
+        .and_then(|document| KeyframesArtifact::from_json(&document).ok());
     for (record, frame) in artifact.frames.iter().zip({
         let mut sorted: Vec<&SampledFrame<'_>> = frames.iter().collect();
         sorted.sort_by_key(|frame| frame.frame_index);
@@ -367,7 +370,55 @@ pub fn write_keyframes_artifact(
     }
     let document = artifact.to_json();
     write_atomically(&index.resolve(root), document.as_bytes())?;
+    if let Some(previous) = previous {
+        remove_superseded_keyframes(root, index, &previous, &artifact)?;
+    }
     Ok((artifact, ContentHash::of_bytes(document.as_bytes())))
+}
+
+/// After a replacement index is committed, remove the sidecars the previous
+/// version listed that are provably unreferenced: inside this index's own
+/// `frames/` directory, not listed by the new version, and not listed by any
+/// other keyframes index in the same directory (which shares `frames/`).
+fn remove_superseded_keyframes(
+    root: &Path,
+    index: &ProjectPath,
+    previous: &KeyframesArtifact,
+    current: &KeyframesArtifact,
+) -> Result<(), String> {
+    let frames_directory = format!("{}/", sibling(index, "frames")?.as_str());
+    let mut referenced: BTreeSet<String> = current
+        .frames
+        .iter()
+        .map(|frame| frame.pixels.as_str().to_owned())
+        .collect();
+    let index_file = index.resolve(root);
+    if let Some(directory) = index_file.parent() {
+        for entry in fs::read_dir(directory).into_iter().flatten().flatten() {
+            let other = entry.path();
+            if other == index_file || other.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let Ok(document) = fs::read_to_string(&other) else {
+                continue;
+            };
+            if let Ok(sharing) = KeyframesArtifact::from_json(&document) {
+                referenced.extend(
+                    sharing
+                        .frames
+                        .iter()
+                        .map(|frame| frame.pixels.as_str().to_owned()),
+                );
+            }
+        }
+    }
+    for frame in &previous.frames {
+        let path = frame.pixels.as_str();
+        if path.starts_with(&frames_directory) && !referenced.contains(path) {
+            let _ = fs::remove_file(frame.pixels.resolve(root));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +601,16 @@ impl SurfaceTexturesArtifact {
             ));
         }
         let mut frames = BTreeSet::new();
+        let mut texture_paths = BTreeSet::new();
         for material in &self.materials {
+            // Scene resource paths must be unique, folding ASCII case as
+            // manifest paths do.
+            if !texture_paths.insert(material.texture.path.as_str().to_ascii_lowercase()) {
+                return Err(format!(
+                    "surface textures artifact names texture `{}` twice",
+                    material.texture.path.as_str()
+                ));
+            }
             if !frames.insert(material.reference_frame) {
                 return Err(format!(
                     "surface textures artifact lists reference frame {} twice",
@@ -793,6 +853,20 @@ pub struct ArtifactSidecar {
     /// Exact byte length the document's format requires (RGBA keyframes),
     /// when it fixes one.
     pub byte_length: Option<u64>,
+    /// Dimensions of the 8-bit RGB PNG the sidecar must be (baked textures).
+    pub png_rgb8: Option<(u32, u32)>,
+}
+
+/// Whether `header` (at least the first 33 bytes of a file) starts a PNG
+/// whose IHDR declares an 8-bit RGB, non-interlaced image of these dimensions.
+pub fn is_png_rgb8(header: &[u8], width: u32, height: u32) -> bool {
+    header.len() >= 33
+        && header.starts_with(b"\x89PNG\r\n\x1a\n")
+        && header[8..12] == 13_u32.to_be_bytes()
+        && &header[12..16] == b"IHDR"
+        && header[16..20] == width.to_be_bytes()
+        && header[20..24] == height.to_be_bytes()
+        && header[24..29] == [8, 2, 0, 0, 0]
 }
 
 /// Sidecar files a recorded artifact document refers to, with their hashes.
@@ -808,6 +882,7 @@ pub fn artifact_sidecars(
             .into_iter()
             .map(|frame| ArtifactSidecar {
                 byte_length: rgba_length(frame.width, frame.height).map(|length| length as u64),
+                png_rgb8: None,
                 path: frame.pixels,
                 content_hash: frame.content_hash,
             })
@@ -816,6 +891,7 @@ pub fn artifact_sidecars(
             .materials
             .into_iter()
             .map(|material| ArtifactSidecar {
+                png_rgb8: Some((material.texture.width, material.texture.height)),
                 path: material.texture.path,
                 content_hash: material.texture.content_hash,
                 byte_length: None,

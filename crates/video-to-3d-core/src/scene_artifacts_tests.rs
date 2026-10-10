@@ -675,6 +675,18 @@ fn texture_artifacts_reject_incompatible_versions_provenance_and_fallbacks() {
         .contains("textures no triangle"));
     assert!(SurfaceTexturesArtifact::from_json(&empty.to_json()).is_err());
 
+    // Two materials may not name one texture path (ASCII case folded).
+    let mut shared = artifact.clone();
+    shared.materials[1].texture.path = ProjectPath::new(
+        shared.materials[0]
+            .texture
+            .path
+            .as_str()
+            .to_ascii_uppercase(),
+    )
+    .unwrap();
+    assert!(shared.validate().unwrap_err().contains("twice"));
+
     let mut learned = artifact.clone();
     learned.materials[0].provenance = vec![EvidenceOrigin::LearnedMultiView];
     assert!(learned
@@ -1049,4 +1061,54 @@ fn keyframe_pixels_load_in_cancelable_chunks() {
         .load_pixels_with_cancel(&dir.0, 1, || true)
         .unwrap_err();
     assert!(error.contains("canceled"), "{error}");
+}
+
+#[test]
+fn texture_sidecars_must_be_the_declared_png() {
+    let dir = TempDir::new("png-sidecar");
+    let inputs = Fixture::new().write(&dir.0);
+    let outcome = bake(&dir.0, &inputs);
+    let header = fs::read(texture_file(&dir.0, &outcome, 0)).unwrap();
+    let texture = &outcome.artifact.materials[0].texture;
+    assert!(is_png_rgb8(&header, texture.width, texture.height));
+    assert!(!is_png_rgb8(&header, texture.width + 1, texture.height));
+    assert!(!is_png_rgb8(b"not a png", texture.width, texture.height));
+    let sidecars =
+        artifact_sidecars(ArtifactKind::SurfaceTextures, &outcome.artifact.to_json()).unwrap();
+    assert_eq!(sidecars[0].png_rgb8, Some((texture.width, texture.height)));
+}
+
+#[test]
+fn rewriting_keyframes_removes_only_unreferenced_superseded_sidecars() {
+    let dir = TempDir::new("superseded");
+    let index = path("inputs/keyframes.json");
+    let frame = |frame_index: usize, rgba: &'static [u8]| SampledFrame {
+        frame_index,
+        timestamp_seconds: frame_index as f64,
+        width: 1,
+        height: 1,
+        rgba,
+    };
+    let (first, _) = write_keyframes_artifact(
+        &dir.0,
+        &index,
+        &[frame(0, &[1, 2, 3, 255]), frame(1, &[4, 5, 6, 255])],
+    )
+    .unwrap();
+    // A sibling index shares frame 1's content-addressed sidecar.
+    let sibling_index = path("inputs/other-keyframes.json");
+    write_keyframes_artifact(&dir.0, &sibling_index, &[frame(1, &[4, 5, 6, 255])]).unwrap();
+
+    let (second, _) =
+        write_keyframes_artifact(&dir.0, &index, &[frame(2, &[7, 8, 9, 255])]).unwrap();
+    let exists = |artifact: &KeyframesArtifact, at: usize| {
+        artifact.frames[at].pixels.resolve(&dir.0).exists()
+    };
+    assert!(!exists(&first, 0), "superseded sidecar was kept");
+    assert!(
+        exists(&first, 1),
+        "a sidecar another index lists was removed"
+    );
+    assert!(exists(&second, 0));
+    second.load_pixels(&dir.0, 2).unwrap();
 }

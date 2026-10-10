@@ -936,6 +936,23 @@ impl SceneProjectManifest {
                 }
             }
         }
+        if kind == OperationKind::TextureBake {
+            let count = |wanted: ArtifactKind| {
+                upstream_kinds
+                    .iter()
+                    .filter(|output| **output == wanted)
+                    .count()
+            };
+            if operation.inputs.len() != 2
+                || count(ArtifactKind::Keyframes) != 1
+                || count(ArtifactKind::SurfaceMesh) != 1
+            {
+                return invalid(format!(
+                    "operation `{}` (texture_bake) must consume exactly one ingest_video and one surface_mesh operation",
+                    operation.id
+                ));
+            }
+        }
         if kind == OperationKind::IngestVideo && operation.inputs.len() != 1 {
             return invalid(format!(
                 "operation `{}` (ingest_video) must consume exactly one media input",

@@ -553,6 +553,23 @@ impl ProjectStore {
             };
             for sidecar in sidecars {
                 let path = &sidecar.path;
+                if let Some((width, height)) = sidecar.png_rgb8 {
+                    let mut header = [0_u8; 33];
+                    let read = fs::File::open(self.resolve(path))
+                        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut header));
+                    // A missing file is reported by the hash check below; a
+                    // file too short for a PNG header is not the PNG.
+                    let not_png = match read {
+                        Ok(()) => !crate::scene_artifacts::is_png_rgb8(&header, width, height),
+                        Err(error) => error.kind() == std::io::ErrorKind::UnexpectedEof,
+                    };
+                    if not_png {
+                        return Err(Invalidation::CorruptSidecar(format!(
+                            "`{}` is not the declared {width}x{height} 8-bit RGB PNG",
+                            path.as_str()
+                        )));
+                    }
+                }
                 match cache.hash(&self.resolve(path), path.as_str()) {
                     Some((hash, length))
                         if hash == sidecar.content_hash
