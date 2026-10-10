@@ -253,6 +253,7 @@ fn image_ownership_tolerates_reference_scale_but_not_another_surface() {
     assert!(
         (footprint
             .ownership(&same, 1.0, &|_| true)
+            .map(|(owned, _)| owned)
             .unwrap_or_default()
             .image_share
             - 1.0)
@@ -264,6 +265,7 @@ fn image_ownership_tolerates_reference_scale_but_not_another_surface() {
     assert_eq!(
         footprint
             .ownership(&layer, 1.0, &|_| true)
+            .map(|(owned, _)| owned)
             .unwrap_or_default()
             .image_share,
         0.0
@@ -276,6 +278,7 @@ fn image_ownership_tolerates_reference_scale_but_not_another_surface() {
     assert!(
         (footprint
             .ownership(&layer, 0.96, &|_| true)
+            .map(|(owned, _)| owned)
             .unwrap_or_default()
             .image_share
             - 1.0)
@@ -287,13 +290,19 @@ fn image_ownership_tolerates_reference_scale_but_not_another_surface() {
     assert_eq!(
         footprint
             .ownership(&behind, 1.0, &|_| true)
+            .map(|(owned, _)| owned)
             .unwrap_or_default()
             .image_share,
         0.0
     );
     // Behind the camera the image cannot judge it at all.
     let flipped = corners([(-0.5, -0.5, -5.0), (0.6, -0.4, -5.0), (0.1, 0.7, -5.0)]);
-    assert_eq!(footprint.ownership(&flipped, 1.0, &|_| true), None);
+    assert_eq!(
+        footprint
+            .ownership(&flipped, 1.0, &|_| true)
+            .map(|(owned, _)| owned),
+        None
+    );
 }
 
 #[test]
@@ -301,14 +310,20 @@ fn image_ownership_measures_the_share_on_the_footprint() {
     let footprint = square_footprint(identity_camera(0.0));
     // Half of this triangle's projected area lies beyond x = 1.
     let seam = corners([(0.0, -0.5, 5.0), (2.0, -0.5, 5.0), (1.0, 0.5, 5.0)]);
-    let owned = footprint.ownership(&seam, 1.0, &|_| true).unwrap();
+    let owned = footprint
+        .ownership(&seam, 1.0, &|_| true)
+        .map(|(owned, _)| owned)
+        .unwrap();
     assert!((owned.image_share - 0.5).abs() < 1.0e-9);
     // Fronto-parallel, so the owned surface area is half of the 3D area too.
     assert!((owned.surface_area - 0.5).abs() < 1.0e-9);
     // Tilted in depth, the image share and the surface share differ; the
     // surface area is measured on the triangle's own plane.
     let tilted = corners([(0.0, -0.5, 4.9), (2.0, -0.5, 5.1), (1.0, 0.5, 5.0)]);
-    let owned = footprint.ownership(&tilted, 1.0, &|_| true).unwrap();
+    let owned = footprint
+        .ownership(&tilted, 1.0, &|_| true)
+        .map(|(owned, _)| owned)
+        .unwrap();
     let full = (tilted[1] - tilted[0])
         .cross(&(tilted[2] - tilted[0]))
         .norm()
@@ -319,6 +334,7 @@ fn image_ownership_measures_the_share_on_the_footprint() {
     assert_eq!(
         footprint
             .ownership(&outside, 1.0, &|_| true)
+            .map(|(owned, _)| owned)
             .unwrap_or_default()
             .image_share,
         0.0
@@ -664,7 +680,10 @@ fn oversized_owner_triangles_are_checked_exactly() {
     let footprint = Footprint::new(0, identity_camera(0.0), &kept).unwrap();
     assert_eq!(footprint.large, vec![0]);
     let inside = corners([(0.5, -0.8, 5.0), (0.8, -0.8, 5.0), (0.8, -0.5, 5.0)]);
-    let owned = footprint.ownership(&inside, 1.0, &|_| true).unwrap();
+    let owned = footprint
+        .ownership(&inside, 1.0, &|_| true)
+        .map(|(owned, _)| owned)
+        .unwrap();
     assert!((owned.image_share - 1.0).abs() < 1.0e-9, "{owned:?}");
 }
 
@@ -717,12 +736,16 @@ fn unprojectable_linked_owners_leave_the_image_unable_to_judge() {
     ));
     let footprint = Footprint::new(0, identity_camera(0.0), &kept).unwrap();
     let outside = corners([(2.0, 2.0, 5.0), (2.5, 2.0, 5.0), (2.0, 2.5, 5.0)]);
-    assert!(footprint.ownership(&outside, 1.0, &|_| true).is_none());
-    // Without a link to the omitted component the image still judges.
-    let judged = footprint
+    // The image judges the projected component and leaves the omitted one
+    // to the 3D test.
+    let (judged, unjudged) = footprint.ownership(&outside, 1.0, &|_| true).unwrap();
+    assert_eq!(judged.image_share, 0.0);
+    assert_eq!(unjudged, vec![1]);
+    // Without a link to the omitted component nothing is left unjudged.
+    let (_, unjudged) = footprint
         .ownership(&outside, 1.0, &|component| component == 0)
         .unwrap();
-    assert_eq!(judged.image_share, 0.0);
+    assert!(unjudged.is_empty());
 }
 
 #[test]

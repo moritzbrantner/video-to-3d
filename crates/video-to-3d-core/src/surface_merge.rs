@@ -441,15 +441,21 @@ pub(super) fn merge_fused_patches(
                 };
                 let linked = |component: usize| components_linked(index, component);
                 // `None` from an owner means its image could not judge the
-                // triangle (behind the camera, degenerate, too large for the
-                // bounded query, or a linked owner triangle of that patch
-                // could not be projected).
+                // triangle at all (behind the camera, degenerate, or too large
+                // for the bounded query); components it could not project are
+                // left unjudged individually.
                 let mut judged_patches = BTreeSet::new();
+                let mut unjudged_components: HashMap<usize, Vec<usize>> = HashMap::new();
                 let judged: Vec<Ownership> = owners
                     .iter()
                     .filter_map(|(footprint, scale)| {
-                        let ownership = footprint.ownership(&candidate.corners, *scale, &linked)?;
-                        judged_patches.insert(footprint.patch);
+                        let (ownership, unjudged) =
+                            footprint.ownership(&candidate.corners, *scale, &linked)?;
+                        if unjudged.is_empty() {
+                            judged_patches.insert(footprint.patch);
+                        } else {
+                            unjudged_components.insert(footprint.patch, unjudged);
+                        }
                         Some(ownership)
                     })
                     .collect();
@@ -475,7 +481,7 @@ pub(super) fn merge_fused_patches(
                 // A linked owner that judged this triangle in its image keeps
                 // its depth rejection: the looser 3D test only considers
                 // owners whose image could not judge (or that have none).
-                if judged.len() == owners.len() && !imageless_owner {
+                if judged_patches.len() == owners.len() && !imageless_owner {
                     if owned.image_share > OWNERSHIP_EPSILON {
                         remaining_overlap_triangles += 1;
                     }
@@ -498,10 +504,16 @@ pub(super) fn merge_fused_patches(
                 let candidates = nearby
                     .into_iter()
                     .filter(|&other| {
-                        let (left, right) =
-                            (component_by_triangle[index], component_by_triangle[other]);
-                        linked_components.contains(&(left.min(right), left.max(right)))
-                            && patch_of[other].is_none_or(|owner| !judged_patches.contains(&owner))
+                        let component = component_by_triangle[other];
+                        // The same (transitive) link the image test uses.
+                        components_linked(index, component)
+                            && match patch_of[other] {
+                                Some(owner) if judged_patches.contains(&owner) => false,
+                                Some(owner) => unjudged_components
+                                    .get(&owner)
+                                    .is_none_or(|components| components.contains(&component)),
+                                None => true,
+                            }
                     })
                     .filter_map(|other| geometry[other].as_ref());
                 let (covered, partially_covered) = candidate.covered_by(candidates, tolerance);
@@ -1035,13 +1047,15 @@ impl Footprint {
 
     /// The share of the candidate's projected area lying on kept triangles at
     /// the same depth once the candidate's relative depth `scale` is removed,
-    /// and the surface area of those owned parts on the candidate's plane.
+    /// and the surface area of those owned parts on the candidate's plane;
+    /// with the linked components this image could not judge (unprojectable
+    /// owner triangles), when the share is below the removal threshold.
     fn ownership(
         &self,
         corners: &[Vector3<f64>; 3],
         scale: f64,
         linked: &dyn Fn(usize) -> bool,
-    ) -> Option<Ownership> {
+    ) -> Option<(Ownership, Vec<usize>)> {
         let (candidate, overlaps) = self.overlaps(corners, linked)?;
         let total = image_area(&candidate);
         let plane = self.camera.plane(corners);
@@ -1069,20 +1083,25 @@ impl Footprint {
             }
         }
         let image_share = (image / total).min(1.0);
-        // Below the removal threshold, an unprojectable linked owner could
-        // still cover the rest: the image cannot judge, so the 3D test must.
-        if image_share < MIN_IMAGE_OWNERSHIP_SHARE
-            && self
-                .omitted_components
+        // Below the removal threshold, an unprojectable linked component
+        // could still cover the rest: the image cannot judge it, so the 3D
+        // test must (for those components only).
+        let unjudged = if image_share < MIN_IMAGE_OWNERSHIP_SHARE {
+            self.omitted_components
                 .iter()
-                .any(|component| linked(*component))
-        {
-            return None;
-        }
-        Some(Ownership {
-            image_share,
-            surface_area: surface,
-        })
+                .copied()
+                .filter(|component| linked(*component))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some((
+            Ownership {
+                image_share,
+                surface_area: surface,
+            },
+            unjudged,
+        ))
     }
 }
 
