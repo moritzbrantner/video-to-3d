@@ -198,6 +198,16 @@ impl<'a> ReconstructionEvidenceView<'a> {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_cancel(|| Ok(()))
+    }
+
+    /// Validate borrowed evidence without allocating duplicate geometry, with
+    /// cooperative polling even for large point and triangle buffers.
+    pub(crate) fn validate_with_cancel(
+        &self,
+        mut poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        poll()?;
         if self.schema_version != RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported reconstruction evidence schema version {}",
@@ -208,14 +218,15 @@ impl<'a> ReconstructionEvidenceView<'a> {
             return Err("reconstruction evidence provider id must not be empty".into());
         }
 
-        validate_cameras(&self.provider, &self.cameras)?;
-        validate_points(self.points)?;
-        validate_provider_origins(&self.provider, &self.regions)?;
-        validate_regions(&self.regions, self.points.len(), &self.cameras)?;
-        validate_triangles(self.triangles, self.points.len())?;
+        validate_cameras(&self.provider, &self.cameras, &mut poll)?;
+        validate_points(self.points, &mut poll)?;
+        validate_provider_origins(&self.provider, &self.regions, &mut poll)?;
+        validate_regions(&self.regions, self.points.len(), &self.cameras, &mut poll)?;
+        validate_triangles(self.triangles, self.points.len(), &mut poll)?;
         if let Some(attributes) = self.point_attributes {
-            validate_point_attributes(&self.provider, attributes, self.points.len())?;
+            validate_point_attributes(&self.provider, attributes, self.points.len(), &mut poll)?;
         }
+        poll()?;
         Ok(())
     }
 
@@ -378,9 +389,13 @@ pub fn classic_reference_patch_regions(
 fn validate_cameras(
     provider: &ReconstructionProviderDescriptor,
     cameras: &[EvidenceCamera],
+    poll: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     let mut frames = HashSet::with_capacity(cameras.len());
-    for camera in cameras {
+    for (index, camera) in cameras.iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
         if !frames.insert(camera.frame_index) {
             return Err(format!(
                 "reconstruction evidence contains duplicate camera frame {}",
@@ -430,8 +445,14 @@ fn validate_cameras(
     Ok(())
 }
 
-fn validate_points(points: &[Point3]) -> Result<(), String> {
+fn validate_points(
+    points: &[Point3],
+    poll: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     for (index, point) in points.iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
         if !point.x.is_finite()
             || !point.y.is_finite()
             || !point.z.is_finite()
@@ -450,6 +471,7 @@ fn validate_point_attributes(
     provider: &ReconstructionProviderDescriptor,
     attributes: &[EvidencePointAttributes],
     point_count: usize,
+    poll: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     if matches!(
         provider.class,
@@ -467,6 +489,9 @@ fn validate_point_attributes(
         ));
     }
     for (index, attribute) in attributes.iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
         if [attribute.reciprocal_consistency, attribute.depth_margin]
             .iter()
             .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
@@ -482,8 +507,12 @@ fn validate_point_attributes(
 fn validate_provider_origins(
     provider: &ReconstructionProviderDescriptor,
     regions: &[SurfaceEvidenceRegion],
+    poll: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     for (region_index, region) in regions.iter().enumerate() {
+        if region_index % 1024 == 0 {
+            poll()?;
+        }
         let allowed = match provider.class {
             ReconstructionProviderClass::GeometricMultiView => matches!(
                 region.origin,
@@ -510,6 +539,7 @@ fn validate_regions(
     regions: &[SurfaceEvidenceRegion],
     point_count: usize,
     cameras: &[EvidenceCamera],
+    poll: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     if point_count == 0 {
         if regions.is_empty() {
@@ -521,9 +551,18 @@ fn validate_regions(
         return Err("reconstruction evidence dense points have no provenance regions".into());
     }
 
-    let camera_frames: HashSet<usize> = cameras.iter().map(|camera| camera.frame_index).collect();
+    let mut camera_frames = HashSet::with_capacity(cameras.len());
+    for (index, camera) in cameras.iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
+        camera_frames.insert(camera.frame_index);
+    }
     let mut intervals = Vec::with_capacity(regions.len());
     for (region_index, region) in regions.iter().enumerate() {
+        if region_index % 1024 == 0 {
+            poll()?;
+        }
         if region.points.count == 0 {
             return Err(format!(
                 "reconstruction evidence region {region_index} has an empty point range"
@@ -558,7 +597,10 @@ fn validate_regions(
                 ));
             }
             let mut distinct_sources = HashSet::with_capacity(region.source_frames.len());
-            for source_frame in &region.source_frames {
+            for (index, source_frame) in region.source_frames.iter().enumerate() {
+                if index % 1024 == 0 {
+                    poll()?;
+                }
                 if *source_frame == reference_frame {
                     return Err(format!(
                         "reconstruction evidence region {region_index} cannot use reference camera frame {reference_frame} as a supporting source"
@@ -584,9 +626,13 @@ fn validate_regions(
         intervals.push((region.points.start, end, region_index));
     }
 
+    poll()?;
     intervals.sort_by_key(|(start, _, _)| *start);
     let mut cursor = 0usize;
-    for (start, end, region_index) in intervals {
+    for (index, (start, end, region_index)) in intervals.into_iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
         if start != cursor {
             return Err(format!(
                 "reconstruction evidence provenance is not an exact non-overlapping partition at region {region_index}: expected point {cursor}, found range {start}..{end}"
@@ -603,8 +649,15 @@ fn validate_regions(
     Ok(())
 }
 
-fn validate_triangles(triangles: &[MeshTriangle], point_count: usize) -> Result<(), String> {
+fn validate_triangles(
+    triangles: &[MeshTriangle],
+    point_count: usize,
+    poll: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     for (index, triangle) in triangles.iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
         if triangle.a >= point_count || triangle.b >= point_count || triangle.c >= point_count {
             return Err(format!(
                 "reconstruction evidence triangle {index} references a point outside the shared evidence buffer"
