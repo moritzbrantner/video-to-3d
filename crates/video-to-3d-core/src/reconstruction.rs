@@ -251,7 +251,8 @@ pub struct SeedCandidateStats {
     pub inlier_ratio: Option<f32>,
     /// Median residual of the best pure-rotation fit; at or below the baseline gate the
     /// pair has no measurable translation. Adjacent pairs fit the essential inliers; a
-    /// non-adjacent pair reports the least-median fit over all its sub-pixel matches.
+    /// non-adjacent pair reports the least-median fit over all its sub-pixel matches,
+    /// except when the essential-inlier fit rejected it, which it then reports.
     pub rotation_only_residual_pixels: Option<f32>,
     /// Inliers that must triangulate in front of both cameras within the reprojection gate.
     pub required_points: Option<usize>,
@@ -774,10 +775,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
             wide_seed_segments.push(segment);
         }
     }
-    let mut promoted_keyframes = 0;
-    for segment in wide_seed_segments {
-        promoted_keyframes += keyframe_selection.promote_segment_frames(segment);
-    }
+    let promoted_keyframes: HashMap<usize, usize> = wide_seed_segments
+        .into_iter()
+        .map(|segment| (segment, keyframe_selection.promote_segment_frames(segment)))
+        .collect();
     let primary_index = best_seed_index(&seed_candidates, |_| true);
     let primary_segment = primary_index.map(|index| segment_of_pair(seed_candidates[index].0[0]));
     let clip_segments = &keyframe_selection.stats.segments;
@@ -986,8 +987,13 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
             .iter()
             .find(|seed| seed.from_frame == pair.from_frame && seed.to_frame == pair.to_frame)
             .and_then(|seed| seed.rotation_only_residual_pixels);
+        let segment = frame_segments[pair.from_frame];
+        let span = &multi_view.keyframe_selection.segments[segment];
+        let promoted = promoted_keyframes.get(&segment).copied().unwrap_or(0);
         warnings.push(format!(
-            "No adjacent frame pair had measurable parallax, so the calibrated seed pair spans frames {}–{} ({} sampling intervals): matches composed along the tracked links and refined to sub-pixel positions leave {} px after the best pure rotation (requires more than {:.2} px), and the pair passed every two-view gate with a {:.2}° median triangulation angle. {promoted_keyframes} further frame(s) of its segment became registration keyframes.",
+            "No adjacent frame pair of frames {}–{} had measurable parallax, so their calibrated seed pair spans frames {}–{} ({} sampling intervals): matches composed along the tracked links and refined to sub-pixel positions leave {} px after the best pure rotation (requires more than {:.2} px), and the pair passed every two-view gate with a {:.2}° median triangulation angle. {promoted} further frame(s) of that span became registration keyframes.",
+            span.first_frame + 1,
+            span.last_frame + 1,
             pair.from_frame + 1,
             pair.to_frame + 1,
             pair.to_frame - pair.from_frame,
@@ -1282,6 +1288,12 @@ fn wide_seed_candidate(
             })
         })
         .collect();
+    if points.len() < two_view::MIN_SEED_INLIERS {
+        // Too few matches survived sub-pixel refinement (e.g. near the border)
+        // to fit anything: a correspondence limit, not a missing baseline.
+        seed.rejected_gate = Some(SeedGate::Matches);
+        return (seed, None);
+    }
     let rotation_residual =
         two_view::least_median_rotation_residual_pixels(&points, width, height, focal as f64);
     if rotation_residual
@@ -1293,8 +1305,11 @@ fn wide_seed_candidate(
     }
     let outcome = two_view::evaluate_two_view_points(&points, width, height, focal as f64);
     record_two_view_evidence(&mut seed, &outcome.evidence);
-    // A wide pair reports the least-median fit it was gated on.
-    seed.rotation_only_residual_pixels = rotation_residual.map(|value| value as f32);
+    // A wide pair reports the least-median fit it was gated on, unless the
+    // shared baseline gate rejected it: then the residual that decided stays.
+    if outcome.result.as_ref().err() != Some(&two_view::TwoViewRejection::Baseline) {
+        seed.rotation_only_residual_pixels = rotation_residual.map(|value| value as f32);
+    }
     match outcome.result {
         Ok(estimate) => (seed, Some(estimate)),
         Err(rejection) => {
@@ -2708,6 +2723,40 @@ mod tests {
             vec![(0, 1, 0.3), (2, 3, 0.2)]
         );
         assert!(compose_track_matches(&[]).is_empty());
+    }
+
+    #[test]
+    fn wide_pairs_without_enough_refined_matches_stop_at_the_match_gate() {
+        let (width, height) = (64_u32, 48_u32);
+        let luma = vec![128_u8; (width * height) as usize];
+        // Ten matches moving 3 px, all on the border where no patch fits.
+        let feature = |x: u32, y: u32| Feature {
+            x,
+            y,
+            score: 1.0,
+            descriptor: vec![0],
+        };
+        let source: Vec<Feature> = (0..10).map(|index| feature(1, 4 + index * 4)).collect();
+        let target: Vec<Feature> = (0..10).map(|index| feature(4, 4 + index * 4)).collect();
+        let matches: Vec<FeatureMatch> = (0..10)
+            .map(|index| FeatureMatch {
+                a: index,
+                b: index,
+                distance: 0.1,
+            })
+            .collect();
+        let (seed, estimate) = wide_seed_candidate(
+            [&source, &target],
+            [&luma, &luma],
+            &matches,
+            [0, 3],
+            width,
+            height,
+            50.0,
+        );
+        assert!(estimate.is_none());
+        assert_eq!(seed.rejected_gate, Some(SeedGate::Matches));
+        assert_eq!(seed.rotation_only_residual_pixels, None);
     }
 
     #[test]
