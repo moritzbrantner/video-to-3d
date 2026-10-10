@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "registry": "coding-agent-conventions",
+  "modules": [
+    "rust",
+    "nextjs",
+    "tooling",
+    "benchmarking"
+  ]
+}

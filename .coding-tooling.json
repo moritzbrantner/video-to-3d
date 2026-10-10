@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "profile": "repository-foundation-v1",
+  "tiers": {
+    "fast": [
+      "format:check",
+      "lint",
+      "typecheck",
+      "test"
+    ],
+    "full": [
+      "format:check",
+      "lint",
+      "typecheck",
+      "test",
+      "build",
+      "test:integration:workflow"
+    ],
+    "performance": [
+      "benchmark:smoke"
+    ]
+  },
+  "requiredCapabilities": [
+    "format:check",
+    "lint",
+    "typecheck",
+    "test",
+    "build",
+    "test:integration:workflow"
+  ],
+  "optionalCapabilities": [
+    "benchmark:smoke"
+  ],
+  "capabilityCommands": {
+    "video-to-3d": {
+      "format:check": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "lint": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "typecheck": [
+        "bun",
+        "run",
+        "typecheck"
+      ],
+      "test": [
+        "bun",
+        "run",
+        "test"
+      ],
+      "build": [
+        "bun",
+        "run",
+        "build"
+      ],
+      "test:integration:workflow": [
+        "bash",
+        "-lc",
+        "bun run test:learned-provider-contract && bun run test:texture-projection && bun run test:browser-contract && bun run test:video-sampling-contract"
+      ],
+      "benchmark:smoke": [
+        "bun",
+        "run",
+        "benchmark:wasm-boundary"
+      ],
+      "benchmark": [
+        "bun",
+        "run",
+        "benchmark:wasm-boundary"
+      ]
+    }
+  },
+  "taskKnowledge": {
+    "schemaVersion": 1,
+    "scopes": [],
+    "completion": {
+      "command": [
+        "bun",
+        "run",
+        "check"
+      ],
+      "source": "package.json"
+    }
+  }
+}
