@@ -22,7 +22,7 @@
           "equals": 0
         },
         "max_time_error_seconds": {
-          "max": 0.000001
+          "max": 1e-06
         }
       }
     },
@@ -229,7 +229,7 @@
         "recorded": "2026-10-10",
         "first_failing_stage": null,
         "expected_failures": [],
-        "notes": "Every stage passes. Overlap ownership is decided in the higher-priority reference camera's image with a 5 % relative depth bound: duplicated coverage 0.085 (max 0.1), unsupported share 0.088, surface coverage 0.389, 166 cross-reference triangles, one patch-graph component. Seam triangles at least 80 % owned are trimmed (0.6 % of the accepted mesh area, reported in the merge diagnostic); the trimmed seams are not re-stitched, so the reported mesh has more connected components (136) than before the trim (40)."
+        "notes": "Every stage passes. Overlap ownership is decided in the higher-priority reference camera's image, between fusion-linked patches only, with a 3.5 % relative depth bound after removing the patch pair's depth scale: duplicated coverage 0.089 (max 0.1), unsupported share 0.096, surface coverage 0.389, 170 cross-reference triangles, one patch-graph component. Seam triangles at least 80 % owned are trimmed (0.6 % of the accepted mesh area on the triangles' planes, reported in the merge diagnostic); the trimmed seams are not re-stitched (#137), so the reported mesh has more connected components (135) than before the trim (40)."
       }
     }
   ]

@@ -14,8 +14,10 @@
 //!   higher-priority patch's reference camera, where that patch's grid
 //!   triangles tile its footprint without overlap: a lower-priority triangle is
 //!   projected into that image and the share of its area lying on kept
-//!   triangles at the same depth (within a relative bound, since per-reference
-//!   depth scale differs by about a percent) is measured. A triangle at least
+//!   triangles at the same depth is measured: within a relative bound, after
+//!   removing the two patches' relative depth scale (per-reference depth scale
+//!   differs by about a percent). Only patches with a fusion-accepted seam pair
+//!   between them may own each other's overlap. A triangle at least
 //!   [`MIN_IMAGE_OWNERSHIP_SHARE`] owned by one higher-priority reference is
 //!   removed. The part of a removed seam triangle that was not owned is
 //!   reported as trimmed seam area, so the bounded loss stays observable.
@@ -49,11 +51,17 @@ const MIN_NORMAL_ALIGNMENT: f64 = 0.94;
 /// share of one triangle is trimmed there, and it is reported.
 pub(crate) const MIN_IMAGE_OWNERSHIP_SHARE: f64 = 0.8;
 /// Largest depth disagreement, as a share of the owner's depth, at which two
-/// references see the same surface, checked at every corner of the overlap.
-/// Per-reference depth scale differs by about a percent and single grid
-/// triangles tilt with per-point depth noise of about a percent; separate
-/// surfaces and occluders differ by more.
-const MAX_RELATIVE_DEPTH_DISAGREEMENT: f64 = 0.05;
+/// references see the same surface, checked at every corner of the overlap
+/// after removing the two patches' relative depth scale. Single grid triangles
+/// tilt with per-point depth noise of about a percent, so their corners spread
+/// by up to about 3 %; a layer nearer to the surface than this is below the
+/// dense depth's resolution. A separate layer in front of the surface (a
+/// railing 0.2 m before a wall 5 m away is 4 %) differs by more.
+const MAX_RELATIVE_DEPTH_DISAGREEMENT: f64 = 0.035;
+/// Overlaps used to estimate two patches' relative depth scale must agree to
+/// this share before the scale is removed; per-reference scale bias is a few
+/// percent at most.
+const MAX_RELATIVE_SCALE_SAMPLE: f64 = 0.1;
 
 /// World-to-camera pose of a reference view: `x_cam = rotation * x + translation`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,13 +82,21 @@ impl ReferenceCamera {
         })
     }
 
+    /// The plane through `corners` in camera coordinates, as `(n, d)` with
+    /// `n · x = d`.
+    fn plane(&self, corners: &[Vector3<f64>; 3]) -> Option<(Vector3<f64>, f64)> {
+        let [a, b, c] = corners.map(|corner| self.rotation * corner + self.translation);
+        let normal = (b - a).cross(&(c - a));
+        (normal.norm() > GEOMETRIC_EPSILON).then(|| (normal, normal.dot(&a)))
+    }
+
     fn project_triangle(&self, corners: &[Vector3<f64>; 3]) -> Option<[(Vector2<f64>, f64); 3]> {
         let [a, b, c] = corners.map(|corner| self.project(corner));
         Some([a?, b?, c?])
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct MergeStats {
     pub fused_pairs: usize,
     pub shared_vertices: usize,
@@ -93,9 +109,13 @@ pub(super) struct MergeStats {
     /// Removed seam triangles that a higher-priority reference owned only in
     /// part (at least `MIN_IMAGE_OWNERSHIP_SHARE`).
     pub trimmed_seam_triangles: usize,
-    /// Unowned area of the trimmed seam triangles, as a share of the accepted
-    /// mesh area before the merge.
+    /// Unowned surface area of the trimmed seam triangles (measured on each
+    /// triangle's plane, not in the image), as a share of the accepted mesh
+    /// area before the merge.
     pub trimmed_seam_area_share: f64,
+    /// Retained triangles per support group (the patch each triangle was
+    /// triangulated in), indexed like `membership`'s groups.
+    pub retained_by_group: Vec<usize>,
     /// Connected components of the patch graph (patches joined by
     /// cross-reference triangles); `0` without meshed patches.
     pub patch_components: usize,
@@ -222,6 +242,16 @@ pub(super) fn merge_fused_patches(
             Some((a.min(b), a.max(b)))
         })
         .collect();
+    // Patches with at least one fusion-accepted pair: only these may own each
+    // other's overlap in the image test.
+    let linked_patches: BTreeSet<(usize, usize)> = pairs
+        .iter()
+        .filter(|&&(a, b)| a < points.len() && b < points.len() && canonical[a] == canonical[b])
+        .filter_map(|&(a, b)| match (group_of(a), group_of(b)) {
+            (Some(left), Some(right)) if left != right => Some((left.min(right), left.max(right))),
+            _ => None,
+        })
+        .collect();
     for triangle in triangles.iter_mut() {
         let mapped = [triangle.a, triangle.b, triangle.c].map(|vertex| canonical[vertex]);
         // Never replace valid topology with a degenerate triangle.
@@ -275,20 +305,47 @@ pub(super) fn merge_fused_patches(
             .filter_map(|(index, owner)| (*owner == Some(*patch)).then_some(index))
             .collect();
         if patch_rank > 0 {
+            // Fusion-linked owners, each with this patch's depth scale relative
+            // to it (the median over loosely agreeing overlaps).
+            let owners: Vec<(&Footprint, f64)> = footprints
+                .iter()
+                .filter(|footprint| {
+                    linked_patches
+                        .contains(&(footprint.patch.min(*patch), footprint.patch.max(*patch)))
+                })
+                .map(|footprint| {
+                    let mut ratios: Vec<f64> = members
+                        .iter()
+                        .filter_map(|&index| geometry[index].as_ref())
+                        .flat_map(|candidate| footprint.depth_ratios(&candidate.corners))
+                        .collect();
+                    ratios.sort_by(f64::total_cmp);
+                    (
+                        footprint,
+                        ratios.get(ratios.len() / 2).copied().unwrap_or(1.0),
+                    )
+                })
+                .collect();
             for &index in &members {
                 let Some(candidate) = &geometry[index] else {
                     continue;
                 };
-                let owned = footprints
+                let owned = owners
                     .iter()
-                    .map(|footprint| footprint.owned_share(&candidate.corners))
-                    .fold(0.0, f64::max);
-                if owned >= MIN_IMAGE_OWNERSHIP_SHARE {
+                    .map(|(footprint, scale)| footprint.ownership(&candidate.corners, *scale))
+                    .fold(Ownership::default(), |best, next| {
+                        if next.image_share > best.image_share {
+                            next
+                        } else {
+                            best
+                        }
+                    });
+                if owned.image_share >= MIN_IMAGE_OWNERSHIP_SHARE {
                     keep[index] = false;
                     removed_duplicate_triangles += 1;
-                    if owned < 1.0 - OWNERSHIP_EPSILON {
+                    if owned.image_share < 1.0 - OWNERSHIP_EPSILON {
                         trimmed_seam_triangles += 1;
-                        trimmed_seam_area += (1.0 - owned) * candidate.area();
+                        trimmed_seam_area += (candidate.area() - owned.surface_area).max(0.0);
                     }
                     continue;
                 }
@@ -316,7 +373,7 @@ pub(super) fn merge_fused_patches(
                 if covered {
                     keep[index] = false;
                     removed_duplicate_triangles += 1;
-                } else if partially_covered || owned > OWNERSHIP_EPSILON {
+                } else if partially_covered || owned.image_share > OWNERSHIP_EPSILON {
                     // In the absence of proven full coverage keep the original
                     // face: it may be the only evidence at a hole or boundary.
                     remaining_overlap_triangles += 1;
@@ -331,7 +388,7 @@ pub(super) fn merge_fused_patches(
                 .filter(|&&index| keep[index])
                 .filter_map(|&index| geometry[index].as_ref().map(|surface| surface.corners))
                 .collect();
-            if let Some(footprint) = Footprint::new(camera, &kept) {
+            if let Some(footprint) = Footprint::new(*patch, camera, &kept) {
                 footprints.push(footprint);
             }
         }
@@ -350,6 +407,17 @@ pub(super) fn merge_fused_patches(
             } else {
                 large_surfaces.push(index);
             }
+        }
+    }
+    let group_count = membership
+        .iter()
+        .flatten()
+        .max()
+        .map_or(0, |group| group + 1);
+    let mut retained_by_group = vec![0; group_count];
+    for (index, owner) in patch_of.iter().enumerate() {
+        if let (true, Some(group)) = (keep[index], owner) {
+            retained_by_group[*group] += 1;
         }
     }
     let mut index = 0;
@@ -403,6 +471,7 @@ pub(super) fn merge_fused_patches(
         } else {
             0.0
         },
+        retained_by_group,
         patch_components,
         meshed_patches: patch_list.len(),
     }
@@ -565,6 +634,8 @@ const MAX_IMAGE_GRID_CELLS: usize = 4096;
 /// Grid triangles of one patch tile its footprint without overlap, so owned
 /// areas of different kept triangles add up.
 struct Footprint {
+    /// Support group of the patch.
+    patch: usize,
     camera: ReferenceCamera,
     triangles: Vec<[(Vector2<f64>, f64); 3]>,
     cell: f64,
@@ -572,7 +643,7 @@ struct Footprint {
 }
 
 impl Footprint {
-    fn new(camera: ReferenceCamera, kept: &[[Vector3<f64>; 3]]) -> Option<Self> {
+    fn new(patch: usize, camera: ReferenceCamera, kept: &[[Vector3<f64>; 3]]) -> Option<Self> {
         let triangles: Vec<[(Vector2<f64>, f64); 3]> = kept
             .iter()
             .filter_map(|corners| camera.project_triangle(corners))
@@ -593,6 +664,7 @@ impl Footprint {
             }
         }
         Some(Self {
+            patch,
             camera,
             triangles,
             cell,
@@ -600,19 +672,17 @@ impl Footprint {
         })
     }
 
-    /// Share of the candidate's projected area lying on kept triangles at the
-    /// same depth. `0` if it is behind the camera or degenerate here.
-    fn owned_share(&self, corners: &[Vector3<f64>; 3]) -> f64 {
-        let Some(candidate) = self.camera.project_triangle(corners) else {
-            return 0.0;
-        };
-        let total = image_area(&candidate);
-        if total <= GEOMETRIC_EPSILON * GEOMETRIC_EPSILON {
-            return 0.0;
+    /// Every overlap of the candidate's projection with a kept triangle: the
+    /// overlap polygon (normalized image coordinates) and that kept triangle.
+    fn overlaps(
+        &self,
+        corners: &[Vector3<f64>; 3],
+    ) -> Option<(ProjectedTriangle, Vec<Overlap<'_>>)> {
+        let candidate = self.camera.project_triangle(corners)?;
+        if image_area(&candidate) <= GEOMETRIC_EPSILON * GEOMETRIC_EPSILON {
+            return None;
         }
-        let Some(keys) = image_cells(&candidate, self.cell) else {
-            return 0.0;
-        };
+        let keys = image_cells(&candidate, self.cell)?;
         let nearby: BTreeSet<usize> = keys
             .iter()
             .filter_map(|key| self.cells.get(key))
@@ -620,7 +690,7 @@ impl Footprint {
             .copied()
             .collect();
         let polygon: Vec<Vector2<f64>> = candidate.iter().map(|corner| corner.0).collect();
-        let mut owned = 0.0;
+        let mut overlaps = Vec::new();
         for index in nearby {
             let kept = &self.triangles[index];
             let winding = cross2(kept[1].0 - kept[0].0, kept[2].0 - kept[0].0);
@@ -637,31 +707,99 @@ impl Footprint {
                     break;
                 }
             }
-            let area = polygon_area(&inside);
-            if area <= 0.0 {
-                continue;
+            if polygon_area(&inside) > 0.0 {
+                overlaps.push((inside, kept));
             }
-            // Depth agreement over the whole overlap: inverse depth is affine
-            // in normalized image coordinates, so checking every corner of the
-            // convex overlap bounds the disagreement inside it.
-            let agrees = inside.iter().all(|point| {
+        }
+        Some((candidate, overlaps))
+    }
+
+    /// Candidate-to-owner depth ratios at the centroids of overlaps that agree
+    /// within `MAX_RELATIVE_SCALE_SAMPLE`.
+    fn depth_ratios(&self, corners: &[Vector3<f64>; 3]) -> Vec<f64> {
+        let Some((candidate, overlaps)) = self.overlaps(corners) else {
+            return Vec::new();
+        };
+        overlaps
+            .iter()
+            .filter_map(|(polygon, kept)| {
+                let centroid = polygon.iter().sum::<Vector2<f64>>() / polygon.len() as f64;
+                let ratio = inverse_depth(kept, centroid)? / inverse_depth(&candidate, centroid)?;
+                ((ratio - 1.0).abs() <= MAX_RELATIVE_SCALE_SAMPLE).then_some(ratio)
+            })
+            .collect()
+    }
+
+    /// The share of the candidate's projected area lying on kept triangles at
+    /// the same depth once the candidate's relative depth `scale` is removed,
+    /// and the surface area of those owned parts on the candidate's plane.
+    fn ownership(&self, corners: &[Vector3<f64>; 3], scale: f64) -> Ownership {
+        let Some((candidate, overlaps)) = self.overlaps(corners) else {
+            return Ownership::default();
+        };
+        let total = image_area(&candidate);
+        let plane = self.camera.plane(corners);
+        let (mut image, mut surface) = (0.0, 0.0);
+        for (polygon, kept) in &overlaps {
+            // Inverse depth is affine in normalized image coordinates, so
+            // checking every corner of the convex overlap bounds the
+            // disagreement inside it.
+            let agrees = polygon.iter().all(|point| {
                 match (
                     inverse_depth(&candidate, *point),
                     inverse_depth(kept, *point),
                 ) {
                     (Some(candidate), Some(kept)) => {
-                        (1.0 / candidate - 1.0 / kept).abs()
-                            <= MAX_RELATIVE_DEPTH_DISAGREEMENT / kept
+                        let (candidate, kept) = (1.0 / candidate, scale / kept);
+                        (candidate - kept).abs() <= MAX_RELATIVE_DEPTH_DISAGREEMENT * kept
                     }
                     _ => false,
                 }
             });
             if agrees {
-                owned += area;
+                image += polygon_area(polygon);
+                surface += plane.map_or(0.0, |plane| back_projected_area(polygon, plane));
             }
         }
-        (owned / total).min(1.0)
+        Ownership {
+            image_share: (image / total).min(1.0),
+            surface_area: surface,
+        }
     }
+}
+
+/// A triangle in normalized image coordinates, with each corner's depth.
+type ProjectedTriangle = [(Vector2<f64>, f64); 3];
+/// An overlap polygon (normalized image coordinates) and the kept triangle it lies on.
+type Overlap<'a> = (Vec<Vector2<f64>>, &'a ProjectedTriangle);
+
+/// How much of a candidate triangle one reference owns.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Ownership {
+    /// Share of the candidate's projected area.
+    image_share: f64,
+    /// Owned area on the candidate's plane, in world units.
+    surface_area: f64,
+}
+
+/// Area of an image polygon lifted onto a camera-space plane `n · x = d`.
+fn back_projected_area(polygon: &[Vector2<f64>], (normal, offset): (Vector3<f64>, f64)) -> f64 {
+    let lifted: Option<Vec<Vector3<f64>>> = polygon
+        .iter()
+        .map(|point| {
+            let ray = Vector3::new(point.x, point.y, 1.0);
+            let along = normal.dot(&ray);
+            (along.abs() > GEOMETRIC_EPSILON).then(|| ray * (offset / along))
+        })
+        .collect();
+    let Some(lifted) = lifted else {
+        return 0.0;
+    };
+    (0..lifted.len())
+        .map(|index| lifted[index].cross(&lifted[(index + 1) % lifted.len()]))
+        .sum::<Vector3<f64>>()
+        .norm()
+        * 0.5
 }
 
 fn image_area(triangle: &[(Vector2<f64>, f64); 3]) -> f64 {
