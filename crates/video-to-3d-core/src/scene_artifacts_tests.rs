@@ -1725,3 +1725,134 @@ fn animated_png_chunks_are_rejected() {
         );
     }
 }
+
+// Acceptance for issue #144, written before the implementation from the issue
+// and the public bake / keyframe-writer seams.
+
+#[test]
+fn baseline_fixture_bake_output_is_unchanged() {
+    // Pins the bake output of the existing two-reference fixture, captured at
+    // the pre-#144 baseline, so incremental reference loading stays
+    // byte-identical.
+    let dir = TempDir::new("bake-baseline-144");
+    let inputs = Fixture::new().write(&dir.0);
+    let outcome = bake(&dir.0, &inputs);
+    assert_eq!(outcome.content_hash.as_str(), BASELINE_144_BAKE_HASH);
+}
+
+#[test]
+fn a_reference_without_textureable_triangles_is_never_loaded() {
+    let dir = TempDir::new("unused-reference");
+    let mut fixture = Fixture::new();
+    // Reference 3 owns one observed point that no triangle uses.
+    let start = fixture.points.len();
+    fixture.points.push(point(start));
+    fixture.sites.push(DenseGridSite { x: 4, y: 4 });
+    fixture.cameras.push(camera(3, 0.9));
+    fixture.images.push((3, image(33)));
+    let mut patches = vec![
+        DenseReferencePatchStats {
+            reference_frame: 0,
+            source_frames: vec![1, 2],
+            primary_start: 0,
+            primary_points: 3,
+            completion_start: 3,
+            completed_points: 1,
+            ..DenseReferencePatchStats::default()
+        },
+        DenseReferencePatchStats {
+            reference_frame: 1,
+            source_frames: vec![0],
+            primary_start: 4,
+            primary_points: 4,
+            completion_start: 8,
+            completed_points: 0,
+            ..DenseReferencePatchStats::default()
+        },
+    ];
+    patches.push(DenseReferencePatchStats {
+        reference_frame: 3,
+        source_frames: vec![0],
+        primary_start: start,
+        primary_points: 1,
+        completion_start: start + 1,
+        completed_points: 0,
+        ..DenseReferencePatchStats::default()
+    });
+    fixture.regions = classic_reference_patch_regions(&patches);
+    let inputs = fixture.write(&dir.0);
+    let reference = bake(&dir.0, &inputs);
+    assert!(reference
+        .artifact
+        .materials
+        .iter()
+        .all(|material| material.reference_frame != 3));
+
+    // Corrupt reference 3's keyframe sidecar. A bake that loaded it would fail
+    // hash verification; one that skips non-contributing references succeeds
+    // with the same output.
+    let keyframes =
+        KeyframesArtifact::from_json(&fs::read_to_string(inputs.0.resolve(&dir.0)).unwrap())
+            .unwrap();
+    let unused = keyframes
+        .frames
+        .iter()
+        .find(|frame| frame.frame_index == 3)
+        .unwrap();
+    fs::write(unused.pixels.resolve(&dir.0), b"corrupt").unwrap();
+    fs::remove_file(path("artifacts/bake/surface-textures.json").resolve(&dir.0)).unwrap();
+    let rebuilt = bake_texture_artifact(
+        &dir.0,
+        &path("artifacts/bake/surface-textures.json"),
+        &inputs.0,
+        &inputs.1,
+        &CancellationToken::new(),
+    )
+    .expect("a reference that textures nothing must not be loaded");
+    assert_eq!(rebuilt.content_hash, reference.content_hash);
+}
+
+#[test]
+fn a_failed_keyframe_index_write_leaves_no_new_sidecars() {
+    let dir = TempDir::new("keyframe-rollback");
+    let frame = |frame_index: usize, rgba: &'static [u8]| SampledFrame {
+        frame_index,
+        timestamp_seconds: frame_index as f64,
+        width: 1,
+        height: 1,
+        rgba,
+    };
+    // Another index already owns frame 0's content-addressed sidecar.
+    let (existing, _) =
+        write_keyframes_artifact(&dir.0, &path("inputs/a.json"), &[frame(0, &[1, 2, 3, 255])])
+            .unwrap();
+    let kept = existing.frames[0].pixels.resolve(&dir.0);
+    assert!(kept.exists());
+
+    // The replacement index path is occupied by a directory, so committing it
+    // fails after the new sidecars would have been written.
+    let blocked = path("inputs/b.json");
+    fs::create_dir_all(blocked.resolve(&dir.0).join("blocker")).unwrap();
+    let result = write_keyframes_artifact(
+        &dir.0,
+        &blocked,
+        &[
+            frame(0, &[1, 2, 3, 255]),
+            frame(1, &[4, 5, 6, 255]),
+            frame(2, &[7, 8, 9, 255]),
+        ],
+    );
+    assert!(result.is_err());
+
+    let frames_dir = dir.0.join("inputs/frames");
+    let mut left: Vec<_> = fs::read_dir(&frames_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    left.sort();
+    // Only the pre-existing sidecar another index owns survives.
+    assert_eq!(left, vec![kept]);
+}
+const BASELINE_144_BAKE_HASH: &str =
+    "sha256:4561a455e335e787b7f4655e8c9652aaaba2b4e248c9d82dd0ce1ca0f252f8ea";
