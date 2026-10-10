@@ -480,6 +480,12 @@ fn bake_declaration() -> crate::scene_project::OperationDeclaration {
 
 #[test]
 fn a_stale_bake_output_at_its_own_directory_is_released() {
+    for stale in ["artifacts/bake", "artifacts/bake/textures"] {
+        stale_own_obstruction_is_released(stale);
+    }
+}
+
+fn stale_own_obstruction_is_released(stale: &str) {
     let project = TempProject::new("stale-own-ancestor");
     let (store, mut manifest) = project.open();
     manifest.quality_mode = crate::scene_project::QualityMode::Standard;
@@ -489,7 +495,8 @@ fn a_stale_bake_output_at_its_own_directory_is_released() {
     let (store, mut manifest) = project.open();
     // An older bake recorded a regular file where the canonical bake now
     // needs its directory.
-    let stale_path = ProjectPath::new("artifacts/bake").unwrap();
+    let stale_path = ProjectPath::new(stale).unwrap();
+    fs::create_dir_all(stale_path.resolve(&project.root).parent().unwrap()).unwrap();
     fs::rename(
         project.file("artifacts/bake.bin"),
         stale_path.resolve(&project.root),
@@ -515,7 +522,7 @@ fn a_stale_bake_output_at_its_own_directory_is_released() {
     assert!(report.invalidated.iter().any(|(operation, reason)| {
         operation == "bake" && *reason == Invalidation::StaleIdentity
     }));
-    assert!(!project.file("artifacts/bake").exists());
+    assert!(!project.file(stale).is_file(), "{stale}");
 }
 
 #[test]

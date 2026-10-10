@@ -753,6 +753,13 @@ fn texture_artifacts_reject_incorrect_camera_source_associations() {
     assert!(SurfaceTexturesArtifact::from_json(&duplicate.to_json()).is_err());
     assert!(duplicate.scene_entries("bake").is_err());
 
+    // Observed provenance needs a supporting view besides the reference.
+    let mut alone = original.clone();
+    alone.materials[0].source_frames = vec![alone.materials[0].reference_frame];
+    let error = alone.validate().unwrap_err();
+    assert!(error.contains("no supporting frame"), "{error}");
+    assert!(alone.scene_entries("bake").is_err());
+
     original.validate().unwrap();
     scene_with(&original).validate().unwrap();
 }
@@ -1150,6 +1157,17 @@ fn rewriting_keyframes_removes_only_unreferenced_superseded_sidecars() {
     );
     assert!(exists(&second, 0));
     second.load_pixels(&dir.0, 2).unwrap();
+
+    // A superseded sidecar that a media input (or any other project entry)
+    // owns is never removed either.
+    let (_, _) = write_keyframes_artifact(&dir.0, &index, &first_frames()).unwrap();
+    manifest.inputs[0].path = first.frames[0].pixels.clone();
+    write_project_keyframes_artifact(&dir.0, &manifest, &index, &[frame(2, &[7, 8, 9, 255])])
+        .unwrap();
+    assert!(
+        exists(&first, 0),
+        "a sidecar a media input owns was removed"
+    );
 }
 
 fn first_frames() -> Vec<SampledFrame<'static>> {
@@ -1203,6 +1221,8 @@ fn png_sidecars_are_validated_completely() {
         .contains("unknown critical"));
     validate_png_rgb8(&with_chunk(b"zzZz", b"x"), 3, 2).unwrap();
     validate_png_rgb8(&with_chunk(b"PLTE", &[0, 0, 0]), 3, 2).unwrap();
+    // PNG dimensions are never zero.
+    assert!(!is_png_rgb8(&png, 0, 2));
 }
 
 #[test]

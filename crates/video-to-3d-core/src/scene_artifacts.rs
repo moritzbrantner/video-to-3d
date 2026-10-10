@@ -360,6 +360,8 @@ pub fn write_keyframes_artifact(
 /// not listed by the new version, and not listed by any keyframes artifact
 /// the manifest records (sidecar paths are otherwise unconstrained, so only
 /// the project's records can establish that no other artifact uses a file).
+/// Media inputs, exports, other recorded documents and the sidecars of every
+/// other record are protected too.
 pub fn write_project_keyframes_artifact(
     root: &Path,
     manifest: &SceneProjectManifest,
@@ -368,15 +370,29 @@ pub fn write_project_keyframes_artifact(
 ) -> Result<(KeyframesArtifact, ContentHash), String> {
     let (artifact, hash, previous) = write_keyframes(root, index, frames)?;
     if let Some(previous) = previous {
-        let mut referenced: BTreeSet<String> = artifact
+        // Every path another project entry owns: the new frames, media
+        // inputs, exports (directories), every other recorded document and
+        // every sidecar those documents list, whatever their kind.
+        let mut referenced: Vec<String> = artifact
             .frames
             .iter()
             .map(|frame| frame.pixels.as_str().to_ascii_lowercase())
+            .chain(
+                manifest
+                    .inputs
+                    .iter()
+                    .map(|input| input.path.as_str().to_ascii_lowercase()),
+            )
+            .chain(
+                manifest
+                    .exports
+                    .iter()
+                    .map(|export| export.path.as_str().to_ascii_lowercase()),
+            )
             .collect();
         for record in &manifest.artifacts {
-            if record.kind == ArtifactKind::Keyframes
-                && !record.path.as_str().eq_ignore_ascii_case(index.as_str())
-            {
+            if !record.path.as_str().eq_ignore_ascii_case(index.as_str()) {
+                referenced.push(record.path.as_str().to_ascii_lowercase());
                 referenced.extend(
                     recorded_sidecar_paths(root, record)
                         .iter()
@@ -384,11 +400,18 @@ pub fn write_project_keyframes_artifact(
                 );
             }
         }
+        let owned = |folded: &str| {
+            referenced.iter().any(|path| {
+                path == folded
+                    || folded.starts_with(&format!("{path}/"))
+                    || path.starts_with(&format!("{folded}/"))
+            })
+        };
         let frames_directory =
             format!("{}/", sibling(index, "frames")?.as_str()).to_ascii_lowercase();
         for frame in &previous.frames {
             let folded = frame.pixels.as_str().to_ascii_lowercase();
-            if folded.starts_with(&frames_directory) && !referenced.contains(&folded) {
+            if folded.starts_with(&frames_directory) && !owned(&folded) {
                 let _ = fs::remove_file(frame.pixels.resolve(root));
             }
         }
@@ -688,6 +711,14 @@ impl SurfaceTexturesArtifact {
             if !sources.contains(&material.reference_frame) {
                 return Err(format!(
                     "surface textures material for frame {} must cite its reference frame",
+                    material.reference_frame
+                ));
+            }
+            // Observed provenance needs source-camera support beyond the
+            // reference view itself.
+            if sources.len() < 2 {
+                return Err(format!(
+                    "surface textures material for frame {} cites no supporting frame besides its reference",
                     material.reference_frame
                 ));
             }
@@ -991,7 +1022,9 @@ pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), Stri
 /// Whether `header` (at least the first 33 bytes of a file) starts a PNG
 /// whose IHDR declares an 8-bit RGB, non-interlaced image of these dimensions.
 pub fn is_png_rgb8(header: &[u8], width: u32, height: u32) -> bool {
-    header.len() >= 33
+    width > 0
+        && height > 0
+        && header.len() >= 33
         && header.starts_with(b"\x89PNG\r\n\x1a\n")
         && header[8..12] == 13_u32.to_be_bytes()
         && &header[12..16] == b"IHDR"

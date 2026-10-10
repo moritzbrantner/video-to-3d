@@ -337,13 +337,21 @@ impl ProjectStore {
                 // file inside the directory collides with the bake's outputs.
                 // A stale record of the bake itself inside its own directory
                 // is simply overwritten.
+                // The bake creates its directory and the `textures/`
+                // directory inside it, so a file at or above either blocks it.
+                let at_or_above = |folded: &str, directory: &str| {
+                    [directory.to_owned(), format!("{directory}/textures")]
+                        .iter()
+                        .any(|managed| {
+                            folded == managed || managed.starts_with(&format!("{folded}/"))
+                        })
+                };
                 let blocks = |owner: &str, folded: &str, producer: &str| {
                     let (_, directory) = bake_directories
                         .iter()
                         .find(|(id, _)| id == owner)
                         .expect("owner is a bake operation");
-                    folded == directory
-                        || directory.starts_with(&format!("{folded}/"))
+                    at_or_above(folded, directory)
                         || (producer != owner && folded.starts_with(&format!("{directory}/")))
                 };
                 // The document and every sidecar a record lists are reserved
@@ -408,12 +416,12 @@ impl ProjectStore {
                     // operation, so removing them is cheaper than spending
                     // the bake's attempt on a failed `create_dir_all`.
                     for (path, folded) in paths {
-                        let at_or_above = bake_directories.iter().any(|(_, directory)| {
-                            folded == directory || directory.starts_with(&format!("{folded}/"))
-                        });
+                        let obstructs = bake_directories
+                            .iter()
+                            .any(|(_, directory)| at_or_above(folded, directory));
                         let shared = protected.iter().any(|kept| overlaps(kept, folded));
                         let file = self.resolve(path);
-                        if at_or_above && !shared && file.is_file() {
+                        if obstructs && !shared && file.is_file() {
                             let _ = fs::remove_file(file);
                         }
                     }
