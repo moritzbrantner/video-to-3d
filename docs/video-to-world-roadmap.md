@@ -1,5 +1,26 @@
 # Video clip → whole scene product roadmap
 
+## Immediate product priority — hybrid room-to-Blender vertical slice (owner decision 2026-10-10)
+
+**Chosen architecture: B — hybrid scene reconstruction.** The observed Rust reconstruction defines accepted camera geometry and evidence. Learned reconstruction strengthens weak observed regions. Semantic identification and tracked masks separate scene objects. Existing asset-tooling generators supply explicit, labeled candidate completions where video evidence is insufficient. All geometry participating in shared fusion crosses the existing evidence validation boundary; scene placement is checked against registered views. No generative output silently becomes observed geometry.
+
+**First product release gate:** [Hybrid room-to-Blender acceptance contract](specs/hybrid-room-to-blender-acceptance.md). A short pinned room video must build, without an agent choosing steps, into one coherent environment plus at least three distinct Blender scene objects (at least one independently editable mesh), source-based transforms/materials, provenance, preview and headless Blender import/transform test. This is **not yet delivered**; intermediate reconstructor successes do not count as product completion.
+
+**Execute existing issues in dependency-first order (not numeric milestone order):**
+1. Establish synthetic scene oracle, licensed real room canary and independent E2E acceptance/Blender import checks **before** declaring implementation successful.
+2. Make the current CLI/scene runner execute the smallest full pipeline from source media; preserve cancellation, receipts and user privacy.
+3. Native evidence interchange and first learned multi-view provider **only where measured reconstruction gates fail**; do not delay the vertical slice for a full research provider matrix.
+4. Semantic inventory, cross-frame identity tracking, consistent masks, multi-view object references and first independent object asset through existing asset-tooling.
+5. Place and validate objects in the observed world; compose environment and object hierarchy; enable hybrid preview and Blender/DCC handoff.
+6. Run acceptance on pinned clip; prioritize the **first failing critical-path stage**, fix it, and repeat. Report product progress as end-to-end gates passed rather than merged PR count or isolated mesh metrics.
+
+**Deferred unless a critical-path gate demonstrates a need:** general splat optimization, extensive scene expansion, multi-video fusion, audio, advanced dynamic scenes and mesh micro-optimizations. Existing security/correctness review findings remain mandatory to resolve; deferral applies to new feature priority, not defect concealment.
+
+**Authority:** This roadmap is the product intent; the linked acceptance spec is the measurable exit gate. Independently authored acceptance expectations should not be weakened by the implementation agent to make a build pass. Add material design decisions to repository-owned specifications before implementation.
+
+---
+
+
 ## Product target
 
 The project succeeds when a user can provide a short video clip and receive a usable 3D scene without an agent deciding which step to run next.
