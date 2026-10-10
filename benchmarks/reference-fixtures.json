@@ -22,7 +22,7 @@
           "equals": 0
         },
         "max_time_error_seconds": {
-          "max": 1e-06
+          "max": 0.000001
         }
       }
     },
@@ -36,7 +36,7 @@
           "min": 0.8
         },
         "max_pair_median_error_pixels": {
-          "max": 1.0
+          "max": 1
         }
       }
     },
@@ -47,10 +47,10 @@
           "equals": true
         },
         "rotation_error_degrees": {
-          "max": 1.0
+          "max": 1
         },
         "translation_direction_error_degrees": {
-          "max": 5.0
+          "max": 5
         }
       }
     },
@@ -64,7 +64,7 @@
           "max": 0.25
         },
         "max_rotation_error_degrees": {
-          "max": 3.0
+          "max": 3
         }
       }
     },
@@ -118,10 +118,10 @@
           "min": 0.5
         },
         "median_texel_reprojection_error_pixels": {
-          "max": 1.0
+          "max": 1
         },
         "median_texel_color_error": {
-          "max": 10.0
+          "max": 10
         }
       }
     }
@@ -226,35 +226,17 @@
         "texture": "default"
       },
       "baseline": {
-        "recorded": "2026-10-09",
+        "recorded": "2026-10-10",
         "first_failing_stage": "mesh",
         "expected_failures": [
-          {
-            "stage": "mesh",
-            "check": "cross_reference_triangles",
-            "issue": 126,
-            "reason": "Each reference patch is triangulated on its own; no triangle spans two reference patches."
-          },
-          {
-            "stage": "mesh",
-            "check": "shared_vertices",
-            "issue": 126,
-            "reason": "No vertex is shared between reference patches."
-          },
           {
             "stage": "mesh",
             "check": "duplicated_coverage_share",
             "issue": 126,
             "reason": "Overlapping references stay separate sheets, so the overlap is meshed more than once."
-          },
-          {
-            "stage": "mesh",
-            "check": "reference_patch_components",
-            "issue": 126,
-            "reason": "The three meshed reference patches are not joined by any triangle: three patch-graph components."
           }
         ],
-        "notes": "The true surface is one component; the accepted mesh has 59, every one inside a single reference patch. Dense coverage holes and discontinuity rejections fragment each patch, and no patch connects to another. Component counts are reported against the truth; the cross-patch part is gated (#126)."
+        "notes": "Cross-reference triangles now connect all three meshed reference patches; original surface holes and dense discontinuity rejections remain observable. Full-area overlap pruning preserves supported boundaries but still leaves excessive duplicated coverage; #126 remains an expected mesh failure until a provenance-preserving seam correction passes the unchanged 0.1 maximum."
       }
     }
   ]

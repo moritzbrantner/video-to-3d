@@ -84,6 +84,31 @@ pub(super) fn merge_fused_patches(
         return MergeStats::default();
     }
 
+    // Components are built from ORIGINAL patch topology, before remapping any
+    // accepted seam vertices. One accepted correspondence does not authorize
+    // deleting an unrelated disconnected island from the same two cameras.
+    let mut component_parent: Vec<usize> = (0..points.len()).collect();
+    for triangle in triangles.iter() {
+        if group_of(triangle.a).is_none()
+            || group_of(triangle.a) != group_of(triangle.b)
+            || group_of(triangle.a) != group_of(triangle.c)
+        {
+            continue;
+        }
+        let representative = find(&mut component_parent, triangle.a);
+        for vertex in [triangle.b, triangle.c] {
+            let root = find(&mut component_parent, vertex);
+            component_parent[root] = representative;
+        }
+    }
+    let component_by_vertex: Vec<usize> = (0..points.len())
+        .map(|vertex| find(&mut component_parent, vertex))
+        .collect();
+    let component_by_triangle: Vec<usize> = triangles
+        .iter()
+        .map(|triangle| component_by_vertex[triangle.a])
+        .collect();
+
     // Each triangle belongs to the patch of its own vertices (patches are
     // triangulated independently, so all three agree).
     let patch_of: Vec<Option<usize>> = triangles.iter().map(|t| group_of(t.a)).collect();
@@ -126,18 +151,22 @@ pub(super) fn merge_fused_patches(
         canonical[drop] = keep;
         fused_pairs += 1;
     }
-    // Only patch pairs with an explicitly fusion-accepted correspondence may
-    // deduplicate faces. Proximity alone is not evidence of a shared surface.
-    let linked_patches: BTreeSet<(usize, usize)> = pairs
+    // Only ORIGINAL mesh components containing a fusion-accepted pair may
+    // deduplicate each other. The same cameras can contain unrelated islands.
+    let linked_components: BTreeSet<(usize, usize)> = pairs
         .iter()
         .filter_map(|&(a, b)| {
             if a >= points.len() || b >= points.len() || canonical[a] != canonical[b] {
                 return None;
             }
-            let (Some(a), Some(b)) = (group_of(a), group_of(b)) else {
+            let (Some(a_group), Some(b_group)) = (group_of(a), group_of(b)) else {
                 return None;
             };
-            (a != b).then_some((a.min(b), a.max(b)))
+            if a_group == b_group {
+                return None;
+            }
+            let (a, b) = (component_by_vertex[a], component_by_vertex[b]);
+            Some((a.min(b), a.max(b)))
         })
         .collect();
     for triangle in triangles.iter_mut() {
@@ -206,13 +235,9 @@ pub(super) fn merge_fused_patches(
                 let candidates = nearby
                     .into_iter()
                     .filter(|&other| {
-                        let Some(other_patch) = patch_of[other] else {
-                            return false;
-                        };
-                        linked_patches.contains(&(
-                            usize::min(*patch, other_patch),
-                            usize::max(*patch, other_patch),
-                        ))
+                        let (left, right) =
+                            (component_by_triangle[index], component_by_triangle[other]);
+                        linked_components.contains(&(left.min(right), left.max(right)))
                     })
                     .filter_map(|other| geometry[other].as_ref());
                 let (covered, partially_covered) = candidate.covered_by(candidates, tolerance);
@@ -273,19 +298,6 @@ pub(super) fn merge_fused_patches(
     }
     let patch_list: Vec<usize> = patches.iter().copied().collect();
     let mut parent: Vec<usize> = (0..patch_list.len()).collect();
-    fn find(parent: &mut [usize], index: usize) -> usize {
-        let mut root = index;
-        while parent[root] != root {
-            root = parent[root];
-        }
-        let mut node = index;
-        while parent[node] != root {
-            let next = parent[node];
-            parent[node] = root;
-            node = next;
-        }
-        root
-    }
     let slot = |group: usize| patch_list.binary_search(&group).ok();
     for (left, right) in links {
         if let (Some(left), Some(right)) = (slot(left), slot(right)) {
@@ -308,6 +320,19 @@ pub(super) fn merge_fused_patches(
     }
 }
 
+fn find(parent: &mut [usize], index: usize) -> usize {
+    let mut root = index;
+    while parent[root] != root {
+        root = parent[root];
+    }
+    let mut node = index;
+    while parent[node] != root {
+        let next = parent[node];
+        parent[node] = root;
+        node = next;
+    }
+    root
+}
 struct TriangleGeometry {
     corners: [Vector3<f64>; 3],
     normal: Vector3<f64>,

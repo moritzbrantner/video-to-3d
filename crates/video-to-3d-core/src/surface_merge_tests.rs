@@ -94,6 +94,38 @@ fn no_accepted_fusion_pair_means_no_dedup_even_for_coincident_sheets() {
 }
 
 #[test]
+fn a_fusion_link_does_not_erase_an_unrelated_island_of_the_same_camera_pair() {
+    let points = vec![
+        point(0.0, 0.0, 0.0),
+        point(1.0, 0.0, 0.0),
+        point(0.0, 1.0, 0.0),
+        point(10.0, 0.0, 0.0),
+        point(11.0, 0.0, 0.0),
+        point(10.0, 1.0, 0.0),
+        point(0.0, 0.0, 0.0),
+        point(1.0, 0.0, 0.0),
+        point(0.0, 1.0, 0.0),
+        point(10.0, 0.0, 0.0),
+        point(11.0, 0.0, 0.0),
+        point(10.0, 1.0, 0.0),
+    ];
+    let mut triangles = vec![
+        triangle(0, 1, 2),
+        triangle(3, 4, 5),
+        triangle(6, 7, 8),
+        triangle(9, 10, 11),
+    ];
+    let membership = [vec![Some(0); 6], vec![Some(1); 6]].concat();
+
+    let stats = merge_fused_patches(&points, &mut triangles, &membership, &[(0, 6)]);
+
+    assert_eq!(stats.fused_pairs, 1);
+    assert_eq!(stats.removed_duplicate_triangles, 1);
+    assert!(signature(&triangles).contains(&(9, 10, 11)));
+    assert!(signature(&triangles).contains(&(3, 4, 5)));
+}
+
+#[test]
 fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
     // Two adjacent camera grids: A covers x=0..2, B x=1..3.
     // The last column of B joins A at x=2; x=1..2 is the redundant sheet,
@@ -155,7 +187,7 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
 
 #[test]
 fn large_triangles_are_indexed_across_their_interior() {
-    let surface = geometry([(0.0, 0.0, 0.0), (20.0, 0.0, 0.0), (0.0, 20.0, 0.0)]);
+    let surface = geometry([(0.0, 0.0, 0.0), (30.0, 0.0, 0.0), (0.0, 30.0, 0.0)]);
     let grid = surface.grid_bounds(1.0, 0.0);
     assert!(grid_cells(&grid).is_none());
     let small = geometry([(4.0, 4.0, 0.0), (5.0, 4.0, 0.0), (4.0, 5.0, 0.0)]);
