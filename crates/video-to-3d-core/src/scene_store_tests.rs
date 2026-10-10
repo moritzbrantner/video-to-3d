@@ -1,5 +1,7 @@
 use super::*;
-use crate::scene_runner::{AttemptOutcome, OperationRequest, ProducedArtifact, ResolvedInput};
+use crate::scene_runner::{
+    AttemptOutcome, OperationRequest, ProducedArtifact, ResolvedInput, RunObserver,
+};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -461,6 +463,161 @@ fn stale_artifacts_whose_sidecars_obstruct_a_bake_are_released() {
         .artifacts
         .iter()
         .any(|artifact| artifact.produced_by == "ingest"));
+}
+
+fn bake_declaration() -> crate::scene_project::OperationDeclaration {
+    crate::scene_project::OperationDeclaration {
+        id: "bake".into(),
+        kind: OperationKind::TextureBake,
+        inputs: vec![
+            OperationInput::Operation("ingest".into()),
+            OperationInput::Operation("mesh".into()),
+        ],
+        provider: None,
+        max_attempts: 1,
+    }
+}
+
+#[test]
+fn a_stale_bake_output_at_its_own_directory_is_released() {
+    let project = TempProject::new("stale-own-ancestor");
+    let (store, mut manifest) = project.open();
+    manifest.quality_mode = crate::scene_project::QualityMode::Standard;
+    manifest.operations.push(bake_declaration());
+    store.save_manifest(&manifest).unwrap();
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, mut manifest) = project.open();
+    // An older bake recorded a regular file where the canonical bake now
+    // needs its directory.
+    let stale_path = ProjectPath::new("artifacts/bake").unwrap();
+    fs::rename(
+        project.file("artifacts/bake.bin"),
+        stale_path.resolve(&project.root),
+    )
+    .unwrap();
+    let mut receipt = store.read_receipt("bake").unwrap().unwrap();
+    receipt.output.path = stale_path.clone();
+    store.write_receipt(&receipt).unwrap();
+    manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.produced_by == "bake")
+        .unwrap()
+        .path = stale_path;
+    manifest
+        .operations
+        .iter_mut()
+        .find(|operation| operation.id == "bake")
+        .unwrap()
+        .max_attempts = 2;
+    store.save_manifest(&manifest).unwrap();
+    let report = store.reconcile(&mut manifest, VerifyMode::Full).unwrap();
+    assert!(report.invalidated.iter().any(|(operation, reason)| {
+        operation == "bake" && *reason == Invalidation::StaleIdentity
+    }));
+    assert!(!project.file("artifacts/bake").exists());
+}
+
+#[test]
+fn released_obstructions_keep_files_other_entries_own() {
+    let project = TempProject::new("stale-shared-obstruction");
+    build(&project, &WritingExecutor::new(&project.root));
+    let (store, mut manifest) = project.open();
+    // A stale keyframes artifact lists a sidecar exactly at the bake
+    // directory, and a declared export also owns that path.
+    let staging = ProjectPath::new("artifacts/staging/keyframes.json").unwrap();
+    let rgba = [10_u8, 20, 30, 255];
+    crate::scene_artifacts::write_keyframes_artifact(
+        &project.root,
+        &staging,
+        &[crate::scene_artifacts::SampledFrame {
+            frame_index: 0,
+            timestamp_seconds: 0.0,
+            width: 1,
+            height: 1,
+            rgba: &rgba,
+        }],
+    )
+    .unwrap();
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(staging.resolve(&project.root)).unwrap()).unwrap();
+    let sidecar = document["frames"][0]["pixels"].as_str().unwrap().to_owned();
+    fs::rename(project.file(&sidecar), project.file("artifacts/bake")).unwrap();
+    document["frames"][0]["pixels"] = json!("artifacts/bake");
+    let document_path = ProjectPath::new("artifacts/ingest-keyframes.json").unwrap();
+    fs::write(document_path.resolve(&project.root), document.to_string()).unwrap();
+    let (hash, length) = hash_file(&document_path.resolve(&project.root)).unwrap();
+    let mut receipt = store.read_receipt("ingest").unwrap().unwrap();
+    receipt.output.path = document_path.clone();
+    receipt.output.content_hash = hash.clone();
+    receipt.output.byte_length = length;
+    store.write_receipt(&receipt).unwrap();
+    let record = manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.produced_by == "ingest")
+        .unwrap();
+    record.path = document_path;
+    record.content_hash = hash;
+    manifest.quality_mode = crate::scene_project::QualityMode::Standard;
+    manifest.operations.push(bake_declaration());
+    manifest
+        .exports
+        .push(crate::scene_project::ExportDeclaration {
+            id: "shared".into(),
+            format: crate::scene_project::ExportFormat::WebBundle,
+            path: ProjectPath::new("artifacts/bake").unwrap(),
+            includes: vec![ArtifactKind::AssembledScene],
+        });
+    manifest
+        .operations
+        .iter_mut()
+        .find(|operation| operation.id == "ingest")
+        .unwrap()
+        .max_attempts = 2;
+    store.save_manifest(&manifest).unwrap();
+
+    let report = store.reconcile(&mut manifest, VerifyMode::Full).unwrap();
+    assert!(report.invalidated.iter().any(|(operation, reason)| {
+        operation == "ingest" && *reason == Invalidation::StaleIdentity
+    }));
+    assert_eq!(fs::read(project.file("artifacts/bake")).unwrap(), rgba);
+}
+
+#[test]
+fn produced_outputs_are_rejected_when_their_sidecars_do_not_verify() {
+    let project = TempProject::new("produced-sidecars");
+    let (store, manifest) = project.open();
+    let path = ProjectPath::new("artifacts/keyframes.json").unwrap();
+    let rgba = [1_u8, 2, 3, 255];
+    crate::scene_artifacts::write_keyframes_artifact(
+        &project.root,
+        &path,
+        &[crate::scene_artifacts::SampledFrame {
+            frame_index: 0,
+            timestamp_seconds: 0.0,
+            width: 1,
+            height: 1,
+            rgba: &rgba,
+        }],
+    )
+    .unwrap();
+    let (hash, _) = hash_file(&path.resolve(&project.root)).unwrap();
+    let produced = ProducedArtifact::new(path.clone(), hash, Reproducibility::Deterministic);
+    let mut persister = Persister {
+        store: &store,
+        snapshot: manifest,
+    };
+    persister
+        .verify_output(ArtifactKind::Keyframes, &produced)
+        .unwrap();
+    let document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path.resolve(&project.root)).unwrap()).unwrap();
+    fs::remove_file(project.file(document["frames"][0]["pixels"].as_str().unwrap())).unwrap();
+    let error = persister
+        .verify_output(ArtifactKind::Keyframes, &produced)
+        .unwrap_err();
+    assert!(error.contains("missing"), "{error}");
 }
 
 #[test]

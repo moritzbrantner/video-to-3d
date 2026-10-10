@@ -328,56 +328,106 @@ impl ProjectStore {
                 .collect();
             if !bake_directories.is_empty() {
                 let identities = manifest.operation_identities()?;
-                manifest.artifacts.retain(|artifact| {
-                    if artifact.operation_identity == identities[&artifact.produced_by] {
-                        return true;
-                    }
-                    // The document and every sidecar it lists are reserved
-                    // for its producer, so any of them can obstruct a bake.
-                    let owned: Vec<ProjectPath> = std::iter::once(artifact.path.clone())
-                        .chain(crate::scene_artifacts::recorded_sidecar_paths(
-                            &self.root, artifact,
-                        ))
-                        .collect();
-                    let paths: Vec<String> = owned
+                // Paths overlap when equal or one contains the other.
+                let overlaps = |a: &str, b: &str| {
+                    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+                };
+                // A file at the bake directory or one of its ancestors makes
+                // creating the directory fail, whoever recorded it; a foreign
+                // file inside the directory collides with the bake's outputs.
+                // A stale record of the bake itself inside its own directory
+                // is simply overwritten.
+                let blocks = |owner: &str, folded: &str, producer: &str| {
+                    let (_, directory) = bake_directories
                         .iter()
-                        .map(|path| path.as_str().to_ascii_lowercase())
-                        .collect();
-                    let obstructs_bake = bake_directories.iter().any(|(owner, directory)| {
-                        artifact.produced_by != *owner
-                            && paths.iter().any(|path| {
-                                path == directory
-                                    || path.starts_with(&format!("{directory}/"))
-                                    || directory.starts_with(&format!("{path}/"))
+                        .find(|(id, _)| id == owner)
+                        .expect("owner is a bake operation");
+                    folded == directory
+                        || directory.starts_with(&format!("{folded}/"))
+                        || (producer != owner && folded.starts_with(&format!("{directory}/")))
+                };
+                // The document and every sidecar a record lists are reserved
+                // for its producer, so any of them can obstruct a bake.
+                let owned: Vec<Vec<(ProjectPath, String)>> = manifest
+                    .artifacts
+                    .iter()
+                    .map(|artifact| {
+                        std::iter::once(artifact.path.clone())
+                            .chain(crate::scene_artifacts::recorded_sidecar_paths(
+                                &self.root, artifact,
+                            ))
+                            .map(|path| {
+                                let folded = path.as_str().to_ascii_lowercase();
+                                (path, folded)
                             })
-                    });
-                    if obstructs_bake {
-                        // A stale file AT the bake directory or one of its
-                        // ancestors would make creating the directory fail;
-                        // it is a verified output of an obsolete operation,
-                        // so remove it rather than spend the bake's attempt.
-                        for (path, folded) in owned.iter().zip(&paths) {
-                            let blocks = bake_directories.iter().any(|(owner, directory)| {
-                                artifact.produced_by != *owner
-                                    && (folded == directory
-                                        || directory.starts_with(&format!("{folded}/")))
-                            });
-                            let file = self.resolve(path);
-                            if blocks && file.is_file() {
-                                let _ = fs::remove_file(file);
-                            }
-                        }
-                        report
-                            .verified
-                            .retain(|operation| operation != &artifact.produced_by);
-                        report
-                            .invalidated
-                            .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
-                        false
-                    } else {
-                        true
+                            .collect()
+                    })
+                    .collect();
+                let obstructing: Vec<bool> = manifest
+                    .artifacts
+                    .iter()
+                    .zip(&owned)
+                    .map(|(artifact, paths)| {
+                        artifact.operation_identity != identities[&artifact.produced_by]
+                            && paths.iter().any(|(_, folded)| {
+                                bake_directories
+                                    .iter()
+                                    .any(|(owner, _)| blocks(owner, folded, &artifact.produced_by))
+                            })
+                    })
+                    .collect();
+                // Paths still owned by a retained record, a media input or an
+                // export are never deleted, even when a stale record aliases
+                // them.
+                let protected: Vec<String> = owned
+                    .iter()
+                    .zip(&obstructing)
+                    .filter(|(_, obstructs)| !**obstructs)
+                    .flat_map(|(paths, _)| paths.iter().map(|(_, folded)| folded.clone()))
+                    .chain(
+                        manifest
+                            .inputs
+                            .iter()
+                            .map(|input| input.path.as_str().to_ascii_lowercase()),
+                    )
+                    .chain(
+                        manifest
+                            .exports
+                            .iter()
+                            .map(|export| export.path.as_str().to_ascii_lowercase()),
+                    )
+                    .collect();
+                for ((artifact, paths), obstructs) in
+                    manifest.artifacts.iter().zip(&owned).zip(&obstructing)
+                {
+                    if !obstructs {
+                        continue;
                     }
-                });
+                    // Remove only stale files at a bake directory or its
+                    // ancestors: they are verified outputs of an obsolete
+                    // operation, so removing them is cheaper than spending
+                    // the bake's attempt on a failed `create_dir_all`.
+                    for (path, folded) in paths {
+                        let at_or_above = bake_directories.iter().any(|(_, directory)| {
+                            folded == directory || directory.starts_with(&format!("{folded}/"))
+                        });
+                        let shared = protected.iter().any(|kept| overlaps(kept, folded));
+                        let file = self.resolve(path);
+                        if at_or_above && !shared && file.is_file() {
+                            let _ = fs::remove_file(file);
+                        }
+                    }
+                    report
+                        .verified
+                        .retain(|operation| operation != &artifact.produced_by);
+                    report
+                        .invalidated
+                        .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
+                }
+                let mut obstructing = obstructing.into_iter();
+                manifest
+                    .artifacts
+                    .retain(|_| !obstructing.next().expect("one flag per artifact"));
             }
         }
 
@@ -540,11 +590,20 @@ impl ProjectStore {
         artifact: &ArtifactRecord,
         cache: &mut HashCache,
     ) -> Result<(), Invalidation> {
+        self.verify_sidecars_of(artifact.kind, &artifact.path, cache)
+    }
+
+    fn verify_sidecars_of(
+        &self,
+        kind: ArtifactKind,
+        document_path: &ProjectPath,
+        cache: &mut HashCache,
+    ) -> Result<(), Invalidation> {
         if matches!(
-            artifact.kind,
+            kind,
             ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
         ) {
-            let bytes = fs::read(self.resolve(&artifact.path))
+            let bytes = fs::read(self.resolve(document_path))
                 .map_err(|error| Invalidation::CorruptSidecar(error.to_string()))?;
             // An opaque (non-UTF-8) provider output, such as a legacy binary,
             // lists no sidecars; it is already hash- and receipt-verified.
@@ -554,8 +613,7 @@ impl ProjectStore {
             // A document claiming a JSON interchange format must parse;
             // opaque provider outputs remain supported even when their path
             // ends in .json. Readers still enforce the format when consumed.
-            let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, document)
-            {
+            let sidecars = match crate::scene_artifacts::artifact_sidecars(kind, document) {
                 Ok(sidecars) => sidecars,
                 // Only a document that is not JSON at all is opaque. Any JSON
                 // value (including a scalar) or anything shaped like an object
@@ -781,7 +839,11 @@ impl RunObserver for Persister<'_> {
             .map_err(|error| error.to_string())
     }
 
-    fn verify_output(&mut self, produced: &ProducedArtifact) -> Result<(), String> {
+    fn verify_output(
+        &mut self,
+        kind: ArtifactKind,
+        produced: &ProducedArtifact,
+    ) -> Result<(), String> {
         let Some((hash, _)) = hash_file(&self.store.resolve(&produced.path)) else {
             return Err(format!(
                 "output `{}` is missing or unreadable",
@@ -796,7 +858,12 @@ impl RunObserver for Persister<'_> {
                 produced.content_hash.as_str()
             ));
         }
-        Ok(())
+        // Sidecars are part of the output: a document listing a missing or
+        // malformed sidecar must fail now, not at the next reconciliation.
+        let mut cache = HashCache::load(&self.store.root, VerifyMode::Full);
+        self.store
+            .verify_sidecars_of(kind, &produced.path, &mut cache)
+            .map_err(|invalidation| invalidation.describe())
     }
 
     fn wave_recorded(

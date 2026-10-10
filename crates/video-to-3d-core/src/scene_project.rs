@@ -645,6 +645,14 @@ impl SceneProjectManifest {
         }
         for operation in &self.operations {
             unique_id("operation id", &operation.id)?;
+            // Operation ids name receipt and artifact paths, so they must be
+            // valid project path components (no device names, no trailing dot).
+            if ProjectPath::new(format!("artifacts/{}", operation.id)).is_err() {
+                return invalid(format!(
+                    "operation id `{}` cannot name a project path (reserved device name or trailing `.`)",
+                    operation.id
+                ));
+            }
         }
         for operation in &self.operations {
             self.validate_operation(operation, &media, &operations, &providers)?;

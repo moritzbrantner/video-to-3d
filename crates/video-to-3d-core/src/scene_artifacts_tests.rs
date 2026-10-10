@@ -1181,6 +1181,28 @@ fn png_sidecars_are_validated_completely() {
     let mut trailing = png.clone();
     trailing.push(0);
     assert!(validate_png_rgb8(&trailing, 3, 2).is_err());
+    // Chunks inserted right after IHDR: a repeated IHDR and an unknown
+    // critical chunk are rejected; an unknown ancillary chunk is fine.
+    let with_chunk = |kind: &[u8; 4], data: &[u8]| {
+        let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(data);
+        let crc = crc32fast::hash(&chunk[4..]);
+        chunk.extend_from_slice(&crc.to_be_bytes());
+        let mut out = png[..33].to_vec();
+        out.extend_from_slice(&chunk);
+        out.extend_from_slice(&png[33..]);
+        out
+    };
+    let ihdr = png[16..29].to_vec();
+    assert!(validate_png_rgb8(&with_chunk(b"IHDR", &ihdr), 3, 2)
+        .unwrap_err()
+        .contains("repeats IHDR"));
+    assert!(validate_png_rgb8(&with_chunk(b"ZZZZ", b"x"), 3, 2)
+        .unwrap_err()
+        .contains("unknown critical"));
+    validate_png_rgb8(&with_chunk(b"zzZz", b"x"), 3, 2).unwrap();
+    validate_png_rgb8(&with_chunk(b"PLTE", &[0, 0, 0]), 3, 2).unwrap();
 }
 
 #[test]

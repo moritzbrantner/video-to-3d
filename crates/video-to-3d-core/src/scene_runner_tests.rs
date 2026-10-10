@@ -479,7 +479,11 @@ fn generated_artifact_ids_are_valid_and_unique() {
 struct RejectProvider(&'static str);
 
 impl RunObserver for RejectProvider {
-    fn verify_output(&mut self, produced: &ProducedArtifact) -> Result<(), String> {
+    fn verify_output(
+        &mut self,
+        _kind: ArtifactKind,
+        produced: &ProducedArtifact,
+    ) -> Result<(), String> {
         if produced.observations.get("provider").map(String::as_str) == Some(self.0) {
             return Err("hash mismatch".into());
         }

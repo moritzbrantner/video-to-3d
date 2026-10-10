@@ -897,7 +897,8 @@ pub struct ArtifactSidecar {
 }
 
 /// Check that `png` is a complete, decodable 8-bit RGB, non-interlaced PNG of
-/// `width` × `height`: signature, IHDR first, every chunk CRC, contiguous
+/// `width` × `height`: signature, a single IHDR first, every chunk CRC, at
+/// most one PLTE before the pixel data, no unknown critical chunks, contiguous
 /// IDAT chunks, IEND last, and a zlib stream inflating to exactly one filter
 /// byte (0..=4) plus `3 · width` bytes per row.
 pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), String> {
@@ -916,6 +917,7 @@ pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), Stri
     let mut seen_idat = false;
     let mut idat_ended = false;
     let mut first = true;
+    let mut seen_plte = false;
     loop {
         let header = png.get(cursor..cursor + 8).ok_or("PNG ends before IEND")?;
         let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
@@ -933,11 +935,24 @@ pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), Stri
                 String::from_utf8_lossy(kind)
             ));
         }
-        if first && kind != b"IHDR" {
-            return Err("PNG does not start with IHDR".into());
+        if first != (kind == b"IHDR") {
+            return Err(if first {
+                "PNG does not start with IHDR".into()
+            } else {
+                "PNG repeats IHDR".into()
+            });
         }
         first = false;
         match kind {
+            b"IHDR" => {}
+            b"PLTE" => {
+                // A suggested palette is allowed for truecolour images, once
+                // and before the pixel data.
+                if seen_plte || seen_idat {
+                    return Err("PNG PLTE is repeated or follows IDAT".into());
+                }
+                seen_plte = true;
+            }
             b"IDAT" => {
                 if idat_ended {
                     return Err("PNG IDAT chunks are not contiguous".into());
@@ -950,6 +965,12 @@ pub fn validate_png_rgb8(png: &[u8], width: u32, height: u32) -> Result<(), Stri
                     return Err("PNG has data after IEND".into());
                 }
                 break;
+            }
+            _ if kind[0].is_ascii_uppercase() => {
+                return Err(format!(
+                    "PNG has an unknown critical chunk {}",
+                    String::from_utf8_lossy(kind)
+                ));
             }
             _ => {
                 if seen_idat {
@@ -1184,7 +1205,12 @@ fn bake_parsed(
         let digest = &material.appearance_key.as_str()["sha256:".len()..];
         let path = sibling(output, &format!("textures/{digest}.png"))?;
         let kept = previous_files.get(&material.appearance_key).filter(|file| {
-            file.path == path && read_verified(root, &file.path, &file.content_hash).is_ok()
+            file.path == path
+                && file.width == material.texture.width
+                && file.height == material.texture.height
+                && read_verified(root, &file.path, &file.content_hash).is_ok_and(|png| {
+                    validate_png_rgb8(&png, material.texture.width, material.texture.height).is_ok()
+                })
         });
         let content_hash = match kept {
             Some(file) => {

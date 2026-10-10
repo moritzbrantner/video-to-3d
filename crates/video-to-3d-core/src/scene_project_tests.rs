@@ -352,6 +352,22 @@ fn provider_policy_combinations_fail_closed() {
 }
 
 #[test]
+fn operation_ids_must_name_project_paths() {
+    for id in ["con", "nul.x", "com1", "bake."] {
+        expect_invalid(
+            &with(standard_document(), "/operations/6/id", json!(id)),
+            "cannot name a project path",
+        );
+    }
+    parse(&with(
+        standard_document(),
+        "/operations/6/id",
+        json!("console"),
+    ))
+    .unwrap();
+}
+
+#[test]
 fn operation_graph_invariants_fail_closed() {
     expect_invalid(
         &with(
