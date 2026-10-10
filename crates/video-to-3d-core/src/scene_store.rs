@@ -310,26 +310,47 @@ impl ProjectStore {
         }
         manifest.artifacts = keep;
 
-        // Only builds release stale artifact ownership. Cached reconciliation
-        // backs read-only status/inspect commands, which must still report
-        // retained but out-of-date outputs as stale (or budget-exhausted).
+        // Only release obsolete foreign artifacts that block a texture-bake
+        // output directory. Other stale records must remain: downstream work
+        // can reuse their original content when an upstream rebuild reproduces
+        // the same bytes. Cached status must also retain stale records.
         if mode == VerifyMode::Full {
-            // An upstream stale identity already makes downstream identities
-            // use 'pending', so one topological pass releases all stale paths.
-            let identities = manifest.operation_identities()?;
-            manifest.artifacts.retain(|artifact| {
-                if artifact.operation_identity == identities[&artifact.produced_by] {
-                    true
-                } else {
-                    report
-                        .verified
-                        .retain(|operation| operation != &artifact.produced_by);
-                    report
-                        .invalidated
-                        .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
-                    false
-                }
-            });
+            let bake_directories: Vec<(String, String)> = manifest
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == OperationKind::TextureBake)
+                .map(|operation| {
+                    (
+                        operation.id.clone(),
+                        format!("artifacts/{}", operation.id).to_ascii_lowercase(),
+                    )
+                })
+                .collect();
+            if !bake_directories.is_empty() {
+                let identities = manifest.operation_identities()?;
+                manifest.artifacts.retain(|artifact| {
+                    let path = artifact.path.as_str().to_ascii_lowercase();
+                    let obstructs_bake = bake_directories.iter().any(|(owner, directory)| {
+                        artifact.produced_by != *owner
+                            && (path == *directory
+                                || path.starts_with(&format!("{directory}/"))
+                                || directory.starts_with(&format!("{path}/")))
+                    });
+                    if obstructs_bake
+                        && artifact.operation_identity != identities[&artifact.produced_by]
+                    {
+                        report
+                            .verified
+                            .retain(|operation| operation != &artifact.produced_by);
+                        report
+                            .invalidated
+                            .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         }
 
         let receipts_dir = self.root.join(STATE_DIRECTORY).join("receipts");
