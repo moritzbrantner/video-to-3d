@@ -206,7 +206,7 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
 
 #[test]
 fn large_triangles_are_indexed_across_their_interior() {
-    let surface = geometry([(0.0, 0.0, 0.0), (30.0, 0.0, 0.0), (0.0, 30.0, 0.0)]);
+    let surface = geometry([(0.0, 0.0, 0.0), (60.0, 0.0, 0.0), (0.0, 60.0, 0.0)]);
     let grid = surface.grid_bounds(1.0, 0.0);
     assert!(grid_cells(&grid).is_none());
     let small = geometry([(4.0, 4.0, 0.0), (5.0, 4.0, 0.0), (4.0, 5.0, 0.0)]);
@@ -233,10 +233,12 @@ fn square_footprint(camera: ReferenceCamera) -> Footprint {
             (
                 corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
                 0,
+                [0, 1, 2],
             ),
             (
                 corners([(-1.0, -1.0, 5.0), (1.0, 1.0, 5.0), (-1.0, 1.0, 5.0)]),
                 0,
+                [0, 2, 3],
             ),
         ],
     )
@@ -268,7 +270,7 @@ fn image_ownership_tolerates_reference_scale_but_not_another_surface() {
     );
     // Unless the whole patch is 4 % nearer: a relative depth scale, removed
     // before the bound applies.
-    let ratios = footprint.depth_ratios(&layer, &|_| true);
+    let ratios = footprint.depth_ratios(&layer, &|_| true, &|_| true);
     assert!(!ratios.is_empty());
     assert!(ratios.iter().all(|ratio| (ratio - 0.96).abs() < 1.0e-9));
     assert!(
@@ -616,4 +618,63 @@ fn pairs_across_evidence_origins_link_patches_but_keep_their_vertices() {
     );
     assert_eq!(stats.fused_pairs, 1);
     assert_eq!(stats.provenance_separated_pairs, 0);
+}
+
+#[test]
+fn only_vertices_referenced_by_two_patches_count_as_shared() {
+    let points = vec![
+        point(0.0, 0.0, 0.0),
+        point(1.0, 0.0, 0.0),
+        point(0.0, 1.0, 0.0),
+        point(0.0, 1.0, 0.0),
+        point(-1.0, 2.0, 0.0),
+        point(-1.0, 1.0, 0.0),
+    ];
+    let mut triangles = vec![triangle(0, 1, 2), triangle(3, 4, 5)];
+    let membership: Vec<Option<usize>> = [Some(0); 3].into_iter().chain([Some(1); 3]).collect();
+    let stats = merge_fused_patches(&points, &mut triangles, &membership, &[(2, 3)], &[], &[]);
+    assert_eq!(stats.fused_pairs, 1);
+    assert_eq!(stats.cross_reference_triangles, 1);
+    // Only the fused seam corner is referenced by both patches.
+    assert_eq!(stats.shared_vertices, 1);
+}
+
+#[test]
+fn oversized_owner_triangles_are_checked_exactly() {
+    // One kept triangle far larger than the rest of the footprint's grid.
+    let mut kept = vec![(
+        corners([(-1.0, -1.0, 5.0), (1.0, -1.0, 5.0), (1.0, 1.0, 5.0)]),
+        0,
+        [0, 1, 2],
+    )];
+    for step in 0..4 {
+        let x = 3.0 + f64::from(step) * 0.02;
+        kept.push((
+            corners([(x, 3.0, 5.0), (x + 0.01, 3.0, 5.0), (x, 3.01, 5.0)]),
+            0,
+            [3 + step as usize, 9, 10],
+        ));
+    }
+    let footprint = Footprint::new(0, identity_camera(0.0), &kept).unwrap();
+    assert_eq!(footprint.large, vec![0]);
+    let inside = corners([(0.5, -0.8, 5.0), (0.8, -0.8, 5.0), (0.8, -0.5, 5.0)]);
+    let owned = footprint.ownership(&inside, 1.0, &|_| true).unwrap();
+    assert!((owned.image_share - 1.0).abs() < 1.0e-9, "{owned:?}");
+}
+
+#[test]
+fn scale_samples_need_an_anchored_owner_triangle() {
+    let footprint = square_footprint(identity_camera(0.0));
+    let layer = corners([(-0.5, -0.5, 4.8), (0.6, -0.4, 4.8), (0.1, 0.7, 4.8)]);
+    // No owner triangle touches an anchor: no sample.
+    assert!(footprint
+        .depth_ratios(&layer, &|_| true, &|vertices| vertices.contains(&99))
+        .is_empty());
+    // Only the owner triangle with vertex 1 is anchored: one sample.
+    assert_eq!(
+        footprint
+            .depth_ratios(&layer, &|_| true, &|vertices| vertices.contains(&1))
+            .len(),
+        1
+    );
 }
