@@ -233,7 +233,7 @@
             "stage": "mesh",
             "check": "duplicated_coverage_share",
             "issue": 126,
-            "reason": "Overlapping references stay separate sheets, so the overlap is meshed more than once."
+            "reason": "Partially overlapping accepted triangles still cover the same surface; trimming them without discarding uniquely supported boundaries remains unresolved."
           }
         ],
         "notes": "Cross-reference triangles now connect all three meshed reference patches; original surface holes and dense discontinuity rejections remain observable. Full-area overlap pruning preserves supported boundaries but still leaves excessive duplicated coverage; #126 remains an expected mesh failure until a provenance-preserving seam correction passes the unchanged 0.1 maximum."

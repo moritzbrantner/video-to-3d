@@ -333,6 +333,7 @@ fn find(parent: &mut [usize], index: usize) -> usize {
     }
     root
 }
+
 struct TriangleGeometry {
     corners: [Vector3<f64>; 3],
     normal: Vector3<f64>,
