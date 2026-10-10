@@ -1665,7 +1665,7 @@ fn animated_png_chunks_are_rejected() {
     let png = crate::textured_glb::encode_png_rgb(3, 2, &rgba).unwrap();
     let mut actl = 2_u32.to_be_bytes().to_vec();
     actl.extend_from_slice(&0_u32.to_be_bytes());
-    let mut fctl = vec![0_u8; 26];
+    let mut fctl = [0_u8; 26];
     fctl[7] = 3; // width
     fctl[11] = 2; // height
     let mut fdat = 1_u32.to_be_bytes().to_vec();
