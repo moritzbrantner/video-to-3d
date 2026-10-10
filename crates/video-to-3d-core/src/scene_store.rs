@@ -320,7 +320,9 @@ impl ProjectStore {
             if artifact.operation_identity == identities[&artifact.produced_by] {
                 true
             } else {
-                report.verified.retain(|operation| operation != &artifact.produced_by);
+                report
+                    .verified
+                    .retain(|operation| operation != &artifact.produced_by);
                 report
                     .invalidated
                     .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
@@ -496,11 +498,13 @@ impl ProjectStore {
             // Versioned JSON artifacts must parse before they can be reused
             // or recovered from orphan receipts. Preserve legacy opaque .bin
             // provider outputs, which are not versioned JSON interchange.
-            let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, &document) {
+            let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, &document)
+            {
                 Ok(sidecars) => sidecars,
-                Err(_) if artifact.path.as_str().ends_with(".bin")
-                    && !document.trim_start().starts_with('{')
-                    && !document.trim_start().starts_with('[') =>
+                Err(_)
+                    if artifact.path.as_str().ends_with(".bin")
+                        && !document.trim_start().starts_with('{')
+                        && !document.trim_start().starts_with('[') =>
                 {
                     Vec::new()
                 }

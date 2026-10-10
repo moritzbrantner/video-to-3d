@@ -348,7 +348,10 @@ fn cancellation_interrupts_inner_triangle_work() {
     })
     .unwrap_err();
     assert!(error.contains("canceled"), "{error}");
-    assert_eq!(checks, threshold, "the work should poll during triangle traversal");
+    assert_eq!(
+        checks, threshold,
+        "the work should poll during triangle traversal"
+    );
 }
 
 #[test]

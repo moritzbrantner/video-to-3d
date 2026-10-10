@@ -653,29 +653,52 @@ fn texture_artifacts_reject_incompatible_versions_provenance_and_fallbacks() {
 
     let mut old = artifact.clone();
     old.bake_schema_version += 1;
-    assert!(old.validate().unwrap_err().contains("unsupported bake schema"));
+    assert!(old
+        .validate()
+        .unwrap_err()
+        .contains("unsupported bake schema"));
     assert!(SurfaceTexturesArtifact::from_json(&old.to_json()).is_err());
 
     let mut learned = artifact.clone();
     learned.materials[0].provenance = vec![EvidenceOrigin::LearnedMultiView];
-    assert!(learned.validate().unwrap_err().contains("non-observed provenance"));
+    assert!(learned
+        .validate()
+        .unwrap_err()
+        .contains("non-observed provenance"));
     assert!(learned.scene_entries("bake").is_err());
 
     let mut repeated = artifact.clone();
-    repeated.materials[0].provenance.push(EvidenceOrigin::GeometricMultiView);
-    assert!(repeated.validate().unwrap_err().contains("repeats provenance"));
+    repeated.materials[0]
+        .provenance
+        .push(EvidenceOrigin::GeometricMultiView);
+    assert!(repeated
+        .validate()
+        .unwrap_err()
+        .contains("repeats provenance"));
     assert!(SurfaceTexturesArtifact::from_json(&repeated.to_json()).is_err());
 
     let mut no_reasons = artifact.clone();
     no_reasons.fallback_reasons = FallbackReasons::default();
-    assert!(no_reasons.validate().unwrap_err().contains("fallback reason(s)"));
+    assert!(no_reasons
+        .validate()
+        .unwrap_err()
+        .contains("fallback reason(s)"));
     let mut overflowing = artifact.clone();
     overflowing.fallback_reasons.mixed_reference = usize::MAX;
     overflowing.fallback_reasons.unobserved_reference = 1;
-    assert!(overflowing.validate().unwrap_err().contains("count overflows"));
+    assert!(overflowing
+        .validate()
+        .unwrap_err()
+        .contains("count overflows"));
 
-    assert!(artifact.scene_entries("Bad").unwrap_err().contains("scene identifier"));
-    assert!(artifact.scene_entries("-").unwrap_err().contains("scene identifier"));
+    assert!(artifact
+        .scene_entries("Bad")
+        .unwrap_err()
+        .contains("scene identifier"));
+    assert!(artifact
+        .scene_entries("-")
+        .unwrap_err()
+        .contains("scene identifier"));
     scene_with(&artifact).validate().unwrap();
 }
 

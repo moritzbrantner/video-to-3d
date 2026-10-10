@@ -213,7 +213,10 @@ fn reconciled_stale_artifacts_release_their_output_reservations() {
     assert!(report.invalidated.iter().any(|(operation, reason)| {
         operation == "assemble" && *reason == Invalidation::StaleIdentity
     }));
-    assert!(!manifest.artifacts.iter().any(|artifact| artifact.produced_by == "assemble"));
+    assert!(!manifest
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.produced_by == "assemble"));
     assert_eq!(report.verified.len(), 4);
 
     store.save_manifest(&manifest).unwrap();
