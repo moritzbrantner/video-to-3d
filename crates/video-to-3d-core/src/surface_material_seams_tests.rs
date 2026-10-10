@@ -354,9 +354,12 @@ fn seams_need_intrinsics_that_reproduce_the_accepted_grid() {
     assert_eq!(bake.fallback.reasons.seam.no_candidate_camera, 2);
     assert_eq!(bake.seam_triangles(), 0);
 
-    // A focal length the accepted grid does not support.
+    // A focal length the accepted grid does not support: at twice the focal
+    // length every residual equals the site's distance from the principal
+    // point, so the true medians are about 5.39 px (camera 0) and 3.65 px
+    // (camera 1), both above the 2 px bound.
     let mut wrong = Seams::new();
-    wrong.focal = Some(FOCAL * 1.5);
+    wrong.focal = Some(FOCAL * 2.0);
     let bake = wrong.bake();
     assert_eq!(bake.fallback.reasons.seam.pose_inconsistent, 2);
     assert!(bake.diagnostic().contains("2 pose inconsistent"));
@@ -485,4 +488,78 @@ fn seam_materials_export_their_camera_and_rule_without_new_geometry() {
         })
         .sum();
     assert_eq!(exported as usize, fixture.triangles.len());
+}
+
+/// Shift the accepted grid sites of camera 0's points 2 and 3 by `pixels`
+/// along x, so camera 0's own residuals are `[0, 0, pixels, pixels]`.
+fn with_camera_0_residuals(pixels: u32) -> Seams {
+    let mut fixture = Seams::new().only_image_0();
+    for index in [2, 3] {
+        fixture.sites[index].x += pixels;
+    }
+    fixture
+}
+
+#[test]
+fn an_even_residual_count_uses_the_true_median() {
+    // Camera 0 owns four points. Residuals [0, 0, 3, 3] have median 1.5 px,
+    // within the 2 px bound, although the upper-middle residual is 3 px.
+    let bake = with_camera_0_residuals(3).bake();
+    assert_eq!(
+        bake.fallback.reasons.seam.pose_inconsistent, 0,
+        "median 1.5 px must not reject camera 0 as pose inconsistent"
+    );
+    assert_eq!(seam_material(&bake, 0).triangles, vec![SEAM_A, SEAM_B]);
+
+    // Residuals [0, 0, 5, 5] have median 2.5 px: still rejected, even though
+    // the lower-middle residual is 0 px.
+    let bake = with_camera_0_residuals(5).bake();
+    assert_eq!(bake.fallback.reasons.seam.pose_inconsistent, 2);
+    assert_eq!(bake.seam_triangles(), 0);
+}
+
+#[test]
+fn a_subpixel_occluder_in_front_of_a_seam_sample_is_not_visible() {
+    // A 0.2 px accepted triangle at depth 2 straddles the ray of seam A's
+    // edge midpoint (16.5, 8) in camera 0, between pixel centers: its
+    // footprint contains no integer pixel center at all.
+    let at = |u: f32, v: f32| {
+        let depth = 2.0;
+        world(
+            (u - WIDTH as f32 * 0.5) / FOCAL * depth,
+            (v - HEIGHT as f32 * 0.5) / FOCAL * depth,
+            depth,
+        )
+    };
+    let occluder = [at(16.4, 7.9), at(16.6, 7.9), at(16.5, 8.1)];
+
+    // Camera 0 alone: seam A is hidden at one of its sample rays and must
+    // not be textured; seam B is unaffected.
+    let bake = Seams::new().only_image_0().with_occluder(occluder).bake();
+    let seam = &bake.fallback.reasons.seam;
+    assert_eq!(
+        seam.occluded + seam.ambiguous,
+        1,
+        "seam A must be occluded or ambiguous in camera 0: {seam:?}"
+    );
+    assert_eq!(seam_material(&bake, 0).triangles, vec![SEAM_B]);
+    assert!(bake.fallback.triangles.contains(&SEAM_A));
+
+    // With both images, camera 1 sees seam A far from the occluder and may
+    // admit it; camera 0 (owning more of its vertices) must not.
+    let mut both = Seams::new().with_occluder(occluder);
+    both.images.truncate(2);
+    let bake = both.bake();
+    let admitting = bake
+        .materials
+        .iter()
+        .filter(|material| material.rule == MaterialRule::SeamSingleCameraProjection)
+        .filter(|material| material.triangles.contains(&SEAM_A))
+        .map(|material| material.reference_frame)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        admitting,
+        vec![1],
+        "only the unoccluded camera 1 may texture seam A"
+    );
 }
