@@ -634,6 +634,7 @@ fn texture_artifacts_must_partition_the_triangles() {
         .contains("triangle 9 of 5"));
     let mut missing = artifact.clone();
     missing.fallback_triangles.clear();
+    missing.fallback_reasons = FallbackReasons::default();
     assert!(missing
         .validate()
         .unwrap_err()
