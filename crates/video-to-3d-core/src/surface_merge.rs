@@ -45,6 +45,16 @@ const MAX_OVERLAP_DISTANCE_FRACTION: f64 = 0.9;
 const MAX_GRID_CELLS: usize = 1728;
 /// Fail closed rather than processing a pathological number of clipping fragments.
 const MAX_UNCOVERED_PIECES: usize = 128;
+/// Most grid postings (owner triangles taken from [`LevelGrid`] buckets or
+/// the exact list of kept triangles) one candidate lookup may process. A
+/// lookup that needs more is cut off at the bound and its candidate is kept
+/// (fail-closed): two strip-like triangulations crossing in one coarse bucket
+/// would otherwise make ownership clipping quadratic. Ordinary grid meshes
+/// need a few dozen postings per lookup; the bound stays at least twice the
+/// clipping budget, so a fragment-heavy seam is still judged by it.
+pub(crate) const MAX_POSTINGS_PER_QUERY: usize = 512;
+const _: () =
+    assert!(MAX_POSTINGS_PER_QUERY >= 2 * MAX_UNCOVERED_PIECES && MAX_POSTINGS_PER_QUERY <= 1024);
 const MIN_NORMAL_ALIGNMENT: f64 = 0.94;
 /// Share of a lower-priority triangle's projected area that one higher-priority
 /// reference must own (kept triangles at the same depth) for it to be removed.
@@ -135,12 +145,24 @@ pub(super) struct MergeStats {
     /// cross-reference triangles); `0` without meshed patches.
     pub patch_components: usize,
     pub meshed_patches: usize,
+    /// The most grid postings any single candidate lookup processed (image
+    /// ownership, scale samples and the 3D test alike); at most
+    /// [`MAX_POSTINGS_PER_QUERY`].
+    pub max_postings_per_query: usize,
+    /// Candidate lookups that needed more than [`MAX_POSTINGS_PER_QUERY`]
+    /// postings and were cut off. A cut-off ownership or 3D lookup keeps its
+    /// candidate; a cut-off scale lookup contributes no samples.
+    pub posting_bound_hits: usize,
+    /// Candidate triangles whose subtraction needed more than
+    /// `MAX_UNCOVERED_PIECES` uncovered fragments. They are retained and
+    /// counted here, not in `remaining_overlap_triangles`.
+    pub clipping_budget_exhausted: usize,
 }
 
 impl MergeStats {
     pub fn diagnostic(&self, support_groups: usize) -> String {
         format!(
-            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area, and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} linked patch pair(s) had too few anchored overlap samples to calibrate their relative depth scale and were compared uncalibrated. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
+            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area, and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} linked patch pair(s) had too few anchored overlap samples to calibrate their relative depth scale and were compared uncalibrated. {} candidate lookup(s) hit the posting bound of {} owner triangles (at most {} processed by one lookup) and {} triangle(s) exhausted the clipping budget of {} fragments; both were retained unjudged. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
             self.fused_pairs,
             self.shared_vertices,
             self.cross_reference_triangles,
@@ -150,6 +172,11 @@ impl MergeStats {
             self.trimmed_seam_area_share * 100.0,
             self.remaining_overlap_triangles,
             self.uncalibrated_patch_pairs.len(),
+            self.posting_bound_hits,
+            MAX_POSTINGS_PER_QUERY,
+            self.max_postings_per_query,
+            self.clipping_budget_exhausted,
+            MAX_UNCOVERED_PIECES,
             self.meshed_patches,
             support_groups,
             self.patch_components,
@@ -319,6 +346,8 @@ pub(super) fn merge_fused_patches(
     let mut all_kept = Vec::new();
     let mut removed_duplicate_triangles = 0;
     let mut remaining_overlap_triangles = 0;
+    let mut clipping_budget_exhausted = 0;
+    let mut tally = PostingTally::default();
     let mut trimmed_seam_triangles = 0;
     let mut trimmed_seam_area = 0.0;
     let mut uncalibrated_patch_pairs = Vec::new();
@@ -411,11 +440,12 @@ pub(super) fn merge_fused_patches(
                             continue;
                         };
                         if anchored(&[triangle.a, triangle.b, triangle.c]) {
-                            ratios.extend(footprint.depth_ratios(
+                            ratios.extend(footprint.depth_ratios_tallied(
                                 &candidate.corners,
                                 &|component| components_linked(index, component),
                                 &anchored,
                                 MAX_SCALE_SAMPLES - ratios.len(),
+                                &mut tally,
                             ));
                         }
                     }
@@ -446,19 +476,37 @@ pub(super) fn merge_fused_patches(
                 // left unjudged individually.
                 let mut judged_patches = BTreeSet::new();
                 let mut unjudged_triangles: HashMap<usize, Vec<usize>> = HashMap::new();
-                let judged: Vec<Ownership> = owners
-                    .iter()
-                    .filter_map(|(footprint, scale)| {
-                        let (ownership, unjudged) =
-                            footprint.ownership(&candidate.corners, *scale, &linked)?;
-                        if unjudged.is_empty() {
-                            judged_patches.insert(footprint.patch);
-                        } else {
-                            unjudged_triangles.insert(footprint.patch, unjudged);
+                let mut judged: Vec<Ownership> = Vec::new();
+                let mut cut_off = false;
+                for (footprint, scale) in &owners {
+                    match footprint.ownership_tallied(
+                        &candidate.corners,
+                        *scale,
+                        &linked,
+                        &mut tally,
+                    ) {
+                        Ok((ownership, unjudged)) => {
+                            if unjudged.is_empty() {
+                                judged_patches.insert(footprint.patch);
+                            } else {
+                                unjudged_triangles.insert(footprint.patch, unjudged);
+                            }
+                            judged.push(ownership);
                         }
-                        Some(ownership)
-                    })
-                    .collect();
+                        // Fail closed: a lookup cut off at the posting bound
+                        // could under-estimate ownership in this image and
+                        // the 3D test would face the same dense overlap, so
+                        // the candidate is kept unjudged.
+                        Err(Unjudged::PostingBound) => {
+                            cut_off = true;
+                            break;
+                        }
+                        Err(Unjudged::Unprojectable | Unjudged::TooManyCells) => {}
+                    }
+                }
+                if cut_off {
+                    continue;
+                }
                 let owned = judged
                     .iter()
                     .copied()
@@ -489,8 +537,23 @@ pub(super) fn merge_fused_patches(
                 }
                 let mut nearby = BTreeSet::<usize>::new();
                 let (low, high) = candidate.aabb(0.0);
-                if !kept_grid.query(low, high, MAX_GRID_CELLS, &mut nearby) {
-                    nearby.extend(&all_kept);
+                let mut budget = PostingBudget::per_query();
+                let found = match kept_grid.query_bounded(
+                    low,
+                    high,
+                    MAX_GRID_CELLS,
+                    &mut budget,
+                    &mut nearby,
+                ) {
+                    // The exact list of kept triangles counts against the
+                    // same posting bound.
+                    Err(QueryLimit::Cells) => budget.take_into(&all_kept, &mut nearby),
+                    found => found,
+                };
+                tally.record(&budget, &found);
+                if found.is_err() {
+                    // Fail closed: cut off at the posting bound, keep it.
+                    continue;
                 }
                 let candidates = nearby
                     .into_iter()
@@ -506,14 +569,21 @@ pub(super) fn merge_fused_patches(
                             }
                     })
                     .filter_map(|other| geometry[other].as_ref());
-                let (covered, partially_covered) = candidate.covered_by(candidates, tolerance);
-                if covered {
-                    keep[index] = false;
-                    removed_duplicate_triangles += 1;
-                } else if partially_covered || owned.image_share > OWNERSHIP_EPSILON {
+                match candidate.coverage(candidates, tolerance) {
+                    Coverage::Full => {
+                        keep[index] = false;
+                        removed_duplicate_triangles += 1;
+                    }
+                    // Kept, and reported apart from ordinary partial overlap:
+                    // the bounded subtraction stopped before it could decide.
+                    Coverage::BudgetExhausted { .. } => clipping_budget_exhausted += 1,
                     // In the absence of proven full coverage keep the original
                     // face: it may be the only evidence at a hole or boundary.
-                    remaining_overlap_triangles += 1;
+                    Coverage::Partial => remaining_overlap_triangles += 1,
+                    Coverage::Uncovered if owned.image_share > OWNERSHIP_EPSILON => {
+                        remaining_overlap_triangles += 1;
+                    }
+                    Coverage::Uncovered => {}
                 }
             }
         }
@@ -634,6 +704,9 @@ pub(super) fn merge_fused_patches(
         retained_by_group,
         patch_components,
         meshed_patches: patch_list.len(),
+        max_postings_per_query: tally.max_postings,
+        posting_bound_hits: tally.bound_hits,
+        clipping_budget_exhausted,
     }
 }
 
@@ -751,11 +824,28 @@ impl TriangleGeometry {
     /// Each subtraction is a planar polygon clipping operation, but the removed
     /// region must also agree in normal and depth at EVERY polygon corner.
     /// No output geometry is generated: partial coverage always keeps the face.
+    /// `(covered, partially covered)`; tests only.
+    #[cfg(test)]
     fn covered_by<'a>(
         &self,
         surfaces: impl Iterator<Item = &'a TriangleGeometry>,
         tolerance: f64,
     ) -> (bool, bool) {
+        match self.coverage(surfaces, tolerance) {
+            Coverage::Full => (true, true),
+            Coverage::Partial => (false, true),
+            Coverage::Uncovered => (false, false),
+            Coverage::BudgetExhausted { partially_covered } => (false, partially_covered),
+        }
+    }
+
+    /// [`Self::covered_by`], telling a subtraction stopped at
+    /// `MAX_UNCOVERED_PIECES` fragments apart from an ordinary partial overlap.
+    fn coverage<'a>(
+        &self,
+        surfaces: impl Iterator<Item = &'a TriangleGeometry>,
+        tolerance: f64,
+    ) -> Coverage {
         let origin = self.corners[0];
         let u = (self.corners[1] - origin).normalize();
         let v = self.normal.cross(&u);
@@ -813,16 +903,33 @@ impl TriangleGeometry {
                 }
                 next.extend(outside);
                 if next.len() > MAX_UNCOVERED_PIECES {
-                    return (false, partially_covered);
+                    return Coverage::BudgetExhausted { partially_covered };
                 }
             }
             remaining = next;
             if remaining.is_empty() {
-                return (true, true);
+                return Coverage::Full;
             }
         }
-        (false, partially_covered)
+        if partially_covered {
+            Coverage::Partial
+        } else {
+            Coverage::Uncovered
+        }
     }
+}
+
+/// How much of a candidate the kept surfaces cover in the 3D test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Coverage {
+    Full,
+    Partial,
+    Uncovered,
+    /// The subtraction needed more than `MAX_UNCOVERED_PIECES` fragments and
+    /// stopped before it could decide.
+    BudgetExhausted {
+        partially_covered: bool,
+    },
 }
 
 const OWNERSHIP_EPSILON: f64 = 1.0e-9;
@@ -904,8 +1011,11 @@ impl Footprint {
         &self,
         corners: &[Vector3<f64>; 3],
         linked: &dyn Fn(usize) -> bool,
-    ) -> Option<(ProjectedTriangle, Vec<Overlap>)> {
-        let candidate = self.project_candidate(corners)?;
+        tally: &mut PostingTally,
+    ) -> Result<(ProjectedTriangle, Vec<Overlap>), Unjudged> {
+        let candidate = self
+            .project_candidate(corners)
+            .ok_or(Unjudged::Unprojectable)?;
         let mut overlaps = Vec::new();
         self.visit_overlaps(
             &candidate,
@@ -914,8 +1024,9 @@ impl Footprint {
                 overlaps.push((polygon, index));
                 true
             },
+            tally,
         )?;
-        Some((candidate, overlaps))
+        Ok((candidate, overlaps))
     }
 
     fn project_candidate(&self, corners: &[Vector3<f64>; 3]) -> Option<ProjectedTriangle> {
@@ -925,21 +1036,24 @@ impl Footprint {
 
     /// Clip the candidate against every nearby kept triangle accepted by
     /// `include`, handing each non-empty overlap to `visit` until it returns
-    /// `false`. `None` when the candidate is too large for the bounded query.
+    /// `false`. Fails when the candidate is too large for the bounded query
+    /// or needs more than [`MAX_POSTINGS_PER_QUERY`] postings; then nothing is
+    /// visited.
     fn visit_overlaps(
         &self,
         candidate: &ProjectedTriangle,
         include: &dyn Fn(usize) -> bool,
         visit: &mut dyn FnMut(Vec<Vector2<f64>>, usize) -> bool,
-    ) -> Option<()> {
+        tally: &mut PostingTally,
+    ) -> Result<(), QueryLimit> {
         let mut nearby = BTreeSet::new();
         let (low, high) = image_aabb(candidate);
-        if !self
-            .grid
-            .query(low, high, MAX_IMAGE_GRID_CELLS, &mut nearby)
-        {
-            return None;
-        }
+        let mut budget = PostingBudget::per_query();
+        let found =
+            self.grid
+                .query_bounded(low, high, MAX_IMAGE_GRID_CELLS, &mut budget, &mut nearby);
+        tally.record(&budget, &found);
+        found?;
         let polygon: Vec<Vector2<f64>> = candidate.iter().map(|corner| corner.0).collect();
         for index in nearby {
             if !include(index) {
@@ -964,19 +1078,39 @@ impl Footprint {
                 break;
             }
         }
-        Some(())
+        Ok(())
     }
 
     /// Candidate-to-owner depth ratios at the centroids of overlaps with kept
     /// triangles whose vertices satisfy `anchored`, that agree within
     /// `MAX_RELATIVE_SCALE_SAMPLE`; at most `limit`, and no overlap beyond the
     /// last one needed is clipped.
+    #[cfg(test)]
     fn depth_ratios(
         &self,
         corners: &[Vector3<f64>; 3],
         linked: &dyn Fn(usize) -> bool,
         anchored: &dyn Fn(&[usize; 3]) -> bool,
         limit: usize,
+    ) -> Vec<f64> {
+        self.depth_ratios_tallied(
+            corners,
+            linked,
+            anchored,
+            limit,
+            &mut PostingTally::default(),
+        )
+    }
+
+    /// [`Self::depth_ratios`], recording the lookup's postings in `tally`; a
+    /// lookup cut off at the posting bound contributes no samples.
+    fn depth_ratios_tallied(
+        &self,
+        corners: &[Vector3<f64>; 3],
+        linked: &dyn Fn(usize) -> bool,
+        anchored: &dyn Fn(&[usize; 3]) -> bool,
+        limit: usize,
+        tally: &mut PostingTally,
     ) -> Vec<f64> {
         let mut ratios = Vec::new();
         let Some(candidate) = self.project_candidate(corners) else {
@@ -1002,6 +1136,7 @@ impl Footprint {
                 }
                 ratios.len() < limit
             },
+            tally,
         );
         ratios
     }
@@ -1011,13 +1146,27 @@ impl Footprint {
     /// and the surface area of those owned parts on the candidate's plane;
     /// with the mesh indices of linked owner triangles this image could not
     /// judge (unprojectable), when the share is below the removal threshold.
+    #[cfg(test)]
     fn ownership(
         &self,
         corners: &[Vector3<f64>; 3],
         scale: f64,
         linked: &dyn Fn(usize) -> bool,
     ) -> Option<(Ownership, Vec<usize>)> {
-        let (candidate, overlaps) = self.overlaps(corners, linked)?;
+        self.ownership_tallied(corners, scale, linked, &mut PostingTally::default())
+            .ok()
+    }
+
+    /// [`Self::ownership`], recording the lookup's postings in `tally`, and
+    /// saying why the image could not judge the candidate.
+    fn ownership_tallied(
+        &self,
+        corners: &[Vector3<f64>; 3],
+        scale: f64,
+        linked: &dyn Fn(usize) -> bool,
+        tally: &mut PostingTally,
+    ) -> Result<(Ownership, Vec<usize>), Unjudged> {
+        let (candidate, overlaps) = self.overlaps(corners, linked, tally)?;
         let total = image_area(&candidate);
         let plane = self.camera.plane(corners);
         let (mut image, mut surface) = (0.0, 0.0);
@@ -1056,13 +1205,33 @@ impl Footprint {
         } else {
             Vec::new()
         };
-        Some((
+        Ok((
             Ownership {
                 image_share,
                 surface_area: surface,
             },
             unjudged,
         ))
+    }
+}
+
+/// Why an owner's image could not judge a candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unjudged {
+    /// Behind the camera or degenerate in the image.
+    Unprojectable,
+    /// Too large for the bounded cell query.
+    TooManyCells,
+    /// Overlaps more than [`MAX_POSTINGS_PER_QUERY`] postings.
+    PostingBound,
+}
+
+impl From<QueryLimit> for Unjudged {
+    fn from(limit: QueryLimit) -> Self {
+        match limit {
+            QueryLimit::Cells => Self::TooManyCells,
+            QueryLimit::Postings => Self::PostingBound,
+        }
     }
 }
 
@@ -1193,7 +1362,8 @@ impl<const D: usize> LevelGrid<D> {
 
     /// Add every item whose cells may overlap the box to `out`; `false` when
     /// one level would need more than `max_cells` cells (the caller then
-    /// needs its exact fallback).
+    /// needs its exact fallback). Unbounded postings: tests only.
+    #[cfg(test)]
     fn query(
         &self,
         low: [f64; D],
@@ -1201,31 +1371,50 @@ impl<const D: usize> LevelGrid<D> {
         max_cells: usize,
         out: &mut BTreeSet<usize>,
     ) -> bool {
-        out.extend(&self.unindexed);
+        let mut budget = PostingBudget::new(usize::MAX);
+        self.query_bounded(low, high, max_cells, &mut budget, out)
+            .is_ok()
+    }
+
+    /// Add every item whose cells may overlap the box to `out`, taking each
+    /// posting from `budget`. Fails with [`QueryLimit::Cells`] before any
+    /// posting is taken when one level would need more than `max_cells`
+    /// cells (the caller then needs its exact fallback), and with
+    /// [`QueryLimit::Postings`] once the budget is spent: the bucket that
+    /// does not fit is taken only up to the budget, never copied whole.
+    fn query_bounded(
+        &self,
+        low: [f64; D],
+        high: [f64; D],
+        max_cells: usize,
+        budget: &mut PostingBudget,
+        out: &mut BTreeSet<usize>,
+    ) -> Result<(), QueryLimit> {
+        let mut ranges = Vec::with_capacity(usize::try_from(self.levels).unwrap_or(0));
         for level in 0..self.levels {
-            let Some(range) = self.range(low, high, level) else {
-                return false;
-            };
+            let range = self.range(low, high, level).ok_or(QueryLimit::Cells)?;
             let range =
                 range.map(|(first, last)| (first.saturating_sub(MAX_ANCHOR_CELL_SPAN), last));
             let mut count = 1_usize;
             for &(first, last) in &range {
-                let Some(span) = last
+                let span = last
                     .checked_sub(first)
                     .and_then(|span| usize::try_from(span).ok())
                     .and_then(|span| span.checked_add(1))
-                else {
-                    return false;
-                };
+                    .ok_or(QueryLimit::Cells)?;
                 count = count.saturating_mul(span);
             }
             if count > max_cells {
-                return false;
+                return Err(QueryLimit::Cells);
             }
+            ranges.push((level, range));
+        }
+        budget.take_into(&self.unindexed, out)?;
+        for (level, range) in ranges {
             let mut key = range.map(|(first, _)| first);
             loop {
                 if let Some(items) = self.cells.get(&(level, key)) {
-                    out.extend(items);
+                    budget.take_into(items, out)?;
                 }
                 // Odometer over the D axes.
                 let mut axis = 0;
@@ -1245,7 +1434,63 @@ impl<const D: usize> LevelGrid<D> {
                 }
             }
         }
-        true
+        Ok(())
+    }
+}
+
+/// Why a bounded lookup stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryLimit {
+    /// Too many grid cells on one level; no posting was taken.
+    Cells,
+    /// More postings than the lookup's budget.
+    Postings,
+}
+
+/// Postings one candidate lookup may still process.
+struct PostingBudget {
+    limit: usize,
+    used: usize,
+}
+
+impl PostingBudget {
+    fn new(limit: usize) -> Self {
+        Self { limit, used: 0 }
+    }
+
+    fn per_query() -> Self {
+        Self::new(MAX_POSTINGS_PER_QUERY)
+    }
+
+    /// Add `items` to `out`, or only the prefix the budget still allows and
+    /// fail with [`QueryLimit::Postings`].
+    fn take_into(&mut self, items: &[usize], out: &mut BTreeSet<usize>) -> Result<(), QueryLimit> {
+        let room = self.limit - self.used;
+        if items.len() <= room {
+            self.used += items.len();
+            out.extend(items);
+            Ok(())
+        } else {
+            self.used = self.limit;
+            out.extend(&items[..room]);
+            Err(QueryLimit::Postings)
+        }
+    }
+}
+
+/// Posting work of all lookups of one merge.
+#[derive(Default)]
+struct PostingTally {
+    max_postings: usize,
+    bound_hits: usize,
+}
+
+impl PostingTally {
+    fn record<T>(&mut self, budget: &PostingBudget, result: &Result<T, QueryLimit>) {
+        self.max_postings = self.max_postings.max(budget.used);
+        if matches!(result, Err(QueryLimit::Postings)) {
+            self.bound_hits += 1;
+        }
     }
 }
 

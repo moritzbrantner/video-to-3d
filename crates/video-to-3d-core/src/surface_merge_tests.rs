@@ -128,11 +128,8 @@ fn a_fusion_link_does_not_erase_an_unrelated_island_of_the_same_camera_pair() {
     assert!(signature(&triangles).contains(&(3, 4, 5)));
 }
 
-#[test]
-fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
-    // Two adjacent camera grids: A covers x=0..2, B x=1..3.
-    // The last column of B joins A at x=2; x=1..2 is the redundant sheet,
-    // but x=2..3 is real, uniquely supported surface that must stay.
+/// Two adjacent camera grids: A covers x=0..2, B x=1..3, fused at x=2.
+fn adjacent_grids_fixture() -> (Vec<Point3>, Vec<MeshTriangle>, Vec<Option<usize>>) {
     let mut points = Vec::new();
     let mut membership = Vec::new();
     for (start, z, patch) in [(0.0_f32, 0.0_f32, 0), (1.0_f32, 0.06_f32, 1)] {
@@ -156,6 +153,15 @@ fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
             triangles.push(triangle(start + 1, start + 4, start + 3));
         }
     }
+    (points, triangles, membership)
+}
+
+#[test]
+fn a_confirmed_seam_deduplicates_overlap_but_keeps_the_uncovered_extension() {
+    // Two adjacent camera grids: A covers x=0..2, B x=1..3.
+    // The last column of B joins A at x=2; x=1..2 is the redundant sheet,
+    // but x=2..3 is real, uniquely supported surface that must stay.
+    let (points, mut triangles, membership) = adjacent_grids_fixture();
     let original_points = points
         .iter()
         .map(|p| (p.x, p.y, p.z, p.r, p.g, p.b))
@@ -351,8 +357,17 @@ fn image_ownership_measures_the_share_on_the_footprint() {
     );
 }
 
-#[test]
-fn owned_overlap_is_removed_and_unique_surface_is_kept() {
+/// Points, membership, triangles, fused link and cameras of
+/// [`owned_overlap_is_removed_and_unique_surface_is_kept`].
+type OwnedOverlapFixture = (
+    Vec<Point3>,
+    Vec<Option<usize>>,
+    Vec<MeshTriangle>,
+    [(usize, usize); 1],
+    [Option<ReferenceCamera>; 2],
+);
+
+fn owned_overlap_fixture() -> OwnedOverlapFixture {
     // Patch 0 (four triangles, higher priority): the square at depth 5, one
     // triangle elsewhere, and a triangle carrying the seam vertex 12.
     // Patch 1: component X, linked to the square by the fused pair (12, 7),
@@ -391,7 +406,12 @@ fn owned_overlap_is_removed_and_unique_surface_is_kept() {
     ];
     let link = [(12, 7)];
     let cameras = [Some(identity_camera(0.0)), Some(identity_camera(0.4))];
+    (points, membership, original, link, cameras)
+}
 
+#[test]
+fn owned_overlap_is_removed_and_unique_surface_is_kept() {
+    let (points, membership, original, link, cameras) = owned_overlap_fixture();
     let mut triangles = original.clone();
     let stats = merge_fused_patches(&points, &mut triangles, &membership, &link, &cameras, &[]);
     // Only the linked inner triangle is owned; the far-reaching one and the
@@ -859,4 +879,287 @@ fn large_items_far_away_are_not_scanned_by_small_queries() {
     let mut found = BTreeSet::new();
     assert!(grid.query([0.0, 0.0], [1.0, 1.0], MAX_IMAGE_GRID_CELLS, &mut found));
     assert_eq!(found, BTreeSet::from([500]));
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance for #145: bounded grid postings and observable clipping-budget
+// exhaustion. Written by an independent acceptance agent before the
+// implementation; the observable API below is chosen here and is not yet
+// implemented on the baseline.
+//
+// API choices (kept minimal):
+// - `MAX_POSTINGS_PER_QUERY: usize` (module constant in `surface_merge.rs`):
+//   the most grid postings (owner triangles retrieved from `LevelGrid`
+//   buckets, including the exact-list fallback) one candidate lookup may
+//   process. It must stay at least `2 * MAX_UNCOVERED_PIECES`, so the posting
+//   bound never makes the clipping budget unreachable, and at most 1024, so
+//   these fixtures (sized from the bound) stay fast.
+// - `MergeStats::max_postings_per_query: usize`: the most postings any single
+//   candidate lookup of this merge processed (image ownership, scale samples
+//   and the 3D test alike). It makes per-query work observable without timing.
+// - `MergeStats::posting_bound_hits: usize`: candidate lookups that needed more
+//   than `MAX_POSTINGS_PER_QUERY` postings and were cut off (fail-closed: such
+//   a lookup may only under-estimate ownership, never invent it).
+// - `MergeStats::clipping_budget_exhausted: usize`: candidate triangles whose
+//   subtraction needed more than `MAX_UNCOVERED_PIECES` uncovered fragments.
+//   They are retained (fail-closed) but counted here and NOT in
+//   `remaining_overlap_triangles`.
+// - `MergeStats::diagnostic` mentions both counters with the phrases
+//   "{posting_bound_hits} candidate lookup(s) hit the posting bound" and
+//   "{clipping_budget_exhausted} triangle(s) exhausted the clipping budget".
+// ---------------------------------------------------------------------------
+
+fn bound_hits_phrase(stats: &MergeStats) -> String {
+    format!(
+        "{} candidate lookup(s) hit the posting bound",
+        stats.posting_bound_hits
+    )
+}
+
+fn clipping_budget_phrase(stats: &MergeStats) -> String {
+    format!(
+        "{} triangle(s) exhausted the clipping budget",
+        stats.clipping_budget_exhausted
+    )
+}
+
+#[test]
+#[allow(clippy::assertions_on_constants)]
+fn the_posting_bound_leaves_the_clipping_budget_reachable() {
+    assert!(
+        MAX_POSTINGS_PER_QUERY >= 2 * MAX_UNCOVERED_PIECES,
+        "MAX_POSTINGS_PER_QUERY={MAX_POSTINGS_PER_QUERY}"
+    );
+    assert!(
+        MAX_POSTINGS_PER_QUERY <= 1024,
+        "MAX_POSTINGS_PER_QUERY={MAX_POSTINGS_PER_QUERY}"
+    );
+}
+
+/// Two crossing strip-like triangulations at depth 5: patch 0 is a comb of
+/// `2 * bound + 4` tall, thin columns over x ∈ [-1, 1], y ∈ [-1, 1] (two
+/// rows); patch 1 a thin horizontal strip over x ∈ [-1.5, 1.5], y ∈ [0, 0.05]
+/// with segment breaks at x = -1, 0, 1. Every comb triangle lands in one of
+/// four coarse buckets (its long edges set the cell size), and each inner
+/// strip triangle genuinely overlaps more than `bound` comb triangles. The
+/// patches are fused at the coincident vertex (-1, 0, 5). Returns the fixture
+/// and the strip's two outer end vertices.
+#[allow(clippy::type_complexity)]
+fn crossing_strips(
+    bound: usize,
+) -> (
+    Vec<Point3>,
+    Vec<Option<usize>>,
+    Vec<MeshTriangle>,
+    Vec<(usize, usize)>,
+    [usize; 2],
+) {
+    let columns = 2 * bound + 4;
+    let comb = |row: usize, column: usize| row * (columns + 1) + column;
+    let mut points = Vec::new();
+    for row in 0..3 {
+        for column in 0..=columns {
+            points.push(point(
+                -1.0 + 2.0 * column as f32 / columns as f32,
+                row as f32 - 1.0,
+                5.0,
+            ));
+        }
+    }
+    let mut triangles = Vec::new();
+    for row in 0..2 {
+        for column in 0..columns {
+            triangles.push(triangle(
+                comb(row, column),
+                comb(row, column + 1),
+                comb(row + 1, column + 1),
+            ));
+            triangles.push(triangle(
+                comb(row, column),
+                comb(row + 1, column + 1),
+                comb(row + 1, column),
+            ));
+        }
+    }
+    let base = points.len();
+    let xs = [-1.5_f32, -1.0, 0.0, 1.0, 1.5];
+    for y in [0.0_f32, 0.05] {
+        for x in xs {
+            points.push(point(x, y, 5.0));
+        }
+    }
+    let (bottom, top) = (|k: usize| base + k, |k: usize| base + xs.len() + k);
+    for k in 0..xs.len() - 1 {
+        triangles.push(triangle(bottom(k), bottom(k + 1), top(k + 1)));
+        triangles.push(triangle(bottom(k), top(k + 1), top(k)));
+    }
+    let membership = (0..points.len())
+        .map(|index| Some(usize::from(index >= base)))
+        .collect();
+    // Comb vertex (-1, 0) and strip vertex (-1, 0) coincide.
+    let pairs = vec![(comb(1, 0), bottom(1))];
+    (
+        points,
+        membership,
+        triangles,
+        pairs,
+        [bottom(0), top(xs.len() - 1)],
+    )
+}
+
+#[test]
+fn crossing_strip_triangulations_keep_per_query_postings_bounded() {
+    let (points, membership, original, pairs, [left_end, right_end]) =
+        crossing_strips(MAX_POSTINGS_PER_QUERY);
+    let with_cameras = [Some(identity_camera(0.0)), Some(identity_camera(0.0))];
+    // The image ownership path and the 3D fallback (no reference cameras).
+    for cameras in [&with_cameras[..], &[]] {
+        let mut triangles = original.clone();
+        let stats = merge_fused_patches(&points, &mut triangles, &membership, &pairs, cameras, &[]);
+        assert_eq!(stats.fused_pairs, 1, "{stats:?}");
+        // Work is counted, and no single lookup exceeds the stated bound,
+        // although one dense bucket holds about 2 * bound comb triangles.
+        assert!(stats.max_postings_per_query > 0, "{stats:?}");
+        assert!(
+            stats.max_postings_per_query <= MAX_POSTINGS_PER_QUERY,
+            "max_postings_per_query={} > {MAX_POSTINGS_PER_QUERY}",
+            stats.max_postings_per_query
+        );
+        // Each inner strip triangle overlaps more than `bound` owner
+        // triangles, so its lookup must hit the bound, and that is recorded.
+        assert!(stats.posting_bound_hits > 0, "{stats:?}");
+        assert!(
+            stats.diagnostic(2).contains(&bound_hits_phrase(&stats)),
+            "{}",
+            stats.diagnostic(2)
+        );
+        // Fail-closed: strip surface beyond the comb is never removed.
+        let ends = triangles
+            .iter()
+            .filter(|t| {
+                [t.a, t.b, t.c]
+                    .iter()
+                    .any(|v| *v == left_end || *v == right_end)
+            })
+            .count();
+        assert_eq!(ends, 4, "{stats:?}");
+        // The comb (higher priority) is untouched.
+        assert_eq!(stats.retained_by_group[0], original.len() - 8);
+    }
+}
+
+/// Patch 0: `slivers` thin triangles fanning out from a hub far below,
+/// each crossing patch 1's single candidate triangle (-2,0)-(2,0)-(0,2) on
+/// the plane z = 0 as a narrow, near-vertical band, with gaps between them;
+/// plus one triangle at the hub touching the candidate only at its corner
+/// (-2, 0), whose vertex is fused with that corner. Every crossing sliver
+/// splits one uncovered fragment in two, so the candidate's 3D subtraction
+/// needs `slivers + 1` fragments and never covers it fully.
+fn sliver_fan(slivers: usize) -> (Vec<Point3>, Vec<Option<usize>>, Vec<MeshTriangle>, usize) {
+    let mut points = vec![
+        point(0.0, -100.0, 0.0),
+        point(-2.0, 0.0, 0.0),
+        point(-2.0, -1.0, 0.0),
+    ];
+    let mut triangles = vec![triangle(0, 1, 2)];
+    for sliver in 0..slivers {
+        let x = -2.0 + 4.0 * (sliver as f32 + 0.5) / slivers as f32;
+        let index = points.len();
+        points.push(point(x, 100.0, 0.0));
+        points.push(point(x + 0.01, 100.0, 0.0));
+        triangles.push(triangle(0, index, index + 1));
+    }
+    let candidate = points.len();
+    points.extend([
+        point(-2.0, 0.0, 0.0),
+        point(2.0, 0.0, 0.0),
+        point(0.0, 2.0, 0.0),
+    ]);
+    triangles.push(triangle(candidate, candidate + 1, candidate + 2));
+    let membership = (0..points.len())
+        .map(|index| Some(usize::from(index >= candidate)))
+        .collect();
+    (points, membership, triangles, candidate)
+}
+
+#[test]
+fn a_seam_beyond_the_fragment_budget_is_reported_as_budget_exhausted() {
+    let slivers = MAX_UNCOVERED_PIECES + 32;
+    let (points, membership, mut triangles, candidate) = sliver_fan(slivers);
+    let stats = merge_fused_patches(
+        &points,
+        &mut triangles,
+        &membership,
+        &[(1, candidate)],
+        &[],
+        &[],
+    );
+    assert_eq!(stats.fused_pairs, 1, "{stats:?}");
+    // The postings fit the bound, so only the clipping budget stops it.
+    assert_eq!(stats.posting_bound_hits, 0, "{stats:?}");
+    // Fail-closed: the gaps between slivers are real surface, so the
+    // candidate stays ...
+    assert_eq!(stats.removed_duplicate_triangles, 0, "{stats:?}");
+    assert_eq!(stats.retained_by_group, vec![slivers + 1, 1]);
+    // ... but it is reported as budget-exhausted, not as an ordinary partial
+    // overlap, and the diagnostic says the bounded algorithm stopped early.
+    assert_eq!(stats.clipping_budget_exhausted, 1, "{stats:?}");
+    assert_eq!(stats.remaining_overlap_triangles, 0, "{stats:?}");
+    let diagnostic = stats.diagnostic(2);
+    assert!(
+        diagnostic.contains(&clipping_budget_phrase(&stats)),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn ordinary_overlaps_report_no_bound_hits_and_keep_their_results() {
+    // A seam within the fragment budget stays an ordinary partial overlap.
+    let (points, membership, mut triangles, candidate) = sliver_fan(8);
+    let stats = merge_fused_patches(
+        &points,
+        &mut triangles,
+        &membership,
+        &[(1, candidate)],
+        &[],
+        &[],
+    );
+    assert_eq!(stats.removed_duplicate_triangles, 0, "{stats:?}");
+    assert_eq!(stats.remaining_overlap_triangles, 1, "{stats:?}");
+    assert_eq!(stats.clipping_budget_exhausted, 0, "{stats:?}");
+    assert_eq!(stats.posting_bound_hits, 0, "{stats:?}");
+    assert!(stats.max_postings_per_query > 0, "{stats:?}");
+    assert!(stats
+        .diagnostic(2)
+        .contains(&clipping_budget_phrase(&stats)));
+
+    // The image-ownership fixture keeps its result and hits neither bound.
+    let (points, membership, original, link, cameras) = owned_overlap_fixture();
+    let mut triangles = original.clone();
+    let stats = merge_fused_patches(&points, &mut triangles, &membership, &link, &cameras, &[]);
+    assert_eq!(stats.removed_duplicate_triangles, 1, "{stats:?}");
+    assert_eq!(stats.retained_by_group, vec![4, 2]);
+    assert_eq!(stats.posting_bound_hits, 0, "{stats:?}");
+    assert_eq!(stats.clipping_budget_exhausted, 0, "{stats:?}");
+    assert!(stats.max_postings_per_query > 0, "{stats:?}");
+    assert!(stats.max_postings_per_query <= original.len(), "{stats:?}");
+
+    // The 3D seam fixture likewise.
+    let (points, mut triangles, membership) = adjacent_grids_fixture();
+    let total = triangles.len();
+    let stats = merge_fused_patches(
+        &points,
+        &mut triangles,
+        &membership,
+        &[(2, 7), (5, 10)],
+        &[],
+        &[],
+    );
+    assert_eq!(stats.removed_duplicate_triangles, 2, "{stats:?}");
+    assert_eq!(triangles.len(), total - 2);
+    assert_eq!(stats.posting_bound_hits, 0, "{stats:?}");
+    assert_eq!(stats.clipping_budget_exhausted, 0, "{stats:?}");
+    assert!(stats.max_postings_per_query > 0, "{stats:?}");
+    assert!(stats.max_postings_per_query <= total, "{stats:?}");
+    assert!(stats.diagnostic(2).contains(&bound_hits_phrase(&stats)));
 }
