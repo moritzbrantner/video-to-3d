@@ -310,25 +310,27 @@ impl ProjectStore {
         }
         manifest.artifacts = keep;
 
-        // Free ownership of verified but stale artifacts before running new
-        // operations. Otherwise their old paths remain reserved and a rebuild
-        // can consume its attempt on an output collision with obsolete work.
-        // An upstream stale identity already makes downstream identities use
-        // 'pending', so one topological identity calculation handles both.
-        let identities = manifest.operation_identities()?;
-        manifest.artifacts.retain(|artifact| {
-            if artifact.operation_identity == identities[&artifact.produced_by] {
-                true
-            } else {
-                report
-                    .verified
-                    .retain(|operation| operation != &artifact.produced_by);
-                report
-                    .invalidated
-                    .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
-                false
-            }
-        });
+        // Only builds release stale artifact ownership. Cached reconciliation
+        // backs read-only status/inspect commands, which must still report
+        // retained but out-of-date outputs as stale (or budget-exhausted).
+        if mode == VerifyMode::Full {
+            // An upstream stale identity already makes downstream identities
+            // use 'pending', so one topological pass releases all stale paths.
+            let identities = manifest.operation_identities()?;
+            manifest.artifacts.retain(|artifact| {
+                if artifact.operation_identity == identities[&artifact.produced_by] {
+                    true
+                } else {
+                    report
+                        .verified
+                        .retain(|operation| operation != &artifact.produced_by);
+                    report
+                        .invalidated
+                        .push((artifact.produced_by.clone(), Invalidation::StaleIdentity));
+                    false
+                }
+            });
+        }
 
         let receipts_dir = self.root.join(STATE_DIRECTORY).join("receipts");
         if let Ok(entries) = fs::read_dir(&receipts_dir) {
@@ -495,15 +497,14 @@ impl ProjectStore {
         ) {
             let document = fs::read_to_string(self.resolve(&artifact.path))
                 .map_err(|error| Invalidation::CorruptSidecar(error.to_string()))?;
-            // Versioned JSON artifacts must parse before they can be reused
-            // or recovered from orphan receipts. Preserve legacy opaque .bin
-            // provider outputs, which are not versioned JSON interchange.
+            // A document claiming a JSON interchange format must parse;
+            // opaque provider outputs remain supported even when their path
+            // ends in .json. Readers still enforce the format when consumed.
             let sidecars = match crate::scene_artifacts::artifact_sidecars(artifact.kind, &document)
             {
                 Ok(sidecars) => sidecars,
                 Err(_)
-                    if artifact.path.as_str().ends_with(".bin")
-                        && !document.trim_start().starts_with('{')
+                    if !document.trim_start().starts_with('{')
                         && !document.trim_start().starts_with('[') =>
                 {
                     Vec::new()
