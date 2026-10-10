@@ -1,18 +1,26 @@
 # Video clip → whole scene product roadmap
 
+## Owner-approved initial product contract — 2026-10-10
+
+The [ten product decisions](specs/whole-scene-product-decisions.md) are authoritative for initial-release behavior. They establish **local-only hybrid reconstruction**, editable major architecture and objects, observation-only versus AI-completed views, mesh/splat switching where both exist, video-validated uncertainty, automatic processing with optional checkpoints, adaptive CPU/GPU execution, and a shared browser/desktop interface.
+
+**Initial release is not complete until one controlled room video and two ordinary handheld videos all produce independently verifiable, recognizable Blender-editable scenes.** The controlled case alone is not sufficient. Fixture expectations and tolerances are independently authored before optimization. The full contract is [hybrid scenes-to-Blender acceptance](specs/hybrid-room-to-blender-acceptance.md).
+
+**Cloud execution and all uploads are deferred.** Any cloud references below describe potential later milestones/schema capabilities, not permission or a requirement for the first release. No operation in this release may silently escalate off-device, even with derived imagery. Advanced dynamics, granular part-level edits, and optional cloud workflows remain future decisions. Do not alter accepted Rust geometry/provenance authority or browser-owned decoding and sampling.
+
 ## Immediate product priority — hybrid room-to-Blender vertical slice (owner decision 2026-10-10)
 
 **Chosen architecture: B — hybrid scene reconstruction.** The observed Rust reconstruction defines accepted camera geometry and evidence. Learned reconstruction strengthens weak observed regions. Semantic identification and tracked masks separate scene objects. Existing asset-tooling generators supply explicit, labeled candidate completions where video evidence is insufficient. All geometry participating in shared fusion crosses the existing evidence validation boundary; scene placement is checked against registered views. No generative output silently becomes observed geometry.
 
-**First product release gate:** [Hybrid room-to-Blender acceptance contract](specs/hybrid-room-to-blender-acceptance.md). A short pinned room video must build, without an agent choosing steps, into one coherent environment plus at least three distinct Blender scene objects (at least one independently editable mesh), source-based transforms/materials, provenance, preview and headless Blender import/transform test. This is **not yet delivered**; intermediate reconstructor successes do not count as product completion.
+**First product release gate:** [Hybrid scenes-to-Blender acceptance contract](specs/hybrid-room-to-blender-acceptance.md). **Three pinned real videos** (one guided room, two ordinary handheld clips) must each build without an agent choosing steps into coherent environments and independently editable Blender objects, with source-based transforms/materials, provenance, uncertainty, preview and headless Blender import/transform tests. The controlled room must contain at least three distinct editable objects; the handheld fixtures have their own independent inventories. This is **not yet delivered**; intermediate reconstructor successes do not count as product completion.
 
 **Execute existing issues in dependency-first order (not numeric milestone order):**
-1. Establish synthetic scene oracle, licensed real room canary and independent E2E acceptance/Blender import checks **before** declaring implementation successful.
+1. Establish the synthetic scene oracle, three licensed real-video canaries (**one controlled room, two ordinary handheld**), and independent E2E/Blender import checks **before** declaring the initial release successful.
 2. Make the current CLI/scene runner execute the smallest full pipeline from the browser-produced sampled frames (or a prepared manifest of them with fixed sampling); the browser keeps sole ownership of video decoding and frame sampling (AGENTS.md), so there is no second native intake path. Preserve cancellation, receipts and user privacy.
 3. Native evidence interchange and first learned multi-view provider **only where measured reconstruction gates fail**; do not delay the vertical slice for a full research provider matrix.
 4. Semantic inventory, cross-frame identity tracking, consistent masks, multi-view object references and first independent object asset through existing asset-tooling.
 5. Place and validate objects in the observed world; compose environment and object hierarchy; enable hybrid preview and Blender/DCC handoff.
-6. Run acceptance on pinned clip; prioritize the **first failing critical-path stage**, fix it, and repeat. Report product progress as end-to-end gates passed rather than merged PR count or isolated mesh metrics.
+6. Run acceptance on all three pinned clips; prioritize the **first failing critical-path stage**, fix it, and repeat. Report product progress as end-to-end gates passed rather than merged PR count or isolated mesh metrics.
 
 **Deferred unless a critical-path gate demonstrates a need:** general splat optimization, extensive scene expansion, multi-video fusion, audio, advanced dynamic scenes and mesh micro-optimizations. Existing security/correctness review findings remain mandatory to resolve; deferral applies to new feature priority, not defect concealment.
 
@@ -76,10 +84,10 @@ The product does **not** promise that every input contains enough evidence for f
 2. **Observed geometry remains authoritative.** Generative completion can fill unseen regions but cannot silently rewrite observed evidence.
 3. **Provider-neutral boundaries.** World models, learned reconstruction models, image editors, segmentation models, image-to-3D systems, and audio systems are replaceable adapters.
 4. **Idempotent convergence.** Re-running the same declared project reconciles existing verified outputs instead of repeating expensive work.
-5. **Explicit escalation.** Cheap/local/deterministic paths run first; learned or paid providers run only when declared quality gates justify them.
+5. **Explicit escalation.** Cheap deterministic paths run first; learned local providers are used when declared quality gates justify them. Paid/cloud providers are deferred beyond the initial release.
 6. **One coordinate system.** Every camera, mesh, splat, generated object, collider, and annotation is registered into one scene frame before assembly.
 7. **Quality is tested on scenes, not screenshots.** Each milestone adds objective acceptance evidence and a human-inspectable preview.
-8. **Source video stays on-device.** Browser decoding and sampling remain local. Cloud operations may consume only explicitly permitted locally derived artifacts; provider policy cannot authorize source-video uploads.
+8. **All execution and data stay on-device for the initial release.** Browser decoding and sampling remain authoritative across both the web and desktop shell; no cloud inference or uploads of original or derived video artifacts are permitted. Cloud plans are deferred.
 9. **Shared evidence validation gates provider geometry.** Learned and generated surfaces cross the versioned `ReconstructionEvidenceView` boundary before participating in shared validation/fusion, with their original provenance retained.
 
 ---
@@ -129,7 +137,7 @@ Add explicit modes rather than hidden heuristic bundles:
 
 - **preview** — fast local reconstruction and coarse outputs;
 - **standard** — learned escalation + scene decomposition + usable completion;
-- **production** — expensive provider escalation, higher-quality meshes/textures, stronger validation/export.
+- **production** — stronger **local** provider escalation, higher-quality meshes/textures, stronger validation/export.
 
 Acceptance:
 - changing quality mode changes declared operations, not hidden behavior;
@@ -182,7 +190,7 @@ Represent provider preference as data:
 - maximum total project cost;
 - quality fallback ordering.
 
-Provider selection must be mechanical after the policy is declared.
+Provider selection must be mechanical after the policy is declared. **The initial release requires local-only enforcement;** cloud-related configuration already represented by the schema is reserved for future owner-approved capability, not an active runtime fallback.
 
 ## 1.4 CLI entry point
 
@@ -401,9 +409,9 @@ Requirements:
 
 ## 6.3 World-model provider adapter
 
-Add a provider-neutral world-generation operation with explicit conditioning capabilities. Video conditioning is available only to providers running locally; the uploaded source video must never leave the device. Cloud adapters may receive only explicitly permitted locally derived images or other artifacts after the user authorizes that operation.
+Add a provider-neutral **local** world-generation operation with explicit conditioning capabilities. Video conditioning and all other operations run on-device for the first release. **Later only**, if the owner explicitly enables a future cloud mode, providers may process separately authorized derived artifacts; source video is never sent to a provider.
 
-A first optional, replaceable cloud adapter may target Marble if its supported conditioning can satisfy this boundary. A cloud provider that requires source-video upload is unsupported, regardless of quality mode or paid-cloud policy.
+**Deferred future research only:** an optional cloud adapter might target a suitable world model under a separately approved privacy policy. It is not part of the initial product or acceptance gate.
 
 ## 6.4 World-model import
 
@@ -461,7 +469,7 @@ For each selected object, prepare:
 
 Expose one operation contract in asset-tooling for image/multi-view → 3D.
 
-Initial adapters should reuse existing local providers and allow cloud providers.
+Initial adapters should reuse existing **local providers**. Cloud adapters are deferred outside the initial-release acceptance gate.
 
 ## 7.3 Local object generation path
 
@@ -470,9 +478,9 @@ Dogfood existing asset-tooling support:
 - Stable Fast 3D;
 - TripoSR fallback.
 
-## 7.4 Cloud object generation path
+## 7.4 Cloud object generation path — deferred
 
-Add a high-quality provider adapter, e.g. Hunyuan3D-class multi-view/image-to-3D.
+Future optional work only, requiring an explicit later owner decision. Not part of the first local-only product acceptance.
 
 Provider choice is policy-driven rather than agent-selected.
 
@@ -763,9 +771,9 @@ Provide the best no-cloud pipeline available:
 - local image edit/segmentation where practical;
 - local asset processing.
 
-## 15.2 Cloud-augmented profile
+## 15.2 Cloud-augmented profile — deferred beyond initial release
 
-Allow optional high-value calls:
+Only after separate owner approval might a future release allow optional high-value calls:
 - world model;
 - high-quality object generation;
 - image cleanup;
@@ -777,7 +785,7 @@ Before execution, estimate which paid operations may run and their configured ma
 
 ## 15.4 Privacy classification
 
-Source video always stays local. Reject any cloud request containing source-video bytes, including a repackaged or transcoded source clip. Clearly identify which optional operations upload explicitly permitted locally derived imagery or other artifacts, require authorization before transfer, and record that choice in the operation receipt. Local-only policy forbids all such transfers.
+**Initial release rejects all cloud requests and uploads, including derived frames.** For any future approved cloud profile, original video must remain local; any explicitly permitted derived-data transfer would require separate owner consent and receipts. Current local-only policy forbids all such transfers.
 
 ## 15.5 Provider substitution tests
 
@@ -887,7 +895,7 @@ Once this path works, increase scene difficulty systematically rather than addin
 13. 7.1 object references
 14. 7.2 provider-neutral object generation
 15. 7.3 local provider path
-16. 7.4 cloud provider path
+16. 7.4 cloud provider path — **deferred, not on first-release critical path**
 17. 8.1–8.4 object placement/validation
 18. 11.1–11.3 hybrid viewer/provenance
 19. 13.1 web scene bundle
