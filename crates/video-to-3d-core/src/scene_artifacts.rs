@@ -497,10 +497,21 @@ impl SurfaceTexturesArtifact {
                 origins.push(origin);
             }
         }
-        if self.fallback_reasons.total() != self.fallback_triangles.len() {
+        // These counts are deserialized from untrusted JSON: do not overflow
+        // before checking the claimed partition.
+        let reasons = [
+            self.fallback_reasons.mixed_reference,
+            self.fallback_reasons.unobserved_reference,
+            self.fallback_reasons.missing_reference_image,
+            self.fallback_reasons.missing_grid_site,
+            self.fallback_reasons.degenerate_footprint,
+        ]
+        .into_iter()
+        .try_fold(0usize, |sum, count| sum.checked_add(count))
+        .ok_or_else(|| "surface textures fallback reason count overflows".to_owned())?;
+        if reasons != self.fallback_triangles.len() {
             return Err(format!(
-                "surface textures artifact has {} fallback reason(s) for {} fallback triangle(s)",
-                self.fallback_reasons.total(),
+                "surface textures artifact has {reasons} fallback reason(s) for {} fallback triangle(s)",
                 self.fallback_triangles.len()
             ));
         }
