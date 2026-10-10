@@ -1278,7 +1278,9 @@ fn png_sidecars_are_validated_completely() {
     // Decoding inverts the encoder's filters exactly.
     let rgb = decode_png_rgb8_with_cancel(&png, 3, 2, || false).unwrap();
     let expected: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| pixel[..3].to_vec())
         .collect();
     assert_eq!(rgb, expected);

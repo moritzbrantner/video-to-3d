@@ -1399,9 +1399,11 @@ fn bake_parsed(
                     .is_ok_and(|rgb| {
                         rgb.len() * 4 == material.texture.rgba.len() * 3
                             && rgb
-                                .chunks_exact(3)
-                                .zip(material.texture.rgba.chunks_exact(4))
-                                .all(|(cached, expected)| cached == &expected[..3])
+                                .as_chunks::<3>()
+                                .0
+                                .iter()
+                                .zip(material.texture.rgba.as_chunks::<4>().0)
+                                .all(|(cached, expected)| cached[..] == expected[..3])
                     })
                 })
         });
