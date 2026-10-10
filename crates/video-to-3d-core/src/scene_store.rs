@@ -413,9 +413,16 @@ impl ProjectStore {
                 // or above a bake directory would still make the bake fail
                 // on `create_dir_all`; remove it unless someone else owns it.
                 for artifact in &rejected {
-                    let paths = std::iter::once(artifact.path.clone()).chain(
-                        crate::scene_artifacts::recorded_sidecar_paths(&self.root, artifact),
-                    );
+                    // Sidecar paths come from the document, so trust them only
+                    // when the document still matches its recorded hash.
+                    let intact = hash_file(&self.resolve(&artifact.path))
+                        .is_some_and(|(hash, _)| hash == artifact.content_hash);
+                    let sidecars = if intact {
+                        crate::scene_artifacts::recorded_sidecar_paths(&self.root, artifact)
+                    } else {
+                        Vec::new()
+                    };
+                    let paths = std::iter::once(artifact.path.clone()).chain(sidecars);
                     for path in paths {
                         let folded = path.as_str().to_ascii_lowercase();
                         let obstructs = bake_directories

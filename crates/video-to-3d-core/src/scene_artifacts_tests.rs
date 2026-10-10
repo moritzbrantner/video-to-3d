@@ -793,6 +793,13 @@ fn texture_artifacts_reject_incorrect_camera_source_associations() {
         assert!(error.contains("outside its"), "{error}");
     }
 
+    // Appearance keys are unique.
+    if original.materials.len() > 1 {
+        let mut shared = original.clone();
+        shared.materials[1].appearance_key = shared.materials[0].appearance_key.clone();
+        assert!(shared.validate().unwrap_err().contains("appearance key"));
+    }
+
     // Triangles need at least three points.
     let mut pointless = original.clone();
     pointless.point_count = 2;
@@ -896,7 +903,8 @@ fn builtin_executor_rejects_ambiguous_inputs_and_foreign_paths() {
         &CancellationToken::new(),
     );
     assert!(
-        matches!(&outcome, AttemptOutcome::Failed(message) if message.contains("would overwrite the declared path `artifacts/bake/clip.webm`")),
+        // Not charged: a declaration conflict is not a bake attempt.
+        matches!(&outcome, AttemptOutcome::Unsupported(message) if message.contains("would overwrite the declared path `artifacts/bake/clip.webm`")),
         "{outcome:?}"
     );
     assert!(!dir.0.join("artifacts/bake").exists());
@@ -919,7 +927,7 @@ fn builtin_executor_rejects_ambiguous_inputs_and_foreign_paths() {
             &CancellationToken::new(),
         );
         assert!(
-            matches!(&outcome, AttemptOutcome::Failed(message) if message.contains(declared)),
+            matches!(&outcome, AttemptOutcome::Unsupported(message) if message.contains(declared)),
             "{declared}: {outcome:?}"
         );
         assert!(!dir.0.join("artifacts/bake").exists());
@@ -994,7 +1002,7 @@ fn builtin_executor_reserves_sidecars_of_recorded_artifacts() {
     let outcome =
         BuiltInExecutor::new(&dir.0, &manifest).execute(&request, &CancellationToken::new());
     assert!(
-        matches!(&outcome, AttemptOutcome::Failed(message) if message.contains(moved.as_str())),
+        matches!(&outcome, AttemptOutcome::Unsupported(message) if message.contains(moved.as_str())),
         "{outcome:?}"
     );
     assert_eq!(fs::read(moved.resolve(&dir.0)).unwrap(), sidecar_bytes);
@@ -1287,6 +1295,24 @@ fn png_sidecars_are_validated_completely() {
     assert!(decode_png_rgb8_with_cancel(&png, 3, 2, || true)
         .unwrap_err()
         .contains("canceled"));
+    // Declared sizes beyond the texture limit are rejected before decoding.
+    assert!(
+        decode_png_rgb8_with_cancel(&png, 1 << 13, 1 << 13, || false)
+            .unwrap_err()
+            .contains("pixel limit")
+    );
+    // Exactly one zlib stream: trailing bytes inside IDAT are rejected.
+    let idat_length = u32::from_be_bytes(png[33..37].try_into().unwrap()) as usize;
+    let mut idat = png[41..41 + idat_length].to_vec();
+    idat.push(0);
+    let mut trailing_zlib = png[..33].to_vec();
+    trailing_zlib.extend_from_slice(&(idat.len() as u32).to_be_bytes());
+    let mut body = b"IDAT".to_vec();
+    body.extend_from_slice(&idat);
+    trailing_zlib.extend_from_slice(&body);
+    trailing_zlib.extend_from_slice(&crc32fast::hash(&body).to_be_bytes());
+    trailing_zlib.extend_from_slice(&png[41 + idat_length + 4..]);
+    assert!(validate_png_rgb8(&trailing_zlib, 3, 2).is_err());
     // IEND carries no data.
     let mut iend = png[..png.len() - 12].to_vec();
     iend.extend_from_slice(&1_u32.to_be_bytes());

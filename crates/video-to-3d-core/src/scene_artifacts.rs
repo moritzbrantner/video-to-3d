@@ -593,6 +593,11 @@ impl SurfaceMeshArtifact {
 // ---------------------------------------------------------------------------
 // Surface textures
 
+/// Largest texture (in pixels) a surface-textures artifact may declare;
+/// decoding allocates in proportion to it. Baked textures are crops of one
+/// keyframe, far below this.
+pub const MAX_TEXTURE_PIXELS: u64 = 1 << 25;
+
 /// PNG sidecar of one baked reference material.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -664,7 +669,22 @@ impl SurfaceTexturesArtifact {
         }
         let mut frames = BTreeSet::new();
         let mut texture_paths = BTreeSet::new();
+        let mut appearance_keys = BTreeSet::new();
         for material in &self.materials {
+            if !appearance_keys.insert(&material.appearance_key) {
+                return Err(format!(
+                    "surface textures artifact uses appearance key {} twice",
+                    material.appearance_key.as_str()
+                ));
+            }
+            if u64::from(material.texture.width) * u64::from(material.texture.height)
+                > MAX_TEXTURE_PIXELS
+            {
+                return Err(format!(
+                    "surface textures material for frame {} exceeds the {MAX_TEXTURE_PIXELS}-pixel texture limit",
+                    material.reference_frame
+                ));
+            }
             // Scene resource paths must be unique, folding ASCII case as
             // manifest paths do.
             if !texture_paths.insert(material.texture.path.as_str().to_ascii_lowercase()) {
@@ -975,6 +995,11 @@ pub(crate) fn decode_png_rgb8_with_cancel(
     height: u32,
     mut is_canceled: impl FnMut() -> bool,
 ) -> Result<Vec<u8>, String> {
+    if u64::from(width) * u64::from(height) > MAX_TEXTURE_PIXELS {
+        return Err(format!(
+            "a {width}x{height} texture exceeds the {MAX_TEXTURE_PIXELS}-pixel limit"
+        ));
+    }
     if !is_png_rgb8(png, width, height) {
         return Err(format!("not a {width}x{height} 8-bit RGB PNG"));
     }
@@ -1121,9 +1146,11 @@ fn inflate_zlib_exact(
     const CHUNK: usize = 1 << 16;
     let mismatch = || "PNG pixel stream does not inflate to the declared size".to_owned();
     let mut state = InflateState::new_boxed(DataFormat::Zlib);
-    // One spare byte detects a stream longer than declared.
-    let mut out = vec![0_u8; expected + 1];
-    let (mut consumed, mut written) = (0, 0);
+    // Output grows with what actually inflates (never from the declared size
+    // alone), one scratch chunk at a time.
+    let mut out = Vec::new();
+    let mut scratch = vec![0_u8; CHUNK];
+    let mut consumed = 0;
     loop {
         if is_canceled() {
             return Err("PNG decoding was canceled".into());
@@ -1134,27 +1161,22 @@ fn inflate_zlib_exact(
         } else {
             MZFlush::None
         };
-        let result = inflate(
-            &mut state,
-            &stream[consumed..end],
-            &mut out[written..],
-            flush,
-        );
+        let result = inflate(&mut state, &stream[consumed..end], &mut scratch, flush);
         consumed += result.bytes_consumed;
-        written += result.bytes_written;
-        if written > expected {
+        if out.len() + result.bytes_written > expected {
             return Err(mismatch());
         }
+        out.extend_from_slice(&scratch[..result.bytes_written]);
         match result.status {
             Ok(MZStatus::StreamEnd) => break,
             Ok(_) if result.bytes_consumed > 0 || result.bytes_written > 0 => {}
             _ => return Err(mismatch()),
         }
     }
-    if written != expected {
+    // Exactly one complete zlib stream: no trailing data after it.
+    if out.len() != expected || consumed != stream.len() {
         return Err(mismatch());
     }
-    out.truncate(expected);
     Ok(out)
 }
 
@@ -1706,8 +1728,10 @@ impl BuiltInExecutor {
             Ok(collision) => collision,
             Err(error) => return AttemptOutcome::Failed(error),
         };
+        // A declaration conflict is not an attempt: nothing was baked, and
+        // fixing the declaration must not find the budget exhausted.
         if let Some(path) = collision {
-            return AttemptOutcome::Failed(format!(
+            return AttemptOutcome::Unsupported(format!(
                 "texture_bake output directory `{directory}` would overwrite the declared path `{}`",
                 path.as_str()
             ));
