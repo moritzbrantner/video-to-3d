@@ -28,6 +28,16 @@
 //!   depth-consistent triangles from a patch with a fusion-accepted link.
 //! - **Cross-reference topology.** Triangles referencing accepted shared
 //!   vertices retain cross-patch connections wherever they extend coverage.
+//! - **Seam stitching.** The gap a trimmed seam leaves between the owner
+//!   patch's boundary and the remaining lower-priority boundary is closed
+//!   with cross-reference triangles over existing retained boundary vertices
+//!   of fusion-linked components (`surface_merge_stitch.rs`). A stitch must
+//!   lie, in the owner camera's image, on the removed seam triangles at their
+//!   depth (after removing the pair's relative depth scale), overlap no
+//!   retained triangle or other stitch, and keep the orientation of the
+//!   triangle across its boundary edge. A gap no removed triangle observed is
+//!   never bridged, and a seam whose lower side still overlaps the owner (an
+//!   overlap seam, not a gap) stays disconnected.
 //!
 //! Patch priority is deterministic: more accepted triangles first, then the
 //! lower support-group index.
@@ -35,6 +45,10 @@
 use crate::{MeshTriangle, Point3};
 use nalgebra::{Matrix3, Vector2, Vector3};
 use std::collections::{BTreeSet, HashMap};
+use stitch::{stitch_trimmed_seams, ImageRemoval, SeamInputs};
+
+#[path = "surface_merge_stitch.rs"]
+mod stitch;
 
 const GEOMETRIC_EPSILON: f64 = 1.0e-9;
 /// Largest distance along the kept triangle's normal, as a fraction of the
@@ -136,8 +150,9 @@ pub(super) struct MergeStats {
     pub trimmed_seam_area_share: f64,
     /// Cross-reference triangles over existing vertices that close the gap a
     /// trimmed seam left between the owner patch's boundary and the remaining
-    /// lower-priority boundary.
-    // contract: populated by #137 implementation
+    /// lower-priority boundary, appended after the retained triangles (see
+    /// `surface_merge_stitch.rs`). They also count as cross-reference
+    /// triangles.
     pub stitched_seam_triangles: usize,
     /// Linked (owner, candidate) patch pairs with fewer than
     /// `MIN_SCALE_SAMPLES` anchored overlap samples, compared without
@@ -170,7 +185,7 @@ pub(super) struct MergeStats {
 impl MergeStats {
     pub fn diagnostic(&self, support_groups: usize) -> String {
         format!(
-            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area, and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} linked patch pair(s) had too few anchored overlap samples to calibrate their relative depth scale and were compared uncalibrated. {} candidate lookup(s) hit the posting bound of {} owner triangles (at most {} processed by one lookup) and {} triangle(s) exhausted the clipping budget of {} fragments; both were retained unjudged. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved and gaps no patch covered stay open.",
+            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area; {} seam stitch triangle(s) over existing vertices closed the gaps trimmed seams left, only where the removed triangles observed the surface at the owner's depth; and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} linked patch pair(s) had too few anchored overlap samples to calibrate their relative depth scale and were compared uncalibrated. {} candidate lookup(s) hit the posting bound of {} owner triangles (at most {} processed by one lookup) and {} triangle(s) exhausted the clipping budget of {} fragments; both were retained unjudged. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved, and gaps no patch observed stay open.",
             self.fused_pairs,
             self.shared_vertices,
             self.cross_reference_triangles,
@@ -178,6 +193,7 @@ impl MergeStats {
             self.removed_duplicate_triangles,
             self.trimmed_seam_triangles,
             self.trimmed_seam_area_share * 100.0,
+            self.stitched_seam_triangles,
             self.remaining_overlap_triangles,
             self.uncalibrated_patch_pairs.len(),
             self.posting_bound_hits,
@@ -353,6 +369,7 @@ pub(super) fn merge_fused_patches(
     let Some(&median_edge) = edges.get(edges.len() / 2) else {
         return MergeStats::default();
     };
+    drop(edges);
     // Reference-scale drift can exceed half an edge, but only a confirmed
     // fused patch pair can use this bounded normal-distance allowance.
     let tolerance = median_edge * MAX_OVERLAP_DISTANCE_FRACTION;
@@ -368,6 +385,8 @@ pub(super) fn merge_fused_patches(
     let mut trimmed_seam_triangles = 0;
     let mut trimmed_seam_area = 0.0;
     let mut uncalibrated_patch_pairs = Vec::new();
+    // Triangles removed because one owner's image owned them, in removal order.
+    let mut image_removals: Vec<ImageRemoval> = Vec::new();
     let total_area: f64 = geometry.iter().flatten().map(TriangleGeometry::area).sum();
     // Kept triangles of each processed patch with a reference camera,
     // projected into that camera and indexed on a grid over its image.
@@ -430,13 +449,14 @@ pub(super) fn merge_fused_patches(
             // fusion-accepted seam vertices, so the scale is anchored to the
             // surface fusion proved shared and not to whatever layer has the
             // most overlap. Too few anchored samples leave the scale at 1.
-            let owners: Vec<(&Footprint, f64)> = footprints
+            let owners: Vec<(usize, &Footprint, f64)> = footprints
                 .iter()
-                .filter(|footprint| {
+                .enumerate()
+                .filter(|(_, footprint)| {
                     linked_patches
                         .contains(&(footprint.patch.min(*patch), footprint.patch.max(*patch)))
                 })
-                .map(|footprint| {
+                .map(|(slot, footprint)| {
                     let anchors = scale_anchors
                         .get(&(footprint.patch.min(*patch), footprint.patch.max(*patch)));
                     // Both sides of every sample touch an accepted seam pair
@@ -473,7 +493,7 @@ pub(super) fn merge_fused_patches(
                         uncalibrated_patch_pairs.push((footprint.patch, *patch));
                         1.0
                     };
-                    (footprint, scale)
+                    (slot, footprint, scale)
                 })
                 .collect();
             // A linked, already processed patch without a footprint (no
@@ -493,12 +513,13 @@ pub(super) fn merge_fused_patches(
                 // left unjudged individually.
                 let mut judged_patches = BTreeSet::new();
                 let mut unjudged_triangles: HashMap<usize, Vec<usize>> = HashMap::new();
-                let mut judged: Vec<Ownership> = Vec::new();
+                // Each judged ownership with the owner's footprint and scale.
+                let mut judged: Vec<(Ownership, usize, f64)> = Vec::new();
                 let mut cut_off = false;
-                for (footprint, scale) in &owners {
+                for &(slot, footprint, scale) in &owners {
                     match footprint.ownership_tallied(
                         &candidate.corners,
-                        *scale,
+                        scale,
                         &linked,
                         &mut tally,
                     ) {
@@ -508,7 +529,7 @@ pub(super) fn merge_fused_patches(
                             } else {
                                 unjudged_triangles.insert(footprint.patch, unjudged);
                             }
-                            judged.push(ownership);
+                            judged.push((ownership, slot, scale));
                         }
                         // Fail closed: a lookup cut off at the posting bound
                         // could under-estimate ownership in this image and
@@ -524,19 +545,24 @@ pub(super) fn merge_fused_patches(
                 if cut_off {
                     continue;
                 }
-                let owned = judged
-                    .iter()
-                    .copied()
-                    .fold(Ownership::default(), |best, next| {
-                        if next.image_share > best.image_share {
+                let (owned, owner_slot, owner_scale) = judged.iter().copied().fold(
+                    (Ownership::default(), usize::MAX, 1.0),
+                    |best, next| {
+                        if next.0.image_share > best.0.image_share {
                             next
                         } else {
                             best
                         }
-                    });
+                    },
+                );
                 if owned.image_share >= MIN_IMAGE_OWNERSHIP_SHARE {
                     keep[index] = false;
                     removed_duplicate_triangles += 1;
+                    image_removals.push(ImageRemoval {
+                        triangle: index,
+                        footprint: owner_slot,
+                        scale: owner_scale,
+                    });
                     if owned.image_share < 1.0 - OWNERSHIP_EPSILON {
                         trimmed_seam_triangles += 1;
                         trimmed_seam_area += (candidate.area() - owned.surface_area).max(0.0);
@@ -638,6 +664,28 @@ pub(super) fn merge_fused_patches(
             kept_grid.insert(index, low, high);
         }
     }
+    // Close the gaps trimmed seams left, over existing vertices only.
+    let stitches = stitch_trimmed_seams(
+        &SeamInputs {
+            vertices: points.len(),
+            triangles,
+            keep: &keep,
+            geometry: &geometry,
+            membership,
+            patch_of: &patch_of,
+            footprints: &footprints,
+            removals: &image_removals,
+            kept_grid: &kept_grid,
+            all_kept: &all_kept,
+            tolerance,
+            cell,
+        },
+        &position,
+        &|triangle, component| components_linked(triangle, component),
+        &mut tally,
+    );
+    drop((footprints, kept_grid, all_kept, image_removals));
+    let stitched_seam_triangles = stitches.len();
     let group_count = membership
         .iter()
         .flatten()
@@ -687,6 +735,9 @@ pub(super) fn merge_fused_patches(
         retained_before += usize::from(*kept);
     }
     drop(reindexed);
+    // Stitches are new triangles over existing vertices, appended after every
+    // retained one: they carry no source corners.
+    triangles.extend(stitches);
 
     // Topology after the merge.
     let mut patches: BTreeSet<usize> = BTreeSet::new();
@@ -732,8 +783,7 @@ pub(super) fn merge_fused_patches(
         } else {
             0.0
         },
-        // contract: populated by #137 implementation
-        stitched_seam_triangles: 0,
+        stitched_seam_triangles,
         uncalibrated_patch_pairs,
         retained_by_group,
         patch_components,
@@ -749,7 +799,12 @@ pub(super) fn merge_fused_patches(
 /// `vertices` points and `triangles` triangles, on top of its inputs. Both
 /// spatial indexes hold one posting per triangle (see
 /// [`MAX_ANCHOR_CELL_SPAN`]) and every hash map is charged one bucket per
-/// entry, so the bound is linear in the mesh size.
+/// entry, so the bound is linear in the mesh size. The seam-stitch pass runs
+/// after the ownership loop has released its transient state (sorted edge
+/// lengths, footprint inputs, per-query candidate sets and scale samples), so
+/// the larger of the two is charged. Stitches are appended in place of
+/// removed triangles (at most one per removal), so the triangle buffer never
+/// grows beyond its input capacity.
 pub(crate) fn working_set_bytes(vertices: usize, triangles: usize) -> usize {
     use std::mem::size_of;
     const fn hash_entry(payload: usize) -> usize {
@@ -769,9 +824,8 @@ pub(crate) fn working_set_bytes(vertices: usize, triangles: usize) -> usize {
         + size_of::<Option<usize>>() // patch of
         + size_of::<bool>() // keep
         + size_of::<Option<TriangleGeometry>>()
-        + 3 * size_of::<f64>() // sorted edge lengths
         + 2 * size_of::<usize>() // all kept, patch members
-        + size_of::<KeptTriangle>() // footprint input
+        + size_of::<ImageRemoval>() // image removals, kept for the stitch pass
         + size_of::<ProjectedTriangle>() + size_of::<usize>() + size_of::<[usize; 3]>() // footprint
         + 2 * size_of::<usize>() // image posting or exact-list entry, 3D likewise
         + hash_entry(size_of::<(i32, [i64; 2])>() + size_of::<Vec<usize>>()) // image bucket
@@ -779,13 +833,19 @@ pub(crate) fn working_set_bytes(vertices: usize, triangles: usize) -> usize {
         + hash_entry(2 * size_of::<usize>()) // per-patch triangle counts and ranks
         + size_of::<(usize, [usize; 3])>() // re-indexed corners
         + size_of::<crate::TriangleSourceCorners>(); // retained triangle sources
+    let ownership_transients = triangles
+        .saturating_mul(
+            3 * size_of::<f64>() // sorted edge lengths
+            + size_of::<KeptTriangle>() // footprint input
+            // Per-query scratch: the candidate set of the widest query.
+            + btree_entry(size_of::<usize>()),
+        )
+        // Scale samples of one patch pair at a time.
+        .saturating_add(MAX_SCALE_SAMPLES * size_of::<f64>());
     vertices
         .saturating_mul(per_vertex)
         .saturating_add(triangles.saturating_mul(per_triangle))
-        // Per-query scratch: the candidate set of the widest query.
-        .saturating_add(triangles.saturating_mul(btree_entry(size_of::<usize>())))
-        // Scale samples of one patch pair at a time.
-        .saturating_add(MAX_SCALE_SAMPLES * size_of::<f64>())
+        .saturating_add(ownership_transients.max(stitch::working_set_bytes(vertices, triangles)))
 }
 
 fn find(parent: &mut [usize], index: usize) -> usize {
