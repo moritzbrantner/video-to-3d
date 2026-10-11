@@ -1,16 +1,16 @@
 # Video-to-3D Decision Atlas
 
-This file is the append-only decision map for `video-to-3d`.
+This file is the append-only product-intent map for `video-to-3d`: the durable place for **what the product should be**.
 
 ## Rules
 
-- Decision IDs are stable. Never renumber or reuse an ID.
-- Existing decision text may receive typo/link clarifications, but a changed choice is recorded as a new decision that explicitly supersedes the old ID.
-- New decisions are appended under the narrowest existing parent. If no suitable parent exists, append a new top-level section.
-- Cross-references use atlas IDs such as `1.3` or `3.2.1`.
-- The atlas records owner/product/architecture choices, not implementation status. A decision being present does not claim that the capability exists.
-- Detailed specifications and acceptance tests may elaborate these decisions, but must not silently contradict them.
-- When a decision is superseded, preserve the old entry and add `Superseded by X.Y`; the new entry should say `Supersedes A.B`.
+- The Atlas has exactly **two semantic leaf-entry kinds: Decision and Question**. Section headings only organize entries and are not a third kind. Existing leaves not explicitly marked `[question]` are Decisions.
+- A **Decision** is owner-selected product intent. Agents follow it until a later Decision explicitly supersedes it. A **Question** is a consequential unresolved choice; it is not automatically a blocker.
+- Coding agents retrieve relevant Atlas entries before making consequential product choices. Follow applicable Decisions. If an unanswered Question materially affects the current task, ask the owner **one question at a time**. If work exposes a new consequential fork, append a Question instead of choosing silently.
+- When a Question is answered, preserve it and append a Decision with `Answers X.Y`. When intent changes, preserve the old Decision and append a Decision with `Supersedes X.Y`. Do not add parallel semantic categories such as constraint, deferred decision, assumption, or principle; express those meanings in the Decision/Question text and relationships.
+- Entry IDs are stable. Never renumber or reuse an ID. New entries are appended under the narrowest existing parent; if no suitable parent exists, append a new top-level section.
+- Cross-references use Atlas IDs such as `1.3` or `3.2.1`.
+- The Atlas records product intent, not implementation status. A Decision being present does not claim that the capability exists. Detailed specifications and acceptance tests may elaborate Decisions, but must not silently contradict them.
 
 Sources seeded into this atlas:
 - `AGENTS.md`
@@ -156,35 +156,32 @@ Sources seeded into this atlas:
 
   Merged PR counts alone are not product progress.
 
-## 7. Deferred decisions
+## 7. Further decisions
 
 - **7.1 Cloud execution is deferred.**  
-  Status: deferred 2026-10-10.  
-  Cloud providers, upload policy, paid-provider exposure, and cloud/local profile selection require a future owner decision. Nothing in the current schema implies permission to use cloud execution. See 4.1.
+  Cloud providers, upload policy, paid-provider exposure, and cloud/local profile selection are not part of the initial release. Their eventual shape remains unanswered in Question 8.5. Nothing in the current schema implies permission to use cloud execution. See 4.1.
 
 - **7.2 User-configurable scene granularity is deferred.**  
-  Status: deferred 2026-10-10.  
-  The initial default remains major architectural elements plus meaningful objects from 1.1. The exact UI and supported granularity levels are not yet decided.
+  The initial default remains major architectural elements plus meaningful objects from 1.1. The exact UI and supported granularity levels remain unanswered rather than forming a separate "deferred decision" category.
 
 - **7.3 Exact numerical quality tolerances remain fixture-owned where not already defined.**  
-  Status: deferred to independent acceptance authorship.  
   Agents must not invent arbitrary universal thresholds merely to make implementation decisions. Fixture-specific tolerances belong to independently authored acceptance evidence.
 
-## 8. Open decision space
+## 8. Questions
 
-This section identifies unresolved decision areas without choosing them. New owner choices should be appended as numbered decisions under the appropriate parent above or, when necessary, as new entries here.
+These are unresolved consequential choices. They remain Questions until the owner answers them; answering preserves the Question and appends a linked Decision.
 
-- **8.1 First local learned provider selection.**  
+- **8.1** [question] **First local learned provider selection.**  
   Unresolved: which concrete local model/provider family becomes the first production learned multi-view evidence source under 2.2 and 4.5.
 
-- **8.2 Minimum acceptable CPU-only product experience.**  
+- **8.2** [question] **Minimum acceptable CPU-only product experience.**  
   Unresolved: which stages/quality tier are required versus explicitly unavailable on CPU-only hardware under 4.5.
 
-- **8.3 User correction semantics at review checkpoints.**  
+- **8.3** [question] **User correction semantics at review checkpoints.**  
   Unresolved: which edits are permitted in the first release checkpoint UI and which changes require recomputation, subject to 4.4 and 5.3.
 
-- **8.4 Representation switching UX.**  
+- **8.4** [question] **Representation switching UX.**  
   Unresolved: exact behavior for mesh/splat switching when both exist, subject to 1.3 and 4.2.
 
-- **8.5 Post-v1 cloud policy.**  
+- **8.5** [question] **Post-v1 cloud policy.**  
   Unresolved and intentionally deferred by 7.1.
