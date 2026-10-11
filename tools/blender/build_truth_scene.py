@@ -11,7 +11,10 @@ which is what a correct production export must look like. The other variants are
 deliberately broken handoffs the acceptance check must reject:
 
 - `joined`: all objects merged into one mesh with disconnected islands;
-- `missing-object`: the first object is left out.
+- `missing-object`: the first object is left out;
+- `parented`: the second object is parented to the first (world placement kept),
+  so moving the first moves both;
+- `shared-data`: an extra, unidentified object reuses the last object's mesh data.
 
 This script only produces reference inputs for the acceptance harness
 (`scene_import_acceptance.py`); it is not the product exporter.
@@ -51,7 +54,7 @@ def arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--variant", choices=["truth", "joined", "missing-object"], default="truth")
+    parser.add_argument("--variant", choices=["truth", "joined", "missing-object", "parented", "shared-data"], default="truth")
     return parser.parse_args(argv)
 
 
@@ -86,6 +89,17 @@ def main():
         obj["video_to_3d_label"] = node["label"]
         bpy.context.scene.collection.objects.link(obj)
         objects.append((node, obj))
+    movable = [obj for node, obj in objects if node["kind"] == "object"]
+    if args.variant == "parented":
+        parent, child = movable[0], movable[1]
+        world = child.matrix_world.copy()
+        child.parent = parent
+        child.matrix_world = world
+    if args.variant == "shared-data":
+        decoy = bpy.data.objects.new("decoy", movable[-1].data)
+        decoy.matrix_world = movable[-1].matrix_world.copy()
+        decoy.location.x += 10.0
+        bpy.context.scene.collection.objects.link(decoy)
     if args.variant == "joined":
         movable = [obj for node, obj in objects if node["kind"] == "object"]
         bpy.ops.object.select_all(action="DESELECT")

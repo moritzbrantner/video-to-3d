@@ -7,8 +7,9 @@ Run inside a pinned Blender:
 
 The expectation (`video-to-3d/blender-scene-expectation/v1`) is authored
 independently of the exporter, e.g. by `expected_from_synthetic_scene.py` from a
-fixture's ground truth. Objects are matched by the `video_to_3d_id` custom property
-(glTF node extras) or, failing that, by object name.
+fixture's ground truth. Objects are matched only by the `video_to_3d_id` custom
+property (glTF node extras); Blender object names are not identities, because the
+importer renames collisions (`chair`, `chair.001`).
 
 Checks, each reported individually; the process exits non-zero unless all pass:
 
@@ -17,12 +18,12 @@ Checks, each reported individually; the process exits non-zero unless all pass:
 - at least `min_independent_object_nodes` expected objects are separate,
   selectable mesh objects with their own mesh data (one mesh with disconnected
   islands is a single node and does not count);
-- every matched mesh has polygons, non-degenerate bounds, a finite transform and a
-  material;
+- every matched node owns its mesh data (no other object shares it), and has
+  polygons, non-degenerate bounds, a finite transform and a material;
 - world bounds agree with the expectation within `bounds_tolerance_m` when given;
-- moving one object by `edit_translation_m` moves exactly its bounds by that
-  amount and leaves every other object's transform and world-space vertices
-  unchanged.
+- moving each expected object in turn by `edit_translation_m` moves exactly its
+  bounds by that amount and leaves every other object's transform and world-space
+  vertices unchanged (no parenting or other coupling between nodes).
 
 The report also lists the imported hierarchy (names, parents, mesh data,
 materials, custom properties) and, with `--render`, writes a canonical render.
@@ -67,7 +68,8 @@ def world_vertex_digest(obj):
 
 
 def object_id(obj):
-    return str(obj.get("video_to_3d_id", obj.name))
+    value = obj.get("video_to_3d_id")
+    return None if value is None else str(value)
 
 
 def custom_properties(obj):
@@ -160,7 +162,8 @@ def main():
         meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
         by_id = {}
         for obj in meshes:
-            by_id.setdefault(object_id(obj), []).append(obj)
+            if object_id(obj) is not None:
+                by_id.setdefault(object_id(obj), []).append(obj)
         matched = {}
         for kind in ("architecture", "objects"):
             for element in expected[kind]:
@@ -173,15 +176,22 @@ def main():
                     matched[element] = candidates[0]
 
         objects = [matched[element] for element in expected["objects"] if element in matched]
-        own_data = {obj.data.name for obj in objects}
-        independent = [obj for obj in objects if obj.data.users == 1 or len(own_data) == len(objects)]
+        # Mesh data shared with any other object (an instance, a decoy) couples edits.
+        users = {}
+        for obj in meshes:
+            users.setdefault(obj.data.name, []).append(obj.name)
+        for element, obj in sorted(matched.items()):
+            report.check(
+                f"{element}:own_mesh_data",
+                len(users[obj.data.name]) == 1,
+                f"mesh {obj.data.name} is used by {users[obj.data.name]}",
+            )
+        independent = [obj for obj in objects if len(users[obj.data.name]) == 1]
         report.check(
             "independent_object_nodes",
-            len(objects) >= expected["min_independent_object_nodes"]
-            and len(own_data) == len(objects)
-            and len(independent) == len(objects),
-            f"{len(objects)} expected objects matched to {len(own_data)} distinct meshes; "
-            f"at least {expected['min_independent_object_nodes']} required",
+            len(independent) >= expected["min_independent_object_nodes"],
+            f"{len(independent)} of {len(expected['objects'])} expected objects are separate nodes "
+            f"with their own mesh data; at least {expected['min_independent_object_nodes']} required",
         )
 
         tolerance = expected.get("bounds_tolerance_m")
@@ -204,23 +214,26 @@ def main():
                 error = max(abs(a - b) for got, want in zip((low, high), truth) for a, b in zip(got, want))
                 report.check(f"{element}:bounds", error <= tolerance, f"max bounds error {error:.6f} m")
 
-        if objects:
-            moved = objects[0]
-            delta = Vector(expected.get("edit_translation_m", [0.5, 0.0, 0.0]))
+        delta = Vector(expected.get("edit_translation_m", [0.5, 0.0, 0.0]))
+        for element in expected["objects"]:
+            moved = matched.get(element)
+            if moved is None:
+                continue
             others = [obj for obj in meshes if obj != moved]
             before = {obj.name: (obj.matrix_world.copy(), world_vertex_digest(obj)) for obj in others}
             low_before = Vector(world_bounds(moved)[0])
             moved.location = moved.location + delta
             bpy.context.view_layer.update()
             shift = Vector(world_bounds(moved)[0]) - low_before
-            untouched = all(
-                obj.matrix_world == before[obj.name][0] and world_vertex_digest(obj) == before[obj.name][1]
+            changed = [
+                obj.name
                 for obj in others
-            )
+                if obj.matrix_world != before[obj.name][0] or world_vertex_digest(obj) != before[obj.name][1]
+            ]
             report.check(
-                "edit_moves_only_one_object",
-                (shift - delta).length < 1e-6 and untouched,
-                f"moved {object_id(moved)} by {list(shift)}; other objects unchanged: {untouched}",
+                f"edit_isolation:{element}",
+                (shift - delta).length < 1e-6 and not changed,
+                f"moved by {list(shift)}; other objects changed: {changed}",
             )
             moved.location = moved.location - delta
             bpy.context.view_layer.update()

@@ -4,10 +4,11 @@
 #   tools/blender/self_test.sh <output dir> [blender binary]
 #
 # Generates the synthetic room fixture (#75), derives its independent Blender
-# expectation, builds a correct ground-truth handoff GLB and two broken ones, and
-# requires the acceptance harness to pass the correct handoff and to reject the
-# broken ones for the right reasons. Reports and the canonical render of the
-# correct handoff are left in the output directory.
+# expectation, builds a correct ground-truth handoff GLB and four broken ones
+# (joined islands, missing object, parent-coupled objects, shared mesh data), and
+# requires the harness to pass the correct handoff and to reject each broken one
+# for exactly the expected checks. Reports and the canonical render of the correct
+# handoff are left in the output directory.
 set -euo pipefail
 
 out=$(realpath -m "${1:?usage: self_test.sh <output dir> [blender]}")
@@ -23,7 +24,7 @@ run_blender() {
   "$blender" --background --factory-startup --python-use-system-env --python "$@"
 }
 
-for variant in truth joined missing-object; do
+for variant in truth joined missing-object parented shared-data; do
   run_blender "$repo/tools/blender/build_truth_scene.py" -- \
     --fixture "$out/fixture" --out "$out/$variant.glb" --variant "$variant"
   render=()
@@ -53,11 +54,16 @@ def failed(variant):
 
 truth = json.loads((out / "report-truth.json").read_text())
 assert truth["passed"] and (out / "render-truth.png").stat().st_size > 0
-assert any(check["check"] == "edit_moves_only_one_object" for check in truth["checks"])
+assert {f"edit_isolation:{name}" for name in ("cabinet", "crate", "stool", "ball")} <= {
+    check["check"] for check in truth["checks"]
+}
 joined = failed("joined")
 assert "independent_object_nodes" in joined, joined
 assert all(f"objects:{name}:single_mesh_node" in joined for name in ("cabinet", "crate", "stool", "ball")), joined
 missing = failed("missing-object")
 assert missing == {"objects:cabinet:single_mesh_node"}, missing
+# Coupled edits must fail specifically on edit isolation / own mesh data.
+assert failed("parented") == {"edit_isolation:cabinet"}, failed("parented")
+assert failed("shared-data") == {"ball:own_mesh_data"}, failed("shared-data")
 print("blender scene acceptance self-test passed")
 PY
