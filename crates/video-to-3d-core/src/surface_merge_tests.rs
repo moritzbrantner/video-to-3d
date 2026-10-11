@@ -1427,11 +1427,20 @@ fn assert_tiles_owner_image(
 
 #[test]
 fn the_seam_contract_is_satisfiable_by_a_strip_over_existing_vertices() {
-    // Checks the oracle, not the merge: today's output plus a hand-made strip
-    // between the owner's boundary (x = 0) and patch 1's remaining boundary
-    // (x = 0.04) meets every geometric condition of the stitching contract.
+    // Checks the oracle, not the merge: the expected retained set (every input
+    // triangle except patch 1's trimmed seam column, the cells touching its
+    // x = -0.46 vertices) plus a hand-made strip between the owner's boundary
+    // (x = 0) and patch 1's remaining boundary (x = 0.04) meets every
+    // geometric condition of the stitching contract.
     let (fixture, owner, lower) = trimmed_seam_fixture();
-    let (mut triangles, _) = fixture.merge();
+    let seam_column: BTreeSet<usize> = lower.iter().map(|row| row[0]).collect();
+    let mut triangles: Vec<MeshTriangle> = fixture
+        .triangles
+        .iter()
+        .filter(|t| [t.a, t.b, t.c].iter().all(|v| !seam_column.contains(v)))
+        .cloned()
+        .collect();
+    assert_eq!(triangles.len(), fixture.triangles.len() - 4);
     assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 2);
     for row in 0..SEAM_ROWS.len() - 1 {
         triangles.push(triangle(owner[row][4], lower[row][1], owner[row + 1][4]));
