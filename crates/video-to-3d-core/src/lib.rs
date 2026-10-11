@@ -21,6 +21,8 @@ include!("reconstruction.rs");
 mod browser_contract;
 mod learned_depth;
 mod reconstruction_evidence;
+// contract: implemented by #172 (stub signatures; see tests/reconstruction_stages.rs)
+mod reconstruction_stages;
 mod surface_fusion;
 mod surface_merge;
 pub use browser_contract::{
@@ -36,6 +38,14 @@ pub use reconstruction_evidence::{
     EvidencePointAttributes, EvidenceRange, EvidenceScale, ReconstructionEvidenceSummary,
     ReconstructionEvidenceView, ReconstructionProviderClass, ReconstructionProviderDescriptor,
     SurfaceEvidenceRegion, TriangleSourceCorners, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+};
+// contract: implemented by #172
+pub use reconstruction_stages::{
+    compose_reconstruction, reconstruct_cameras, reconstruct_dense, reconstruct_mesh,
+    request_content_hash, CameraStageArtifact, DenseStageArtifact, MeshStageArtifact,
+    ReconstructionStage, ReconstructionStageError, StageInput,
+    CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION, DENSE_STAGE_ARTIFACT_SCHEMA_VERSION,
+    MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
 };
 
 pub fn reconstruct_browser(
