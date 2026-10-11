@@ -2,7 +2,7 @@
 use super::*;
 
 #[allow(dead_code)]
-mod golden {
+pub(super) mod golden {
     use crate as video_to_3d_core;
     pub fn request() -> crate::ReconstructionRequest {
         let points = scene();

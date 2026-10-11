@@ -231,7 +231,8 @@ Frozen baseline `5aadd49` still calls noncancelable dense/mesh `to_json()` at
 walking every geometry array an acceptable atomic cancellation window. Independent
 `stage_serialization_cancel_acceptance_tests.rs` was authored before this repair.
 It uses actual outputs of the existing deterministic golden multiview fixture,
-including dense points/grid sites/attributes and mesh triangles/source corners.
+including dense points/grid sites/attributes and mesh triangles. Its optional
+source-corner array is empty on the independently verified frozen baseline.
 
 Proposed routine `to_json_with_cancel(FnMut()->bool)` names may be independently
 translated to a shared serializer/write seam. False cancellation must produce
@@ -301,3 +302,16 @@ pretty JSON/newline. No-op callback parity and nonfinite safeguards must remain.
 These linear JSON walks are now explicit required cooperative boundaries; earlier
 notes disclosing atomic JSON were honest limitations, not proof of interruption.
 Individual SVD/sorts remain their separately disclosed indivisible operations.
+
+
+Independent fixture correction after serialization implementation began: frozen
+`9f7e485` golden Lateral run through actual cameras/dense/mesh reports629 dense
+points,629 grid sites,629 attributes,9 mesh triangles and **zero** triangle sources.
+The initial protected serialization fixture incorrectly asserted nonempty sources,
+so its six tests stopped before reaching their new serializer assertions. Correcting
+that source claim to the actual empty optional array preserves every geometry,
+byte-parity, cancellation and nonfinite assertion. No geometry is manufactured to
+force source-corner coverage. Reuse the same existing golden module across both
+acceptance files instead of including example/common twice (strictClippy duplicate_mod).
+This fixture correction follows production work and is not claimed test-first; the
+original missing-serializer compile RED remains honest baseline evidence.

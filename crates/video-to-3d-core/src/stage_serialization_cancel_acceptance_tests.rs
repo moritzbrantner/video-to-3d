@@ -1,20 +1,7 @@
 //! Independent serialization cancellation contract, before producer repair.
 use super::*;
 
-#[allow(dead_code)]
-mod golden {
-    use crate as video_to_3d_core;
-    pub fn request() -> crate::ReconstructionRequest {
-        let points = scene();
-        crate::ReconstructionRequest {
-            frames: (0..FRAME_COUNT)
-                .map(|i| render_frame(i, &points, Scenario::Lateral))
-                .collect(),
-            options: Default::default(),
-        }
-    }
-    include!("../examples/golden_fixture.rs");
-}
+use super::native_stage_acceptance_tests::golden;
 
 // Independent before serialization repair; real multiview stage outputs.
 fn serialization_fixture() -> (DenseStageArtifact, MeshStageArtifact) {
@@ -26,7 +13,9 @@ fn serialization_fixture() -> (DenseStageArtifact, MeshStageArtifact) {
     assert!(!dense.dense.grid_sites.is_empty());
     assert!(!dense.dense.point_attributes.is_empty());
     assert!(!mesh.mesh.triangles.is_empty());
-    assert!(!mesh.mesh.triangle_sources.is_empty());
+    // Frozen9f independently reproduces 629 points/9 triangles and zero source
+    // corners: this Lateral fixture has no canonicalized corner replacements.
+    assert!(mesh.mesh.triangle_sources.is_empty());
     (dense, mesh)
 }
 
