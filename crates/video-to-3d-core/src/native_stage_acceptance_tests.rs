@@ -4,7 +4,6 @@ use super::*;
 #[allow(dead_code)]
 mod golden {
     use crate as video_to_3d_core;
-    include!("../examples/golden_fixture.rs");
     pub fn request() -> crate::ReconstructionRequest {
         let points = scene();
         crate::ReconstructionRequest {
@@ -14,6 +13,7 @@ mod golden {
             options: Default::default(),
         }
     }
+    include!("../examples/golden_fixture.rs");
 }
 
 #[test]
