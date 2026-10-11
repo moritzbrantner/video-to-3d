@@ -19,6 +19,7 @@
 //! | 19 · n     | points: x, y, z, confidence (f32); r, g, b (u8)                  |
 //! | 16 · t     | triangles: a, b, c (u32); confidence (f32)                       |
 //! | 8 · n      | per-point attributes (f32 pair), only when the header says so    |
+//! | 16 · s     | triangle sources: triangle, a, b, c (u32), sorted by triangle    |
 //!
 //! Geometry buffers are written straight from the borrowed slices and read into
 //! one owned buffer each. Every declared count is checked against the caller's
@@ -28,6 +29,7 @@
 use crate::{
     EvidenceCamera, EvidencePointAttributes, EvidenceScale, MeshTriangle, Point3,
     ReconstructionEvidenceView, ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    TriangleSourceCorners,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -39,6 +41,7 @@ pub const EVIDENCE_INTERCHANGE_MAGIC: [u8; 8] = *b"V3DEVID\0";
 const POINT_BYTES: usize = 19;
 const TRIANGLE_BYTES: usize = 16;
 const ATTRIBUTE_BYTES: usize = 8;
+const SOURCE_BYTES: usize = 16;
 /// Points or triangles decoded per read, so a large buffer is streamed through a
 /// bounded scratch block instead of a second full-size byte copy.
 const CHUNK_ITEMS: usize = 4096;
@@ -77,6 +80,8 @@ pub struct OwnedReconstructionEvidence {
     pub points: Vec<Point3>,
     pub triangles: Vec<MeshTriangle>,
     pub point_attributes: Option<Vec<EvidencePointAttributes>>,
+    /// Sparse pre-canonicalization corners of merged triangles (empty when none).
+    pub triangle_sources: Vec<TriangleSourceCorners>,
 }
 
 impl OwnedReconstructionEvidence {
@@ -90,6 +95,7 @@ impl OwnedReconstructionEvidence {
             points: view.points.to_vec(),
             triangles: view.triangles.to_vec(),
             point_attributes: view.point_attributes.map(<[_]>::to_vec),
+            triangle_sources: view.triangle_sources.map(<[_]>::to_vec).unwrap_or_default(),
         }
     }
 
@@ -103,10 +109,11 @@ impl OwnedReconstructionEvidence {
             &self.points,
             &self.triangles,
         )?;
-        match &self.point_attributes {
-            Some(attributes) => view.with_point_attributes(attributes),
-            None => Ok(view),
-        }
+        let view = match &self.point_attributes {
+            Some(attributes) => view.with_point_attributes(attributes)?,
+            None => view,
+        };
+        view.with_triangle_sources(&self.triangle_sources)
     }
 }
 
@@ -121,6 +128,7 @@ struct Header {
     points: usize,
     triangles: usize,
     point_attributes: bool,
+    triangle_sources: usize,
 }
 
 /// Header fields borrowed for encoding, so cameras and regions are not cloned.
@@ -134,6 +142,43 @@ struct HeaderRef<'a> {
     points: usize,
     triangles: usize,
     point_attributes: bool,
+    triangle_sources: usize,
+}
+
+/// Lengths of the header's collections, counted without materializing them, so
+/// caller limits apply before the header is deserialized.
+#[derive(Deserialize)]
+struct HeaderCounts {
+    #[serde(default)]
+    cameras: SequenceLength,
+    #[serde(default)]
+    regions: SequenceLength,
+}
+
+#[derive(Default)]
+struct SequenceLength(usize);
+
+impl<'de> Deserialize<'de> for SequenceLength {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = SequenceLength;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a sequence")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<SequenceLength, A::Error> {
+                let mut length = 0;
+                while sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    length += 1;
+                }
+                Ok(SequenceLength(length))
+            }
+        }
+        deserializer.deserialize_seq(Visitor)
+    }
 }
 
 fn io_error(error: std::io::Error) -> String {
@@ -156,6 +201,7 @@ pub fn encode_evidence(
         points: view.points.len(),
         triangles: view.triangles.len(),
         point_attributes: view.point_attributes.is_some(),
+        triangle_sources: view.triangle_sources.map_or(0, <[_]>::len),
     })
     .map_err(|error| format!("evidence interchange header: {error}"))?;
     let header_length = u32::try_from(header.len())
@@ -202,6 +248,22 @@ pub fn encode_evidence(
             out.write_all(&block).map_err(io_error)?;
         }
     }
+    for chunk in view
+        .triangle_sources
+        .unwrap_or_default()
+        .chunks(CHUNK_ITEMS)
+    {
+        block.clear();
+        for source in chunk {
+            for value in [source.triangle].into_iter().chain(source.corners) {
+                let value = u32::try_from(value).map_err(|_| {
+                    "evidence interchange triangle source exceeds the u32 range".to_owned()
+                })?;
+                block.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out.write_all(&block).map_err(io_error)?;
+    }
     out.flush().map_err(io_error)
 }
 
@@ -241,7 +303,9 @@ fn read_records<T>(
         let items = remaining.min(CHUNK_ITEMS);
         let bytes = &mut block[..items * record_bytes];
         read_exact(input, bytes, what)?;
-        records.reserve(items);
+        records.try_reserve(items).map_err(|_| {
+            format!("evidence interchange {what} exceeds the receiver's allocation limit")
+        })?;
         records.extend(bytes.chunks_exact(record_bytes).map(&decode));
         remaining -= items;
     }
@@ -279,12 +343,22 @@ pub fn decode_evidence(
     bounded("header bytes", header_length, limits.max_header_bytes)?;
     let mut header = vec![0_u8; header_length];
     read_exact(input, &mut header, "header")?;
+    // Collection lengths are counted first; nested data is then bounded by the
+    // header byte limit.
+    let counts: HeaderCounts = serde_json::from_slice(&header)
+        .map_err(|error| format!("evidence interchange header: {error}"))?;
+    bounded("cameras", counts.cameras.0, limits.max_cameras)?;
+    bounded("regions", counts.regions.0, limits.max_regions)?;
     let header: Header = serde_json::from_slice(&header)
         .map_err(|error| format!("evidence interchange header: {error}"))?;
-    bounded("cameras", header.cameras.len(), limits.max_cameras)?;
-    bounded("regions", header.regions.len(), limits.max_regions)?;
     bounded("points", header.points, limits.max_points)?;
     bounded("triangles", header.triangles, limits.max_triangles)?;
+    // At most one source per triangle.
+    bounded(
+        "triangle sources",
+        header.triangle_sources,
+        header.triangles,
+    )?;
 
     let points = read_records(input, header.points, POINT_BYTES, "point buffer", |bytes| {
         Point3 {
@@ -323,15 +397,28 @@ pub fn decode_evidence(
     } else {
         None
     };
+    let triangle_sources = read_records(
+        input,
+        header.triangle_sources,
+        SOURCE_BYTES,
+        "triangle source buffer",
+        |bytes| TriangleSourceCorners {
+            triangle: u32_at(bytes, 0) as usize,
+            corners: [1, 2, 3].map(|slot| u32_at(bytes, slot * 4) as usize),
+        },
+    )?;
     let mut probe = [0_u8; 1];
-    match input.read(&mut probe) {
-        Ok(0) => {}
-        Ok(_) => {
-            return Err(
-                "evidence interchange stream has trailing bytes after its last buffer".into(),
-            )
+    loop {
+        match input.read(&mut probe) {
+            Ok(0) => break,
+            Ok(_) => {
+                return Err(
+                    "evidence interchange stream has trailing bytes after its last buffer".into(),
+                )
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("evidence interchange read failed: {error}")),
         }
-        Err(error) => return Err(format!("evidence interchange read failed: {error}")),
     }
 
     let evidence = OwnedReconstructionEvidence {
@@ -342,6 +429,7 @@ pub fn decode_evidence(
         points,
         triangles,
         point_attributes,
+        triangle_sources,
     };
     let view = evidence.view()?;
     if view.schema_version != header.schema_version {
@@ -356,3 +444,112 @@ pub fn decode_evidence(
 #[cfg(test)]
 #[path = "evidence_interchange_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod implementation_tests {
+    use super::*;
+    use crate::{EvidenceOrigin, EvidenceRange, ReconstructionProviderClass};
+
+    fn point(x: f32) -> Point3 {
+        Point3 {
+            x,
+            y: 0.0,
+            z: 1.0,
+            confidence: 0.9,
+            r: 1,
+            g: 2,
+            b: 3,
+        }
+    }
+
+    /// Points 1 and 3 coincide; triangle 0 was re-indexed from corner 3 to corner 1.
+    fn fixture() -> (Vec<Point3>, Vec<MeshTriangle>, Vec<TriangleSourceCorners>) {
+        let points = vec![
+            point(0.0),
+            point(1.0),
+            Point3 {
+                y: 1.0,
+                ..point(0.0)
+            },
+            point(1.0),
+        ];
+        let triangles = vec![MeshTriangle {
+            a: 0,
+            b: 1,
+            c: 2,
+            confidence: 0.8,
+        }];
+        let sources = vec![TriangleSourceCorners {
+            triangle: 0,
+            corners: [0, 3, 2],
+        }];
+        (points, triangles, sources)
+    }
+
+    fn view<'a>(
+        points: &'a [Point3],
+        triangles: &'a [MeshTriangle],
+        sources: &'a [TriangleSourceCorners],
+    ) -> ReconstructionEvidenceView<'a> {
+        ReconstructionEvidenceView::new(
+            ReconstructionProviderDescriptor::new(
+                "test/completion",
+                ReconstructionProviderClass::GenerativeCompletion,
+                None,
+            )
+            .unwrap(),
+            EvidenceScale::ProviderLocal,
+            Vec::new(),
+            vec![SurfaceEvidenceRegion {
+                origin: EvidenceOrigin::GenerativeCompletion,
+                reference_frame: None,
+                source_frames: Vec::new(),
+                points: EvidenceRange::new(0, points.len()),
+            }],
+            points,
+            triangles,
+        )
+        .unwrap()
+        .with_triangle_sources(sources)
+        .unwrap()
+    }
+
+    #[test]
+    fn triangle_sources_cross_the_interchange() {
+        let (points, triangles, sources) = fixture();
+        let mut bytes = Vec::new();
+        encode_evidence(&view(&points, &triangles, &sources), &mut bytes).unwrap();
+        let decoded = decode_evidence(&mut bytes.as_slice(), InterchangeLimits::default()).unwrap();
+        assert_eq!(decoded.triangle_sources, sources);
+        assert_eq!(decoded.view().unwrap().triangle_sources, Some(&sources[..]));
+        // A truncated source buffer is refused.
+        let cut = &bytes[..bytes.len() - 1];
+        let error = decode_evidence(&mut &cut[..], InterchangeLimits::default()).unwrap_err();
+        assert!(error.contains("truncated"), "{error}");
+    }
+
+    #[test]
+    fn interrupted_reads_are_retried() {
+        struct Interrupting<'a> {
+            bytes: &'a [u8],
+            interrupt: bool,
+        }
+        impl Read for Interrupting<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                self.bytes.read(buffer)
+            }
+        }
+        let (points, triangles, sources) = fixture();
+        let mut bytes = Vec::new();
+        encode_evidence(&view(&points, &triangles, &sources), &mut bytes).unwrap();
+        let mut reader = Interrupting {
+            bytes: &bytes,
+            interrupt: false,
+        };
+        assert!(decode_evidence(&mut reader, InterchangeLimits::default()).is_ok());
+    }
+}
