@@ -142,6 +142,8 @@ export function buildSurfaceMaterialRequest(
       : new Uint8Array(0),
     triangle_indices_u32_le: littleEndianBytes(source.mesh_triangles.indices),
     triangle_confidence_f32_le: littleEndianBytes(source.mesh_triangles.confidence),
+    // Rust-owned canonicalization record; the core validates it against the triangles.
+    triangle_sources_u32_le: littleEndianBytes(source.mesh_triangles.sources ?? new Uint32Array(0)),
     reference_patches: source.dense.reference_patches.map((patch) => ({
       reference_frame: patch.reference_frame,
       source_frames: patch.source_frames,
