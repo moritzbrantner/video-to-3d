@@ -21,7 +21,7 @@ Sources seeded into this atlas:
 
 - **1.1 Major scene decomposition is the default.**  
   Status: adopted 2026-10-10.  
-  Individual walls, doors, windows, furniture, and other meaningful objects are independently editable scene identities by default. Disconnected triangles of one mesh do not count as separate objects. Finer/coarser granularity may become configurable later. See 3.2 and 4.3.
+  Individual walls, doors, windows, furniture, and other meaningful objects are independently editable scene identities by default. Disconnected triangles of one mesh do not count as separate objects. Finer/coarser granularity may become configurable later. See 3.2 and 7.2.
 
 - **1.2 Preserve observation-only and AI-completed scene modes.**  
   Status: adopted 2026-10-10.  
@@ -29,7 +29,7 @@ Sources seeded into this atlas:
 
 - **1.3 Editable meshes are the default DCC representation.**  
   Status: adopted 2026-10-10.  
-  Blender receives editable meshes by default. Higher-fidelity representations such as Gaussian splats may accompany them and may be switchable where both exist, but do not substitute for mesh editability. See 3.3 and 4.2.
+  Blender receives editable meshes by default. Higher-fidelity representations such as Gaussian splats may accompany them. A representation switch is required whenever both mesh and splat representations actually exist; splats do not substitute for mesh editability. See 3.3 and 4.2.
 
 - **1.4 Ordinary handheld video is the product target.**  
   Status: adopted 2026-10-10.  
@@ -105,7 +105,7 @@ Sources seeded into this atlas:
 
 - **4.1 Initial release processing is fully local.**  
   Status: adopted 2026-10-10.  
-  No cloud inference, provider calls, source uploads, or derived-frame uploads are permitted in the initial release. Cloud execution requires a later explicit owner decision.
+  No cloud inference, provider calls, source uploads, or derived-frame uploads are permitted in the initial release. Cloud execution requires a later explicit owner decision, subject to the persistent source-video privacy invariant in 4.3.
 
 - **4.2 Browser and desktop share one application interface.**  
   Status: adopted 2026-10-10.  
@@ -113,7 +113,7 @@ Sources seeded into this atlas:
 
 - **4.3 Browser-side code owns video decoding and frame sampling.**  
   Status: repository architecture.  
-  This remains true inside the Tauri desktop shell. Native workers must not create a competing authoritative decode/sampling path. See 4.2.
+  This remains true inside the Tauri desktop shell. Native workers must not create a competing authoritative decode/sampling path. Uploaded source video must not leave the device; this repository privacy invariant also constrains any later cloud policy. See 4.1 and 4.2.
 
 - **4.4 Optional review checkpoints occur before expensive local stages.**  
   Status: adopted 2026-10-10.  
@@ -121,13 +121,13 @@ Sources seeded into this atlas:
 
 - **4.5 Hardware selection adapts locally and reports limits honestly.**  
   Status: adopted 2026-10-10.  
-  Provider/model choice adapts to available CPU/GPU resources. CPU-only operation should remain usable where feasible, potentially at reduced quality or speed. Requested versus attainable quality and unavailable capabilities must be explicit; there is no hidden cloud fallback. See 4.1.
+  Provider/model choice adapts to available CPU/GPU resources. CPU-only operation must remain usable, potentially at reduced quality or speed, and requires a CPU-only smoke check. The exact minimum quality tier remains unanswered in 8.2. Requested versus attainable quality and unavailable capabilities must be explicit; there is no hidden cloud fallback. See 4.1.
 
 ## 5. Quality and correction
 
 - **5.1 Every algorithmic change requires deterministic Rust coverage and observable diagnostics.**  
   Status: repository architecture.  
-  Algorithmic changes must have deterministic Rust tests and a diagnostic signal suitable for surfacing failure in the UI.
+  Algorithmic changes must have deterministic Rust tests and a diagnostic signal that makes failure observable in the UI.
 
 - **5.2 Object placement is accepted only against retained source evidence.**  
   Status: adopted product direction.  
@@ -159,7 +159,7 @@ Sources seeded into this atlas:
 ## 7. Further decisions
 
 - **7.1 Cloud execution is deferred.**  
-  Cloud providers, upload policy, paid-provider exposure, and cloud/local profile selection are not part of the initial release. Their eventual shape remains unanswered in Question 8.5. Nothing in the current schema implies permission to use cloud execution. See 4.1.
+  Cloud providers, upload policy, paid-provider exposure, and cloud/local profile selection are not part of the initial release. Their eventual shape remains unanswered in Question 8.5, subject to the source-video privacy invariant in 4.3. Nothing in the current schema implies permission to use cloud execution. See 4.1.
 
 - **7.2 User-configurable scene granularity is deferred.**  
   The initial default remains major architectural elements plus meaningful objects from 1.1. The exact UI and supported granularity levels remain unanswered rather than forming a separate "deferred decision" category.
@@ -184,4 +184,4 @@ These are unresolved consequential choices. They remain Questions until the owne
   Unresolved: exact behavior for mesh/splat switching when both exist, subject to 1.3 and 4.2.
 
 - **8.5** [question] **Post-v1 cloud policy.**  
-  Unresolved and intentionally deferred by 7.1.
+  Unresolved and intentionally deferred by 7.1. Any later cloud/derived-frame upload policy remains subject to 4.3: source video must not leave the device.
