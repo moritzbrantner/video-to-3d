@@ -34,7 +34,7 @@ pub use reconstruction_evidence::{
     classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
     EvidencePointAttributes, EvidenceRange, EvidenceScale, ReconstructionEvidenceSummary,
     ReconstructionEvidenceView, ReconstructionProviderClass, ReconstructionProviderDescriptor,
-    SurfaceEvidenceRegion, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+    SurfaceEvidenceRegion, TriangleSourceCorners, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 
 pub fn reconstruct_browser(

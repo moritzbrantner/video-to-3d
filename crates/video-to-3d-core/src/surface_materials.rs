@@ -267,6 +267,12 @@ pub struct SurfaceMaterialBake {
     pub triangle_count: usize,
     pub materials: Vec<BakedReferenceMaterial>,
     pub fallback: FallbackSurface,
+    /// Same-reference triangles textured through the original corners overlap
+    /// canonicalization re-indexed (see [`crate::TriangleSourceCorners`]). Their
+    /// appearance keys already cover the original corners' grid sites, so no
+    /// revision bump is needed; omitted from the document when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub canonicalized_same_reference_triangles: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -366,6 +372,12 @@ impl SurfaceMaterialBake {
                     self.seam_triangles(),
                     seam_cameras.len(),
                     seam_cameras.join(", ")
+                ));
+            }
+            if self.canonicalized_same_reference_triangles > 0 {
+                textured.push_str(&format!(
+                    ", {} canonicalized seam triangle(s) textured from their original reference grid",
+                    self.canonicalized_same_reference_triangles
                 ));
             }
             textured
@@ -587,57 +599,67 @@ pub(crate) fn bake_incremental<'p>(
     let grid_mapped = grid_sites.len() == points.len();
 
     let mut fallback = FallbackSurface::default();
-    // reference frame -> (triangle indices, contributing regions)
-    let mut assigned: BTreeMap<usize, (Vec<usize>, BTreeSet<usize>)> = BTreeMap::new();
+    // reference frame -> (triangle indices with the corners addressing their grid
+    // sites, contributing regions)
+    let mut assigned: BTreeMap<usize, AssignedTriangles> = BTreeMap::new();
     let mut seam_candidates = Vec::new();
+    let mut canonicalized_same_reference = 0;
+    let mut sources = evidence
+        .triangle_sources
+        .unwrap_or_default()
+        .iter()
+        .peekable();
     for (triangle_index, triangle) in evidence.triangles.iter().enumerate() {
         if triangle_index % 1024 == 0 {
             check_canceled()?;
         }
-        let corners = [triangle.a, triangle.b, triangle.c].map(|index| ownership[index]);
-        let mut references = Vec::with_capacity(3);
-        let mut regions = Vec::with_capacity(3);
-        for corner in corners {
-            match corner {
-                Ownership::Observed { reference, region } => {
-                    references.push(reference);
-                    regions.push(region);
+        let current = [triangle.a, triangle.b, triangle.c];
+        let source = sources
+            .next_if(|source| source.triangle == triangle_index)
+            .map(|source| source.corners);
+        // A canonicalized triangle keeps the reference support it was triangulated
+        // over: when its original corners still form a texturable same-reference
+        // triangle, they address the grid sites (they are coincident with the
+        // current corners, so geometry is unchanged). Otherwise its current corners
+        // decide, which sends genuinely mixed support to the seam rule.
+        let original = source.and_then(|corners| {
+            match classify_corners(corners, &ownership, grid_sites, &images) {
+                CornerSupport::SameReference { reference, regions } => {
+                    Some((corners, reference, regions))
                 }
-                Ownership::Unobserved => {}
+                _ => None,
             }
-        }
+        });
+        let decided = match original {
+            Some((corners, reference, regions)) => {
+                canonicalized_same_reference += 1;
+                Ok((corners, reference, regions))
+            }
+            None => match classify_corners(current, &ownership, grid_sites, &images) {
+                CornerSupport::SameReference { reference, regions } => {
+                    Ok((current, reference, regions))
+                }
+                other => Err(other),
+            },
+        };
         let reasons = &mut fallback.reasons;
-        if references.len() < 3 {
-            reasons.unobserved_reference += 1;
-        } else if references
-            .iter()
-            .any(|reference| *reference != references[0])
-        {
+        match decided {
+            Ok((corners, reference, regions)) => {
+                let entry = assigned.entry(reference).or_default();
+                entry.0.push((triangle_index, corners));
+                entry.1.extend(regions);
+                continue;
+            }
             // Decided by the seam rule below.
-            seam_candidates.push(triangle_index);
-            continue;
-        } else if !images.contains_key(&references[0]) {
-            reasons.missing_reference_image += 1;
-        } else if !grid_mapped
-            || [triangle.a, triangle.b, triangle.c].iter().any(|index| {
-                let site = grid_sites[*index];
-                let image = &images[&references[0]];
-                site.x >= image.width || site.y >= image.height
-            })
-        {
-            reasons.missing_grid_site += 1;
-        } else if footprint_double_area(
-            grid_sites[triangle.a],
-            grid_sites[triangle.b],
-            grid_sites[triangle.c],
-        ) == 0
-        {
-            reasons.degenerate_footprint += 1;
-        } else {
-            let entry = assigned.entry(references[0]).or_default();
-            entry.0.push(triangle_index);
-            entry.1.extend(regions);
-            continue;
+            Err(CornerSupport::Mixed) => {
+                seam_candidates.push(triangle_index);
+                continue;
+            }
+            Err(CornerSupport::Unobserved) => reasons.unobserved_reference += 1,
+            Err(CornerSupport::MissingImage) => reasons.missing_reference_image += 1,
+            Err(CornerSupport::MissingGridSite) => reasons.missing_grid_site += 1,
+            Err(CornerSupport::DegenerateFootprint) => reasons.degenerate_footprint += 1,
+            Err(CornerSupport::SameReference { .. }) => unreachable!("handled above"),
         }
         fallback.triangles.push(triangle_index);
     }
@@ -710,12 +732,11 @@ pub(crate) fn bake_incremental<'p>(
             let (source_frames, provenance) = region_provenance(evidence, reference, &regions);
 
             let mut corner_pixels = Vec::with_capacity(triangles.len());
-            for (ordinal, index) in triangles.iter().enumerate() {
+            for (ordinal, (_, corners)) in triangles.iter().enumerate() {
                 if ordinal % 1024 == 0 {
                     check_canceled()?;
                 }
-                let triangle = &evidence.triangles[*index];
-                corner_pixels.push([triangle.a, triangle.b, triangle.c].map(|point| {
+                corner_pixels.push(corners.map(|point| {
                     let site = grid_sites[point];
                     [site.x as f64, site.y as f64]
                 }));
@@ -737,15 +758,11 @@ pub(crate) fn bake_incremental<'p>(
                 &source_frames,
                 &provenance,
             );
-            for (ordinal, triangle) in triangles
-                .iter()
-                .map(|index| &evidence.triangles[*index])
-                .enumerate()
-            {
+            for (ordinal, (_, corners)) in triangles.iter().enumerate() {
                 if ordinal % 1024 == 0 {
                     check_canceled()?;
                 }
-                for site in [triangle.a, triangle.b, triangle.c].map(|index| grid_sites[index]) {
+                for site in corners.map(|index| grid_sites[index]) {
                     key.update(site.x.to_le_bytes());
                     key.update(site.y.to_le_bytes());
                 }
@@ -761,7 +778,7 @@ pub(crate) fn bake_incremental<'p>(
                 camera_translation: camera.translation,
                 source_frames,
                 provenance,
-                triangles,
+                triangles: triangles.iter().map(|(index, _)| *index).collect(),
                 corner_uvs,
                 texture,
                 appearance_key: content_hash(key),
@@ -856,6 +873,7 @@ pub(crate) fn bake_incremental<'p>(
         triangle_count: evidence.triangles.len(),
         materials,
         fallback,
+        canonicalized_same_reference_triangles: canonicalized_same_reference,
     })
 }
 
@@ -980,6 +998,68 @@ fn hash_camera_and_texture(
 
 /// Continuous pixel coordinates of triangle corners `[a, b, c]`.
 type CornerPixels = [[f64; 2]; 3];
+
+/// Same-reference triangles of one reference frame, each with the corners that
+/// address its grid sites, and the regions contributing to them.
+type AssignedTriangles = (Vec<(usize, [usize; 3])>, BTreeSet<usize>);
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// How one triangle's corners support the same-reference rule.
+enum CornerSupport {
+    /// All three corners are observed geometry of `reference` with a usable footprint.
+    SameReference {
+        reference: usize,
+        regions: [usize; 3],
+    },
+    /// Observed corners of different reference views.
+    Mixed,
+    Unobserved,
+    MissingImage,
+    MissingGridSite,
+    DegenerateFootprint,
+}
+
+fn classify_corners(
+    corners: [usize; 3],
+    ownership: &[Ownership],
+    grid_sites: &[DenseGridSite],
+    images: &BTreeMap<usize, ReferenceShape>,
+) -> CornerSupport {
+    let mut references = [0; 3];
+    let mut regions = [0; 3];
+    for (slot, corner) in corners.iter().enumerate() {
+        match ownership[*corner] {
+            Ownership::Observed { reference, region } => {
+                references[slot] = reference;
+                regions[slot] = region;
+            }
+            Ownership::Unobserved => return CornerSupport::Unobserved,
+        }
+    }
+    let reference = references[0];
+    if references.iter().any(|other| *other != reference) {
+        return CornerSupport::Mixed;
+    }
+    let Some(image) = images.get(&reference) else {
+        return CornerSupport::MissingImage;
+    };
+    if grid_sites.len() != ownership.len()
+        || corners.iter().any(|index| {
+            let site = grid_sites[*index];
+            site.x >= image.width || site.y >= image.height
+        })
+    {
+        return CornerSupport::MissingGridSite;
+    }
+    let [a, b, c] = corners.map(|index| grid_sites[index]);
+    if footprint_double_area(a, b, c) == 0 {
+        return CornerSupport::DegenerateFootprint;
+    }
+    CornerSupport::SameReference { reference, regions }
+}
 
 fn footprint_double_area(a: DenseGridSite, b: DenseGridSite, c: DenseGridSite) -> i64 {
     let (ax, ay) = (a.x as i64, a.y as i64);

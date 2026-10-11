@@ -259,6 +259,39 @@ fn keyframes_round_trip_and_verify_their_pixels() {
 }
 
 #[test]
+fn surface_mesh_round_trips_triangle_sources() {
+    // Point 4 coincides with point 3, so triangle 1 (1, 3, 2) may record that it
+    // was triangulated over (1, 4, 2) before canonicalization.
+    let mut fixture = Fixture::new();
+    fixture.points[4] = fixture.points[3];
+    let sources = [crate::TriangleSourceCorners {
+        triangle: 1,
+        corners: [1, 4, 2],
+    }];
+    let evidence = ReconstructionEvidenceView::new(
+        ReconstructionProviderDescriptor::classic(),
+        EvidenceScale::ArbitraryMonocular,
+        fixture.cameras.clone(),
+        fixture.regions.clone(),
+        &fixture.points,
+        &fixture.triangles,
+    )
+    .unwrap()
+    .with_triangle_sources(&sources)
+    .unwrap();
+    let mesh = SurfaceMeshArtifact::from_evidence(&evidence, &fixture.sites).unwrap();
+    let document = mesh.to_json();
+    assert!(document.contains("triangle_sources"));
+    let parsed = SurfaceMeshArtifact::from_json(&document).unwrap();
+    assert_eq!(
+        parsed.evidence().unwrap().triangle_sources,
+        Some(&sources[..])
+    );
+    // Without sources the field is omitted, so earlier artifacts stay byte-identical.
+    assert!(!fixture.mesh().to_json().contains("triangle_sources"));
+}
+
+#[test]
 fn surface_mesh_round_trips_the_evidence_view() {
     let fixture = Fixture::new();
     let mesh = fixture.mesh();

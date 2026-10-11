@@ -336,6 +336,10 @@ pub struct ReconstructionResult {
     pub dense_point_attributes: Vec<EvidencePointAttributes>,
     pub dense: DenseStats,
     pub mesh_triangles: Vec<MeshTriangle>,
+    /// Sparse pre-canonicalization corners of merged triangles, sorted by triangle: the
+    /// reference support overlap canonicalization re-indexed away (see
+    /// [`crate::TriangleSourceCorners`]). Empty unless surface consolidation merged patches.
+    pub mesh_triangle_sources: Vec<crate::TriangleSourceCorners>,
     pub mesh: MeshStats,
     pub pairs: Vec<PairStats>,
     pub calibrated_pair: Option<CalibratedPairStats>,
@@ -1187,6 +1191,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         dense_point_attributes,
         dense,
         mesh_triangles,
+        mesh_triangle_sources: Vec::new(),
         mesh,
         pairs,
         calibrated_pair,
