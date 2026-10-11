@@ -2,6 +2,7 @@
 
 pub mod coarse_collision;
 pub mod colmap;
+pub mod evidence_interchange;
 pub mod feature_analysis;
 pub mod geometry_confidence;
 pub mod input_readiness;
