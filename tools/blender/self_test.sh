@@ -4,8 +4,9 @@
 #   tools/blender/self_test.sh <output dir> [blender binary]
 #
 # Generates the synthetic room fixture (#75), derives its independent Blender
-# expectation, builds a correct ground-truth handoff GLB and four broken ones
-# (joined islands, missing object, parent-coupled objects, shared mesh data), and
+# expectation, builds a correct ground-truth handoff GLB and five broken ones
+# (joined islands, missing object, object- and architecture-parented objects,
+# shared mesh data), and
 # requires the harness to pass the correct handoff and to reject each broken one
 # for exactly the expected checks. Reports and the canonical render of the correct
 # handoff are left in the output directory.
@@ -24,7 +25,7 @@ run_blender() {
   "$blender" --background --factory-startup --python-use-system-env --python "$@"
 }
 
-for variant in truth joined missing-object parented shared-data; do
+for variant in truth joined missing-object parented architecture-parented shared-data; do
   run_blender "$repo/tools/blender/build_truth_scene.py" -- \
     --fixture "$out/fixture" --out "$out/$variant.glb" --variant "$variant"
   render=()
@@ -65,6 +66,9 @@ assert missing == {"objects:cabinet:single_mesh_node"}, missing
 # Coupled edits must fail specifically on edit isolation / own mesh data.
 # The child also moves in its rotated parent's space, so its own edit is off too.
 assert failed("parented") == {"edit_isolation:crate", "edit_isolation:stool", "stool:unparented"}, failed("parented")
+assert failed("architecture-parented") == {"edit_isolation:floor", "ball:unparented"}, failed(
+    "architecture-parented"
+)
 assert failed("shared-data") == {"ball:own_mesh_data"}, failed("shared-data")
 print("blender scene acceptance self-test passed")
 PY

@@ -14,6 +14,8 @@ deliberately broken handoffs the acceptance check must reject:
 - `missing-object`: the first object is left out;
 - `parented`: the third object is parented to the second (world placement kept),
   so moving the second moves both;
+- `architecture-parented`: the last object is parented to the floor (world
+  placement kept), so moving the floor moves the object;
 - `shared-data`: an extra, unidentified object reuses the last object's mesh data.
 
 This script only produces reference inputs for the acceptance harness
@@ -54,7 +56,7 @@ def arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--variant", choices=["truth", "joined", "missing-object", "parented", "shared-data"], default="truth")
+    parser.add_argument("--variant", choices=["truth", "joined", "missing-object", "parented", "architecture-parented", "shared-data"], default="truth")
     return parser.parse_args(argv)
 
 
@@ -94,6 +96,12 @@ def main():
         parent, child = movable[1], movable[2]
         world = child.matrix_world.copy()
         child.parent = parent
+        child.matrix_world = world
+    if args.variant == "architecture-parented":
+        floor = next(obj for node, obj in objects if node["id"] == "floor")
+        child = movable[-1]
+        world = child.matrix_world.copy()
+        child.parent = floor
         child.matrix_world = world
     if args.variant == "shared-data":
         decoy = bpy.data.objects.new("decoy", movable[-1].data)
