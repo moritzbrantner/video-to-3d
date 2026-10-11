@@ -72,7 +72,7 @@ impl BuiltInExecutor {
     fn dense_cameras(
         &self,
         dense_record: &crate::scene_project::ArtifactRecord,
-        dense: &DenseStageArtifact,
+        cameras_hash: &ContentHash,
     ) -> Result<CameraStageArtifact, String> {
         let manifest = self.manifest()?;
         let identities = manifest.operation_identities().map_err(|e| e.to_string())?;
@@ -94,7 +94,7 @@ impl BuiltInExecutor {
                     }
                     let camera = CameraStageArtifact::from_json(&self.document(record)?)
                         .map_err(|e| e.to_string())?;
-                    if camera.content_hash() != dense.cameras_hash {
+                    if camera.content_hash() != *cameras_hash {
                         return Err("dense camera ancestor content hash does not match".into());
                     }
                     cameras.push(camera);
@@ -168,7 +168,7 @@ impl BuiltInExecutor {
                 let record = self.input(request, ArtifactKind::DenseEvidence)?;
                 let mut dense = DenseStageArtifact::from_json(&self.document(record)?)
                     .map_err(|e| e.to_string())?;
-                let cameras = self.dense_cameras(record, &dense)?;
+                let cameras = self.dense_cameras(record, &dense.cameras_hash)?;
                 let mesh = crate::reconstruct_mesh(&cameras, &dense).map_err(|e| e.to_string())?;
                 // Dense is owned by this adapter. Apply consolidated positions
                 // in place, then move its buffers into external interchange.
@@ -259,9 +259,32 @@ impl BuiltInExecutor {
             .iter()
             .find(|r| r.produced_by == *dense_id && r.kind == ArtifactKind::DenseEvidence)
             .ok_or("dense ancestor missing")?;
-        let dense = DenseStageArtifact::from_json(&self.document(dense_record)?)
-            .map_err(|e| e.to_string())?;
-        if self.dense_cameras(dense_record, &dense)?.content_hash() != sparse.content_hash() {
+        // Assembly needs identity metadata, not a second dense geometry buffer.
+        // The document/receipt already crossed store verification; deserialize
+        // only this versioned ancestry header, skipping dense arrays.
+        #[derive(Deserialize)]
+        struct DenseIdentity {
+            schema_version: u32,
+            request_hash: ContentHash,
+            cameras_hash: ContentHash,
+        }
+        let dense: DenseIdentity = serde_json::from_str(&self.document(dense_record)?)
+            .map_err(|error| error.to_string())?;
+        if dense.schema_version != crate::DENSE_STAGE_ARTIFACT_SCHEMA_VERSION {
+            return Err("unsupported dense ancestor schema version".into());
+        }
+        let identities = manifest
+            .operation_identities()
+            .map_err(|error| error.to_string())?;
+        if identities.get(&dense_record.produced_by) != Some(&dense_record.operation_identity) {
+            return Err("dense ancestor has stale operation identity".into());
+        }
+        if dense.request_hash != sparse.request_hash
+            || self
+                .dense_cameras(dense_record, &dense.cameras_hash)?
+                .content_hash()
+                != sparse.content_hash()
+        {
             return Err("scene camera does not match mesh ancestry".into());
         }
         let mesh = SurfaceMeshArtifact::from_json(&self.document(mesh_record)?)?;
