@@ -1,5 +1,6 @@
 # Agent guide
 
+- Decision Atlas: `docs/DECISION-ATLAS.md` is the canonical product-intent map. Its semantic leaf entries are only Decisions and Questions. Retrieve relevant entries before making consequential product choices; follow Decisions, and ask the owner one unanswered Question at a time only when it materially affects the task. Preserve answered/superseded history through linked append-only Decisions rather than rewriting entries.
 - Rust owns reusable reconstruction semantics. Keep feature detection, matching, camera-path estimation, point generation, evidence validation/fusion, and scene data contracts in `crates/video-to-3d-core`.
 - Reconstruction backends are evidence providers, not geometry authorities. Classical, learned multi-view, and generative providers must cross the versioned `ReconstructionEvidenceView` boundary before their output can participate in shared validation/fusion.
 - Preserve provenance. Geometric multi-view evidence, image-revalidated completion, learned multi-view evidence, and generative completion must remain distinguishable; generative completion must never be silently relabeled as observed geometry.
