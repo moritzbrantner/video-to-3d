@@ -7,7 +7,10 @@ use crate::{CameraStageArtifact, DenseStageArtifact, FrameInput, ReconstructionR
 impl BuiltInExecutor {
     fn manifest(&self) -> Result<SceneProjectManifest, String> {
         match &self.reservations {
-            Reservations::Fixed { manifest, .. } => Ok((**manifest).clone()),
+            Reservations::Fixed { manifest } => manifest
+                .read()
+                .map(|snapshot| snapshot.clone())
+                .map_err(|_| "executor manifest lock poisoned".into()),
             Reservations::ManifestFile(path) => {
                 SceneProjectManifest::load(path).map_err(|e| e.to_string())
             }
@@ -112,20 +115,42 @@ impl BuiltInExecutor {
         request: &OperationRequest,
         cancel: &CancellationToken,
     ) -> Option<AttemptOutcome> {
-        let expected = match request.operation.kind {
-            OperationKind::SparseReconstruction => 1,
-            OperationKind::DenseReconstruction => 2,
-            OperationKind::SurfaceMesh => 1,
-            OperationKind::SceneAssembly => 2,
+        let expected: &[ArtifactKind] = match request.operation.kind {
+            OperationKind::SparseReconstruction => &[ArtifactKind::Keyframes],
+            OperationKind::DenseReconstruction => {
+                &[ArtifactKind::Keyframes, ArtifactKind::SparseReconstruction]
+            }
+            OperationKind::SurfaceMesh => &[ArtifactKind::DenseEvidence],
+            OperationKind::SceneAssembly => &[
+                ArtifactKind::SparseReconstruction,
+                ArtifactKind::SurfaceMesh,
+            ],
             _ => return None,
         };
-        if request.inputs.len() != expected {
+        if request.inputs.len() != expected.len()
+            || expected.iter().any(|kind| {
+                request.inputs.iter().filter(|input| {
+                matches!(input, ResolvedInput::Artifact(record) if record.kind == *kind)
+            }).count() != 1
+            })
+        {
             return Some(AttemptOutcome::Unsupported(
                 "native classic stage has unsupported extra or missing inputs".into(),
             ));
         }
         if cancel.is_canceled() {
             return Some(AttemptOutcome::Canceled);
+        }
+        let directory = format!("artifacts/native/{}", request.operation.id);
+        match self.collision(&request.operation.id, &directory) {
+            Ok(Some(path)) => {
+                return Some(AttemptOutcome::Unsupported(format!(
+                    "native output would overwrite declared path {}",
+                    path.as_str()
+                )))
+            }
+            Err(message) => return Some(AttemptOutcome::Failed(message)),
+            Ok(None) => {}
         }
         let result = self.run_native_stage(request, cancel);
         Some(match result {
@@ -141,12 +166,6 @@ impl BuiltInExecutor {
         cancel: &CancellationToken,
     ) -> Result<ProducedArtifact, String> {
         let directory = format!("artifacts/native/{}", request.operation.id);
-        if let Some(path) = self.collision(&request.operation.id, &directory)? {
-            return Err(format!(
-                "native output would overwrite declared path {}",
-                path.as_str()
-            ));
-        }
         let output =
             ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
         let document = match request.operation.kind {
@@ -166,20 +185,11 @@ impl BuiltInExecutor {
             }
             OperationKind::SurfaceMesh => {
                 let record = self.input(request, ArtifactKind::DenseEvidence)?;
-                let mut dense = DenseStageArtifact::from_json(&self.document(record)?)
+                let dense = DenseStageArtifact::from_json(&self.document(record)?)
                     .map_err(|e| e.to_string())?;
                 let cameras = self.dense_cameras(record, &dense.cameras_hash)?;
-                let mesh = crate::reconstruct_mesh(&cameras, &dense).map_err(|e| e.to_string())?;
-                // Dense is owned by this adapter. Apply consolidated positions
-                // in place, then move its buffers into external interchange.
-                for point in &mesh.mesh.consolidated_points {
-                    let target = dense
-                        .dense
-                        .points
-                        .get_mut(point.index)
-                        .ok_or("consolidated point outside dense buffer")?;
-                    *target = point.point;
-                }
+                let (dense, mesh) =
+                    crate::reconstruct_mesh_owned(&cameras, dense).map_err(|e| e.to_string())?;
                 let final_cameras: Vec<_> = cameras
                     .sparse
                     .final_cameras

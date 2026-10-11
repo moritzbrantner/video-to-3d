@@ -171,6 +171,12 @@ pub enum AttemptOutcome {
 /// Executes single operation attempts. Implementations must be safe to call
 /// concurrently for independent operations.
 pub trait OperationExecutor: Sync {
+    /// Publish the authoritative metadata for the next wave. The snapshot stays
+    /// stable while that wave executes; executors must not mutate runner state.
+    fn prepare_wave(&self, _manifest: &SceneProjectManifest) -> Result<(), SceneProjectError> {
+        Ok(())
+    }
+
     fn execute(&self, request: &OperationRequest, cancel: &CancellationToken) -> AttemptOutcome;
 }
 
@@ -385,6 +391,7 @@ pub fn run_observed(
             break;
         }
 
+        executor.prepare_wave(manifest)?;
         let outcomes = {
             let observer = Mutex::new(&mut *observer);
             execute_wave(manifest, executor, options, cancel, &observer, &wave)

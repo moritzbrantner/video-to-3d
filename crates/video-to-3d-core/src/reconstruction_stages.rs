@@ -469,24 +469,43 @@ pub fn reconstruct_mesh(
     // artifact keeps just the points that moved.
     let original = &dense.dense.points;
     let mut points = original.clone();
-    let mut surface = build_surface(&cameras.sparse, DenseFields::of(&dense.dense), &mut points)
+    let surface = build_surface(&cameras.sparse, DenseFields::of(&dense.dense), &mut points)
         .map_err(ReconstructionStageError::Reconstruction)?;
-    surface.consolidated_points = points
-        .iter()
-        .zip(original)
-        .enumerate()
-        .filter(|(_, (consolidated, original))| consolidated != original)
-        .map(|(index, (point, _))| ConsolidatedPoint {
-            index,
-            point: *point,
-        })
-        .collect();
     MeshStageArtifact {
         schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
         dense_hash: dense.content_hash(),
         mesh: surface,
     }
     .check_finite()
+}
+
+/// Consume dense evidence and consolidate its existing point allocation in
+/// place. The mesh records the original dense content identity and only changed
+/// vertices, exactly as the immutable borrowed entrypoint does.
+pub fn reconstruct_mesh_owned(
+    cameras: &CameraStageArtifact,
+    mut dense: DenseStageArtifact,
+) -> Result<(DenseStageArtifact, MeshStageArtifact), ReconstructionStageError> {
+    cameras.check_schema_version()?;
+    dense.check_schema_version()?;
+    check_identity(
+        ReconstructionStage::Dense,
+        StageInput::Cameras,
+        &dense.cameras_hash,
+        cameras.content_hash(),
+    )?;
+    let dense_hash = dense.content_hash();
+    let mut points = std::mem::take(&mut dense.dense.points);
+    let surface = build_surface(&cameras.sparse, DenseFields::of(&dense.dense), &mut points)
+        .map_err(ReconstructionStageError::Reconstruction)?;
+    dense.dense.points = points;
+    let mesh = MeshStageArtifact {
+        schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
+        dense_hash,
+        mesh: surface,
+    }
+    .check_finite()?;
+    Ok((dense, mesh))
 }
 
 /// The single-call [`ReconstructionResult`] from the three artifacts of one chain,
@@ -641,7 +660,7 @@ fn build_surface(
     };
     let mut warnings: Vec<String> = crate::mesh_warning(&surface.stats).into_iter().collect();
     let owned = warnings.len();
-    crate::surface_fusion::consolidate_surface(
+    let moved_indices = crate::surface_fusion::consolidate_surface_recording(
         crate::surface_fusion::SurfaceSupport {
             calibrated_pair: sparse.calibrated_pair.as_ref(),
             registered_views: &sparse.registered_views,
@@ -657,6 +676,13 @@ fn build_surface(
             warnings: &mut warnings,
         },
     )?;
+    surface.consolidated_points = moved_indices
+        .into_iter()
+        .map(|index| ConsolidatedPoint {
+            index,
+            point: points[index],
+        })
+        .collect();
     surface.consolidation_warnings = warnings.split_off(owned);
     surface.mesh_warning = warnings.pop();
     Ok(surface)

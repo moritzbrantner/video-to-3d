@@ -1683,8 +1683,7 @@ pub struct BuiltInExecutor {
 #[derive(Clone, Debug)]
 enum Reservations {
     Fixed {
-        paths: Vec<(String, ProjectPath)>,
-        manifest: Box<SceneProjectManifest>,
+        manifest: std::sync::Arc<std::sync::RwLock<SceneProjectManifest>>,
     },
     /// Re-read at execution, so the reconciled manifest a build persisted
     /// before running decides (dropped stale records do not block an output).
@@ -1754,8 +1753,7 @@ impl BuiltInExecutor {
     pub fn new(project_root: impl Into<PathBuf>, manifest: &SceneProjectManifest) -> Self {
         let root = project_root.into();
         let reservations = Reservations::Fixed {
-            paths: reserved_paths(&root, manifest),
-            manifest: Box::new(manifest.clone()),
+            manifest: std::sync::Arc::new(std::sync::RwLock::new(manifest.clone())),
         };
         Self { root, reservations }
     }
@@ -1778,7 +1776,13 @@ impl BuiltInExecutor {
     fn collision(&self, operation: &str, directory: &str) -> Result<Option<ProjectPath>, String> {
         let loaded;
         let reserved = match &self.reservations {
-            Reservations::Fixed { paths, .. } => paths,
+            Reservations::Fixed { manifest } => {
+                let snapshot = manifest
+                    .read()
+                    .map_err(|_| "executor manifest lock poisoned")?;
+                loaded = reserved_paths(&self.root, &snapshot);
+                &loaded
+            }
             Reservations::ManifestFile(path) => {
                 loaded = reserved_paths(
                     &self.root,
@@ -1886,6 +1890,20 @@ impl BuiltInExecutor {
 }
 
 impl OperationExecutor for BuiltInExecutor {
+    fn prepare_wave(
+        &self,
+        manifest: &SceneProjectManifest,
+    ) -> Result<(), crate::scene_project::SceneProjectError> {
+        if let Reservations::Fixed { manifest: current } = &self.reservations {
+            *current.write().map_err(|_| {
+                crate::scene_project::SceneProjectError::Invalid(
+                    "executor manifest lock poisoned".into(),
+                )
+            })? = manifest.clone();
+        }
+        Ok(())
+    }
+
     fn execute(&self, request: &OperationRequest, cancel: &CancellationToken) -> AttemptOutcome {
         let kind = request.operation.kind;
         if kind == OperationKind::TextureBake && request.provider.is_none() {

@@ -27,6 +27,7 @@ struct FusionStats {
 struct FusionOutcome {
     stats: FusionStats,
     pairs: Vec<(usize, usize)>,
+    moved_indices: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -97,10 +98,20 @@ pub(super) fn consolidate_surface_evidence(
 
 /// Cross-reference surface fusion and the connected-surface merge over borrowed
 /// classic evidence, changing only `target`.
+#[cfg(test)]
 pub(crate) fn consolidate_surface(
     support: SurfaceSupport<'_>,
     target: SurfaceTarget<'_>,
 ) -> Result<(), String> {
+    consolidate_surface_recording(support, target).map(drop)
+}
+
+/// Record only vertices whose final value actually changed, without retaining a
+/// second dense geometry buffer to discover those changes afterward.
+pub(crate) fn consolidate_surface_recording(
+    support: SurfaceSupport<'_>,
+    target: SurfaceTarget<'_>,
+) -> Result<Vec<usize>, String> {
     let SurfaceTarget {
         points,
         triangles,
@@ -109,7 +120,7 @@ pub(crate) fn consolidate_surface(
         warnings,
     } = target;
     if triangles.is_empty() || points.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let (membership, support_group_count, group_frames, reference_cameras, point_origins) = {
@@ -137,11 +148,14 @@ pub(crate) fn consolidate_surface(
         (membership, count, frames, cameras, origins)
     };
     if support_group_count < 2 {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    let FusionOutcome { stats, pairs } =
-        fuse_mutually_supported_vertices(points, triangles, &membership);
+    let FusionOutcome {
+        stats,
+        pairs,
+        moved_indices,
+    } = fuse_mutually_supported_vertices(points, triangles, &membership);
 
     if stats.fused_pairs > 0 {
         remove_stale_surface_fusion_claim(warnings);
@@ -182,7 +196,7 @@ pub(crate) fn consolidate_surface(
         &merge.retained_by_group,
     );
     warnings.push(merge.diagnostic(support_group_count));
-    Ok(())
+    Ok(moved_indices)
 }
 
 /// The mesh diagnostic was rendered before the merge: bring the aggregate and
@@ -441,12 +455,20 @@ fn fuse_mutually_supported_vertices(
 
     let (accepted_moves, rejected_topology_pairs) =
         topology_safe_moves(points, triangles, &incident_triangles, proposed_moves);
+    let mut moved_indices = Vec::new();
     for movement in &accepted_moves {
-        set_point_position(&mut points[movement.first], movement.position);
-        set_point_position(&mut points[movement.second], movement.position);
+        for index in [movement.first, movement.second] {
+            let original = points[index];
+            set_point_position(&mut points[index], movement.position);
+            if points[index] != original {
+                moved_indices.push(index);
+            }
+        }
     }
+    moved_indices.sort_unstable();
 
     FusionOutcome {
+        moved_indices,
         stats: FusionStats {
             eligible_vertices,
             candidate_pairs,

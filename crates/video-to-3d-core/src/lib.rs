@@ -45,8 +45,8 @@ pub use reconstruction_evidence::{
 };
 pub use reconstruction_stages::{
     compose_reconstruction, reconstruct_cameras, reconstruct_dense, reconstruct_mesh,
-    request_content_hash, CameraStageArtifact, DenseStageArtifact, MeshStageArtifact,
-    ReconstructionStage, ReconstructionStageError, StageInput,
+    reconstruct_mesh_owned, request_content_hash, CameraStageArtifact, DenseStageArtifact,
+    MeshStageArtifact, ReconstructionStage, ReconstructionStageError, StageInput,
     CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION, DENSE_STAGE_ARTIFACT_SCHEMA_VERSION,
     MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
 };
