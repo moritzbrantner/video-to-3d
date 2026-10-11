@@ -54,7 +54,7 @@ def failed(variant):
 
 truth = json.loads((out / "report-truth.json").read_text())
 assert truth["passed"] and (out / "render-truth.png").stat().st_size > 0
-assert {f"edit_isolation:{name}" for name in ("cabinet", "crate", "stool", "ball")} <= {
+assert {f"edit_isolation:{name}" for name in ("cabinet", "crate", "stool", "ball", "floor", "door")} <= {
     check["check"] for check in truth["checks"]
 }
 joined = failed("joined")
@@ -63,7 +63,8 @@ assert all(f"objects:{name}:single_mesh_node" in joined for name in ("cabinet", 
 missing = failed("missing-object")
 assert missing == {"objects:cabinet:single_mesh_node"}, missing
 # Coupled edits must fail specifically on edit isolation / own mesh data.
-assert failed("parented") == {"edit_isolation:cabinet"}, failed("parented")
+# The child also moves in its rotated parent's space, so its own edit is off too.
+assert failed("parented") == {"edit_isolation:crate", "edit_isolation:stool", "stool:unparented"}, failed("parented")
 assert failed("shared-data") == {"ball:own_mesh_data"}, failed("shared-data")
 print("blender scene acceptance self-test passed")
 PY

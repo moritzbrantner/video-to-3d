@@ -21,9 +21,9 @@ Checks, each reported individually; the process exits non-zero unless all pass:
 - every matched node owns its mesh data (no other object shares it), and has
   polygons, non-degenerate bounds, a finite transform and a material;
 - world bounds agree with the expectation within `bounds_tolerance_m` when given;
-- moving each expected object in turn by `edit_translation_m` moves exactly its
-  bounds by that amount and leaves every other object's transform and world-space
-  vertices unchanged (no parenting or other coupling between nodes).
+- no matched node has a parent or constraints, and moving each matched node in
+  turn by `edit_translation_m` moves exactly its bounds by that amount and leaves
+  every other object's transform and world-space vertices unchanged.
 
 The report also lists the imported hierarchy (names, parents, mesh data,
 materials, custom properties) and, with `--render`, writes a canonical render.
@@ -215,7 +215,14 @@ def main():
                 report.check(f"{element}:bounds", error <= tolerance, f"max bounds error {error:.6f} m")
 
         delta = Vector(expected.get("edit_translation_m", [0.5, 0.0, 0.0]))
-        for element in expected["objects"]:
+        for element, obj in sorted(matched.items()):
+            report.check(
+                f"{element}:unparented",
+                obj.parent is None and len(obj.constraints) == 0,
+                f"parent {obj.parent.name if obj.parent else None}, {len(obj.constraints)} constraint(s)",
+            )
+        # Every matched node, architecture included, is a potential coupling source.
+        for element in expected["architecture"] + expected["objects"]:
             moved = matched.get(element)
             if moved is None:
                 continue

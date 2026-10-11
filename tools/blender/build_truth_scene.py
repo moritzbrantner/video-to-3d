@@ -12,8 +12,8 @@ deliberately broken handoffs the acceptance check must reject:
 
 - `joined`: all objects merged into one mesh with disconnected islands;
 - `missing-object`: the first object is left out;
-- `parented`: the second object is parented to the first (world placement kept),
-  so moving the first moves both;
+- `parented`: the third object is parented to the second (world placement kept),
+  so moving the second moves both;
 - `shared-data`: an extra, unidentified object reuses the last object's mesh data.
 
 This script only produces reference inputs for the acceptance harness
@@ -91,7 +91,7 @@ def main():
         objects.append((node, obj))
     movable = [obj for node, obj in objects if node["kind"] == "object"]
     if args.variant == "parented":
-        parent, child = movable[0], movable[1]
+        parent, child = movable[1], movable[2]
         world = child.matrix_world.copy()
         child.parent = parent
         child.matrix_world = world
