@@ -89,7 +89,25 @@ impl Shape {
         Vector3::new(0.0, down, 0.0)
     }
 
+    /// Whether a local point lies inside (or on) the shape.
+    fn contains(self, point: &Vector3<f64>) -> bool {
+        match self {
+            Self::Box { half } => (0..3).all(|axis| point[axis].abs() <= half[axis]),
+            Self::Cylinder {
+                radius,
+                half_height,
+            } => {
+                point.y.abs() <= half_height
+                    && point.x * point.x + point.z * point.z <= radius * radius
+            }
+            Self::Sphere { radius } => point.norm_squared() <= radius * radius,
+        }
+    }
+
     /// Nearest entry hit of a local ray with `t > 0`, with the local outward normal.
+    /// Exact for origins outside the shape, the only case the fixture renders (every
+    /// camera center is checked against every element before rendering); an interior
+    /// origin reports no hit.
     fn intersect(
         self,
         origin: &Vector3<f64>,
@@ -772,6 +790,16 @@ fn generate(supersample: u32) -> Fixture {
     let elements = scene();
     let plan = sampling_plan();
     let intrinsics = Intrinsics::for_plan(&plan);
+    for &time in &plan.times {
+        let center = Pose::at(time).center;
+        for element in &elements {
+            assert!(
+                !element.shape.contains(&element.local_point(&center)),
+                "camera center at {time} s lies inside {}",
+                element.id
+            );
+        }
+    }
     let views = plan
         .times
         .iter()
@@ -1226,23 +1254,190 @@ mod tests {
         (t > 1e-9).then_some(t)
     }
 
-    /// World triangles of every exported mesh, tagged with their element index.
-    fn world_triangles(elements: &[Element]) -> Vec<(usize, [Vector3<f64>; 3])> {
-        elements
-            .iter()
-            .enumerate()
-            .flat_map(|(index, element)| {
-                let (vertices, triangles) = element.shape.mesh();
+    /// The fixture as written to disk, read back only through its files.
+    struct Exported {
+        width: u32,
+        height: u32,
+        focal: f64,
+        cx: f64,
+        cy: f64,
+        /// Per frame: world-to-camera rotation, center, depth and instance masks.
+        frames: Vec<(Matrix3<f64>, Vector3<f64>, Vec<f32>, Vec<u8>)>,
+        /// World triangles of every exported mesh with their instance id.
+        triangles: Vec<(u8, [Vector3<f64>; 3])>,
+        /// Tessellation bound per instance id.
+        bounds: std::collections::BTreeMap<u8, f64>,
+    }
+
+    fn header_end(bytes: &[u8], lines: usize) -> (Vec<String>, usize) {
+        let mut cursor = 0;
+        let mut out = Vec::new();
+        while out.len() < lines {
+            let end = cursor
+                + bytes[cursor..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .expect("header line");
+            out.push(String::from_utf8(bytes[cursor..end].to_vec()).expect("ASCII header"));
+            cursor = end + 1;
+        }
+        (out, cursor)
+    }
+
+    fn read_ply(path: &Path) -> (Vec<Vector3<f64>>, Vec<[u32; 3]>) {
+        let bytes = fs::read(path).expect("read PLY");
+        let text_end = bytes
+            .windows(11)
+            .position(|w| w == b"end_header\n")
+            .expect("PLY header")
+            + 11;
+        let header = String::from_utf8(bytes[..text_end].to_vec()).expect("ASCII header");
+        let count = |name: &str| -> usize {
+            header
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("element {name} ")))
+                .expect("element count")
+                .parse()
+                .expect("count")
+        };
+        let (vertices, faces) = (count("vertex"), count("face"));
+        let f32_at =
+            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let u32_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let positions = (0..vertices)
+            .map(|v| {
+                let base = text_end + v * 12;
+                Vector3::new(
+                    f64::from(f32_at(base)),
+                    f64::from(f32_at(base + 4)),
+                    f64::from(f32_at(base + 8)),
+                )
+            })
+            .collect();
+        let start = text_end + vertices * 12;
+        let triangles = (0..faces)
+            .map(|f| {
+                let base = start + f * 13;
+                assert_eq!(bytes[base], 3);
+                [u32_at(base + 1), u32_at(base + 5), u32_at(base + 9)]
+            })
+            .collect();
+        assert_eq!(bytes.len(), start + faces * 13, "PLY has trailing bytes");
+        (positions, triangles)
+    }
+
+    fn exported() -> &'static Exported {
+        static EXPORTED: std::sync::OnceLock<Exported> = std::sync::OnceLock::new();
+        EXPORTED.get_or_init(|| {
+            let root =
+                env::temp_dir().join(format!("video-to-3d-synthetic-room-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            write_fixture(&root, fixture());
+            let json = |name: &str| -> Value {
+                serde_json::from_slice(
+                    &fs::read(root.join("truth").join(name)).expect("read truth"),
+                )
+                .expect("JSON")
+            };
+            let (scene, cameras) = (json("scene.json"), json("cameras.json"));
+            let number = |value: &Value| value.as_f64().expect("number");
+            let intrinsics = &cameras["intrinsics"];
+            let (width, height) = (
+                number(&intrinsics["width"]) as u32,
+                number(&intrinsics["height"]) as u32,
+            );
+            let pixels = (width * height) as usize;
+            let frames = cameras["frames"]
+                .as_array()
+                .expect("frames")
+                .iter()
+                .map(|frame| {
+                    let values = |key: &str| {
+                        frame[key]
+                            .as_array()
+                            .expect(key)
+                            .iter()
+                            .map(number)
+                            .collect::<Vec<_>>()
+                    };
+                    let rotation = Matrix3::from_row_slice(&values("rotation_world_to_camera"));
+                    let center = Vector3::from_row_slice(&values("center"));
+                    let translation = Vector3::from_row_slice(&values("translation"));
+                    assert!(
+                        (rotation * center + translation).norm() < 1e-5,
+                        "serialized R, t and center disagree with x_camera = R x_world + t"
+                    );
+                    let depth_bytes =
+                        fs::read(root.join(frame["depth"].as_str().unwrap())).expect("depth");
+                    let (header, start) = header_end(&depth_bytes, 3);
+                    assert_eq!(
+                        header,
+                        [
+                            "Pf".to_owned(),
+                            format!("{width} {height}"),
+                            "-1.0".to_owned()
+                        ]
+                    );
+                    let mut depth = vec![0.0_f32; pixels];
+                    for (index, chunk) in depth_bytes[start..].as_chunks::<4>().0.iter().enumerate()
+                    {
+                        // Rows are stored bottom to top.
+                        let (row, column) = (index / width as usize, index % width as usize);
+                        depth[(height as usize - 1 - row) * width as usize + column] =
+                            f32::from_le_bytes(*chunk);
+                    }
+                    let mask_bytes =
+                        fs::read(root.join(frame["instances"].as_str().unwrap())).expect("mask");
+                    let (header, start) = header_end(&mask_bytes, 3);
+                    assert_eq!(
+                        header,
+                        [
+                            "P5".to_owned(),
+                            format!("{width} {height}"),
+                            "255".to_owned()
+                        ]
+                    );
+                    (rotation, center, depth, mask_bytes[start..].to_vec())
+                })
+                .collect();
+            let mut triangles = Vec::new();
+            let mut bounds = std::collections::BTreeMap::new();
+            for node in scene["nodes"].as_array().expect("nodes") {
+                let id = number(&node["instance_id"]) as u8;
+                bounds.insert(id, number(&node["tessellation_bound_m"]));
+                let m: Vec<f64> = node["world_from_local"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(number)
+                    .collect();
+                assert_eq!(&m[12..], &[0.0, 0.0, 0.0, 1.0]);
+                let rotation = Matrix3::new(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+                let translation = Vector3::new(m[3], m[7], m[11]);
+                let (vertices, faces) = read_ply(&root.join(node["mesh"].as_str().unwrap()));
                 let world: Vec<Vector3<f64>> = vertices
                     .iter()
-                    .map(|v| element.world_point(&Vector3::from(*v)))
+                    .map(|v| rotation * v + translation)
                     .collect();
-                triangles
-                    .into_iter()
-                    .map(move |t| (index, t.map(|corner| world[corner as usize])))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+                triangles.extend(
+                    faces
+                        .iter()
+                        .map(|f| (id, f.map(|corner| world[corner as usize]))),
+                );
+            }
+            let _ = fs::remove_dir_all(&root);
+            Exported {
+                width,
+                height,
+                focal: number(&intrinsics["fx"]),
+                cx: number(&intrinsics["cx"]),
+                cy: number(&intrinsics["cy"]),
+                frames,
+                triangles,
+                bounds,
+            }
+        })
     }
 
     fn fixture() -> &'static Fixture {
@@ -1387,50 +1582,50 @@ mod tests {
 
     #[test]
     fn exported_meshes_and_transforms_reproduce_depth_and_masks() {
-        // Ray-cast the exported world-transformed triangle meshes: the nearest triangle's
-        // element and depth must match the rendered truth up to the tessellation bound.
-        let fixture = fixture();
-        let triangles = world_triangles(&fixture.elements);
-        let intrinsics = &fixture.intrinsics;
+        // Read back only the written files (cameras.json, scene.json transforms, PLY
+        // meshes, PFM depth, PGM masks) and ray-cast the world-transformed meshes: the
+        // nearest triangle's instance and depth must match the exported truth up to the
+        // tessellation bound.
+        let exported = exported();
         let mut checked = 0;
         let mut mask_disagreements = 0;
-        for view in fixture.views.iter().step_by(6) {
-            for py in (2..intrinsics.height).step_by(9) {
-                for px in (2..intrinsics.width).step_by(9) {
-                    let pixel = (py * intrinsics.width + px) as usize;
-                    let camera_direction = intrinsics.ray(f64::from(px) + 0.5, f64::from(py) + 0.5);
-                    let direction = view.pose.world_direction(&camera_direction);
-                    let nearest = triangles
+        for (rotation, center, depth, masks) in exported.frames.iter().step_by(6) {
+            for py in (2..exported.height).step_by(9) {
+                for px in (2..exported.width).step_by(9) {
+                    let pixel = (py * exported.width + px) as usize;
+                    let camera_direction = Vector3::new(
+                        (f64::from(px) + 0.5 - exported.cx) / exported.focal,
+                        (f64::from(py) + 0.5 - exported.cy) / exported.focal,
+                        1.0,
+                    );
+                    let direction = rotation.transpose() * camera_direction;
+                    let (id, t, corners) = exported
+                        .triangles
                         .iter()
-                        .filter_map(|(index, corners)| {
-                            moller_trumbore(&view.pose.center, &direction, *corners)
-                                .map(|t| (*index, t))
+                        .filter_map(|(id, corners)| {
+                            moller_trumbore(center, &direction, *corners).map(|t| (*id, t, corners))
                         })
                         .min_by(|a, b| a.1.total_cmp(&b.1))
                         .expect("closed room: every ray hits an exported mesh");
-                    let truth_id = usize::from(view.instances[pixel]) - 1;
-                    let depth = f64::from(view.depth[pixel]);
-                    let bound = fixture.elements[truth_id]
-                        .shape
-                        .tessellation_bound()
-                        .max(fixture.elements[nearest.0].shape.tessellation_bound());
+                    let truth_id = masks[pixel];
+                    let truth_depth = f64::from(depth[pixel]);
+                    let bound = exported.bounds[&truth_id].max(exported.bounds[&id]);
                     // Depth along the camera z equals the ray parameter (unit z). A facet
                     // within `bound` of the surface along its normal can differ by
                     // bound / cos(incidence) along a grazing ray.
-                    let (_, _, normal) = trace(&fixture.elements, &view.pose.center, &direction)
-                        .expect("closed room");
-                    let incidence = normal.dot(&direction).abs() / direction.norm();
-                    let tolerance = 2e-5 * depth + 2.0 * bound / incidence.max(0.1);
-                    if nearest.0 != truth_id {
+                    let facet = (corners[1] - corners[0])
+                        .cross(&(corners[2] - corners[0]))
+                        .normalize();
+                    let incidence = facet.dot(&direction).abs() / direction.norm();
+                    let tolerance = 2e-5 * truth_depth + 2.0 * bound / incidence.max(0.1);
+                    if id != truth_id {
                         mask_disagreements += 1;
                         // Only possible where a curved silhouette's tessellation differs.
                         assert!(bound > 0.0, "flat element mismatch at ({px}, {py})");
                     } else {
                         assert!(
-                            (nearest.1 - depth).abs() <= tolerance,
-                            "mesh depth {} vs truth {depth} at ({px}, {py}) on {}",
-                            nearest.1,
-                            fixture.elements[truth_id].id
+                            (t - truth_depth).abs() <= tolerance,
+                            "mesh depth {t} vs truth {truth_depth} at ({px}, {py}) on instance {id}"
                         );
                     }
                     checked += 1;
@@ -1442,6 +1637,112 @@ mod tests {
             mask_disagreements * 200 < checked,
             "{mask_disagreements} of {checked} disagree"
         );
+    }
+
+    #[test]
+    fn camera_axes_follow_the_documented_convention() {
+        // Independent of the cross products in `Pose::at`: for a level look-at in a y-down
+        // world, camera x is the horizontal (fz, 0, -fx) direction and camera y points
+        // toward the floor.
+        for view in &fixture().views {
+            let r = view.pose.rotation;
+            let forward = (Vector3::from(LOOK_AT) - view.pose.center).normalize();
+            let right = Vector3::new(forward.z, 0.0, -forward.x).normalize();
+            assert!(
+                (r.row(0).transpose() - right).norm() < 1e-12,
+                "camera x is not image right"
+            );
+            assert!((r.row(2).transpose() - forward).norm() < 1e-12);
+            assert!(r[(1, 1)] > 0.0, "camera y does not point toward the floor");
+            // The floor point below the target appears below the image center.
+            let below =
+                r * (Vector3::from(LOOK_AT) + Vector3::new(0.0, 0.3, 0.0) - view.pose.center);
+            assert!(below.y > 0.0);
+        }
+    }
+
+    #[test]
+    fn hits_report_the_expected_face_cap_and_radial_normals() {
+        let toward = |origin: [f64; 3], direction: [f64; 3], shape: Shape| {
+            shape
+                .intersect(&Vector3::from(origin), &Vector3::from(direction))
+                .expect("hit")
+        };
+        let cube = Shape::Box {
+            half: [1.0, 2.0, 3.0],
+        };
+        for (origin, direction, normal, t) in [
+            ([0.0, 0.0, -10.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], 7.0),
+            ([10.0, 0.5, 0.5], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], 9.0),
+            ([0.2, -10.0, 0.1], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], 8.0),
+            ([0.0, 0.0, -10.0], [0.05, 0.0, 1.0], [0.0, 0.0, -1.0], 7.0),
+        ] {
+            let (hit_t, hit_normal) = toward(origin, direction, cube);
+            assert!(
+                (hit_t - t).abs() < 1e-12 && (hit_normal - Vector3::from(normal)).norm() < 1e-12
+            );
+        }
+        let cylinder = Shape::Cylinder {
+            radius: 0.5,
+            half_height: 1.0,
+        };
+        let (t, normal) = toward([0.0, -5.0, 0.1], [0.0, 1.0, 0.0], cylinder);
+        assert!(
+            (t - 4.0).abs() < 1e-12 && (normal - Vector3::new(0.0, -1.0, 0.0)).norm() < 1e-12,
+            "top cap"
+        );
+        let (t, normal) = toward([0.0, 5.0, 0.1], [0.0, -1.0, 0.0], cylinder);
+        assert!(
+            (t - 4.0).abs() < 1e-12 && (normal - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-12,
+            "bottom cap"
+        );
+        let (t, normal) = toward([3.0, 0.3, 0.0], [-1.0, 0.0, 0.0], cylinder);
+        assert!(
+            (t - 2.5).abs() < 1e-12 && (normal - Vector3::new(1.0, 0.0, 0.0)).norm() < 1e-12,
+            "side"
+        );
+        assert!(cylinder
+            .intersect(&Vector3::new(3.0, 1.5, 0.0), &Vector3::new(-1.0, 0.0, 0.0))
+            .is_none());
+        let sphere = Shape::Sphere { radius: 2.0 };
+        let (t, normal) = toward([0.0, 0.0, -6.0], [0.0, 0.0, 1.0], sphere);
+        assert!((t - 4.0).abs() < 1e-12 && (normal - Vector3::new(0.0, 0.0, -1.0)).norm() < 1e-12);
+        // Every rendered hit faces its camera.
+        let fixture = fixture();
+        let intrinsics = &fixture.intrinsics;
+        for view in fixture.views.iter().step_by(5) {
+            for py in (0..intrinsics.height).step_by(7) {
+                for px in (0..intrinsics.width).step_by(7) {
+                    let direction = view
+                        .pose
+                        .world_direction(&intrinsics.ray(f64::from(px) + 0.5, f64::from(py) + 0.5));
+                    let (_, _, normal) =
+                        trace(&fixture.elements, &view.pose.center, &direction).unwrap();
+                    assert!(
+                        normal.dot(&direction) < 0.0,
+                        "back-facing normal at ({px}, {py})"
+                    );
+                    assert!((normal.norm() - 1.0).abs() < 1e-9);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn camera_centers_lie_outside_every_element() {
+        // `Shape::intersect` reports entry hits only, which is exact for exterior origins.
+        let fixture = fixture();
+        for view in &fixture.views {
+            for element in &fixture.elements {
+                assert!(
+                    !element
+                        .shape
+                        .contains(&element.local_point(&view.pose.center)),
+                    "{}",
+                    element.id
+                );
+            }
+        }
     }
 
     #[test]
