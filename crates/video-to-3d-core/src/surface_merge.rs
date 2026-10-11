@@ -134,6 +134,11 @@ pub(super) struct MergeStats {
     /// triangle's plane, not in the image), as a share of the accepted mesh
     /// area before the merge.
     pub trimmed_seam_area_share: f64,
+    /// Cross-reference triangles over existing vertices that close the gap a
+    /// trimmed seam left between the owner patch's boundary and the remaining
+    /// lower-priority boundary.
+    // contract: populated by #137 implementation
+    pub stitched_seam_triangles: usize,
     /// Linked (owner, candidate) patch pairs with fewer than
     /// `MIN_SCALE_SAMPLES` anchored overlap samples, compared without
     /// removing a relative depth scale.
@@ -727,6 +732,8 @@ pub(super) fn merge_fused_patches(
         } else {
             0.0
         },
+        // contract: populated by #137 implementation
+        stitched_seam_triangles: 0,
         uncalibrated_patch_pairs,
         retained_by_group,
         patch_components,

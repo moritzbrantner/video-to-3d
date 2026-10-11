@@ -1163,3 +1163,393 @@ fn ordinary_overlaps_report_no_bound_hits_and_keep_their_results() {
     assert!(stats.max_postings_per_query <= total, "{stats:?}");
     assert!(stats.diagnostic(2).contains(&bound_hits_phrase(&stats)));
 }
+
+// Acceptance contract of #137: re-stitching trimmed overlap seams.
+//
+// Every fixture is a plane (or planes) in front of an identity reference camera
+// at the origin, so a point (x, y, z) projects to (x / z, y / z) in the owner's
+// image. Patch 0 owns x ∈ [-1.84, 0]; the seam column of patch 1 spans
+// x ∈ [-0.46, 0.04], so both of its triangles per row are owned at least 80 %
+// (0.9936 and 0.8464) and trimmed, which leaves a gap x ∈ (0, 0.04) between
+// the owner's boundary and patch 1's remaining boundary that the removed
+// triangles observed.
+
+const OWNER_XS: [f32; 5] = [-1.84, -1.38, -0.92, -0.46, 0.0];
+const SEAM_ROWS: [f32; 3] = [-1.0, 0.0, 1.0];
+
+/// Appends a planar grid (`xs` × `ys` at depth `z`) of `group` and returns
+/// its vertex indices as `grid[row][column]`. Each cell is split into
+/// (p00, p10, p01) and (p10, p11, p01), counter-clockwise in the owner image.
+fn push_grid(
+    fixture: &mut SeamFixture,
+    xs: &[f32],
+    ys: &[f32],
+    z: f32,
+    group: usize,
+) -> Vec<Vec<usize>> {
+    let grid: Vec<Vec<usize>> = ys
+        .iter()
+        .map(|&y| {
+            xs.iter()
+                .map(|&x| {
+                    fixture.points.push(point(x, y, z));
+                    fixture.membership.push(Some(group));
+                    fixture
+                        .origins
+                        .push(Some(crate::EvidenceOrigin::GeometricMultiView));
+                    fixture.points.len() - 1
+                })
+                .collect()
+        })
+        .collect();
+    for row in 0..ys.len() - 1 {
+        for column in 0..xs.len() - 1 {
+            let (p00, p10) = (grid[row][column], grid[row][column + 1]);
+            let (p01, p11) = (grid[row + 1][column], grid[row + 1][column + 1]);
+            fixture.triangles.push(triangle(p00, p10, p01));
+            fixture.triangles.push(triangle(p10, p11, p01));
+        }
+    }
+    grid
+}
+
+#[derive(Default)]
+struct SeamFixture {
+    points: Vec<Point3>,
+    membership: Vec<Option<usize>>,
+    triangles: Vec<MeshTriangle>,
+    pairs: Vec<(usize, usize)>,
+    cameras: Vec<Option<ReferenceCamera>>,
+    origins: Vec<Option<crate::EvidenceOrigin>>,
+}
+
+impl SeamFixture {
+    fn merge(&self) -> (Vec<MeshTriangle>, MergeStats) {
+        let mut triangles = self.triangles.clone();
+        let stats = merge_fused_patches(
+            &self.points,
+            &mut triangles,
+            &self.membership,
+            &self.pairs,
+            &self.cameras,
+            &self.origins,
+        );
+        (triangles, stats)
+    }
+
+    fn group(&self, vertex: usize) -> Option<usize> {
+        self.membership[vertex]
+    }
+
+    /// Output triangles that are neither an input triangle nor an input
+    /// triangle re-indexed through an accepted pair (in either direction).
+    fn new_triangles(&self, output: &[MeshTriangle]) -> Vec<MeshTriangle> {
+        let key = |corners: [usize; 3]| {
+            let mut corners = corners;
+            corners.sort_unstable();
+            corners
+        };
+        let mut known = BTreeSet::new();
+        for t in &self.triangles {
+            let corners = [t.a, t.b, t.c];
+            known.insert(key(corners));
+            for &(first, second) in &self.pairs {
+                let swap = |from: usize, to: usize| {
+                    corners.map(|vertex| if vertex == from { to } else { vertex })
+                };
+                known.insert(key(swap(first, second)));
+                known.insert(key(swap(second, first)));
+            }
+        }
+        output
+            .iter()
+            .filter(|t| !known.contains(&key([t.a, t.b, t.c])))
+            .cloned()
+            .collect()
+    }
+
+    /// The triangle's corners in the owner's (patch 0) image.
+    fn projected(&self, t: &MeshTriangle) -> [Vector2<f64>; 3] {
+        let camera = self.cameras[0].expect("owner camera");
+        [t.a, t.b, t.c].map(|vertex| {
+            let p = self.points[vertex];
+            camera
+                .project(Vector3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)))
+                .expect("in front of the owner camera")
+                .0
+        })
+    }
+}
+
+/// The owner grid (patch 0, 16 triangles) and patch 1 (12 triangles) whose
+/// seam column overlaps it; patch 1's seam-column vertices at x = -0.46 are
+/// fused onto the owner's (coincident) boundary-column vertices there.
+fn trimmed_seam_fixture() -> (SeamFixture, Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    let mut fixture = SeamFixture::default();
+    let owner = push_grid(&mut fixture, &OWNER_XS, &SEAM_ROWS, 5.0, 0);
+    let lower = push_grid(&mut fixture, &[-0.46, 0.04, 0.54, 1.04], &SEAM_ROWS, 5.0, 1);
+    fixture.pairs = (0..SEAM_ROWS.len())
+        .map(|row| (owner[row][3], lower[row][0]))
+        .collect();
+    fixture.cameras = vec![Some(identity_camera(0.0)), Some(identity_camera(0.4))];
+    (fixture, owner, lower)
+}
+
+/// Connected components of the vertices the triangles reference (vertex
+/// connectivity over triangles).
+fn vertex_components(triangles: &[MeshTriangle], vertices: usize) -> (usize, Vec<usize>) {
+    let mut parent: Vec<usize> = (0..vertices).collect();
+    let mut used = vec![false; vertices];
+    for t in triangles {
+        for vertex in [t.a, t.b, t.c] {
+            used[vertex] = true;
+        }
+        let root = find(&mut parent, t.a);
+        for vertex in [t.b, t.c] {
+            let other = find(&mut parent, vertex);
+            parent[other] = root;
+        }
+    }
+    let roots: Vec<usize> = (0..vertices)
+        .map(|vertex| find(&mut parent, vertex))
+        .collect();
+    let count = (0..vertices)
+        .filter(|&vertex| used[vertex] && roots[vertex] == vertex)
+        .count();
+    (count, roots)
+}
+
+fn signed_area_2d(corners: &[Vector2<f64>]) -> f64 {
+    (0..corners.len())
+        .map(|index| corners[index].perp(&corners[(index + 1) % corners.len()]))
+        .sum::<f64>()
+        * 0.5
+}
+
+/// Area of the intersection of two image triangles (convex clipping).
+fn intersection_area(subject: [Vector2<f64>; 3], clip: [Vector2<f64>; 3]) -> f64 {
+    let orientation = signed_area_2d(&clip).signum();
+    let mut polygon = subject.to_vec();
+    for index in 0..3 {
+        let (a, b) = (clip[index], clip[(index + 1) % 3]);
+        let side = |p: &Vector2<f64>| orientation * (b - a).perp(&(p - a));
+        let mut next = Vec::new();
+        for current in 0..polygon.len() {
+            let (p, q) = (polygon[current], polygon[(current + 1) % polygon.len()]);
+            let (sp, sq) = (side(&p), side(&q));
+            if sp >= 0.0 {
+                next.push(p);
+            }
+            if (sp >= 0.0) != (sq >= 0.0) {
+                next.push(p + (q - p) * (sp / (sp - sq)));
+            }
+        }
+        polygon = next;
+        if polygon.len() < 3 {
+            return 0.0;
+        }
+    }
+    signed_area_2d(&polygon).abs()
+}
+
+#[test]
+fn a_trimmed_seam_is_stitched_into_one_connected_surface() {
+    let (fixture, owner, lower) = trimmed_seam_fixture();
+    let (triangles, stats) = fixture.merge();
+    // Precondition (current behaviour): the seam column is owned and trimmed.
+    assert_eq!(stats.removed_duplicate_triangles, 4, "{stats:?}");
+    assert_eq!(stats.trimmed_seam_triangles, 4, "{stats:?}");
+
+    // No new points: every index addresses the existing point buffer.
+    assert!(triangles
+        .iter()
+        .all(|t| [t.a, t.b, t.c].iter().all(|&v| v < fixture.points.len())));
+    // The gap is closed: one connected surface, one patch component.
+    let (components, _) = vertex_components(&triangles, fixture.points.len());
+    assert_eq!(components, 1, "{stats:?}");
+    assert_eq!(stats.patch_components, 1, "{stats:?}");
+
+    // Stitch triangles join the owner's boundary to patch 1's remaining
+    // boundary, and are counted and reported.
+    let stitches = fixture.new_triangles(&triangles);
+    assert!(!stitches.is_empty());
+    assert!(stats.stitched_seam_triangles > 0, "{stats:?}");
+    assert_eq!(stats.stitched_seam_triangles, stitches.len(), "{stats:?}");
+    for t in &stitches {
+        let groups: BTreeSet<_> = [t.a, t.b, t.c].iter().map(|&v| fixture.group(v)).collect();
+        assert_eq!(groups, BTreeSet::from([Some(0), Some(1)]), "{t:?}");
+    }
+    assert!(
+        stats.diagnostic(2).contains(&format!(
+            "{} seam stitch triangle(s)",
+            stats.stitched_seam_triangles
+        )),
+        "{}",
+        stats.diagnostic(2)
+    );
+
+    let [left, right] = [owner[0][0], lower[0][3]].map(|v| f64::from(fixture.points[v].x));
+    assert_tiles_owner_image(&fixture, &triangles, left, right);
+}
+
+/// In the owner's image: every triangle keeps the neighbours' orientation, no
+/// two triangles cover the same area, and together they tile the observed
+/// rectangle x ∈ [left, right], y ∈ [-1, 1] at depth 5, without a gap.
+fn assert_tiles_owner_image(
+    fixture: &SeamFixture,
+    triangles: &[MeshTriangle],
+    left: f64,
+    right: f64,
+) {
+    let projected: Vec<[Vector2<f64>; 3]> =
+        triangles.iter().map(|t| fixture.projected(t)).collect();
+    for (t, corners) in triangles.iter().zip(&projected) {
+        assert!(signed_area_2d(corners) > 0.0, "{t:?} is flipped");
+    }
+    for first in 0..projected.len() {
+        for second in first + 1..projected.len() {
+            let overlap = intersection_area(projected[first], projected[second]);
+            assert!(
+                overlap < 1.0e-9,
+                "{:?} and {:?} overlap by {overlap}",
+                triangles[first],
+                triangles[second]
+            );
+        }
+    }
+    let rectangle = (right - left) / 5.0 * (2.0 / 5.0);
+    let total: f64 = projected.iter().map(|c| signed_area_2d(c)).sum();
+    assert!(
+        (total - rectangle).abs() < 1.0e-6 * rectangle,
+        "covered {total}, observed {rectangle}"
+    );
+}
+
+#[test]
+fn the_seam_contract_is_satisfiable_by_a_strip_over_existing_vertices() {
+    // Checks the oracle, not the merge: today's output plus a hand-made strip
+    // between the owner's boundary (x = 0) and patch 1's remaining boundary
+    // (x = 0.04) meets every geometric condition of the stitching contract.
+    let (fixture, owner, lower) = trimmed_seam_fixture();
+    let (mut triangles, _) = fixture.merge();
+    assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 2);
+    for row in 0..SEAM_ROWS.len() - 1 {
+        triangles.push(triangle(owner[row][4], lower[row][1], owner[row + 1][4]));
+        triangles.push(triangle(
+            lower[row][1],
+            lower[row + 1][1],
+            owner[row + 1][4],
+        ));
+    }
+    assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 1);
+    assert_eq!(fixture.new_triangles(&triangles).len(), 4);
+    let [left, right] = [owner[0][0], lower[0][3]].map(|v| f64::from(fixture.points[v].x));
+    assert_tiles_owner_image(&fixture, &triangles, left, right);
+}
+
+#[test]
+fn seam_stitching_is_deterministic() {
+    let (fixture, _, _) = trimmed_seam_fixture();
+    let (first, first_stats) = fixture.merge();
+    let (second, second_stats) = fixture.merge();
+    assert_eq!(signature(&first), signature(&second));
+    assert_eq!(first_stats, second_stats);
+}
+
+#[test]
+fn an_unobserved_gap_between_linked_patches_is_never_bridged() {
+    // Patch 1 starts at x = 0.3: nothing overlaps, nothing is trimmed, and no
+    // patch observed x ∈ (0, 0.3). The patches are linked by a fusion pair
+    // across evidence origins (so no vertex is shared).
+    let mut fixture = SeamFixture::default();
+    let owner = push_grid(&mut fixture, &OWNER_XS, &SEAM_ROWS, 5.0, 0);
+    let lower = push_grid(&mut fixture, &[0.3, 0.8, 1.3], &SEAM_ROWS, 5.0, 1);
+    fixture.origins[lower[1][0]] = Some(crate::EvidenceOrigin::RevalidatedCompletion);
+    fixture.pairs = vec![(owner[1][4], lower[1][0])];
+    fixture.cameras = vec![Some(identity_camera(0.0)), Some(identity_camera(0.4))];
+    let (triangles, stats) = fixture.merge();
+    assert_eq!(stats.provenance_separated_pairs, 1, "{stats:?}");
+    assert_eq!(stats.removed_duplicate_triangles, 0, "{stats:?}");
+    assert_eq!(stats.stitched_seam_triangles, 0, "{stats:?}");
+    assert!(fixture.new_triangles(&triangles).is_empty());
+    assert_eq!(signature(&triangles), signature(&fixture.triangles));
+    assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 2);
+}
+
+#[test]
+fn a_trimmed_seam_is_not_stitched_to_a_surface_at_another_depth() {
+    // Patch 1's seam column lies on the owner's plane and is trimmed; the
+    // rest of patch 1 is a separate component 8 % farther (beyond the 3.5 %
+    // relative depth bound), right next to the owner's boundary in its image.
+    // Even with a fusion link to it, it is never stitched to the owner.
+    let mut fixture = SeamFixture::default();
+    let owner = push_grid(&mut fixture, &OWNER_XS, &SEAM_ROWS, 5.0, 0);
+    let seam = push_grid(&mut fixture, &[-0.46, 0.04], &SEAM_ROWS, 5.0, 1);
+    let far = push_grid(&mut fixture, &[0.04, 0.54, 1.04], &SEAM_ROWS, 5.4, 1);
+    fixture.origins[far[1][0]] = Some(crate::EvidenceOrigin::RevalidatedCompletion);
+    fixture.pairs = (0..SEAM_ROWS.len())
+        .map(|row| (owner[row][3], seam[row][0]))
+        .chain([(owner[1][4], far[1][0])])
+        .collect();
+    fixture.cameras = vec![Some(identity_camera(0.0)), Some(identity_camera(0.4))];
+    let far_vertices: BTreeSet<usize> = far.iter().flatten().copied().collect();
+    let owner_vertices: BTreeSet<usize> = owner.iter().flatten().copied().collect();
+
+    let (triangles, stats) = fixture.merge();
+    // Precondition: the seam column was trimmed, the far surface kept.
+    assert_eq!(stats.trimmed_seam_triangles, 4, "{stats:?}");
+    let far_kept = triangles
+        .iter()
+        .filter(|t| [t.a, t.b, t.c].iter().all(|v| far_vertices.contains(v)))
+        .count();
+    assert_eq!(far_kept, 8, "{stats:?}");
+
+    assert!(
+        triangles.iter().all(|t| {
+            let corners = [t.a, t.b, t.c];
+            !(corners.iter().any(|v| owner_vertices.contains(v))
+                && corners.iter().any(|v| far_vertices.contains(v)))
+        }),
+        "a triangle bridges the depth discontinuity"
+    );
+    let (_, roots) = vertex_components(&triangles, fixture.points.len());
+    assert_ne!(roots[owner[1][4]], roots[far[1][0]]);
+    assert_eq!(stats.stitched_seam_triangles, 0, "{stats:?}");
+}
+
+#[test]
+fn patches_without_a_fusion_link_are_never_stitched() {
+    let (mut fixture, _, _) = trimmed_seam_fixture();
+    fixture.pairs.clear();
+    let (triangles, stats) = fixture.merge();
+    assert_eq!(stats.removed_duplicate_triangles, 0, "{stats:?}");
+    assert_eq!(stats.stitched_seam_triangles, 0, "{stats:?}");
+    assert!(fixture.new_triangles(&triangles).is_empty());
+    assert_eq!(signature(&triangles), signature(&fixture.triangles));
+    assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 2);
+}
+
+#[test]
+fn only_the_linked_patch_of_three_is_stitched() {
+    // The trimmed seam fixture plus patch 2, overlapping the owner's left
+    // columns at the same depth but without any fusion link: patches 0 and 1
+    // become one surface, patch 2 stays apart and untouched.
+    let (mut fixture, owner, lower) = trimmed_seam_fixture();
+    let third = push_grid(&mut fixture, &[-2.3, -1.8, -1.3], &SEAM_ROWS, 5.0, 2);
+    fixture.cameras.push(Some(identity_camera(-1.5)));
+    let third_vertices: BTreeSet<usize> = third.iter().flatten().copied().collect();
+
+    let (triangles, stats) = fixture.merge();
+    assert_eq!(stats.trimmed_seam_triangles, 4, "{stats:?}");
+    assert_eq!(stats.retained_by_group[2], 8, "{stats:?}");
+    let (components, roots) = vertex_components(&triangles, fixture.points.len());
+    assert_eq!(components, 2, "{stats:?}");
+    assert_eq!(roots[owner[1][4]], roots[lower[1][1]]);
+    assert_ne!(roots[owner[1][0]], roots[third[1][0]]);
+    let stitches = fixture.new_triangles(&triangles);
+    assert!(!stitches.is_empty());
+    assert_eq!(stats.stitched_seam_triangles, stitches.len(), "{stats:?}");
+    assert!(stitches
+        .iter()
+        .all(|t| { [t.a, t.b, t.c].iter().all(|v| !third_vertices.contains(v)) }));
+}
