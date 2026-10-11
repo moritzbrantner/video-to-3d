@@ -55,8 +55,15 @@ impl BuiltInExecutor {
         request: &OperationRequest,
         cancel: &CancellationToken,
     ) -> Result<ReconstructionRequest, String> {
-        let keyframes = KeyframesArtifact::from_json(
+        let keyframes = KeyframesArtifact::from_json_with_cancel(
             &self.document(self.input(request, ArtifactKind::Keyframes)?, cancel)?,
+            || {
+                if cancel.is_canceled() {
+                    Err("native keyframes read canceled".into())
+                } else {
+                    Ok(())
+                }
+            },
         )?;
         let mut frames = Vec::with_capacity(keyframes.frames.len());
         for (index, frame) in keyframes.frames.iter().enumerate() {
@@ -109,9 +116,16 @@ impl BuiltInExecutor {
                     if identities.get(id) != Some(&record.operation_identity) {
                         return Err("camera ancestor has stale operation identity".into());
                     }
-                    let camera = CameraStageArtifact::from_json(&self.document(record, cancel)?)
-                        .map_err(|e| e.to_string())?;
-                    if camera.content_hash() != *cameras_hash {
+                    let camera = CameraStageArtifact::from_json_with_cancel(
+                        &self.document(record, cancel)?,
+                        || cancel.is_canceled(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if camera
+                        .content_hash_with_cancel(|| cancel.is_canceled())
+                        .map_err(|error| error.to_string())?
+                        != *cameras_hash
+                    {
                         return Err("dense camera ancestor content hash does not match".into());
                     }
                     cameras.push(camera);
@@ -188,13 +202,17 @@ impl BuiltInExecutor {
                     cancel.is_canceled()
                 })
                 .map_err(|e| e.to_string())?
-                .to_json()
+                .to_json_with_cancel(|| cancel.is_canceled())
+                .map_err(|error| error.to_string())?
             }
             OperationKind::DenseReconstruction => {
-                let cameras = CameraStageArtifact::from_json(&self.document(
-                    self.input(request, ArtifactKind::SparseReconstruction)?,
-                    cancel,
-                )?)
+                let cameras = CameraStageArtifact::from_json_with_cancel(
+                    &self.document(
+                        self.input(request, ArtifactKind::SparseReconstruction)?,
+                        cancel,
+                    )?,
+                    || cancel.is_canceled(),
+                )
                 .map_err(|e| e.to_string())?;
                 crate::reconstruct_dense_with_cancel(
                     &self.frames(request, cancel)?,
@@ -202,12 +220,16 @@ impl BuiltInExecutor {
                     || cancel.is_canceled(),
                 )
                 .map_err(|e| e.to_string())?
-                .to_json()
+                .to_json_with_cancel(|| cancel.is_canceled())
+                .map_err(|error| error.to_string())?
             }
             OperationKind::SurfaceMesh => {
                 let record = self.input(request, ArtifactKind::DenseEvidence)?;
-                let dense = DenseStageArtifact::from_json(&self.document(record, cancel)?)
-                    .map_err(|e| e.to_string())?;
+                let dense = DenseStageArtifact::from_json_with_cancel(
+                    &self.document(record, cancel)?,
+                    || cancel.is_canceled(),
+                )
+                .map_err(|e| e.to_string())?;
                 let cameras = self.dense_cameras(record, &dense.cameras_hash, cancel)?;
                 let (dense, mesh) =
                     crate::reconstruct_mesh_owned_with_cancel(&cameras, dense, || {
@@ -255,11 +277,26 @@ impl BuiltInExecutor {
                     triangle_sources: mesh.mesh.triangle_sources,
                     grid_sites: dense.dense.grid_sites,
                 };
-                artifact.to_json()
+                artifact.to_json_with_cancel(|| {
+                    if cancel.is_canceled() {
+                        Err("native surface mesh write canceled".into())
+                    } else {
+                        Ok(())
+                    }
+                })?
             }
-            OperationKind::SceneAssembly => {
-                to_document(&self.assemble(request, &directory, cancel)?)
-            }
+            OperationKind::SceneAssembly => crate::controlled_json::to_string(
+                &self.assemble(request, &directory, cancel)?,
+                true,
+                true,
+                &mut || {
+                    if cancel.is_canceled() {
+                        Err("native assembly write canceled".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )?,
             _ => return Err("unsupported native stage".into()),
         };
         if cancel.is_canceled() {
@@ -280,8 +317,11 @@ impl BuiltInExecutor {
         cancel: &CancellationToken,
     ) -> Result<AssembledScene, String> {
         let sparse_record = self.input(request, ArtifactKind::SparseReconstruction)?;
-        let sparse = CameraStageArtifact::from_json(&self.document(sparse_record, cancel)?)
-            .map_err(|e| e.to_string())?;
+        let sparse = CameraStageArtifact::from_json_with_cancel(
+            &self.document(sparse_record, cancel)?,
+            || cancel.is_canceled(),
+        )
+        .map_err(|e| e.to_string())?;
         let mesh_record = self.input(request, ArtifactKind::SurfaceMesh)?;
         // Validate the full declared mesh -> dense -> sparse ancestry rather
         // than pairing arbitrary camera and surface artifacts.
@@ -309,8 +349,14 @@ impl BuiltInExecutor {
             request_hash: ContentHash,
             cameras_hash: ContentHash,
         }
-        let dense: DenseIdentity = serde_json::from_str(&self.document(dense_record, cancel)?)
-            .map_err(|error| error.to_string())?;
+        let dense: DenseIdentity =
+            crate::controlled_json::from_str(&self.document(dense_record, cancel)?, &mut || {
+                if cancel.is_canceled() {
+                    Err("native dense ancestry read canceled".into())
+                } else {
+                    Ok(())
+                }
+            })?;
         if dense.schema_version != crate::DENSE_STAGE_ARTIFACT_SCHEMA_VERSION {
             return Err("unsupported dense ancestor schema version".into());
         }
@@ -323,8 +369,11 @@ impl BuiltInExecutor {
         if dense.request_hash != sparse.request_hash
             || self
                 .dense_cameras(dense_record, &dense.cameras_hash, cancel)?
-                .content_hash()
-                != sparse.content_hash()
+                .content_hash_with_cancel(|| cancel.is_canceled())
+                .map_err(|error| error.to_string())?
+                != sparse
+                    .content_hash_with_cancel(|| cancel.is_canceled())
+                    .map_err(|error| error.to_string())?
         {
             return Err("scene camera does not match mesh ancestry".into());
         }
@@ -416,7 +465,15 @@ impl BuiltInExecutor {
             lights: Vec::new(),
             audio: Vec::new(),
         };
-        scene.validate().map_err(|e| e.to_string())?;
+        scene
+            .validate_with_cancel(&mut || {
+                if cancel.is_canceled() {
+                    Err("native scene validation canceled".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|e| e.to_string())?;
         if cancel.is_canceled() {
             return Err("scene assembly canceled".into());
         }

@@ -286,18 +286,75 @@ macro_rules! stage_artifact_document {
             /// a missing `schema_version` or another stage's document with
             /// [`ReconstructionStageError::Malformed`].
             pub fn from_json(document: &str) -> Result<Self, ReconstructionStageError> {
+                Self::from_json_with_cancel(document, || false)
+            }
+
+            pub fn from_json_with_cancel(
+                document: &str,
+                mut is_canceled: impl FnMut() -> bool,
+            ) -> Result<Self, ReconstructionStageError> {
+                let mut control = ReconstructionControl::new(&mut is_canceled);
+                let mut poll = || control.check();
                 #[derive(Deserialize)]
                 struct Version {
                     schema_version: u32,
                 }
-                let malformed = |error: serde_json::Error| ReconstructionStageError::Malformed {
+                let malformed = |error: String| ReconstructionStageError::Malformed {
                     artifact: $stage,
                     message: error.to_string(),
                 };
                 let Version { schema_version } =
-                    serde_json::from_str(document).map_err(malformed)?;
+                    crate::controlled_json::from_str(document, &mut poll).map_err(malformed)?;
                 check_schema_version($stage, schema_version, $version)?;
-                serde_json::from_str(document).map_err(malformed)
+                let artifact: Self =
+                    crate::controlled_json::from_str(document, &mut poll).map_err(malformed)?;
+                artifact.check_finite_with_control(&mut control)?;
+                Ok(artifact)
+            }
+
+            /// Serialize with the existing JSON encoding while polling real
+            /// finite-value validation and byte emission. No partial output escapes.
+            pub fn to_json_with_cancel(
+                &self,
+                mut is_canceled: impl FnMut() -> bool,
+            ) -> Result<String, ReconstructionStageError> {
+                let mut control = ReconstructionControl::new(&mut is_canceled);
+                self.check_schema_version()?;
+                self.check_finite_with_control(&mut control)?;
+                crate::controlled_json::to_string(self, false, false, &mut || control.check())
+                    .map_err(ReconstructionStageError::Reconstruction)
+            }
+
+            pub fn content_hash_with_cancel(
+                &self,
+                mut is_canceled: impl FnMut() -> bool,
+            ) -> Result<ContentHash, ReconstructionStageError> {
+                self.content_hash_with_control(&mut ReconstructionControl::new(&mut is_canceled))
+            }
+
+            fn content_hash_with_control(
+                &self,
+                control: &mut ReconstructionControl<'_>,
+            ) -> Result<ContentHash, ReconstructionStageError> {
+                struct HashWriter(Sha256);
+                impl std::io::Write for HashWriter {
+                    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                        self.0.update(bytes);
+                        Ok(bytes.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        Ok(())
+                    }
+                }
+                let mut writer = HashWriter(Sha256::new());
+                crate::controlled_json::to_writer(self, &mut writer, false, &mut || {
+                    control.check()
+                })
+                .map_err(ReconstructionStageError::Reconstruction)?;
+                control
+                    .check()
+                    .map_err(ReconstructionStageError::Reconstruction)?;
+                Ok(ContentHash::of_digest(&writer.0.finalize()))
             }
 
             /// `ContentHash::of_bytes(self.to_json().as_bytes())`: the identity a
@@ -311,13 +368,25 @@ macro_rules! stage_artifact_document {
             }
 
             /// Every float of the artifact is finite, so its document reloads.
+            #[cfg(test)]
             fn check_finite(self) -> Result<Self, ReconstructionStageError> {
-                finite::first_non_finite(&self).map_or(Ok(self), |field| {
-                    Err(ReconstructionStageError::NonFinite {
+                self.check_finite_with_control(&mut ReconstructionControl::new(&mut || false))?;
+                Ok(self)
+            }
+
+            fn check_finite_with_control(
+                &self,
+                control: &mut ReconstructionControl<'_>,
+            ) -> Result<(), ReconstructionStageError> {
+                match finite::first_non_finite_with_cancel(self, &mut || control.check())
+                    .map_err(ReconstructionStageError::Reconstruction)?
+                {
+                    None => Ok(()),
+                    Some(field) => Err(ReconstructionStageError::NonFinite {
                         artifact: $stage,
                         field,
-                    })
-                })
+                    }),
+                }
             }
         }
     };
@@ -444,12 +513,13 @@ pub fn reconstruct_cameras_with_cancel(
     control
         .check()
         .map_err(ReconstructionStageError::Reconstruction)?;
-    CameraStageArtifact {
+    let artifact = CameraStageArtifact {
         schema_version: CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
         request_hash: request_content_hash_with_control(request, &mut control)?,
         sparse,
-    }
-    .check_finite()
+    };
+    artifact.check_finite_with_control(&mut control)?;
+    Ok(artifact)
 }
 
 /// Stage 2: cameras + frames → dense evidence. Rejects a camera artifact of another
@@ -483,13 +553,14 @@ pub fn reconstruct_dense_with_cancel(
     control
         .check()
         .map_err(ReconstructionStageError::Reconstruction)?;
-    DenseStageArtifact {
+    let artifact = DenseStageArtifact {
         schema_version: DENSE_STAGE_ARTIFACT_SCHEMA_VERSION,
         request_hash: cameras.request_hash.clone(),
-        cameras_hash: cameras.content_hash(),
+        cameras_hash: cameras.content_hash_with_control(&mut control)?,
         dense,
-    }
-    .check_finite()
+    };
+    artifact.check_finite_with_control(&mut control)?;
+    Ok(artifact)
 }
 
 /// Stage 3: dense evidence (+ the cameras it was computed from) → consolidated mesh.
@@ -516,7 +587,7 @@ pub fn reconstruct_mesh_with_cancel(
         ReconstructionStage::Dense,
         StageInput::Cameras,
         &dense.cameras_hash,
-        cameras.content_hash(),
+        cameras.content_hash_with_control(&mut control)?,
     )?;
     // Surface consolidation borrows every other stage field; only the points fusion may
     // move need a working buffer, since the dense artifact stays unchanged. The
@@ -530,12 +601,13 @@ pub fn reconstruct_mesh_with_cancel(
         &mut control,
     )
     .map_err(ReconstructionStageError::Reconstruction)?;
-    MeshStageArtifact {
+    let artifact = MeshStageArtifact {
         schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
-        dense_hash: dense.content_hash(),
+        dense_hash: dense.content_hash_with_control(&mut control)?,
         mesh: surface,
-    }
-    .check_finite()
+    };
+    artifact.check_finite_with_control(&mut control)?;
+    Ok(artifact)
 }
 
 /// Owned geometry after surface consolidation. This is a working buffer, not a
@@ -574,9 +646,9 @@ pub fn reconstruct_mesh_owned_with_cancel(
         ReconstructionStage::Dense,
         StageInput::Cameras,
         &dense.cameras_hash,
-        cameras.content_hash(),
+        cameras.content_hash_with_control(&mut control)?,
     )?;
-    let dense_hash = dense.content_hash();
+    let dense_hash = dense.content_hash_with_control(&mut control)?;
     let mut points = std::mem::take(&mut dense.dense.points);
     let surface = build_surface_with_control(
         &cameras.sparse,
@@ -590,8 +662,8 @@ pub fn reconstruct_mesh_owned_with_cancel(
         schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
         dense_hash,
         mesh: surface,
-    }
-    .check_finite()?;
+    };
+    mesh.check_finite_with_control(&mut control)?;
     Ok((ConsumedDenseGeometry { dense: dense.dense }, mesh))
 }
 
@@ -875,28 +947,47 @@ mod finite {
     use serde::ser::{self, Serialize};
     use std::fmt;
 
+    #[cfg(test)]
     pub(super) fn first_non_finite<T: Serialize>(value: &T) -> Option<String> {
-        let mut probe = Probe { path: Vec::new() };
+        first_non_finite_with_cancel(value, &mut || Ok(())).expect("no-op validation cannot cancel")
+    }
+
+    pub(super) fn first_non_finite_with_cancel<T: Serialize>(
+        value: &T,
+        poll: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<Option<String>, String> {
+        let mut probe = Probe {
+            path: Vec::new(),
+            poll,
+        };
         match value.serialize(&mut probe) {
-            Ok(()) => None,
-            Err(Found(field)) => Some(field),
+            Ok(()) => Ok(None),
+            Err(Found::NonFinite(field)) => Ok(Some(field)),
+            Err(Found::Canceled(message)) => Err(message),
         }
     }
 
-    struct Probe {
+    struct Probe<'a> {
         path: Vec<String>,
+        poll: &'a mut dyn FnMut() -> Result<(), String>,
     }
 
-    impl Probe {
-        fn check(&self, finite: bool) -> Result<(), Found> {
+    impl Probe<'_> {
+        fn poll(&mut self) -> Result<(), Found> {
+            (self.poll)().map_err(Found::Canceled)
+        }
+
+        fn check(&mut self, finite: bool) -> Result<(), Found> {
+            self.poll()?;
             if finite {
                 Ok(())
             } else {
-                Err(Found(self.path.join(".")))
+                Err(Found::NonFinite(self.path.join(".")))
             }
         }
 
         fn nested<T: ?Sized + Serialize>(&mut self, key: String, value: &T) -> Result<(), Found> {
+            self.poll()?;
             self.path.push(key);
             value.serialize(&mut *self)?;
             self.path.pop();
@@ -905,11 +996,17 @@ mod finite {
     }
 
     #[derive(Debug)]
-    struct Found(String);
+    enum Found {
+        NonFinite(String),
+        Canceled(String),
+    }
 
     impl fmt::Display for Found {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(formatter, "non-finite value at `{}`", self.0)
+            match self {
+                Self::NonFinite(field) => write!(formatter, "non-finite value at `{field}`"),
+                Self::Canceled(message) => formatter.write_str(message),
+            }
         }
     }
 
@@ -917,17 +1014,17 @@ mod finite {
 
     impl ser::Error for Found {
         fn custom<T: fmt::Display>(message: T) -> Self {
-            Self(message.to_string())
+            Self::NonFinite(message.to_string())
         }
     }
 
     macro_rules! ignore {
         ($($method:ident: $type:ty),* $(,)?) => {
-            $(fn $method(self, _: $type) -> Result<(), Found> { Ok(()) })*
+            $(fn $method(self, _: $type) -> Result<(), Found> { self.poll() })*
         };
     }
 
-    impl ser::Serializer for &mut Probe {
+    impl ser::Serializer for &mut Probe<'_> {
         type Ok = ();
         type Error = Found;
         type SerializeSeq = Self;
@@ -1037,11 +1134,12 @@ mod finite {
     /// Sequences keep a running element index as the last path segment.
     macro_rules! sequence {
         ($($trait:ident :: $method:ident),* $(,)?) => {
-            $(impl ser::$trait for &mut Probe {
+            $(impl ser::$trait for &mut Probe<'_> {
                 type Ok = ();
                 type Error = Found;
 
                 fn $method<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Found> {
+                    self.poll()?;
                     let index = self.path.last_mut().expect("sequence path segment");
                     let current: usize = index.parse().map_or(0, |last: usize| last + 1);
                     *index = current.to_string();
@@ -1063,7 +1161,7 @@ mod finite {
         SerializeTupleVariant::serialize_field,
     );
 
-    impl ser::SerializeMap for &mut Probe {
+    impl ser::SerializeMap for &mut Probe<'_> {
         type Ok = ();
         type Error = Found;
 
@@ -1082,7 +1180,7 @@ mod finite {
 
     macro_rules! fields {
         ($($trait:ident),* $(,)?) => {
-            $(impl ser::$trait for &mut Probe {
+            $(impl ser::$trait for &mut Probe<'_> {
                 type Ok = ();
                 type Error = Found;
 

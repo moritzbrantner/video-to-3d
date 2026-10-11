@@ -66,6 +66,15 @@ fn parse_versioned<T: DeserializeOwned>(
     label: &str,
     expected: u32,
 ) -> Result<T, String> {
+    parse_versioned_with_cancel(document, label, expected, &mut || Ok(()))
+}
+
+fn parse_versioned_with_cancel<T: DeserializeOwned>(
+    document: &str,
+    label: &str,
+    expected: u32,
+    poll: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<T, String> {
     // Only the version is read first; every other field is skipped without
     // building a generic JSON tree, so a dense mesh is materialized once.
     #[derive(Deserialize)]
@@ -73,8 +82,8 @@ fn parse_versioned<T: DeserializeOwned>(
         #[serde(default)]
         schema_version: Option<serde_json::Value>,
     }
-    let header: Version =
-        serde_json::from_str(document).map_err(|error| format!("{label}: {error}"))?;
+    let header: Version = crate::controlled_json::from_str(document, poll)
+        .map_err(|error| format!("{label}: {error}"))?;
     match header
         .schema_version
         .as_ref()
@@ -88,7 +97,7 @@ fn parse_versioned<T: DeserializeOwned>(
         }
         None => return Err(format!("{label}: `schema_version` is missing")),
     }
-    serde_json::from_str(document).map_err(|error| format!("{label}: {error}"))
+    crate::controlled_json::from_str(document, poll).map_err(|error| format!("{label}: {error}"))
 }
 
 fn to_document<T: Serialize>(value: &T) -> String {
@@ -264,18 +273,34 @@ fn rgba_length(width: u32, height: u32) -> Option<usize> {
 
 impl KeyframesArtifact {
     pub fn from_json(document: &str) -> Result<Self, String> {
-        let artifact: Self = parse_versioned(
+        Self::from_json_with_cancel(document, || Ok(()))
+    }
+
+    pub(crate) fn from_json_with_cancel(
+        document: &str,
+        mut poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let artifact: Self = parse_versioned_with_cancel(
             document,
             "keyframes artifact",
             KEYFRAMES_ARTIFACT_SCHEMA_VERSION,
+            &mut poll,
         )?;
-        artifact.validate()?;
+        artifact.validate_with_cancel(&mut poll)?;
         Ok(artifact)
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_cancel(&mut || Ok(()))
+    }
+
+    fn validate_with_cancel(
+        &self,
+        poll: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut previous = None;
         for frame in &self.frames {
+            poll()?;
             if previous.is_some_and(|index| index >= frame.frame_index) {
                 return Err(format!(
                     "keyframes artifact: frame {} is duplicated or out of order",
@@ -557,12 +582,13 @@ impl SurfaceMeshArtifact {
     /// traversal, so a large artifact can be canceled while it is checked.
     pub(crate) fn from_json_with_cancel(
         document: &str,
-        poll: impl FnMut() -> Result<(), String>,
+        mut poll: impl FnMut() -> Result<(), String>,
     ) -> Result<Self, String> {
-        let artifact: Self = parse_versioned(
+        let artifact: Self = parse_versioned_with_cancel(
             document,
             "surface mesh artifact",
             SURFACE_MESH_ARTIFACT_SCHEMA_VERSION,
+            &mut poll,
         )?;
         artifact.validate_with_cancel(poll)?;
         Ok(artifact)
@@ -610,6 +636,16 @@ impl SurfaceMeshArtifact {
 
     pub fn to_json(&self) -> String {
         to_document(self)
+    }
+
+    /// Preserve the native pretty document/newline, validating and emitting
+    /// geometry cooperatively without publishing a partial buffer.
+    pub fn to_json_with_cancel(
+        &self,
+        mut poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<String, String> {
+        self.validate_with_cancel(&mut poll)?;
+        crate::controlled_json::to_string(self, true, true, &mut poll)
     }
 }
 

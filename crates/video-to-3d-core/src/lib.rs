@@ -24,6 +24,7 @@ pub mod textured_glb;
 include!("reconstruction.rs");
 
 mod browser_contract;
+mod controlled_json;
 mod learned_depth;
 mod reconstruction_evidence;
 mod reconstruction_stages;
