@@ -192,3 +192,33 @@ scene or object-recognition evidence. Baseline helper lacks the controlled seam:
 new prepass tests are compile-red until distinct production repair; assembly parse/
 borrow tests can be green while native wiring remains defective. Record chronology
 as independent repair acceptance before this fix, not original feature tests-first.
+
+### Supplemental native GLB cancellation audit after 88ce75d
+
+This coverage is authored after the repair, not a pre-production RED contract.
+`native_glb_cancel_acceptance_tests.rs` reuses the existing independently authored
+`surface_materials_tests::Fixture`, validates its real evidence, and constructs the
+same all-triangle vertex-color fallback as native assembly. The controlled no-op
+export must equal the public export byte for byte. Cancellation after initial
+polling, actual assignment/fallback triangle work, position components and accessor
+writes returns an error with no output. The source audit, not callback counts alone,
+establishes that polls occur inside real loops; no timing bound is imposed.
+
+On 88ce75d, native assembly calls `SurfaceMeshArtifact::from_json_with_cancel` with
+the active token exactly once and subsequently borrows `evidence_view`. It does not
+call the revalidating `evidence()` accessor. The GLB encoder does not revalidate the
+mesh; it checks bake coverage and polls triangle/position/color/index/accessor work,
+chunked buffer copying and final output writes. Fusion's triangle normal/edge
+prepass polls each triangle, then normal/local-scale calculations each vertex;
+edge-length sorting is atomic with checks on either side. Classic-part evidence
+construction uses one cancel-aware validation traversal without duplicate points.
+
+Limits: serde JSON parsing/serialization, individual numerical SVD calls and sorts
+remain indivisible operations. `classic_camera_evidence`, classic region construction,
+`evidence_support_membership` and `support_group_references` prepare metadata without
+internal polling; membership range fills and provenance range fills are indivisible.
+These remaining windows are disclosed, not claimed canceled during their execution.
+The fixed findings concerning raw assembly validation and whole triangle prepass
+are resolved by actual token wiring and work-loop polls. This does not prove hard
+real-time cancellation or full product acceptance (#77), Blender/portable export
+(#84/#151), desktop availability or owner-room approval.
