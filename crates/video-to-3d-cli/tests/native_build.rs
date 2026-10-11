@@ -46,7 +46,57 @@ mod golden {
 
 fn request() -> &'static ReconstructionRequest {
     static REQUEST: OnceLock<ReconstructionRequest> = OnceLock::new();
-    REQUEST.get_or_init(golden::request)
+    REQUEST.get_or_init(|| {
+        let Some(root) = std::env::var_os("VIDEO_TO_3D_ROOM_FIXTURE") else {
+            return golden::request();
+        };
+        let root = PathBuf::from(root);
+        let cameras: Value =
+            serde_json::from_slice(&fs::read(root.join("truth/cameras.json")).unwrap()).unwrap();
+        assert_eq!(cameras["case"], "controlled-room");
+        let frames = cameras["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|camera| {
+                let image = camera["image"].as_str().unwrap();
+                let bytes = fs::read(root.join(image)).unwrap();
+                let pinned = include_str!("controlled-room-inputs.sha256")
+                    .lines()
+                    .find_map(|line| {
+                        let (hash, path) = line.split_once("  ")?;
+                        (path == image).then_some(hash)
+                    })
+                    .expect("canonical frame identity is pinned");
+                assert_eq!(
+                    ContentHash::of_bytes(&bytes).as_str(),
+                    format!("sha256:{pinned}")
+                );
+                let header = b"P6\n360 203\n255\n";
+                assert!(
+                    bytes.starts_with(header),
+                    "canonical #75 exported PPM required"
+                );
+                let pixels = &bytes[header.len()..];
+                assert_eq!(pixels.len(), 360 * 203 * 3);
+                video_to_3d_core::FrameInput {
+                    width: 360,
+                    height: 203,
+                    rgba: pixels
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 18);
+        ReconstructionRequest {
+            frames,
+            options: Default::default(),
+        }
+    })
 }
 
 struct Project {
@@ -64,7 +114,11 @@ impl Project {
         fs::create_dir_all(root.join("media")).unwrap();
         // Honest generated-input provenance; this is not a fake encoded video
         // and the native implementation must never decode it.
-        let source = b"golden_fixture.rs/lateral: deterministic generated sampled frames";
+        let source: &[u8] = if std::env::var_os("VIDEO_TO_3D_ROOM_FIXTURE").is_some() {
+            b"synthetic_room_fixture.rs/controlled-room: seed 0x00755ce9e0ac1e00, canonical generated sampled frames"
+        } else {
+            b"golden_fixture.rs/lateral: deterministic generated sampled frames"
+        };
         fs::write(root.join("media/generated-source.txt"), source).unwrap();
         let document = json!({
             "schema_version": 1,
@@ -161,7 +215,12 @@ impl OperationExecutor for ImportFrames {
             .enumerate()
             .map(|(index, frame)| SampledFrame {
                 frame_index: index,
-                timestamp_seconds: index as f64 * 0.5,
+                timestamp_seconds: if std::env::var_os("VIDEO_TO_3D_ROOM_FIXTURE").is_some() {
+                    // Canonical sampling_plan: 18 inclusive samples, 0.8..15.2s.
+                    0.8 + index as f64 * (14.4 / 17.0)
+                } else {
+                    index as f64 * 0.5
+                },
                 width: frame.width,
                 height: frame.height,
                 rgba: &frame.rgba,

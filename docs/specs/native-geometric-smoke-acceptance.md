@@ -87,3 +87,26 @@ Record unavailable desktop/tooling checks honestly and use actual hosted CI evid
 for any local environment gap. A native headless technical enabler does not require
 an artificial Pages route; the real CLI and content-verified scene files are its
 observable surface.
+
+## Approved room smoke reproduction
+
+Issue #150's owner explicitly permits #75's deterministic synthetic room until
+#74 pins the controlled real clip. Generate it through the unchanged canonical
+renderer, then run the same native acceptance contract against its exported frames:
+
+```bash
+cargo run --release -p video-to-3d-core --example synthetic_room_fixture -- "$HOME/.local/share/coding-agent/video-150-controlled-room" controlled-room
+VIDEO_TO_3D_ROOM_FIXTURE="$HOME/.local/share/coding-agent/video-150-controlled-room" cargo test --release -p video-to-3d-cli --test native_build
+```
+
+The reader consumes only original exported PPM frames; it adds no renderer or
+geometry authority. `controlled-room-inputs.sha256` pins all 18 original PPM bytes
+(manifest SHA-256 `284fb813c1e79a951f41da02d87e888f5689840fd4d7161b91fac9ca7d4e83fa`).
+Provenance: canonical #75 seed `0x00755ce9e0ac1e00`, notional 1920×1080/16s,
+18 sampled 360×203 frames, 3×3 ray averaging, timestamps 0.8..15.2s inclusive.
+This is generated room evidence, never a genuine filmed room. Baseline renderer
+reports 766 dense points and 120 triangles; the independent nonempty geometry
+check passes. Native acceptance is expected red: five pass, five fail because
+native sparse reconstruction is unsupported. Both golden and this room invocation
+must pass after implementation. Keep #150 open until that demonstration succeeds;
+#74/#77 still require the owner-approved real controlled recording and handhelds.
