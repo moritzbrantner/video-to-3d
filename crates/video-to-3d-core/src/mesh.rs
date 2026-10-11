@@ -11,7 +11,7 @@ mod legacy {
 
 pub use legacy::MeshTriangle;
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct MeshReferencePatchStats {
     pub reference_frame: usize,
     pub point_count: usize,
@@ -26,7 +26,7 @@ pub struct MeshReferencePatchStats {
     pub rejected_degenerate: usize,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct MeshStats {
     pub attempted: bool,
     pub skip_reason: Option<String>,

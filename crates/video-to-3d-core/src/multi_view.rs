@@ -12,7 +12,7 @@ const MAX_NEW_LANDMARK_REPROJECTION_ERROR_PIXELS: f64 = 4.0;
 const MAX_NEW_LANDMARK_MEDIAN_REPROJECTION_ERROR_PIXELS: f64 = 2.5;
 const MIN_NEW_LANDMARK_SUPPORT_RATIO: f64 = 0.6;
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct BundleAdjustmentStats {
     pub attempted: bool,
     pub accepted: bool,
@@ -28,14 +28,14 @@ pub struct BundleAdjustmentStats {
     pub(crate) final_cameras: Vec<RegisteredCamera>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct RegistrationCandidateStats {
     pub frame_index: usize,
     pub seed_landmark_correspondences: usize,
     pub pnp_ready: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct NewLandmarkStats {
     pub candidate_tracks: usize,
     pub accepted_landmarks: usize,
@@ -44,7 +44,7 @@ pub struct NewLandmarkStats {
     pub median_triangulation_angle_degrees: Option<f32>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct MultiViewStats {
     pub keyframes: Vec<usize>,
     /// Per-frame selection decisions and clip segments behind `keyframes`.
@@ -59,7 +59,7 @@ pub struct MultiViewStats {
     pub bundle_adjustment: BundleAdjustmentStats,
     /// One independent solve per clip segment when the clip splits; empty (and omitted)
     /// for a single-segment clip, whose solve is the top-level result.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segment_solves: Vec<super::SegmentSolveStats>,
 }
 
@@ -81,7 +81,7 @@ pub(super) struct RegistrationCandidate {
     pub correspondences: Vec<RegistrationCorrespondence>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct RegisteredCamera {
     pub frame_index: usize,
     pub rotation: Matrix3<f64>,

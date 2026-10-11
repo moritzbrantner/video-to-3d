@@ -1,6 +1,4 @@
-use crate::{
-    MeshTriangle, Point3, ReconstructionEvidenceView, ReconstructionResult, SurfaceEvidenceRegion,
-};
+use crate::{MeshTriangle, Point3, ReconstructionEvidenceView, SurfaceEvidenceRegion};
 use nalgebra::Vector3;
 use std::collections::HashMap;
 
@@ -51,15 +49,81 @@ struct VertexSurfaceEvidence {
     global_edge_scale: Option<f64>,
 }
 
+/// The fixed classic evidence surface consolidation reads besides the surface itself:
+/// seed pair, registered views and their final poses, reference patches, and the
+/// per-point attributes. All borrowed; consolidation never changes them.
+#[derive(Clone, Copy)]
+pub(crate) struct SurfaceSupport<'a> {
+    pub calibrated_pair: Option<&'a crate::CalibratedPairStats>,
+    pub registered_views: &'a [crate::RegisteredViewStats],
+    pub final_cameras: &'a [crate::multi_view::RegisteredCamera],
+    pub reference_patches: &'a [crate::DenseReferencePatchStats],
+    pub point_attributes: &'a [crate::EvidencePointAttributes],
+}
+
+/// What surface consolidation changes in place: the dense points fusion may move, the
+/// mesh it merges, and the diagnostics it rewrites or appends.
+pub(crate) struct SurfaceTarget<'a> {
+    pub points: &'a mut [Point3],
+    pub triangles: &'a mut Vec<MeshTriangle>,
+    pub triangle_sources: &'a mut Vec<crate::TriangleSourceCorners>,
+    pub mesh: &'a mut crate::MeshStats,
+    pub warnings: &'a mut Vec<String>,
+}
+
+/// [`consolidate_surface`] on one assembled classic result.
+#[cfg(test)]
 pub(super) fn consolidate_surface_evidence(
-    reconstruction: &mut ReconstructionResult,
+    reconstruction: &mut crate::ReconstructionResult,
 ) -> Result<(), String> {
-    if reconstruction.mesh_triangles.is_empty() || reconstruction.dense_points.is_empty() {
+    let support = SurfaceSupport {
+        calibrated_pair: reconstruction.calibrated_pair.as_ref(),
+        registered_views: &reconstruction.registered_views,
+        final_cameras: &reconstruction.multi_view.bundle_adjustment.final_cameras,
+        reference_patches: &reconstruction.dense.reference_patches,
+        point_attributes: &reconstruction.dense_point_attributes,
+    };
+    consolidate_surface(
+        support,
+        SurfaceTarget {
+            points: &mut reconstruction.dense_points,
+            triangles: &mut reconstruction.mesh_triangles,
+            triangle_sources: &mut reconstruction.mesh_triangle_sources,
+            mesh: &mut reconstruction.mesh,
+            warnings: &mut reconstruction.warnings,
+        },
+    )
+}
+
+/// Cross-reference surface fusion and the connected-surface merge over borrowed
+/// classic evidence, changing only `target`.
+pub(crate) fn consolidate_surface(
+    support: SurfaceSupport<'_>,
+    target: SurfaceTarget<'_>,
+) -> Result<(), String> {
+    let SurfaceTarget {
+        points,
+        triangles,
+        triangle_sources,
+        mesh,
+        warnings,
+    } = target;
+    if triangles.is_empty() || points.is_empty() {
         return Ok(());
     }
 
     let (membership, support_group_count, group_frames, reference_cameras, point_origins) = {
-        let evidence = ReconstructionEvidenceView::from_classic(reconstruction)?;
+        let parts = crate::reconstruction_evidence::ClassicEvidenceParts {
+            calibrated_pair: support.calibrated_pair,
+            registered_views: support.registered_views,
+            final_cameras: support.final_cameras,
+            reference_patches: support.reference_patches,
+            points,
+            point_attributes: support.point_attributes,
+            triangles,
+            triangle_sources,
+        };
+        let evidence = ReconstructionEvidenceView::from_classic_parts(&parts)?;
         let (membership, count) =
             evidence_support_membership(&evidence.regions, evidence.points.len());
         let (frames, cameras) = support_group_references(&evidence, count);
@@ -76,14 +140,11 @@ pub(super) fn consolidate_surface_evidence(
         return Ok(());
     }
 
-    let FusionOutcome { stats, pairs } = fuse_mutually_supported_vertices(
-        &mut reconstruction.dense_points,
-        &reconstruction.mesh_triangles,
-        &membership,
-    );
+    let FusionOutcome { stats, pairs } =
+        fuse_mutually_supported_vertices(points, triangles, &membership);
 
     if stats.fused_pairs > 0 {
-        remove_stale_surface_fusion_claim(&mut reconstruction.warnings);
+        remove_stale_surface_fusion_claim(warnings);
     }
     let diagnostic = if stats.fused_pairs > 0 {
         format!(
@@ -102,27 +163,25 @@ pub(super) fn consolidate_surface_evidence(
             stats.candidate_pairs,
         )
     };
-    reconstruction.warnings.push(diagnostic);
+    warnings.push(diagnostic);
 
     let mut merge = crate::surface_merge::merge_fused_patches(
-        &reconstruction.dense_points,
-        &mut reconstruction.mesh_triangles,
+        points,
+        triangles,
         &membership,
         &pairs,
         &reference_cameras,
         &point_origins,
     );
-    reconstruction.mesh_triangle_sources = std::mem::take(&mut merge.triangle_sources);
+    *triangle_sources = std::mem::take(&mut merge.triangle_sources);
     refresh_mesh_after_merge(
-        &mut reconstruction.mesh,
-        &mut reconstruction.warnings,
-        reconstruction.mesh_triangles.len(),
+        mesh,
+        warnings,
+        triangles.len(),
         &group_frames,
         &merge.retained_by_group,
     );
-    reconstruction
-        .warnings
-        .push(merge.diagnostic(support_group_count));
+    warnings.push(merge.diagnostic(support_group_count));
     Ok(())
 }
 
