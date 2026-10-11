@@ -1226,3 +1226,7 @@ mod tests {
 #[cfg(test)]
 #[path = "native_stage_acceptance_tests.rs"]
 mod native_stage_acceptance_tests;
+
+#[cfg(test)]
+#[path = "stage_serialization_cancel_acceptance_tests.rs"]
+mod stage_serialization_cancel_acceptance_tests;

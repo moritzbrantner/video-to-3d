@@ -222,3 +222,42 @@ The fixed findings concerning raw assembly validation and whole triangle prepass
 are resolved by actual token wiring and work-loop polls. This does not prove hard
 real-time cancellation or full product acceptance (#77), Blender/portable export
 (#84/#151), desktop availability or owner-room approval.
+
+
+### Independent final stage serialization cancellation (#174 review4243648144)
+
+Frozen baseline `5aadd49` still calls noncancelable dense/mesh `to_json()` at
+`scene_artifacts/native.rs` final stage output. Solver completion does not make
+walking every geometry array an acceptable atomic cancellation window. Independent
+`stage_serialization_cancel_acceptance_tests.rs` was authored before this repair.
+It uses actual outputs of the existing deterministic golden multiview fixture,
+including dense points/grid sites/attributes and mesh triangles/source corners.
+
+Proposed routine `to_json_with_cancel(FnMut()->bool)` names may be independently
+translated to a shared serializer/write seam. False cancellation must produce
+byte-exact existing `to_json()` and a round-trippable artifact. Cancellation at
+callbacks2/4, early emission32, halfway through actual uncanceled polls and just
+before completion must return an error containing `canceled`, never successful or
+partial serialized output, stop before the full uncanceled poll count, and leave
+source arrays unchanged. Nonfinite dense point/mesh confidence must fail validation
+instead of serde converting it to null. Initial baseline is compile-red solely
+for eight missing-method diagnostics; no new runtime test is claimed executed.
+
+**Mandatory source audit before closure:** active native token reaches the actual
+Serde serialization sink while it emits array/scalar bytes, and any required
+finite/schema validation traversal. Use existing serde_json serializer with a
+cancel-aware `std::io::Write` Vec sink (or equivalent existing Serde boundary), not
+a second JSON parser/serializer/schema. Entry/exit checks or an artificial polling
+prewalk followed by atomic `to_string` cannot satisfy this contract even if callback
+counts appear green. On cancellation discard the private sink and propagate the
+canceled error; do not publish bytes/artifact/build outputs. Native dense/mesh
+callers must invoke this path instead of default `to_json` with the same build
+cancellation token. Existing native operation stop/no downstream artifact contracts
+remain applicable. Canceling a large one-shot string write should also be bounded
+rather than copying the whole string before polling.
+
+After this repair is validated, update the earlier atomic-JSON limitation to
+separate cancelable stage serialization from still-atomic JSON parsing, numerical
+SVD, sorts and disclosed nonserialization metadata windows. Until then, the old
+limitation describes baseline only and is not an acceptance exemption. This is
+not hard real-time cancellation, reconstruction recognition or product #77 closure.
