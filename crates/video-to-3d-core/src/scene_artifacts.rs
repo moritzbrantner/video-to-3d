@@ -41,7 +41,7 @@ use crate::textured_glb::encode_png_rgb_with_cancel;
 use crate::{
     DenseGridSite, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
     EvidencePointAttributes, EvidenceScale, MeshTriangle, Point3, ReconstructionEvidenceView,
-    ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    ReconstructionProviderDescriptor, SurfaceEvidenceRegion, TriangleSourceCorners,
     RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
@@ -503,6 +503,10 @@ pub struct SurfaceMeshArtifact {
     pub triangles: Vec<MeshTriangle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point_attributes: Option<Vec<EvidencePointAttributes>>,
+    /// Sparse pre-canonicalization corners of merged triangles; empty when no
+    /// triangle was re-indexed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triangle_sources: Vec<TriangleSourceCorners>,
     /// `grid_sites[i]` is the pixel of dense point `i` in its own reference
     /// image; parallel to `points`.
     pub grid_sites: Vec<DenseGridSite>,
@@ -533,6 +537,10 @@ impl SurfaceMeshArtifact {
             points: evidence.points.to_vec(),
             triangles: evidence.triangles.to_vec(),
             point_attributes: evidence.point_attributes.map(<[_]>::to_vec),
+            triangle_sources: evidence
+                .triangle_sources
+                .map(<[_]>::to_vec)
+                .unwrap_or_default(),
             grid_sites: grid_sites.to_vec(),
         };
         artifact.validate()?;
@@ -593,6 +601,8 @@ impl SurfaceMeshArtifact {
             points: &self.points,
             triangles: &self.triangles,
             point_attributes: self.point_attributes.as_deref(),
+            triangle_sources: (!self.triangle_sources.is_empty())
+                .then_some(self.triangle_sources.as_slice()),
         }
     }
 

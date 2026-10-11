@@ -114,6 +114,21 @@ pub struct EvidencePointAttributes {
     pub depth_margin: f32,
 }
 
+/// The corners a merged triangle had before overlap canonicalization re-indexed some of
+/// them onto fused, coincident points of a higher-priority reference patch.
+///
+/// Sparse and sorted by `triangle`: only re-indexed triangles carry an entry. Each source
+/// corner is the point the triangle was triangulated over and sits at exactly the
+/// position of the current corner, so the record changes no geometry; it only keeps the
+/// original reference support (its reference view and grid sites) observable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriangleSourceCorners {
+    /// Index of the triangle in the shared triangle buffer.
+    pub triangle: usize,
+    /// Point indices of the triangle's corners before canonicalization, in corner order.
+    pub corners: [usize; 3],
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceEvidenceRegion {
     pub origin: EvidenceOrigin,
@@ -134,6 +149,8 @@ pub struct ReconstructionEvidenceSummary {
     pub triangles: usize,
     /// Whether the provider recorded per-point reciprocal/depth-margin attributes.
     pub point_attributes: bool,
+    /// Triangles that keep their pre-canonicalization corners (see [`TriangleSourceCorners`]).
+    pub triangle_sources: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +165,9 @@ pub struct ReconstructionEvidenceView<'a> {
     /// Optional per-point attributes parallel to `points`; providers without them leave
     /// `None` and the confidence field keeps the combined point-confidence factor.
     pub point_attributes: Option<&'a [EvidencePointAttributes]>,
+    /// Optional sparse pre-canonicalization corners of merged triangles; `None` (or an
+    /// empty slice) means every triangle's support is given by its current corners.
+    pub triangle_sources: Option<&'a [TriangleSourceCorners]>,
 }
 
 impl<'a> ReconstructionEvidenceView<'a> {
@@ -168,6 +188,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
             points,
             triangles,
             point_attributes: None,
+            triangle_sources: None,
         };
         evidence.validate()?;
         Ok(evidence)
@@ -183,6 +204,20 @@ impl<'a> ReconstructionEvidenceView<'a> {
         Ok(self)
     }
 
+    /// Attach borrowed pre-canonicalization triangle corners, validating them against the
+    /// shared points and triangles.
+    pub fn with_triangle_sources(
+        mut self,
+        sources: &'a [TriangleSourceCorners],
+    ) -> Result<Self, String> {
+        if sources.is_empty() {
+            return Ok(self);
+        }
+        self.triangle_sources = Some(sources);
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn from_classic(reconstruction: &'a ReconstructionResult) -> Result<Self, String> {
         let cameras = classic_camera_evidence(reconstruction)?;
         let regions = classic_reference_patch_regions(&reconstruction.dense.reference_patches);
@@ -194,7 +229,8 @@ impl<'a> ReconstructionEvidenceView<'a> {
             &reconstruction.dense_points,
             &reconstruction.mesh_triangles,
         )?
-        .with_point_attributes(&reconstruction.dense_point_attributes)
+        .with_point_attributes(&reconstruction.dense_point_attributes)?
+        .with_triangle_sources(&reconstruction.mesh_triangle_sources)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -226,6 +262,15 @@ impl<'a> ReconstructionEvidenceView<'a> {
         if let Some(attributes) = self.point_attributes {
             validate_point_attributes(&self.provider, attributes, self.points.len(), &mut poll)?;
         }
+        if let Some(sources) = self.triangle_sources {
+            validate_triangle_sources(
+                sources,
+                self.points,
+                self.triangles,
+                &self.regions,
+                &mut poll,
+            )?;
+        }
         poll()?;
         Ok(())
     }
@@ -237,6 +282,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
             total_points: self.points.len(),
             triangles: self.triangles.len(),
             point_attributes: self.point_attributes.is_some(),
+            triangle_sources: self.triangle_sources.map_or(0, <[_]>::len),
             ..ReconstructionEvidenceSummary::default()
         };
         for region in &self.regions {
@@ -265,8 +311,16 @@ impl<'a> ReconstructionEvidenceView<'a> {
         } else {
             "carries no per-point reciprocal or depth-margin attributes"
         };
+        let sources = if summary.triangle_sources > 0 {
+            format!(
+                " {} merged triangle(s) keep their pre-canonicalization reference corners.",
+                summary.triangle_sources
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "Provider-neutral reconstruction evidence v{} validated for {}: {} accepted cameras, {} provenance regions, {} shared dense points ({} geometric, {} revalidated completion, {} learned, {} generative completion), and {} accepted triangles; it {attributes}. The evidence view borrows the existing geometry buffers instead of materializing a second point cloud or mesh.",
+            "Provider-neutral reconstruction evidence v{} validated for {}: {} accepted cameras, {} provenance regions, {} shared dense points ({} geometric, {} revalidated completion, {} learned, {} generative completion), and {} accepted triangles; it {attributes}.{sources} The evidence view borrows the existing geometry buffers instead of materializing a second point cloud or mesh.",
             self.schema_version,
             self.provider.id,
             summary.cameras,
@@ -649,6 +703,79 @@ fn validate_regions(
     Ok(())
 }
 
+/// Source corners must name existing points at exactly the position, and with the
+/// evidence origin, of the current corner they replace, with one entry per re-indexed
+/// triangle (at least one corner differs) in ascending order: a record that disagrees
+/// with the shared geometry or provenance is a contract violation, never a hint.
+fn validate_triangle_sources(
+    sources: &[TriangleSourceCorners],
+    points: &[Point3],
+    triangles: &[MeshTriangle],
+    regions: &[SurfaceEvidenceRegion],
+    poll: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    // Sources are sparse and regions few: look origins up per corner.
+    let origin_of = |point: usize| {
+        regions
+            .iter()
+            .find(|region| {
+                point >= region.points.start && point - region.points.start < region.points.count
+            })
+            .map(|region| region.origin)
+    };
+    let mut previous: Option<usize> = None;
+    for (index, source) in sources.iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
+        if previous.is_some_and(|previous| source.triangle <= previous) {
+            return Err(format!(
+                "reconstruction evidence triangle source {index} is not in ascending triangle order"
+            ));
+        }
+        previous = Some(source.triangle);
+        let Some(triangle) = triangles.get(source.triangle) else {
+            return Err(format!(
+                "reconstruction evidence triangle source {index} names a missing triangle"
+            ));
+        };
+        let [a, b, c] = source.corners;
+        if a == b || b == c || c == a {
+            return Err(format!(
+                "reconstruction evidence triangle source {index} is topologically degenerate"
+            ));
+        }
+        let current = [triangle.a, triangle.b, triangle.c];
+        if source.corners == current {
+            return Err(format!(
+                "reconstruction evidence triangle source {index} records no re-indexed corner"
+            ));
+        }
+        for (corner, current) in source.corners.iter().zip(current) {
+            let Some(point) = points.get(*corner) else {
+                return Err(format!(
+                    "reconstruction evidence triangle source {index} references a point outside the shared evidence buffer"
+                ));
+            };
+            let at = &points[current];
+            if point.x.to_bits() != at.x.to_bits()
+                || point.y.to_bits() != at.y.to_bits()
+                || point.z.to_bits() != at.z.to_bits()
+            {
+                return Err(format!(
+                    "reconstruction evidence triangle source {index} corner is not coincident with the triangle's current corner"
+                ));
+            }
+            if *corner != current && origin_of(*corner) != origin_of(current) {
+                return Err(format!(
+                    "reconstruction evidence triangle source {index} corner carries a different evidence origin than the triangle's current corner"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_triangles(
     triangles: &[MeshTriangle],
     point_count: usize,
@@ -758,6 +885,78 @@ mod tests {
             triangles.as_ptr()
         ));
         assert_eq!(evidence.summary().learned_points, 3);
+    }
+
+    #[test]
+    fn triangle_sources_must_be_sorted_in_bounds_and_coincident() {
+        // Points 1 and 3 coincide (a fused seam pair); triangle 0 was re-indexed from
+        // corner 3 onto corner 1.
+        let points = vec![
+            point(0.0, 0.0, 1.0),
+            point(1.0, 0.0, 1.0),
+            point(0.0, 1.0, 1.0),
+            point(1.0, 0.0, 1.0),
+        ];
+        let triangles = vec![
+            MeshTriangle {
+                a: 0,
+                b: 1,
+                c: 2,
+                confidence: 0.9,
+            },
+            MeshTriangle {
+                a: 2,
+                b: 1,
+                c: 0,
+                confidence: 0.9,
+            },
+        ];
+        let view = || {
+            ReconstructionEvidenceView::new(
+                learned_provider(),
+                EvidenceScale::ProviderLocal,
+                vec![camera(0), camera(1)],
+                vec![SurfaceEvidenceRegion {
+                    origin: EvidenceOrigin::LearnedMultiView,
+                    reference_frame: Some(0),
+                    source_frames: vec![1],
+                    points: EvidenceRange::new(0, 4),
+                }],
+                &points,
+                &triangles,
+            )
+            .expect("valid evidence")
+        };
+        let source = |triangle, corners| TriangleSourceCorners { triangle, corners };
+        let valid = [source(0, [0, 3, 2]), source(1, [2, 3, 0])];
+        let evidence = view()
+            .with_triangle_sources(&valid)
+            .expect("coincident sources");
+        assert_eq!(evidence.summary().triangle_sources, 2);
+        assert!(evidence.diagnostic().contains("2 merged triangle(s)"));
+        assert!(view()
+            .with_triangle_sources(&[])
+            .expect("empty")
+            .triangle_sources
+            .is_none());
+
+        let rejected = |sources: &[TriangleSourceCorners], needle: &str| {
+            let error = view()
+                .with_triangle_sources(sources)
+                .expect_err("must be refused");
+            assert!(error.contains(needle), "{error}");
+        };
+        rejected(&[source(1, [2, 3, 0]), source(0, [0, 3, 2])], "ascending");
+        rejected(&[source(0, [0, 3, 2]), source(0, [0, 3, 2])], "ascending");
+        rejected(&[source(2, [0, 3, 2])], "missing triangle");
+        rejected(
+            &[source(0, [0, 9, 2])],
+            "outside the shared evidence buffer",
+        );
+        rejected(&[source(0, [0, 3, 3])], "degenerate");
+        // Corner 2 does not sit where corner 1 does.
+        rejected(&[source(0, [0, 2, 1])], "not coincident");
+        rejected(&[source(0, [0, 1, 2])], "no re-indexed corner");
     }
 
     fn learned_view<'a>(

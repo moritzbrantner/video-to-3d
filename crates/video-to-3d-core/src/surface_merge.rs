@@ -157,6 +157,9 @@ pub(super) struct MergeStats {
     /// `MAX_UNCOVERED_PIECES` uncovered fragments. They are retained and
     /// counted here, not in `remaining_overlap_triangles`.
     pub clipping_budget_exhausted: usize,
+    /// Retained triangles that canonicalization re-indexed, with the corners they were
+    /// triangulated over, sorted by their index in the merged triangle buffer.
+    pub triangle_sources: Vec<crate::TriangleSourceCorners>,
 }
 
 impl MergeStats {
@@ -307,11 +310,20 @@ pub(super) fn merge_fused_patches(
             _ => None,
         })
         .collect();
-    for triangle in triangles.iter_mut() {
-        let mapped = [triangle.a, triangle.b, triangle.c].map(|vertex| canonical[vertex]);
+    // Re-indexed triangles keep their original corners (indexed by the triangle's
+    // position before removal), so their reference support stays observable.
+    let mut reindexed: Vec<(usize, [usize; 3])> = Vec::new();
+    for (index, triangle) in triangles.iter_mut().enumerate() {
+        let original = [triangle.a, triangle.b, triangle.c];
+        let mapped = original.map(|vertex| canonical[vertex]);
         // Never replace valid topology with a degenerate triangle.
-        if mapped[0] != mapped[1] && mapped[1] != mapped[2] && mapped[0] != mapped[2] {
+        if mapped != original
+            && mapped[0] != mapped[1]
+            && mapped[1] != mapped[2]
+            && mapped[0] != mapped[2]
+        {
             [triangle.a, triangle.b, triangle.c] = mapped;
+            reindexed.push((index, original));
         }
     }
 
@@ -655,6 +667,21 @@ pub(super) fn merge_fused_patches(
         index += 1;
         keep[index - 1]
     });
+    let mut retained_before = 0;
+    let mut next_reindexed = reindexed.iter().peekable();
+    let mut triangle_sources = Vec::new();
+    for (original, kept) in keep.iter().enumerate() {
+        if let Some((_, corners)) = next_reindexed.next_if(|(index, _)| *index == original) {
+            if *kept {
+                triangle_sources.push(crate::TriangleSourceCorners {
+                    triangle: retained_before,
+                    corners: *corners,
+                });
+            }
+        }
+        retained_before += usize::from(*kept);
+    }
+    drop(reindexed);
 
     // Topology after the merge.
     let mut patches: BTreeSet<usize> = BTreeSet::new();
@@ -707,6 +734,7 @@ pub(super) fn merge_fused_patches(
         max_postings_per_query: tally.max_postings,
         posting_bound_hits: tally.bound_hits,
         clipping_budget_exhausted,
+        triangle_sources,
     }
 }
 
@@ -741,7 +769,9 @@ pub(crate) fn working_set_bytes(vertices: usize, triangles: usize) -> usize {
         + 2 * size_of::<usize>() // image posting or exact-list entry, 3D likewise
         + hash_entry(size_of::<(i32, [i64; 2])>() + size_of::<Vec<usize>>()) // image bucket
         + hash_entry(size_of::<(i32, [i64; 3])>() + size_of::<Vec<usize>>()) // 3D bucket
-        + hash_entry(2 * size_of::<usize>()); // per-patch triangle counts and ranks
+        + hash_entry(2 * size_of::<usize>()) // per-patch triangle counts and ranks
+        + size_of::<(usize, [usize; 3])>() // re-indexed corners
+        + size_of::<crate::TriangleSourceCorners>(); // retained triangle sources
     vertices
         .saturating_mul(per_vertex)
         .saturating_add(triangles.saturating_mul(per_triangle))
