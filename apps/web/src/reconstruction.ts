@@ -541,6 +541,12 @@ export type DensePointAttributeBuffer = {
 export type MeshTriangleBuffer = {
   indices: Uint32Array;
   confidence: Float32Array;
+  /**
+   * Rust-owned pre-canonicalization corners of merged triangles as `(triangle, a, b, c)`
+   * quads, sorted by triangle. Forwarded unchanged to the texture bake so canonicalized
+   * seam triangles keep their original reference; absent or empty when none.
+   */
+  sources?: Uint32Array;
   length: number;
 };
 
@@ -673,6 +679,7 @@ type RawDensePointAttributeBuffer = {
 type RawMeshTriangleBuffer = {
   indices_u32_le: Uint8Array;
   confidence_f32_le: Uint8Array;
+  sources_u32_le?: Uint8Array;
   length: number;
 };
 
@@ -822,10 +829,17 @@ function normalizeMeshTriangleBuffer(value: unknown): MeshTriangleBuffer {
     byteBuffer(raw.confidence_f32_le, "mesh-triangle confidence buffer"),
     "mesh-triangle confidence buffer",
   );
-  if (indices.length !== length * 3 || confidence.length !== length) {
+  const sources =
+    raw.sources_u32_le === undefined
+      ? new Uint32Array(0)
+      : uint32LittleEndian(
+          byteBuffer(raw.sources_u32_le, "mesh-triangle source buffer"),
+          "mesh-triangle source buffer",
+        );
+  if (indices.length !== length * 3 || confidence.length !== length || sources.length % 4 !== 0) {
     throw new Error("camera-state contract mismatch: mesh-triangle buffer lengths are inconsistent");
   }
-  return { indices, confidence, length };
+  return { indices, confidence, sources, length };
 }
 
 export function normalizeWasmReconstruction(value: unknown): ReconstructionResult {

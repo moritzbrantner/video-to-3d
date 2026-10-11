@@ -18,7 +18,7 @@ use video_to_3d_core::{
     FrameInput, LearnedDepthCamera, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
     ReconstructionEvidenceView, ReconstructionOptions, ReconstructionProviderDescriptor,
     ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame, RevisitStats,
-    SeedCandidateStats,
+    SeedCandidateStats, TriangleSourceCorners,
 };
 use wasm_bindgen::prelude::*;
 
@@ -98,6 +98,9 @@ struct PackedDensePointAttributeBuffer {
 struct PackedMeshTriangleBuffer {
     indices_u32_le: ByteBuffer,
     confidence_f32_le: ByteBuffer,
+    /// Pre-canonicalization corners of merged triangles as `(triangle, a, b, c)`
+    /// little-endian `u32` quads, sorted by triangle; empty when none.
+    sources_u32_le: ByteBuffer,
     length: usize,
 }
 
@@ -255,8 +258,22 @@ fn pack_dense_point_attributes(
 
 fn pack_mesh_triangles(
     triangles: &[MeshTriangle],
+    sources: &[TriangleSourceCorners],
     point_count: usize,
 ) -> Result<PackedMeshTriangleBuffer, JsValue> {
+    let transport = |value: usize| {
+        u32::try_from(value).map_err(|_| {
+            JsValue::from_str(
+                "failed to serialize reconstruction: triangle source exceeds browser transport range",
+            )
+        })
+    };
+    let mut sources_u32_le = Vec::with_capacity(sources.len() * 4 * size_of::<u32>());
+    for source in sources {
+        for value in [source.triangle].into_iter().chain(source.corners) {
+            sources_u32_le.extend_from_slice(&transport(value)?.to_le_bytes());
+        }
+    }
     let mut indices_u32_le = Vec::with_capacity(triangles.len() * 3 * size_of::<u32>());
     let mut confidence_f32_le = Vec::with_capacity(triangles.len() * size_of::<f32>());
     for triangle in triangles {
@@ -278,6 +295,7 @@ fn pack_mesh_triangles(
     Ok(PackedMeshTriangleBuffer {
         indices_u32_le: ByteBuffer(indices_u32_le),
         confidence_f32_le: ByteBuffer(confidence_f32_le),
+        sources_u32_le: ByteBuffer(sources_u32_le),
         length: triangles.len(),
     })
 }
@@ -388,7 +406,7 @@ pub fn benchmark_packed_geometry_result(
         .collect();
     let payload = GeometryBenchmarkPackedPayload {
         dense_points: pack_dense_points(&points),
-        mesh_triangles: pack_mesh_triangles(&triangles, points.len())?,
+        mesh_triangles: pack_mesh_triangles(&triangles, &[], points.len())?,
     };
     let serializer = browser_serializer();
     payload.serialize(&serializer).map_err(|error| {
@@ -497,6 +515,7 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         dense: &reconstruction.dense,
         mesh_triangles: pack_mesh_triangles(
             &reconstruction.mesh_triangles,
+            &reconstruction.mesh_triangle_sources,
             reconstruction.dense_points.len(),
         )?,
         mesh: &reconstruction.mesh,
@@ -556,6 +575,11 @@ struct WasmSurfaceMaterialRequest {
     triangle_indices_u32_le: Vec<u8>,
     #[serde(deserialize_with = "deserialize_byte_buffer")]
     triangle_confidence_f32_le: Vec<u8>,
+    /// Optional `(triangle, a, b, c)` quads of pre-canonicalization corners, as
+    /// returned in the reconstruction's mesh-triangle buffer. Empty or absent
+    /// means every triangle's support is given by its current corners.
+    #[serde(default, deserialize_with = "deserialize_byte_buffer")]
+    triangle_sources_u32_le: Vec<u8>,
     reference_patches: Vec<WasmReferencePatch>,
     cameras: Vec<EvidenceCamera>,
     reference_images: Vec<WasmReferenceImage>,
@@ -683,6 +707,25 @@ pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
             .with_point_attributes(&attributes)
             .map_err(|error| JsValue::from_str(&error))?;
     }
+    let source_values = decode_u32_le(&request.triangle_sources_u32_le, "triangle source buffer")?;
+    if !source_values.len().is_multiple_of(4) {
+        return Err(JsValue::from_str(
+            "invalid surface material request: triangle source buffer holds an incomplete quad",
+        ));
+    }
+    let sources = source_values
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|quad| TriangleSourceCorners {
+            triangle: quad[0] as usize,
+            corners: [quad[1] as usize, quad[2] as usize, quad[3] as usize],
+        })
+        .collect::<Vec<_>>();
+    // The core validates order, bounds and coincidence with the current corners.
+    evidence = evidence
+        .with_triangle_sources(&sources)
+        .map_err(|error| JsValue::from_str(&error))?;
     let images = request
         .reference_images
         .iter()

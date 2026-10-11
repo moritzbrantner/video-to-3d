@@ -442,6 +442,68 @@ if (!invalidAttributesRejected) {
   throw new Error("bake accepted out-of-range dense-point attributes");
 }
 
+// Rust-owned canonicalization records cross the bake boundary: a triangle whose
+// corner was re-indexed onto a coincident point of another reference keeps its
+// original same-reference texture, and a record that disagrees with the shared
+// geometry is refused by the Rust evidence validation.
+const canonicalizedSource: SurfaceMaterialSource = {
+  ...materialSource,
+  dense_points: {
+    values: new Float32Array([
+      0, 0, 2, 0.9, 1, 0, 2, 0.9, 0, 1, 2, 0.9, 2, 0, 2, 0.9,
+      2, 0, 2, 0.9, 3, 0, 2, 0.9, 2, 1, 2, 0.9,
+    ]),
+    rgb: new Uint8Array(21).fill(140),
+    length: 7,
+  },
+  dense_grid_sites: {
+    xy: new Uint32Array([2, 2, 8, 2, 2, 8, 14, 2, 3, 3, 9, 3, 3, 9]),
+    length: 7,
+  },
+  mesh_triangles: {
+    indices: new Uint32Array([0, 1, 2, 4, 5, 6, 1, 4, 2]),
+    confidence: new Float32Array([0.8, 0.8, 0.8]),
+    sources: new Uint32Array([2, 1, 3, 2]),
+    length: 3,
+  },
+  dense: {
+    reference_patches: [
+      { ...patch(0, 1, 0), primary_points: 4, completion_start: 4, accepted_points: 4 },
+      patch(1, 0, 4),
+    ],
+  },
+};
+const canonicalized = normalizeSurfaceMaterialResult(
+  bake_textured_surface(buildSurfaceMaterialRequest(canonicalizedSource, referenceImages)),
+);
+if (
+  canonicalized.bake.fallback.reasons.mixed_reference !== 0 ||
+  canonicalized.bake.materials.length !== 2 ||
+  canonicalized.bake.materials.some((material) => material.rule !== "same_reference_grid") ||
+  canonicalized.bake.materials.find((material) => material.reference_frame === 0)?.triangles.join() !== "0,2" ||
+  !canonicalized.diagnostic.includes("3 of 3 accepted triangles textured") ||
+  !canonicalized.diagnostic.includes("1 canonicalized seam triangle(s) textured from their original reference grid")
+) {
+  throw new Error(`canonicalized seam triangle lost its original reference: ${canonicalized.diagnostic}`);
+}
+let incoherentSourceRejected = false;
+try {
+  bake_textured_surface(
+    buildSurfaceMaterialRequest(
+      {
+        ...canonicalizedSource,
+        mesh_triangles: { ...canonicalizedSource.mesh_triangles, sources: new Uint32Array([2, 1, 0, 2]) },
+      },
+      referenceImages,
+    ),
+  );
+} catch (error) {
+  incoherentSourceRejected = String(error).includes("not coincident");
+}
+if (!incoherentSourceRejected) {
+  throw new Error("bake accepted a triangle source that is not coincident with the shared geometry");
+}
+
 console.log(
   "Rust -> WASM -> TypeScript camera-state, readiness, confidence/collider, and surface-material contracts passed",
 );

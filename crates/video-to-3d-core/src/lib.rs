@@ -2,6 +2,7 @@
 
 pub mod coarse_collision;
 pub mod colmap;
+pub mod evidence_interchange;
 pub mod feature_analysis;
 pub mod geometry_confidence;
 pub mod input_readiness;
@@ -34,7 +35,7 @@ pub use reconstruction_evidence::{
     classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
     EvidencePointAttributes, EvidenceRange, EvidenceScale, ReconstructionEvidenceSummary,
     ReconstructionEvidenceView, ReconstructionProviderClass, ReconstructionProviderDescriptor,
-    SurfaceEvidenceRegion, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+    SurfaceEvidenceRegion, TriangleSourceCorners, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 
 pub fn reconstruct_browser(

@@ -371,16 +371,65 @@ fn classic_result(
     result
 }
 
-#[test]
-fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
-    use crate::surface_materials::{
-        bake_surface_materials_with_seams, MaterialRule, ReferenceImage, SeamProjection,
-    };
-    use crate::ReconstructionEvidenceView;
+/// A slow pan over one textured plane, before and after surface
+/// consolidation: overlapping reference patches, triangulated per reference by
+/// the mesh stage and connected by surface fusion and the overlap merge into
+/// shared seam vertices.
+struct PanSurface {
+    frames: Vec<FrameInput>,
+    focal: f64,
+    /// The classic result as the mesh stage produced it (no consolidation).
+    before: crate::ReconstructionResult,
+    /// The same result after `consolidate_surface_evidence`.
+    after: crate::ReconstructionResult,
+    /// Index into `before.mesh_triangles` of a stitched triangle with
+    /// genuinely mixed-reference support, when one was requested.
+    stitched: Option<usize>,
+}
 
-    // A slow pan over one textured plane: overlapping reference patches,
-    // triangulated per reference by the mesh stage and connected by surface
-    // fusion and the merge into shared seam vertices.
+/// Reference frame owning each point of `reconstruction` as observed
+/// (geometric or revalidated) evidence, derived from the evidence regions.
+fn observed_reference_by_point(reconstruction: &crate::ReconstructionResult) -> Vec<Option<usize>> {
+    use crate::{EvidenceOrigin, ReconstructionEvidenceView};
+    let evidence =
+        ReconstructionEvidenceView::from_classic(reconstruction).expect("valid classic evidence");
+    let mut owners = vec![None; evidence.points.len()];
+    for region in &evidence.regions {
+        if !matches!(
+            region.origin,
+            EvidenceOrigin::GeometricMultiView | EvidenceOrigin::RevalidatedCompletion
+        ) {
+            continue;
+        }
+        let end = region.points.start + region.points.count;
+        owners[region.points.start..end].fill(region.reference_frame);
+    }
+    owners
+}
+
+fn corner_references(
+    owners: &[Option<usize>],
+    triangle: &crate::MeshTriangle,
+) -> [Option<usize>; 3] {
+    [triangle.a, triangle.b, triangle.c].map(|index| owners[index])
+}
+
+fn is_single_reference(references: [Option<usize>; 3]) -> bool {
+    references[0].is_some()
+        && references
+            .iter()
+            .all(|reference| *reference == references[0])
+}
+
+fn is_mixed_reference(references: [Option<usize>; 3]) -> bool {
+    references.iter().all(Option::is_some) && !is_single_reference(references)
+}
+
+/// Builds the pan surface. With `stitch`, one extra triangle spanning a vertex
+/// of the highest-priority (largest) patch and two vertices of another patch
+/// is added to the mesh output before consolidation: genuinely mixed support
+/// that no canonicalization produced (as a future stitched seam would be).
+fn pan_surface(stitch: bool) -> PanSurface {
     let width = 68;
     let height = 48;
     let focal = 60.0;
@@ -406,55 +455,366 @@ fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
         height,
         focal,
     );
-    let mut reconstruction = classic_result(&cameras, dense, mesh);
-    crate::surface_fusion::consolidate_surface_evidence(&mut reconstruction)
+    let mut before = classic_result(&cameras, dense, mesh);
+    let owners = observed_reference_by_point(&before);
+    for triangle in &before.mesh_triangles {
+        assert!(
+            is_single_reference(corner_references(&owners, triangle)),
+            "the mesh stage triangulates every reference patch on its own"
+        );
+    }
+
+    let stitched = stitch.then(|| {
+        let mut counts = std::collections::BTreeMap::<usize, usize>::new();
+        for triangle in &before.mesh_triangles {
+            *counts.entry(owners[triangle.a].unwrap()).or_default() += 1;
+        }
+        let (&largest, _) = counts
+            .iter()
+            .max_by(|(fa, ca), (fb, cb)| ca.cmp(cb).then(fb.cmp(fa)))
+            .expect("meshed patches");
+        let position = |index: usize| {
+            let point = &before.dense_points[index];
+            Vector3::new(point.x as f64, point.y as f64, point.z as f64)
+        };
+        // The other-patch triangle whose first corner lies closest to a
+        // vertex of the largest patch; that vertex replaces the corner.
+        let mut best: Option<(f64, usize, usize)> = None;
+        for (triangle_index, triangle) in before.mesh_triangles.iter().enumerate() {
+            if owners[triangle.a] == Some(largest) {
+                continue;
+            }
+            for (vertex, owner) in owners.iter().enumerate() {
+                if *owner != Some(largest) {
+                    continue;
+                }
+                let distance = (position(vertex) - position(triangle.a)).norm();
+                if distance > 1.0e-6 && best.is_none_or(|(d, _, _)| distance < d) {
+                    best = Some((distance, triangle_index, vertex));
+                }
+            }
+        }
+        let (_, triangle_index, vertex) = best.expect("patches overlap");
+        let source = before.mesh_triangles[triangle_index];
+        let stitched = crate::MeshTriangle {
+            a: vertex,
+            ..source
+        };
+        let corners = [stitched.a, stitched.b, stitched.c].map(position);
+        assert!(
+            (corners[1] - corners[0])
+                .cross(&(corners[2] - corners[0]))
+                .norm()
+                > 1.0e-6,
+            "stitched triangle must not be degenerate"
+        );
+        assert!(is_mixed_reference(corner_references(&owners, &stitched)));
+        before.mesh_triangles.push(stitched);
+        before.mesh_triangles.len() - 1
+    });
+
+    let mut after = before.clone();
+    crate::surface_fusion::consolidate_surface_evidence(&mut after)
         .expect("surface consolidation succeeds");
+    assert_eq!(
+        after.dense_points.len(),
+        before.dense_points.len(),
+        "consolidation never creates or removes points"
+    );
+    PanSurface {
+        frames,
+        focal,
+        before,
+        after,
+        stitched,
+    }
+}
 
-    let evidence = ReconstructionEvidenceView::from_classic(&reconstruction)
-        .expect("connected surface is valid classic evidence");
-    let images = frames
+impl PanSurface {
+    fn images(&self) -> Vec<crate::surface_materials::ReferenceImage<'_>> {
+        self.frames
+            .iter()
+            .enumerate()
+            .map(
+                |(frame_index, frame)| crate::surface_materials::ReferenceImage {
+                    frame_index,
+                    width: frame.width,
+                    height: frame.height,
+                    rgba: &frame.rgba,
+                },
+            )
+            .collect()
+    }
+
+    fn bake(
+        &self,
+        reconstruction: &crate::ReconstructionResult,
+        projection: bool,
+    ) -> crate::surface_materials::SurfaceMaterialBake {
+        use crate::surface_materials::{bake_surface_materials_with_seams, SeamProjection};
+        let evidence = crate::ReconstructionEvidenceView::from_classic(reconstruction)
+            .expect("valid classic evidence");
+        let points = geometry_snapshot(reconstruction);
+        let bake = bake_surface_materials_with_seams(
+            &evidence,
+            &reconstruction.dense_grid_sites,
+            &self.images(),
+            projection.then_some(SeamProjection {
+                focal_pixels: self.focal as f32,
+            }),
+        )
+        .expect("bake succeeds");
+        // Texture processing never creates or repairs geometry.
+        assert_eq!(points, geometry_snapshot(reconstruction));
+        assert_eq!(bake.point_count, reconstruction.dense_points.len());
+        assert_eq!(bake.triangle_count, reconstruction.mesh_triangles.len());
+        let mut seen = vec![0usize; reconstruction.mesh_triangles.len()];
+        for index in bake
+            .materials
+            .iter()
+            .flat_map(|material| &material.triangles)
+            .chain(&bake.fallback.triangles)
+        {
+            seen[*index] += 1;
+        }
+        assert!(
+            seen.iter().all(|count| *count == 1),
+            "every accepted triangle is textured or kept as fallback exactly once"
+        );
+        bake
+    }
+
+    /// For every triangle of `after`, the index of the `before` triangle it
+    /// was retained from. Consolidation keeps the triangle order, removes
+    /// owned duplicates, and re-indexes a corner only onto a fused partner,
+    /// which fusion moved to the same position.
+    fn retained_from(&self) -> Vec<usize> {
+        let points = &self.after.dense_points;
+        let same_position = |left: usize, right: usize| {
+            let (l, r) = (&points[left], &points[right]);
+            l.x.to_bits() == r.x.to_bits()
+                && l.y.to_bits() == r.y.to_bits()
+                && l.z.to_bits() == r.z.to_bits()
+        };
+        let mut origin = Vec::with_capacity(self.after.mesh_triangles.len());
+        let mut next = 0;
+        for triangle in &self.after.mesh_triangles {
+            let after = [triangle.a, triangle.b, triangle.c];
+            let found = (next..self.before.mesh_triangles.len()).find(|&index| {
+                let source = &self.before.mesh_triangles[index];
+                let before = [source.a, source.b, source.c];
+                before.iter().zip(&after).any(|(b, a)| b == a)
+                    && before
+                        .iter()
+                        .zip(&after)
+                        .all(|(b, a)| b == a || same_position(*b, *a))
+            });
+            let index = found.expect("every consolidated triangle is a retained mesh triangle");
+            origin.push(index);
+            next = index + 1;
+        }
+        origin
+    }
+}
+
+fn geometry_snapshot(reconstruction: &crate::ReconstructionResult) -> Vec<[u32; 4]> {
+    reconstruction
+        .dense_points
         .iter()
-        .enumerate()
-        .map(|(frame_index, frame)| ReferenceImage {
-            frame_index,
-            width: frame.width,
-            height: frame.height,
-            rgba: &frame.rgba,
+        .map(|point| {
+            [
+                point.x.to_bits(),
+                point.y.to_bits(),
+                point.z.to_bits(),
+                point.confidence.to_bits(),
+            ]
         })
-        .collect::<Vec<_>>();
-    let bake = bake_surface_materials_with_seams(
-        &evidence,
-        &reconstruction.dense_grid_sites,
-        &images,
-        Some(SeamProjection {
-            focal_pixels: focal as f32,
-        }),
-    )
-    .expect("seam bake succeeds");
+        .chain(reconstruction.mesh_triangles.iter().map(|triangle| {
+            [
+                triangle.a as u32,
+                triangle.b as u32,
+                triangle.c as u32,
+                triangle.confidence.to_bits(),
+            ]
+        }))
+        .collect()
+}
 
-    // The connected surface really contains mixed-reference triangles...
-    let seams = bake.seam_triangles() + bake.fallback.reasons.mixed_reference;
+/// Rule, reference frame, and absolute image-pixel corners of every textured
+/// triangle of `bake`, by triangle index.
+fn textured_corners(
+    bake: &crate::surface_materials::SurfaceMaterialBake,
+) -> std::collections::BTreeMap<usize, (crate::surface_materials::MaterialRule, usize, [[f64; 2]; 3])>
+{
+    let mut corners = std::collections::BTreeMap::new();
+    for material in &bake.materials {
+        let origin = material.texture.crop_origin.map(f64::from);
+        let size = [material.texture.width, material.texture.height].map(f64::from);
+        for (triangle, uvs) in material.triangles.iter().zip(&material.corner_uvs) {
+            let pixels = uvs.map(|uv| {
+                [
+                    origin[0] + uv[0] as f64 * size[0],
+                    origin[1] + uv[1] as f64 * size[1],
+                ]
+            });
+            corners.insert(*triangle, (material.rule, material.reference_frame, pixels));
+        }
+    }
+    corners
+}
+
+/// Asserts that every retained triangle the unconsolidated bake textured from
+/// its own reference grid is, after consolidation, still textured by the
+/// same-reference rule from that reference frame at the same grid pixels,
+/// and returns the canonicalization-born triangles (single reference before
+/// the merge, mixed reference by their consolidated indices).
+fn assert_retained_triangles_keep_their_reference(
+    surface: &PanSurface,
+    before: &crate::surface_materials::SurfaceMaterialBake,
+    after: &crate::surface_materials::SurfaceMaterialBake,
+) -> Vec<usize> {
+    use crate::surface_materials::MaterialRule;
+    let owners = observed_reference_by_point(&surface.after);
+    let before_corners = textured_corners(before);
+    let after_corners = textured_corners(after);
+    let mut born = Vec::new();
+    for (index, source) in surface.retained_from().into_iter().enumerate() {
+        if Some(source) == surface.stitched {
+            continue;
+        }
+        let canonicalized = is_mixed_reference(corner_references(
+            &owners,
+            &surface.after.mesh_triangles[index],
+        ));
+        if canonicalized {
+            born.push(index);
+        }
+        let Some(&(rule, frame, pixels)) = before_corners.get(&source) else {
+            continue;
+        };
+        assert_eq!(rule, MaterialRule::SameReferenceGrid);
+        let kept = after_corners.get(&index);
+        let Some(&(after_rule, after_frame, after_pixels)) = kept else {
+            panic!(
+                "retained triangle {index} (mesh triangle {source}, canonicalized: {canonicalized}) lost its frame-{frame} reference texture: {}",
+                after.diagnostic()
+            );
+        };
+        assert_eq!(
+            (after_rule, after_frame),
+            (MaterialRule::SameReferenceGrid, frame),
+            "retained triangle {index} (canonicalized: {canonicalized}) must stay textured from its original reference grid: {}",
+            after.diagnostic()
+        );
+        for (corner, (expected, actual)) in pixels.iter().zip(&after_pixels).enumerate() {
+            assert!(
+                (expected[0] - actual[0]).abs() < 1.0e-3
+                    && (expected[1] - actual[1]).abs() < 1.0e-3,
+                "retained triangle {index} corner {corner} (canonicalized: {canonicalized}) must sample its original grid site {expected:?}, not {actual:?}"
+            );
+        }
+    }
+    born
+}
+
+#[test]
+fn canonicalized_seam_triangles_keep_their_original_reference_texture() {
+    let surface = pan_surface(false);
+    for projection in [true, false] {
+        let before = surface.bake(&surface.before, projection);
+        assert_eq!(before.fallback.reasons.mixed_reference, 0);
+        assert_eq!(before.seam_triangles(), 0);
+        let after = surface.bake(&surface.after, projection);
+
+        let born = assert_retained_triangles_keep_their_reference(&surface, &before, &after);
+        assert!(
+            !born.is_empty(),
+            "overlap canonicalization must re-index retained lower-priority seam triangles onto higher-priority vertices"
+        );
+        // No triangle of this surface has genuinely mixed support.
+        assert_eq!(
+            after.fallback.reasons.mixed_reference,
+            0,
+            "canonicalization-born seam triangles must not count as mixed_reference (projection: {projection}): {}",
+            after.diagnostic()
+        );
+        assert_eq!(
+            after.seam_triangles(),
+            0,
+            "canonicalization-born seam triangles must not go to the seam rule: {}",
+            after.diagnostic()
+        );
+    }
+}
+
+#[test]
+fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
+    use crate::surface_materials::MaterialRule;
+
+    let surface = pan_surface(true);
+    let stitched_before = surface.stitched.expect("stitched seam");
+    let retained = surface.retained_from();
+    let stitched = retained
+        .iter()
+        .position(|source| *source == stitched_before)
+        .expect("consolidation keeps the stitched seam triangle");
+    let owners = observed_reference_by_point(&surface.after);
     assert!(
-        seams > 0,
-        "the connected surface must contain mixed-reference triangles: {}",
+        is_mixed_reference(corner_references(
+            &owners,
+            &surface.after.mesh_triangles[stitched]
+        )),
+        "the stitched seam keeps mixed-reference support after consolidation"
+    );
+
+    let before = surface.bake(&surface.before, true);
+    let bake = surface.bake(&surface.after, true);
+    // Canonicalization-born triangles keep their original reference texture...
+    let born = assert_retained_triangles_keep_their_reference(&surface, &before, &bake);
+    assert!(
+        !born.is_empty(),
+        "the connected surface must contain canonicalization-born cross-reference triangles"
+    );
+    // ...so the only mixed-reference triangle is the genuinely mixed seam,
+    // and the single-camera rule textures it.
+    assert_eq!(
+        bake.seam_triangles() + bake.fallback.reasons.mixed_reference,
+        1,
+        "only the genuinely mixed seam is decided by the seam rule: {}",
         bake.diagnostic()
     );
-    // ...and the single-camera rule textures at least one that a camera sees.
-    assert!(
-        bake.seam_triangles() > 0,
-        "no seam triangle of a fronto-parallel plane seen by all cameras was textured: {}",
-        bake.diagnostic()
-    );
+    let seam_material = bake
+        .materials
+        .iter()
+        .find(|material| material.triangles.contains(&stitched))
+        .unwrap_or_else(|| {
+            panic!(
+                "the single-camera rule must texture the genuinely mixed seam of a fronto-parallel plane seen by all cameras: {}",
+                bake.diagnostic()
+            )
+        });
+    assert_eq!(seam_material.rule, MaterialRule::SeamSingleCameraProjection);
     for material in bake
         .materials
         .iter()
         .filter(|material| material.rule == MaterialRule::SeamSingleCameraProjection)
     {
+        assert_eq!(material.triangles, vec![stitched]);
         assert!(material.seam_reference_frames.len() >= 2);
-        assert_eq!(material.focal_pixels, Some(focal as f32));
+        assert_eq!(material.focal_pixels, Some(surface.focal as f32));
     }
+
+    // Without intrinsics the seam rule fails closed for the genuinely mixed
+    // seam only; canonicalization-born triangles stay textured.
+    let before = surface.bake(&surface.before, false);
+    let closed = surface.bake(&surface.after, false);
+    assert_retained_triangles_keep_their_reference(&surface, &before, &closed);
+    assert_eq!(closed.seam_triangles(), 0);
     assert_eq!(
-        bake.textured_triangles() + bake.fallback.triangles.len(),
-        reconstruction.mesh_triangles.len()
+        closed.fallback.reasons.mixed_reference,
+        1,
+        "{}",
+        closed.diagnostic()
     );
+    assert!(closed.fallback.triangles.contains(&stitched));
 }

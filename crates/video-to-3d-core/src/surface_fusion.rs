@@ -104,7 +104,7 @@ pub(super) fn consolidate_surface_evidence(
     };
     reconstruction.warnings.push(diagnostic);
 
-    let merge = crate::surface_merge::merge_fused_patches(
+    let mut merge = crate::surface_merge::merge_fused_patches(
         &reconstruction.dense_points,
         &mut reconstruction.mesh_triangles,
         &membership,
@@ -112,6 +112,7 @@ pub(super) fn consolidate_surface_evidence(
         &reference_cameras,
         &point_origins,
     );
+    reconstruction.mesh_triangle_sources = std::mem::take(&mut merge.triangle_sources);
     refresh_mesh_after_merge(
         &mut reconstruction.mesh,
         &mut reconstruction.warnings,
