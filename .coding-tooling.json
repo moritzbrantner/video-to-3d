@@ -34,9 +34,9 @@
   "capabilityCommands": {
     "video-to-3d": {
       "format:check": [
-        "cargo",
-        "fmt",
-        "--check"
+        "bash",
+        "-lc",
+        "cargo fmt --check && cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --check"
       ],
       "lint": [
         "cargo",
@@ -65,7 +65,7 @@
       "test:integration:workflow": [
         "bash",
         "-lc",
-        "bun run test:learned-provider-contract && bun run test:texture-projection && bun run test:browser-contract && bun run test:video-sampling-contract"
+        "bun run test:learned-provider-contract && bun run test:texture-projection && bun run test:browser-contract && bun run test:video-sampling-contract && cargo check --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --target wasm32-unknown-unknown && cargo test -p video-to-3d-core --example golden_fixture && cargo test -p video-to-3d-core --example reference_fixture && cargo test -p video-to-3d-core --example synthetic_room_fixture && python3 -m unittest discover -s tools/tests -p 'test_*.py' && python3 -m py_compile tools/fetch_tanks_and_temples.py tools/score_tanks_and_temples.py"
       ],
       "benchmark:smoke": [
         "bun",

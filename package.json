@@ -8,7 +8,7 @@
     "build": "bun run wasm:build && bun --cwd apps/web build",
     "build:pages": "GITHUB_PAGES=true bun run build",
     "cargo:check": "cargo check --workspace",
-    "check": "bun run typecheck && bun run test:learned-provider-contract && bun run test:texture-projection && cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && bun run build && bun run test:browser-contract && bun run test:video-sampling-contract",
+    "check": "bun run typecheck && bun run test:learned-provider-contract && bun run test:texture-projection && cargo fmt --check && cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && bun run build && bun run test:browser-contract && bun run test:video-sampling-contract && python3 -m unittest discover -s tools/tests -p 'test_*.py' && python3 -m py_compile tools/fetch_tanks_and_temples.py tools/score_tanks_and_temples.py",
     "dev": "bun run wasm:build && bun --cwd apps/web dev",
     "tauri:build": "bun run wasm:build && bun --cwd apps/desktop tauri build --no-bundle",
     "tauri:dev": "bun run wasm:build && bun --cwd apps/desktop tauri dev",
