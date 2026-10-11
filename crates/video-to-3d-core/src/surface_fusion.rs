@@ -148,12 +148,14 @@ pub(crate) fn consolidate_surface_recording_with_control(
             triangles,
             triangle_sources,
         };
-        let evidence = ReconstructionEvidenceView::from_classic_parts(&parts)?;
+        let evidence =
+            ReconstructionEvidenceView::from_classic_parts_with_cancel(&parts, || control.check())?;
         let (membership, count) =
             evidence_support_membership(&evidence.regions, evidence.points.len());
         let (frames, cameras) = support_group_references(&evidence, count);
         let mut origins = vec![None; evidence.points.len()];
         for region in &evidence.regions {
+            control.check()?;
             let end = region.points.start.saturating_add(region.points.count);
             if let Some(range) = origins.get_mut(region.points.start..end) {
                 range.fill(Some(region.origin));
@@ -369,7 +371,10 @@ fn fuse_mutually_supported_vertices_with_control(
         local_scales,
         incident_triangles,
         global_edge_scale,
-    } = vertex_surface_evidence(points, triangles);
+    } = match vertex_surface_evidence_with_control(points, triangles, control) {
+        Ok(evidence) => evidence,
+        Err(_) => return FusionOutcome::default(),
+    };
     let Some(global_edge_scale) = global_edge_scale else {
         return FusionOutcome::default();
     };
@@ -695,7 +700,22 @@ fn proposed_position(
     points.get(vertex).copied().and_then(point_position)
 }
 
+#[cfg(test)]
 fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> VertexSurfaceEvidence {
+    vertex_surface_evidence_with_control(
+        points,
+        triangles,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+    .unwrap_or_else(|_| unreachable!("uncancelable surface evidence"))
+}
+
+fn vertex_surface_evidence_with_control(
+    points: &[Point3],
+    triangles: &[MeshTriangle],
+    control: &mut ReconstructionControl<'_>,
+) -> Result<VertexSurfaceEvidence, String> {
+    control.check()?;
     let mut normal_sums = vec![Vector3::zeros(); points.len()];
     let mut edge_sums = vec![0.0f64; points.len()];
     let mut edge_counts = vec![0usize; points.len()];
@@ -703,6 +723,7 @@ fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> Ver
     let mut edge_lengths = Vec::with_capacity(triangles.len() * 3);
 
     for (triangle_index, triangle) in triangles.iter().enumerate() {
+        control.check()?;
         if triangle.a == triangle.b
             || triangle.b == triangle.c
             || triangle.c == triangle.a
@@ -753,27 +774,33 @@ fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> Ver
         edge_lengths.extend_from_slice(&[ab_length, ac_length, bc_length]);
     }
 
+    control.check()?;
     edge_lengths.sort_by(f64::total_cmp);
+    control.check()?;
     let global_edge_scale = median(&edge_lengths);
     let normals = normal_sums
         .into_iter()
         .map(|normal| {
+            control.check()?;
             let length = normal.norm();
-            (length.is_finite() && length > GEOMETRIC_EPSILON).then_some(normal / length)
+            Ok((length.is_finite() && length > GEOMETRIC_EPSILON).then_some(normal / length))
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     let local_scales = edge_sums
         .into_iter()
         .zip(edge_counts)
-        .map(|(sum, count)| (count > 0 && sum.is_finite()).then_some(sum / count as f64))
-        .collect();
+        .map(|(sum, count)| {
+            control.check()?;
+            Ok((count > 0 && sum.is_finite()).then_some(sum / count as f64))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
-    VertexSurfaceEvidence {
+    Ok(VertexSurfaceEvidence {
         normals,
         local_scales,
         incident_triangles,
         global_edge_scale,
-    }
+    })
 }
 
 fn spatial_cell(position: Vector3<f64>, cell_size: f64) -> (i64, i64, i64) {

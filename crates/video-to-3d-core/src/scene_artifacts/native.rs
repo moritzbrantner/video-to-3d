@@ -220,7 +220,7 @@ impl BuiltInExecutor {
                     .iter()
                     .map(|camera| camera.registered())
                     .collect();
-                let evidence = ReconstructionEvidenceView::from_classic_parts(
+                let evidence = ReconstructionEvidenceView::from_classic_parts_with_cancel(
                     &crate::reconstruction_evidence::ClassicEvidenceParts {
                         calibrated_pair: cameras.sparse.calibrated_pair.as_ref(),
                         registered_views: &cameras.sparse.registered_views,
@@ -230,6 +230,13 @@ impl BuiltInExecutor {
                         point_attributes: &dense.dense.point_attributes,
                         triangles: &mesh.mesh.triangles,
                         triangle_sources: &mesh.mesh.triangle_sources,
+                    },
+                    || {
+                        if cancel.is_canceled() {
+                            Err("native mesh canceled".into())
+                        } else {
+                            Ok(())
+                        }
                     },
                 )?;
                 let provider = evidence.provider;
@@ -321,8 +328,19 @@ impl BuiltInExecutor {
         {
             return Err("scene camera does not match mesh ancestry".into());
         }
-        let mesh = SurfaceMeshArtifact::from_json(&self.document(mesh_record, cancel)?)?;
-        let evidence = mesh.evidence()?;
+        let check = || {
+            if cancel.is_canceled() {
+                Err("native assembly canceled".into())
+            } else {
+                Ok(())
+            }
+        };
+        let mesh = SurfaceMeshArtifact::from_json_with_cancel(
+            &self.document(mesh_record, cancel)?,
+            check,
+        )?;
+        // Parsing validated this exact owned artifact once with the active token.
+        let evidence = mesh.evidence_view();
         if mesh.triangles.is_empty() {
             return Err("no observed surface triangles available for scene assembly".into());
         }
@@ -342,7 +360,9 @@ impl BuiltInExecutor {
             },
             canonicalized_same_reference_triangles: 0,
         };
-        let bytes = crate::textured_glb::encode_textured_glb(&evidence, &bake)?;
+        let bytes = crate::textured_glb::encode_textured_glb_with_cancel(&evidence, &bake, || {
+            cancel.is_canceled()
+        })?;
         let path =
             ProjectPath::new(format!("{directory}/environment.glb")).map_err(|e| e.to_string())?;
         let content_hash = ContentHash::of_bytes(&bytes);
