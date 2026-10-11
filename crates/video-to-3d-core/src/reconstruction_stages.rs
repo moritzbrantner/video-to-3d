@@ -540,7 +540,8 @@ pub fn reconstruct_mesh_with_cancel(
 
 /// Owned geometry after surface consolidation. This is a working buffer, not a
 /// reusable dense stage snapshot: consolidation may change its vertex positions.
-/// The accompanying mesh retains the consumed input artifact's content identity.
+/// Only the accompanying mesh's `dense_hash` records the consumed input identity.
+/// This buffer cannot be passed to [`compose_reconstruction`] as a stage snapshot.
 #[derive(Debug)]
 pub struct ConsumedDenseGeometry {
     pub(crate) dense: DenseEvidence,
@@ -556,6 +557,8 @@ pub fn reconstruct_mesh_owned(
     reconstruct_mesh_owned_with_cancel(cameras, dense, || false)
 }
 
+/// Consume and consolidate dense geometry with cooperative cancellation.
+/// A canceled call returns no accepted mesh or reusable dense stage snapshot.
 pub fn reconstruct_mesh_owned_with_cancel(
     cameras: &CameraStageArtifact,
     mut dense: DenseStageArtifact,
