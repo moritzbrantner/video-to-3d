@@ -260,13 +260,14 @@ fn keyframes_round_trip_and_verify_their_pixels() {
 
 #[test]
 fn surface_mesh_round_trips_triangle_sources() {
-    // Point 4 coincides with point 3, so triangle 1 (1, 3, 2) may record that it
-    // was triangulated over (1, 4, 2) before canonicalization.
+    // Geometric point 1 (frame 0) coincides with geometric point 4 (frame 1), so
+    // triangle 2 (4, 5, 6) may record that its first corner was point 1 before
+    // canonicalization.
     let mut fixture = Fixture::new();
-    fixture.points[4] = fixture.points[3];
+    fixture.points[1] = fixture.points[4];
     let sources = [crate::TriangleSourceCorners {
-        triangle: 1,
-        corners: [1, 4, 2],
+        triangle: 2,
+        corners: [1, 5, 6],
     }];
     let evidence = ReconstructionEvidenceView::new(
         ReconstructionProviderDescriptor::classic(),
@@ -289,6 +290,30 @@ fn surface_mesh_round_trips_triangle_sources() {
     );
     // Without sources the field is omitted, so earlier artifacts stay byte-identical.
     assert!(!fixture.mesh().to_json().contains("triangle_sources"));
+}
+
+#[test]
+fn triangle_sources_never_relabel_evidence_origin() {
+    // Point 3 is revalidated completion of frame 0; moving it onto geometric point
+    // 1 makes it coincident, but a source must still not swap the corner's origin.
+    let mut fixture = Fixture::new();
+    fixture.points[3] = fixture.points[1];
+    let sources = [crate::TriangleSourceCorners {
+        triangle: 0,
+        corners: [0, 3, 2],
+    }];
+    let error = ReconstructionEvidenceView::new(
+        ReconstructionProviderDescriptor::classic(),
+        EvidenceScale::ArbitraryMonocular,
+        fixture.cameras.clone(),
+        fixture.regions.clone(),
+        &fixture.points,
+        &fixture.triangles,
+    )
+    .unwrap()
+    .with_triangle_sources(&sources)
+    .unwrap_err();
+    assert!(error.contains("different evidence origin"), "{error}");
 }
 
 #[test]

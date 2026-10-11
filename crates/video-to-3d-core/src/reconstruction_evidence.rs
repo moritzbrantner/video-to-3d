@@ -263,7 +263,13 @@ impl<'a> ReconstructionEvidenceView<'a> {
             validate_point_attributes(&self.provider, attributes, self.points.len(), &mut poll)?;
         }
         if let Some(sources) = self.triangle_sources {
-            validate_triangle_sources(sources, self.points, self.triangles, &mut poll)?;
+            validate_triangle_sources(
+                sources,
+                self.points,
+                self.triangles,
+                &self.regions,
+                &mut poll,
+            )?;
         }
         poll()?;
         Ok(())
@@ -697,15 +703,26 @@ fn validate_regions(
     Ok(())
 }
 
-/// Source corners must name existing points at exactly the position of the current
-/// corner they replace, with one entry per re-indexed triangle in ascending order: a
-/// record that disagrees with the shared geometry is a contract violation, never a hint.
+/// Source corners must name existing points at exactly the position, and with the
+/// evidence origin, of the current corner they replace, with one entry per re-indexed
+/// triangle (at least one corner differs) in ascending order: a record that disagrees
+/// with the shared geometry or provenance is a contract violation, never a hint.
 fn validate_triangle_sources(
     sources: &[TriangleSourceCorners],
     points: &[Point3],
     triangles: &[MeshTriangle],
+    regions: &[SurfaceEvidenceRegion],
     poll: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
+    // Sources are sparse and regions few: look origins up per corner.
+    let origin_of = |point: usize| {
+        regions
+            .iter()
+            .find(|region| {
+                point >= region.points.start && point - region.points.start < region.points.count
+            })
+            .map(|region| region.origin)
+    };
     let mut previous: Option<usize> = None;
     for (index, source) in sources.iter().enumerate() {
         if index % 1024 == 0 {
@@ -729,6 +746,11 @@ fn validate_triangle_sources(
             ));
         }
         let current = [triangle.a, triangle.b, triangle.c];
+        if source.corners == current {
+            return Err(format!(
+                "reconstruction evidence triangle source {index} records no re-indexed corner"
+            ));
+        }
         for (corner, current) in source.corners.iter().zip(current) {
             let Some(point) = points.get(*corner) else {
                 return Err(format!(
@@ -742,6 +764,11 @@ fn validate_triangle_sources(
             {
                 return Err(format!(
                     "reconstruction evidence triangle source {index} corner is not coincident with the triangle's current corner"
+                ));
+            }
+            if *corner != current && origin_of(*corner) != origin_of(current) {
+                return Err(format!(
+                    "reconstruction evidence triangle source {index} corner carries a different evidence origin than the triangle's current corner"
                 ));
             }
         }
@@ -929,6 +956,7 @@ mod tests {
         rejected(&[source(0, [0, 3, 3])], "degenerate");
         // Corner 2 does not sit where corner 1 does.
         rejected(&[source(0, [0, 2, 1])], "not coincident");
+        rejected(&[source(0, [0, 1, 2])], "no re-indexed corner");
     }
 
     fn learned_view<'a>(
