@@ -13,13 +13,29 @@ export type ReferenceImage = {
   rgba: Uint8Array;
 };
 
+/** Rule that admitted a material's triangles into its texture (Rust-owned). */
+export type MaterialRule = "same_reference_grid" | "seam_single_camera_projection";
+
 export type RecordedAppearance = {
   reference_frame: number;
+  rule: MaterialRule;
   appearance_key: string;
+};
+
+/** Furthest seam-rule check reached by a rejected mixed-reference triangle. */
+export type SeamRejections = {
+  no_candidate_camera: number;
+  pose_inconsistent: number;
+  behind_camera: number;
+  out_of_frame: number;
+  grazing_view: number;
+  occluded: number;
+  ambiguous: number;
 };
 
 export type SurfaceMaterialFallbackReasons = {
   mixed_reference: number;
+  seam: SeamRejections;
   unobserved_reference: number;
   missing_reference_image: number;
   missing_grid_site: number;
@@ -28,6 +44,9 @@ export type SurfaceMaterialFallbackReasons = {
 
 export type BakedReferenceMaterial = {
   reference_frame: number;
+  rule: MaterialRule;
+  seam_reference_frames: number[];
+  focal_pixels: number | null;
   camera_authority: string;
   source_frames: number[];
   provenance: string[];
@@ -35,11 +54,13 @@ export type BakedReferenceMaterial = {
   appearance_key: string;
 };
 
+export type AppearanceArtifact = { reference_frame: number; rule: MaterialRule };
+
 export type AppearanceInvalidation = {
-  reused: number[];
-  invalidated: number[];
-  added: number[];
-  removed: number[];
+  reused: AppearanceArtifact[];
+  invalidated: AppearanceArtifact[];
+  added: AppearanceArtifact[];
+  removed: AppearanceArtifact[];
 };
 
 export type SurfaceMaterialBakeResult = {
@@ -60,7 +81,11 @@ export type SurfaceMaterialBakeResult = {
 
 export type SurfaceMaterialSource = Pick<
   ReconstructionResult,
-  "dense_points" | "dense_grid_sites" | "mesh_triangles" | "accepted_camera_evidence"
+  | "dense_points"
+  | "dense_grid_sites"
+  | "mesh_triangles"
+  | "accepted_camera_evidence"
+  | "calibrated_pair"
 > &
   Partial<Pick<ReconstructionResult, "dense_point_attributes">> & {
   dense: { reference_patches: DenseReferencePatchStats[] };
@@ -127,6 +152,8 @@ export function buildSurfaceMaterialRequest(
     })),
     cameras: source.accepted_camera_evidence,
     reference_images: referenceImages,
+    // Intrinsics of the accepted cameras; without them Rust textures no seam.
+    seam_focal_pixels: source.calibrated_pair?.focal_pixels ?? null,
     previous_appearance: previousAppearance,
   };
 }

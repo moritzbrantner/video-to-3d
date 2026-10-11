@@ -24,13 +24,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: bun install
-      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Install verified wasm-bindgen CLI
+        uses: moritzbrantner/reusable-workflows/.github/actions/install-verified-wasm-cli@e60855ad67f3dad72c283c355d544d6d296241d7
+        with:
+          tool: wasm-bindgen
+          version: "0.2.129"
       - name: Compile Rust reconstruction and feature lab to WebAssembly
         run: bun run wasm:build
       - name: Build static Next.js export
@@ -47,7 +51,7 @@ jobs:
           test -f apps/web/out/litert-wasm/litert_wasm_internal.wasm
       - name: Upload pull-request static export
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: github-pages-static-export
           path: apps/web/out

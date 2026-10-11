@@ -188,7 +188,11 @@ impl OperationKind {
     /// artifacts become stale. Provider operations are versioned by their
     /// provider declaration instead.
     pub fn implementation_revision(self) -> u32 {
-        1
+        match self {
+            // 2: the built-in executor and the versioned surface-textures format.
+            Self::TextureBake => 2,
+            _ => 1,
+        }
     }
 
     fn name(self) -> &'static str {
@@ -641,6 +645,14 @@ impl SceneProjectManifest {
         }
         for operation in &self.operations {
             unique_id("operation id", &operation.id)?;
+            // Operation ids name receipt and artifact paths, so they must be
+            // valid project path components (no device names, no trailing dot).
+            if ProjectPath::new(format!("artifacts/{}", operation.id)).is_err() {
+                return invalid(format!(
+                    "operation id `{}` cannot name a project path (reserved device name or trailing `.`)",
+                    operation.id
+                ));
+            }
         }
         for operation in &self.operations {
             self.validate_operation(operation, &media, &operations, &providers)?;
@@ -930,6 +942,23 @@ impl SceneProjectManifest {
                     }
                     upstream_kinds.push(upstream.kind.output());
                 }
+            }
+        }
+        if kind == OperationKind::TextureBake {
+            let count = |wanted: ArtifactKind| {
+                upstream_kinds
+                    .iter()
+                    .filter(|output| **output == wanted)
+                    .count()
+            };
+            if operation.inputs.len() != 2
+                || count(ArtifactKind::Keyframes) != 1
+                || count(ArtifactKind::SurfaceMesh) != 1
+            {
+                return invalid(format!(
+                    "operation `{}` (texture_bake) must consume exactly one ingest_video and one surface_mesh operation",
+                    operation.id
+                ));
             }
         }
         if kind == OperationKind::IngestVideo && operation.inputs.len() != 1 {

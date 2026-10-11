@@ -178,6 +178,8 @@ fn single_reference_triangles_are_textured_and_mixed_ones_fall_back() {
 
     assert_eq!(bake.fallback.triangles, vec![3]);
     assert_eq!(bake.fallback.reasons.mixed_reference, 1);
+    // Without intrinsics the seam rule has no camera to project through.
+    assert_eq!(bake.fallback.reasons.seam.no_candidate_camera, 1);
     assert_eq!(bake.fallback.reasons.total(), 1);
     assert_eq!(bake.textured_triangles() + bake.fallback.triangles.len(), 5);
     assert!(bake
@@ -292,27 +294,133 @@ fn malformed_or_duplicate_reference_images_fail_closed() {
     assert!(bake_surface_materials(&evidence, &fixture.sites, &duplicate).is_err());
 }
 
+fn frames(artifacts: &[AppearanceArtifact]) -> Vec<usize> {
+    assert!(artifacts
+        .iter()
+        .all(|artifact| artifact.rule == MaterialRule::SameReferenceGrid));
+    artifacts
+        .iter()
+        .map(|artifact| artifact.reference_frame)
+        .collect()
+}
+
+#[test]
+fn cancellation_interrupts_evidence_validation_before_traversal_finishes() {
+    let mut small = Fixture::new();
+    small.triangles.truncate(1);
+    let mut small_polls = 0;
+    small
+        .evidence()
+        .validate_with_cancel(|| {
+            small_polls += 1;
+            Ok(())
+        })
+        .unwrap();
+
+    let mut large = Fixture::new();
+    large.triangles = (0..4096).map(|_| triangle(0, 1, 2)).collect();
+    let mut polls = 0;
+    let error = large
+        .evidence()
+        .validate_with_cancel(|| {
+            polls += 1;
+            if polls >= small_polls + 2 {
+                Err("validation canceled".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert_eq!(polls, small_polls + 2);
+}
+
+#[test]
+fn cancellation_interrupts_inner_triangle_work() {
+    let mut fixture = Fixture::new();
+    // More than two polling windows; a cancel delivered mid-traversal must
+    // stop before the full bake or any of the texture crops are produced.
+    fixture.triangles = (0..4096).map(|_| triangle(0, 1, 2)).collect();
+    let evidence = fixture.evidence();
+    let images = fixture.reference_images();
+    let mut validation_polls = 0;
+    evidence
+        .validate_with_cancel(|| {
+            validation_polls += 1;
+            Ok(())
+        })
+        .unwrap();
+    // Beyond validation: check the image and region setup, then cancel in
+    // the large triangle traversal before materials are allocated.
+    let threshold = validation_polls + 11;
+    let mut checks = 0;
+    let error = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        checks += 1;
+        checks >= threshold
+    })
+    .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert_eq!(
+        checks, threshold,
+        "the work should poll during triangle traversal"
+    );
+}
+
+#[test]
+fn cancellation_rejects_all_fallback_bakes() {
+    let mut fixture = Fixture::new();
+    // No grid mapping means every triangle falls back; there are no materials
+    // and hence no PNG loop in which an executor could notice cancellation.
+    fixture.sites.clear();
+    let evidence = fixture.evidence();
+    let images = fixture.reference_images();
+    let mut full_polls = 0;
+    let full = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        full_polls += 1;
+        false
+    })
+    .unwrap();
+    assert!(full.materials.is_empty());
+    let mut checks = 0;
+    let error = bake_surface_materials_with_cancel(&evidence, &fixture.sites, &images, || {
+        checks += 1;
+        checks == full_polls
+    })
+    .unwrap_err();
+    assert!(error.contains("canceled"), "{error}");
+    assert_eq!(
+        checks, full_polls,
+        "cancellation must be checked after fallback processing"
+    );
+}
+
 #[test]
 fn reprojection_and_framing_changes_invalidate_only_the_affected_reference() {
     let fixture = Fixture::new();
     let baseline = fixture.bake();
     let recorded = baseline.recorded_appearance();
     let unchanged = fixture.bake().invalidation_against(&recorded);
-    assert_eq!(unchanged.reused, vec![0, 1]);
+    assert_eq!(frames(&unchanged.reused), vec![0, 1]);
     assert!(unchanged.invalidated.is_empty());
 
     // Reprojecting reference 1 (new camera pose) leaves reference 0 valid.
     let mut moved = Fixture::new();
     moved.cameras[1].translation = [0.31, 0.0, 0.0];
     let diff = moved.bake().invalidation_against(&recorded);
-    assert_eq!((diff.reused, diff.invalidated), (vec![0], vec![1]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.invalidated)),
+        (vec![0], vec![1])
+    );
 
     // Re-sampling pixels inside reference 0's crop invalidates only it.
     let mut reframed = Fixture::new();
     let pixel = ((3 * WIDTH + 3) * 4) as usize;
     reframed.images[0].1[pixel] ^= 0xff;
     let diff = reframed.bake().invalidation_against(&recorded);
-    assert_eq!((diff.reused, diff.invalidated), (vec![1], vec![0]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.invalidated)),
+        (vec![1], vec![0])
+    );
 
     // Pixels outside every crop and point positions do not affect appearance.
     let mut unrelated = Fixture::new();
@@ -320,20 +428,26 @@ fn reprojection_and_framing_changes_invalidate_only_the_affected_reference() {
     unrelated.images[0].1[outside] ^= 0xff;
     unrelated.points[4].z += 0.5;
     let diff = unrelated.bake().invalidation_against(&recorded);
-    assert_eq!(diff.reused, vec![0, 1]);
+    assert_eq!(frames(&diff.reused), vec![0, 1]);
 
     // Changing reference 1's footprint shifts nothing in reference 0.
     let mut regridded = Fixture::new();
     regridded.sites[7] = site(10, 10);
     let diff = regridded.bake().invalidation_against(&recorded);
-    assert_eq!((diff.reused, diff.invalidated), (vec![0], vec![1]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.invalidated)),
+        (vec![0], vec![1])
+    );
 
     // Losing a reference image removes only that artifact.
     let mut dropped = Fixture::new();
     dropped.images.truncate(1);
     let diff = dropped.bake().invalidation_against(&recorded);
     assert!(diff.diagnostic().contains("removed 1"));
-    assert_eq!((diff.reused, diff.removed), (vec![0], vec![1]));
+    assert_eq!(
+        (frames(&diff.reused), frames(&diff.removed)),
+        (vec![0], vec![1])
+    );
 }
 
 fn glb_parts(glb: &[u8]) -> (Value, &[u8]) {

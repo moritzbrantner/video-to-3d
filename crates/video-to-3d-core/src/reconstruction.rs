@@ -88,7 +88,7 @@ pub struct CameraPose {
     pub matched_features: usize,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
 pub struct Point3 {
     pub x: f32,
     pub y: f32,
@@ -2043,7 +2043,7 @@ fn segment_solve_stats(
     }
 }
 
-fn mesh_warning(mesh: &MeshStats) -> Option<String> {
+pub(crate) fn mesh_warning(mesh: &MeshStats) -> Option<String> {
     if !mesh.attempted {
         return None;
     }

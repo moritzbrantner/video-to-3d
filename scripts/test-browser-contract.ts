@@ -320,6 +320,7 @@ const materialSource: SurfaceMaterialSource = {
     confidence: 0.9,
     median_reprojection_error_pixels: 0.4,
   })),
+  calibrated_pair: null,
   dense: { reference_patches: [patch(0, 1, 0), patch(1, 0, 3)] },
 };
 const referenceImages = retainReferenceImages(materialSource, [
@@ -336,7 +337,10 @@ const baked = normalizeSurfaceMaterialResult(
 if (
   baked.bake.materials.length !== 2 ||
   baked.bake.fallback.reasons.mixed_reference !== 1 ||
-  !baked.diagnostic.includes("2 of 3 accepted triangles textured")
+  baked.bake.fallback.reasons.seam.no_candidate_camera !== 1 ||
+  baked.bake.materials.some((material) => material.rule !== "same_reference_grid") ||
+  !baked.diagnostic.includes("2 of 3 accepted triangles textured") ||
+  !baked.diagnostic.includes("1 no candidate camera")
 ) {
   throw new Error(`surface material bake mismatch: ${baked.diagnostic}`);
 }
@@ -378,8 +382,29 @@ const rebaked = normalizeSurfaceMaterialResult(
     buildSurfaceMaterialRequest(materialSource, referenceImages, baked.appearance),
   ),
 );
-if (rebaked.invalidation.reused.join() !== "0,1" || rebaked.invalidation.invalidated.length !== 0) {
+if (
+  rebaked.invalidation.reused.map((artifact) => `${artifact.rule}:${artifact.reference_frame}`).join() !==
+    "same_reference_grid:0,same_reference_grid:1" ||
+  rebaked.invalidation.invalidated.length !== 0 ||
+  baked.appearance.some((record) => record.rule !== "same_reference_grid")
+) {
   throw new Error("unchanged reference appearance must be reused, not invalidated");
+}
+// The accepted focal length crosses into the Rust seam rule, which fails
+// closed: this fixture's points do not lie on the rays of their grid sites.
+const seamChecked = normalizeSurfaceMaterialResult(
+  bake_textured_surface(
+    buildSurfaceMaterialRequest(
+      { ...materialSource, calibrated_pair: { ...contradictory.calibrated_pair!, focal_pixels: width } },
+      referenceImages,
+    ),
+  ),
+);
+if (
+  seamChecked.bake.fallback.reasons.seam.pose_inconsistent !== 1 ||
+  seamChecked.bake.materials.some((material) => material.rule !== "same_reference_grid")
+) {
+  throw new Error(`seam rule must reject cameras that do not reproduce their grid: ${seamChecked.diagnostic}`);
 }
 
 // Per-point reciprocal/depth-margin attributes cross the bake boundary: strong

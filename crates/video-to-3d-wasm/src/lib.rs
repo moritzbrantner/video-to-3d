@@ -7,8 +7,8 @@ use video_to_3d_core::coarse_collision::{CoarseCollider, CoarseColliderOptions};
 use video_to_3d_core::geometry_confidence::{GeometryConfidenceField, GeometryConfidenceSummary};
 use video_to_3d_core::input_readiness::{assess_readiness, SamplingMetadata};
 use video_to_3d_core::surface_materials::{
-    bake_surface_materials, AppearanceInvalidation, RecordedAppearance, ReferenceImage,
-    SurfaceMaterialBake,
+    bake_surface_materials_with_seams, AppearanceInvalidation, RecordedAppearance, ReferenceImage,
+    SeamProjection, SurfaceMaterialBake,
 };
 use video_to_3d_core::textured_glb::encode_textured_glb_with_collider;
 use video_to_3d_core::{
@@ -559,6 +559,10 @@ struct WasmSurfaceMaterialRequest {
     reference_patches: Vec<WasmReferencePatch>,
     cameras: Vec<EvidenceCamera>,
     reference_images: Vec<WasmReferenceImage>,
+    /// Focal length of the accepted cameras; without it no seam triangle is
+    /// textured.
+    #[serde(default)]
+    seam_focal_pixels: Option<f32>,
     #[serde(default)]
     previous_appearance: Vec<RecordedAppearance>,
 }
@@ -689,7 +693,10 @@ pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
             rgba: &image.rgba,
         })
         .collect::<Vec<_>>();
-    let bake = bake_surface_materials(&evidence, &sites, &images)
+    let seam_projection = request
+        .seam_focal_pixels
+        .map(|focal_pixels| SeamProjection { focal_pixels });
+    let bake = bake_surface_materials_with_seams(&evidence, &sites, &images, seam_projection)
         .map_err(|error| JsValue::from_str(&error))?;
     let confidence = GeometryConfidenceField::from_evidence(&evidence);
     let collider =

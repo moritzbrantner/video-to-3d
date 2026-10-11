@@ -10,53 +10,16 @@ camera_params="${4:-520,520,320,240}"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/sparse" "$work_dir/models"
 
-database="$work_dir/database.db"
-
-# Keep stochastic geometry estimation seeded. CPU approximate SIFT matching
-# in COLMAP 3.9.1 still varies with this seed, so use exact matching below.
-colmap_random_args=(--random_seed 0)
-
-colmap feature_extractor \
-  --database_path "$database" \
-  --image_path "$images_dir" \
-  --ImageReader.camera_model PINHOLE \
-  --ImageReader.single_camera 1 \
-  --ImageReader.camera_params "$camera_params" \
-  --SiftExtraction.num_threads 1 \
-  --SiftExtraction.use_gpu 0 \
-  "${colmap_random_args[@]}" \
-  >/dev/null
-
-python3 "$(dirname "${BASH_SOURCE[0]}")/match_colmap_golden.py" "$database" >/dev/null
-
-# COLMAP exits non-zero when it cannot initialize any model; that outcome is reported
-# below as a zero-registration result instead of aborting the evidence run.
-if ! colmap mapper \
-  --database_path "$database" \
-  --image_path "$images_dir" \
-  --output_path "$work_dir/sparse" \
-  --Mapper.num_threads 1 \
-  --Mapper.init_min_tri_angle 8 \
-  --Mapper.ba_refine_focal_length 0 \
-  --Mapper.ba_refine_principal_point 0 \
-  --Mapper.ba_refine_extra_params 0 \
-  "${colmap_random_args[@]}" \
-  >/dev/null; then
-  echo "COLMAP mapper reported failure for case $case_name" >&2
+# One pinned pycolmap runs every COLMAP stage (see tools/colmap_golden.py).
+if ! python3 "$(dirname "${BASH_SOURCE[0]}")/colmap_golden.py" \
+  "$images_dir" "$work_dir" "$camera_params" >&2; then
+  echo "COLMAP reference pipeline reported failure for case $case_name" >&2
 fi
 
 best_model=""
 best_registered=-1
-for model_dir in "$work_dir"/sparse/*; do
-  test -d "$model_dir" || continue
-  model_name="$(basename "$model_dir")"
-  text_dir="$work_dir/models/$model_name"
-  mkdir -p "$text_dir"
-  colmap model_converter \
-    --input_path "$model_dir" \
-    --output_path "$text_dir" \
-    --output_type TXT \
-    >/dev/null
+for text_dir in "$work_dir"/models/*; do
+  test -f "$text_dir/images.txt" || continue
   registered_lines="$(grep -v '^#' "$text_dir/images.txt" | sed '/^[[:space:]]*$/d' | wc -l)"
   registered="$((registered_lines / 2))"
   if (( registered > best_registered )); then

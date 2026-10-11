@@ -18,7 +18,7 @@ env:
 jobs:
   reconstruction-evidence:
     name: Reconstruction runtime, COLMAP golden, and behavior
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -41,20 +41,19 @@ jobs:
           ref: ${{ env.MOONLIGHT_REV }}
           path: moonlight
 
-      - name: Install Rust and COLMAP
+      - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
           rustup default stable
           sudo apt-get update
-          sudo apt-get install -y colmap python3-venv
-          colmap -h | head -n 4
+          sudo apt-get install -y python3-venv
 
       - name: Install Bun for the browser sampling contract
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
 
-      - name: Install exact COLMAP reference matcher
+      - name: Install the pinned COLMAP reference (pycolmap)
         run: |
           python3 -m venv "$RUNNER_TEMP/colmap-python"
           "$RUNNER_TEMP/colmap-python/bin/pip" install -r candidate/tools/requirements-colmap.txt
@@ -296,7 +295,7 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: reconstruction-runtime-colmap-moonlight-${{ github.event.pull_request.head.sha }}
           path: |

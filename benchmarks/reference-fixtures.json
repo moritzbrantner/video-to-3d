@@ -36,7 +36,7 @@
           "min": 0.8
         },
         "max_pair_median_error_pixels": {
-          "max": 1.0
+          "max": 1
         }
       }
     },
@@ -47,10 +47,10 @@
           "equals": true
         },
         "rotation_error_degrees": {
-          "max": 1.0
+          "max": 1
         },
         "translation_direction_error_degrees": {
-          "max": 5.0
+          "max": 5
         }
       }
     },
@@ -64,7 +64,7 @@
           "max": 0.25
         },
         "max_rotation_error_degrees": {
-          "max": 3.0
+          "max": 3
         }
       }
     },
@@ -118,10 +118,10 @@
           "min": 0.5
         },
         "median_texel_reprojection_error_pixels": {
-          "max": 1.0
+          "max": 1
         },
         "median_texel_color_error": {
-          "max": 10.0
+          "max": 10
         }
       }
     }
@@ -146,36 +146,18 @@
         "expected_failures": [
           {
             "stage": "mesh",
-            "check": "cross_reference_triangles",
-            "issue": 126,
-            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
-          },
-          {
-            "stage": "mesh",
-            "check": "shared_vertices",
-            "issue": 126,
-            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
-          },
-          {
-            "stage": "mesh",
-            "check": "duplicated_coverage_share",
-            "issue": 126,
-            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
-          },
-          {
-            "stage": "mesh",
-            "check": "reference_patch_components",
-            "issue": 126,
-            "reason": "The reference patches are meshed independently: no cross-reference topology, duplicated overlap."
+            "check": "median_surface_error_m",
+            "issue": 138,
+            "reason": "0.034 m against 0.03 m: once #126 removes the duplicated overlap, the triangles more than 5 cm off the true surface (#138) dominate a larger share of the mesh."
           },
           {
             "stage": "mesh",
             "check": "unsupported_triangle_share",
             "issue": 138,
-            "reason": "26 % of the triangles lie more than 5 cm off the true surface; the cause is not yet measured."
+            "reason": "33 % of the triangles lie more than 5 cm off the true surface; the cause is not yet measured."
           }
         ],
-        "notes": "Since #127 no adjacent pair needs to seed: the segment tries wider pairs over composed, sub-pixel-refined matches gated by a least-median pure-rotation fit, and seeds from frames 5-11 (6 intervals, 0.6° translation-direction error). All 18 views register (normalized pose RMSE 0.0065, worst orientation error 0.33°); dense depth and texture pass. The pure-rotation control still stops at the baseline gate: its wide pairs fit a rotation to about 0.1 px."
+        "notes": "Since #127 no adjacent pair needs to seed: the segment tries wider pairs over composed, sub-pixel-refined matches gated by a least-median pure-rotation fit, and seeds from frames 5-11 (6 intervals, 0.6° translation-direction error). All 18 views register (normalized pose RMSE 0.0065, worst orientation error 0.33°); dense depth and texture pass. The pure-rotation control still stops at the baseline gate: its wide pairs fit a rotation to about 0.1 px. With #126 the mesh topology passes too: 66 cross-reference triangles, one patch-graph component, duplicated coverage 0.036."
       }
     },
     {
@@ -219,35 +201,10 @@
         "texture": "default"
       },
       "baseline": {
-        "recorded": "2026-10-09",
-        "first_failing_stage": "mesh",
-        "expected_failures": [
-          {
-            "stage": "mesh",
-            "check": "cross_reference_triangles",
-            "issue": 126,
-            "reason": "Each reference patch is triangulated on its own; no triangle spans two reference patches."
-          },
-          {
-            "stage": "mesh",
-            "check": "shared_vertices",
-            "issue": 126,
-            "reason": "No vertex is shared between reference patches."
-          },
-          {
-            "stage": "mesh",
-            "check": "duplicated_coverage_share",
-            "issue": 126,
-            "reason": "Overlapping references stay separate sheets, so the overlap is meshed more than once."
-          },
-          {
-            "stage": "mesh",
-            "check": "reference_patch_components",
-            "issue": 126,
-            "reason": "The three meshed reference patches are not joined by any triangle: three patch-graph components."
-          }
-        ],
-        "notes": "The true surface is one component; the accepted mesh has 59, every one inside a single reference patch. Dense coverage holes and discontinuity rejections fragment each patch, and no patch connects to another. Component counts are reported against the truth; the cross-patch part is gated (#126)."
+        "recorded": "2026-10-10",
+        "first_failing_stage": null,
+        "expected_failures": [],
+        "notes": "Every stage passes. Overlap ownership is decided in the higher-priority reference camera's image, only between original mesh components joined (transitively) by fusion-accepted seam pairs, with a 3.5 % relative depth bound after removing the patch pair's depth scale (anchored at the fusion-accepted seam vertices between that patch pair); where an owner camera judged a triangle, the looser 3D test does not overrule it. Duplicated coverage 0.095 (max 0.1), unsupported share 0.098, surface coverage 0.390, 135 cross-reference triangles (seam pairs across evidence origins link patches but keep separate vertices), one patch-graph component. Seam triangles at least 80 % owned are trimmed (0.6 % of the accepted mesh area on the triangles' planes, reported in the merge diagnostic); the trimmed seams are not re-stitched (#137), so the reported mesh has more connected components (141) than before the trim (40)."
       }
     }
   ]

@@ -1,3 +1,4 @@
-# 3.13 exposes exact CPU matching and interoperates with the Ubuntu 24.04
-# COLMAP 3.9.1 database used by extraction, mapping, and model conversion.
+# The whole COLMAP reference pipeline (extraction, exact CPU matching, mapping,
+# text export) runs through this one pycolmap, independent of the runner's
+# distribution packages (tools/colmap_golden.py, #153).
 pycolmap==4.2.1

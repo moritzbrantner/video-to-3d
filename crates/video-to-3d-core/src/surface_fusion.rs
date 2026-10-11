@@ -24,6 +24,13 @@ struct FusionStats {
     fused_pairs: usize,
 }
 
+/// Vertex pairs fusion accepted as one surface point and moved to one position.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FusionOutcome {
+    stats: FusionStats,
+    pairs: Vec<(usize, usize)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct EvidenceSupportKey {
     reference_frame: usize,
@@ -51,15 +58,25 @@ pub(super) fn consolidate_surface_evidence(
         return Ok(());
     }
 
-    let (membership, support_group_count) = {
+    let (membership, support_group_count, group_frames, reference_cameras, point_origins) = {
         let evidence = ReconstructionEvidenceView::from_classic(reconstruction)?;
-        evidence_support_membership(&evidence.regions, evidence.points.len())
+        let (membership, count) =
+            evidence_support_membership(&evidence.regions, evidence.points.len());
+        let (frames, cameras) = support_group_references(&evidence, count);
+        let mut origins = vec![None; evidence.points.len()];
+        for region in &evidence.regions {
+            let end = region.points.start.saturating_add(region.points.count);
+            if let Some(range) = origins.get_mut(region.points.start..end) {
+                range.fill(Some(region.origin));
+            }
+        }
+        (membership, count, frames, cameras, origins)
     };
     if support_group_count < 2 {
         return Ok(());
     }
 
-    let stats = fuse_mutually_supported_vertices(
+    let FusionOutcome { stats, pairs } = fuse_mutually_supported_vertices(
         &mut reconstruction.dense_points,
         &reconstruction.mesh_triangles,
         &membership,
@@ -86,7 +103,111 @@ pub(super) fn consolidate_surface_evidence(
         )
     };
     reconstruction.warnings.push(diagnostic);
+
+    let merge = crate::surface_merge::merge_fused_patches(
+        &reconstruction.dense_points,
+        &mut reconstruction.mesh_triangles,
+        &membership,
+        &pairs,
+        &reference_cameras,
+        &point_origins,
+    );
+    refresh_mesh_after_merge(
+        &mut reconstruction.mesh,
+        &mut reconstruction.warnings,
+        reconstruction.mesh_triangles.len(),
+        &group_frames,
+        &merge.retained_by_group,
+    );
+    reconstruction
+        .warnings
+        .push(merge.diagnostic(support_group_count));
     Ok(())
+}
+
+/// The mesh diagnostic was rendered before the merge: bring the aggregate and
+/// per-reference-patch triangle counts, and that warning, in line with the
+/// merged mesh.
+fn refresh_mesh_after_merge(
+    mesh: &mut crate::MeshStats,
+    warnings: &mut [String],
+    triangles: usize,
+    group_frames: &[Option<usize>],
+    retained_by_group: &[usize],
+) {
+    let stale = crate::mesh_warning(mesh);
+    mesh.accepted_triangles = triangles;
+    for patch in &mut mesh.reference_patches {
+        if group_frames.contains(&Some(patch.reference_frame)) {
+            patch.accepted_triangles = 0;
+        }
+    }
+    for (group, retained) in retained_by_group.iter().enumerate() {
+        let Some(frame) = group_frames.get(group).copied().flatten() else {
+            continue;
+        };
+        if let Some(patch) = mesh
+            .reference_patches
+            .iter_mut()
+            .find(|patch| patch.reference_frame == frame)
+        {
+            patch.accepted_triangles += retained;
+        }
+    }
+    if let (Some(stale), Some(fresh)) = (stale, crate::mesh_warning(mesh)) {
+        for warning in warnings.iter_mut().filter(|warning| **warning == stale) {
+            warning.clone_from(&fresh);
+        }
+    }
+}
+
+/// Reference frame and world-to-camera pose of each support group's reference
+/// camera, in support-group order (the same first-seen region order
+/// `evidence_support_membership` assigns).
+fn support_group_references(
+    evidence: &ReconstructionEvidenceView<'_>,
+    group_count: usize,
+) -> (
+    Vec<Option<usize>>,
+    Vec<Option<crate::surface_merge::ReferenceCamera>>,
+) {
+    let mut seen = HashMap::<EvidenceSupportKey, usize>::new();
+    let mut frames = vec![None; group_count];
+    let mut centers = vec![None; group_count];
+    for region in &evidence.regions {
+        let Some(reference_frame) = region.reference_frame else {
+            continue;
+        };
+        let mut source_frames = region.source_frames.clone();
+        source_frames.sort_unstable();
+        let next = seen.len();
+        let group = *seen
+            .entry(EvidenceSupportKey {
+                reference_frame,
+                source_frames,
+            })
+            .or_insert(next);
+        if group >= group_count || frames[group].is_some() {
+            continue;
+        }
+        frames[group] = Some(reference_frame);
+        centers[group] = evidence
+            .cameras
+            .iter()
+            .find(|camera| camera.frame_index == reference_frame)
+            .and_then(|camera| {
+                let r = camera.rotation.map(f64::from);
+                let rotation = nalgebra::Matrix3::from_row_slice(&r);
+                let t = Vector3::from(camera.translation.map(f64::from));
+                (rotation.iter().chain(t.iter()).all(|v| v.is_finite())).then_some(
+                    crate::surface_merge::ReferenceCamera {
+                        rotation,
+                        translation: t,
+                    },
+                )
+            });
+    }
+    (frames, centers)
 }
 
 fn evidence_support_membership(
@@ -132,9 +253,9 @@ fn fuse_mutually_supported_vertices(
     points: &mut [Point3],
     triangles: &[MeshTriangle],
     membership: &[Option<usize>],
-) -> FusionStats {
+) -> FusionOutcome {
     if points.len() != membership.len() {
-        return FusionStats::default();
+        return FusionOutcome::default();
     }
 
     let VertexSurfaceEvidence {
@@ -144,7 +265,7 @@ fn fuse_mutually_supported_vertices(
         global_edge_scale,
     } = vertex_surface_evidence(points, triangles);
     let Some(global_edge_scale) = global_edge_scale else {
-        return FusionStats::default();
+        return FusionOutcome::default();
     };
     let cell_size = (global_edge_scale * MAX_GLOBAL_EDGE_FRACTION).max(GEOMETRIC_EPSILON);
 
@@ -265,12 +386,18 @@ fn fuse_mutually_supported_vertices(
         set_point_position(&mut points[movement.second], movement.position);
     }
 
-    FusionStats {
-        eligible_vertices,
-        candidate_pairs,
-        rejected_normal_pairs,
-        rejected_topology_pairs,
-        fused_pairs: accepted_moves.len(),
+    FusionOutcome {
+        stats: FusionStats {
+            eligible_vertices,
+            candidate_pairs,
+            rejected_normal_pairs,
+            rejected_topology_pairs,
+            fused_pairs: accepted_moves.len(),
+        },
+        pairs: accepted_moves
+            .iter()
+            .map(|movement| (movement.first, movement.second))
+            .collect(),
     }
 }
 
@@ -607,7 +734,7 @@ mod tests {
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
         let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 3);
         assert_eq!(stats.rejected_normal_pairs, 0);
@@ -631,7 +758,7 @@ mod tests {
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
         let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 0);
         assert!(stats.rejected_normal_pairs >= 2);
@@ -652,7 +779,7 @@ mod tests {
         let triangles = [triangle(0, 1, 2), triangle(3, 4, 5)];
         let membership = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 0);
         assert!(stats.rejected_topology_pairs > 0);
@@ -700,10 +827,52 @@ mod tests {
         let triangles = [triangle(0, 1, 2)];
         let membership = vec![Some(0), Some(0), Some(0)];
 
-        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership);
+        let stats = fuse_mutually_supported_vertices(&mut points, &triangles, &membership).stats;
 
         assert_eq!(stats.fused_pairs, 0);
         assert_eq!(stats.candidate_pairs, 0);
+    }
+
+    #[test]
+    fn merged_mesh_counts_and_warning_follow_the_retained_triangles() {
+        let patch = |reference_frame, accepted_triangles| crate::mesh::MeshReferencePatchStats {
+            reference_frame,
+            accepted_triangles,
+            attempted: true,
+            ..crate::mesh::MeshReferencePatchStats::default()
+        };
+        let mut mesh = crate::MeshStats {
+            attempted: true,
+            accepted_triangles: 30,
+            candidate_triangles: 40,
+            reference_patches: vec![patch(2, 20), patch(5, 10), patch(9, 4)],
+            ..crate::MeshStats::default()
+        };
+        let stale = crate::mesh_warning(&mesh).unwrap();
+        let mut warnings = vec!["other".to_owned(), stale.clone()];
+        // Groups 0 and 2 share reference frame 2; frame 5 lost every triangle;
+        // frame 9 has no support group and keeps its count.
+        refresh_mesh_after_merge(
+            &mut mesh,
+            &mut warnings,
+            21,
+            &[Some(2), Some(5), Some(2)],
+            &[12, 0, 5],
+        );
+        assert_eq!(mesh.accepted_triangles, 21);
+        let counts: Vec<usize> = mesh
+            .reference_patches
+            .iter()
+            .map(|patch| patch.accepted_triangles)
+            .collect();
+        assert_eq!(counts, vec![17, 0, 4]);
+        assert_eq!(warnings[0], "other");
+        assert_ne!(warnings[1], stale);
+        assert!(
+            warnings[1].contains("accepted 21 triangles"),
+            "{}",
+            warnings[1]
+        );
     }
 
     #[test]
