@@ -1292,6 +1292,35 @@ mod tests {
             .expect("PLY header")
             + 11;
         let header = String::from_utf8(bytes[..text_end].to_vec()).expect("ASCII header");
+        // The declared layout must be exactly what the payload decoding below assumes.
+        let declared: Vec<&str> = header
+            .lines()
+            .filter(|line| !line.starts_with("comment ") && !line.starts_with("element "))
+            .collect();
+        assert_eq!(
+            declared,
+            [
+                "ply",
+                "format binary_little_endian 1.0",
+                "property float x",
+                "property float y",
+                "property float z",
+                "property list uchar uint vertex_indices",
+                "end_header",
+            ],
+            "unexpected PLY layout in {}",
+            path.display()
+        );
+        let elements: Vec<&str> = header
+            .lines()
+            .filter(|line| line.starts_with("element "))
+            .collect();
+        assert!(
+            elements.len() == 2
+                && elements[0].starts_with("element vertex ")
+                && elements[1].starts_with("element face "),
+            "PLY must declare vertices, then faces"
+        );
         let count = |name: &str| -> usize {
             header
                 .lines()
@@ -1379,6 +1408,11 @@ mod tests {
                             "-1.0".to_owned()
                         ]
                     );
+                    assert_eq!(
+                        depth_bytes.len() - start,
+                        pixels * 4,
+                        "PFM payload is not width x height floats"
+                    );
                     let mut depth = vec![0.0_f32; pixels];
                     for (index, chunk) in depth_bytes[start..].as_chunks::<4>().0.iter().enumerate()
                     {
@@ -1397,6 +1431,11 @@ mod tests {
                             format!("{width} {height}"),
                             "255".to_owned()
                         ]
+                    );
+                    assert_eq!(
+                        mask_bytes.len() - start,
+                        pixels,
+                        "PGM payload is not width x height bytes"
                     );
                     (rotation, center, depth, mask_bytes[start..].to_vec())
                 })
