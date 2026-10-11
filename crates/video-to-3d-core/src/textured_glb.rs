@@ -53,7 +53,12 @@ struct GltfBuilder {
 }
 
 impl GltfBuilder {
-    fn view(&mut self, bytes: &[u8], target: Option<u32>) -> usize {
+    fn view(
+        &mut self,
+        bytes: &[u8],
+        target: Option<u32>,
+        control: &mut crate::ReconstructionControl<'_>,
+    ) -> Result<usize, String> {
         while !self.bin.len().is_multiple_of(4) {
             self.bin.push(0);
         }
@@ -65,17 +70,28 @@ impl GltfBuilder {
         if let Some(target) = target {
             view["target"] = json!(target);
         }
-        self.bin.extend_from_slice(bytes);
+        for chunk in bytes.chunks(64 * 1024) {
+            control.check()?;
+            self.bin.extend_from_slice(chunk);
+        }
         self.buffer_views.push(view);
-        self.buffer_views.len() - 1
+        Ok(self.buffer_views.len() - 1)
     }
 
-    fn float_accessor(&mut self, values: &[f32], kind: &str, width: usize, bounds: bool) -> usize {
-        let bytes = values
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        let view = self.view(&bytes, Some(ARRAY_BUFFER));
+    fn float_accessor(
+        &mut self,
+        values: &[f32],
+        kind: &str,
+        width: usize,
+        bounds: bool,
+        control: &mut crate::ReconstructionControl<'_>,
+    ) -> Result<usize, String> {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            control.check()?;
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let view = self.view(&bytes, Some(ARRAY_BUFFER), control)?;
         let mut accessor = json!({
             "bufferView": view,
             "componentType": FLOAT,
@@ -86,6 +102,7 @@ impl GltfBuilder {
             let mut min = vec![f32::INFINITY; width];
             let mut max = vec![f32::NEG_INFINITY; width];
             for chunk in values.chunks_exact(width) {
+                control.check()?;
                 for (axis, value) in chunk.iter().enumerate() {
                     min[axis] = min[axis].min(*value);
                     max[axis] = max[axis].max(*value);
@@ -95,22 +112,27 @@ impl GltfBuilder {
             accessor["max"] = json!(max);
         }
         self.accessors.push(accessor);
-        self.accessors.len() - 1
+        Ok(self.accessors.len() - 1)
     }
 
-    fn index_accessor(&mut self, indices: &[u32]) -> usize {
-        let bytes = indices
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        let view = self.view(&bytes, Some(ELEMENT_ARRAY_BUFFER));
+    fn index_accessor(
+        &mut self,
+        indices: &[u32],
+        control: &mut crate::ReconstructionControl<'_>,
+    ) -> Result<usize, String> {
+        let mut bytes = Vec::with_capacity(indices.len() * 4);
+        for value in indices {
+            control.check()?;
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let view = self.view(&bytes, Some(ELEMENT_ARRAY_BUFFER), control)?;
         self.accessors.push(json!({
             "bufferView": view,
             "componentType": UNSIGNED_INT,
             "count": indices.len(),
             "type": "SCALAR",
         }));
-        self.accessors.len() - 1
+        Ok(self.accessors.len() - 1)
     }
 }
 
@@ -163,6 +185,35 @@ pub fn encode_textured_glb_with_collider(
     bake: &SurfaceMaterialBake,
     collider: Option<&CoarseCollider>,
 ) -> Result<Vec<u8>, String> {
+    encode_textured_glb_controlled(
+        evidence,
+        bake,
+        collider,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+/// Internal cancelable export for a previously validated native assembly mesh.
+pub(crate) fn encode_textured_glb_with_cancel(
+    evidence: &ReconstructionEvidenceView<'_>,
+    bake: &SurfaceMaterialBake,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
+    encode_textured_glb_controlled(
+        evidence,
+        bake,
+        None,
+        &mut crate::ReconstructionControl::new(&mut is_canceled),
+    )
+}
+
+fn encode_textured_glb_controlled(
+    evidence: &ReconstructionEvidenceView<'_>,
+    bake: &SurfaceMaterialBake,
+    collider: Option<&CoarseCollider>,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> Result<Vec<u8>, String> {
+    control.check()?;
     // A collider is exported only when it is exactly what this evidence yields, so stale
     // or foreign collision geometry can never be paired with this surface.
     if let Some(collider) = collider {
@@ -192,6 +243,7 @@ pub fn encode_textured_glb_with_collider(
         .flat_map(|material| &material.triangles)
         .chain(&bake.fallback.triangles);
     for index in all_triangles {
+        control.check()?;
         match covered.get_mut(*index) {
             Some(seen @ false) => *seen = true,
             _ => {
@@ -216,6 +268,7 @@ pub fn encode_textured_glb_with_collider(
     let mut textures = Vec::new();
 
     for material in &bake.materials {
+        control.check()?;
         if material.corner_uvs.len() != material.triangles.len() {
             return Err(format!(
                 "reference material {} has {} corner UV sets for {} triangles",
@@ -227,6 +280,7 @@ pub fn encode_textured_glb_with_collider(
         let mut vertices = PrimitiveVertices::default();
         let mut uvs = Vec::new();
         for (triangle, corner_uvs) in material.triangles.iter().zip(&material.corner_uvs) {
+            control.check()?;
             let triangle = &triangles[*triangle];
             for (point, uv) in [
                 (triangle.a, corner_uvs[0]),
@@ -242,14 +296,20 @@ pub fn encode_textured_glb_with_collider(
             .order
             .iter()
             .flat_map(|index| position(*index))
-            .collect::<Vec<_>>();
-        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true);
-        let uv_accessor = gltf.float_accessor(&uvs, "VEC2", 2, false);
-        let index_accessor = gltf.index_accessor(&vertices.indices);
+            .map(|value| {
+                control.check()?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true, control)?;
+        let uv_accessor = gltf.float_accessor(&uvs, "VEC2", 2, false, control)?;
+        let index_accessor = gltf.index_accessor(&vertices.indices, control)?;
 
         let texture = &material.texture;
-        let png = encode_png_rgb(texture.width, texture.height, &texture.rgba)?;
-        let image_view = gltf.view(&png, None);
+        let png = encode_png_rgb_with_cancel(texture.width, texture.height, &texture.rgba, || {
+            control.is_canceled()
+        })?;
+        let image_view = gltf.view(&png, None, control)?;
         let name = match material.rule {
             MaterialRule::SameReferenceGrid => {
                 format!("reference-frame-{}", material.reference_frame)
@@ -310,6 +370,7 @@ pub fn encode_textured_glb_with_collider(
     if !bake.fallback.triangles.is_empty() {
         let mut vertices = PrimitiveVertices::default();
         for triangle in &bake.fallback.triangles {
+            control.check()?;
             let triangle = &triangles[*triangle];
             for point in [triangle.a, triangle.c, triangle.b] {
                 vertices.push(point);
@@ -319,7 +380,11 @@ pub fn encode_textured_glb_with_collider(
             .order
             .iter()
             .flat_map(|index| position(*index))
-            .collect::<Vec<_>>();
+            .map(|value| {
+                control.check()?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let colors = vertices
             .order
             .iter()
@@ -327,10 +392,14 @@ pub fn encode_textured_glb_with_collider(
                 let point = &points[*index];
                 [point.r, point.g, point.b].map(srgb_to_linear)
             })
-            .collect::<Vec<_>>();
-        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true);
-        let color_accessor = gltf.float_accessor(&colors, "VEC3", 3, false);
-        let index_accessor = gltf.index_accessor(&vertices.indices);
+            .map(|value| {
+                control.check()?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true, control)?;
+        let color_accessor = gltf.float_accessor(&colors, "VEC3", 3, false, control)?;
+        let index_accessor = gltf.index_accessor(&vertices.indices, control)?;
         materials.push(json!({
             "name": "vertex-color-fallback",
             "pbrMetallicRoughness": {
@@ -371,8 +440,8 @@ pub fn encode_textured_glb_with_collider(
     });
     if let Some(collider) = collider.filter(|collider| !collider.boxes.is_empty()) {
         let (positions, indices) = collider_mesh(collider);
-        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true);
-        let index_accessor = gltf.index_accessor(&indices);
+        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true, control)?;
+        let index_accessor = gltf.index_accessor(&indices, control)?;
         let extras = json!({ "video_to_3d": collision });
         meshes.push(json!({
             "name": "coarse-collider",
@@ -441,10 +510,17 @@ pub fn encode_textured_glb_with_collider(
     glb.extend_from_slice(&total.to_le_bytes());
     glb.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
     glb.extend_from_slice(&CHUNK_JSON.to_le_bytes());
-    glb.extend_from_slice(&json_chunk);
+    for chunk in json_chunk.chunks(64 * 1024) {
+        control.check()?;
+        glb.extend_from_slice(chunk);
+    }
     glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
     glb.extend_from_slice(&CHUNK_BIN.to_le_bytes());
-    glb.extend_from_slice(&bin);
+    for chunk in bin.chunks(64 * 1024) {
+        control.check()?;
+        glb.extend_from_slice(chunk);
+    }
+    control.check()?;
     Ok(glb)
 }
 

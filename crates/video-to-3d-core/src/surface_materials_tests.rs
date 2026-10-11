@@ -616,3 +616,6 @@ fn glb_export_rejects_a_bake_for_different_topology() {
     bake.fallback.triangles.push(0);
     assert!(encode_textured_glb(&fixture.evidence(), &bake).is_err());
 }
+
+#[path = "native_glb_cancel_acceptance_tests.rs"]
+mod native_glb_cancel_acceptance;

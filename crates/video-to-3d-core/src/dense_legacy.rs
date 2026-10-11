@@ -129,11 +129,28 @@ struct SourceView<'a> {
     search_max_depth: f64,
 }
 
+#[cfg(test)]
 pub(super) fn estimate_depth_points(
     frames: &[FrameInput],
     cameras: &[RegisteredCamera],
     sparse_points: &[Vector3<f64>],
     focal: f64,
+) -> DenseAnalysis {
+    estimate_depth_points_with_control(
+        frames,
+        cameras,
+        sparse_points,
+        focal,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+pub(super) fn estimate_depth_points_with_control(
+    frames: &[FrameInput],
+    cameras: &[RegisteredCamera],
+    sparse_points: &[Vector3<f64>],
+    focal: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> DenseAnalysis {
     if frames.is_empty() {
         return DenseAnalysis::skipped("no sampled frames are available");
@@ -251,6 +268,9 @@ pub(super) fn estimate_depth_points(
     let mut fusion_observation_counts = Vec::new();
 
     for y in (border..height - border).step_by(stride) {
+        if control.is_canceled() {
+            return DenseAnalysis::skipped("dense reconstruction canceled");
+        }
         for x in (border..width - border).step_by(stride) {
             if patch_contrast(&reference_luma, width, height, x as f64, y as f64)
                 < MIN_REFERENCE_CONTRAST
@@ -354,11 +374,7 @@ pub(super) fn estimate_depth_points(
             reciprocal_consistent_points += 1;
             fusion_input_observations += 1 + reciprocal_positions.len();
 
-            let fused = fuse_depth_observations(
-                best.position,
-                &reciprocal_positions,
-                best.depth,
-            );
+            let fused = fuse_depth_observations(best.position, &reciprocal_positions, best.depth);
             fusion_rejected_observations += fused.rejected_observations;
             if fused.observations < MIN_FUSION_OBSERVATIONS {
                 fusion_rejected_points += 1;
@@ -372,11 +388,9 @@ pub(super) fn estimate_depth_points(
             let error_confidence = 1.0 / (1.0 + best.error / 8.0);
             let depth_margin = depth_margin_score(ambiguity_margin);
             let margin_confidence = depth_margin.max(0.2);
-            let confidence = (support_confidence
-                * reciprocal_confidence
-                * error_confidence
-                * margin_confidence)
-                .clamp(0.05, 1.0) as f32;
+            let confidence =
+                (support_confidence * reciprocal_confidence * error_confidence * margin_confidence)
+                    .clamp(0.05, 1.0) as f32;
             let (r, g, b) = sample_rgb(reference_frame, x, y);
             points.push(Point3 {
                 x: fused.position.x as f32,
@@ -397,7 +411,7 @@ pub(super) fn estimate_depth_points(
         }
     }
 
-    let surface_completion = complete_surface_samples(
+    let surface_completion = complete_surface_samples_with_control(
         reference,
         reference_frame,
         &reference_luma,
@@ -412,6 +426,7 @@ pub(super) fn estimate_depth_points(
         border,
         stride,
         focal,
+        control,
     );
 
     DenseAnalysis {
@@ -462,6 +477,7 @@ fn depth_margin_score(ambiguity_margin: f64) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn complete_surface_samples(
     reference: &RegisteredCamera,
     reference_frame: &FrameInput,
@@ -478,6 +494,43 @@ fn complete_surface_samples(
     stride: usize,
     focal: f64,
 ) -> SurfaceCompletionStats {
+    complete_surface_samples_with_control(
+        reference,
+        reference_frame,
+        reference_luma,
+        source_views,
+        points,
+        grid_sites,
+        point_attributes,
+        errors,
+        supports,
+        width,
+        height,
+        border,
+        stride,
+        focal,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_surface_samples_with_control(
+    reference: &RegisteredCamera,
+    reference_frame: &FrameInput,
+    reference_luma: &[u8],
+    source_views: &[SourceView<'_>],
+    points: &mut Vec<Point3>,
+    grid_sites: &mut Vec<DenseGridSite>,
+    point_attributes: &mut Vec<EvidencePointAttributes>,
+    errors: &mut Vec<f64>,
+    supports: &mut Vec<f64>,
+    width: u32,
+    height: u32,
+    border: u32,
+    stride: usize,
+    focal: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> SurfaceCompletionStats {
     if stride == 0 || source_views.is_empty() {
         return SurfaceCompletionStats::default();
     }
@@ -493,6 +546,9 @@ fn complete_surface_samples(
         let mut additions = Vec::new();
 
         for y in (border..height - border).step_by(stride) {
+            if control.is_canceled() {
+                return stats;
+            }
             for x in (border..width - border).step_by(stride) {
                 if occupied.contains_key(&(x, y)) {
                     continue;
@@ -626,8 +682,8 @@ fn complete_surface_samples(
                     continue;
                 }
 
-                let neighbor_confidence = neighbor_confidences.iter().sum::<f64>()
-                    / neighbor_confidences.len() as f64;
+                let neighbor_confidence =
+                    neighbor_confidences.iter().sum::<f64>() / neighbor_confidences.len() as f64;
                 let support_confidence = direct_errors.len() as f64 / source_views.len() as f64;
                 let reciprocal_confidence =
                     ((fused.observations - 1) as f64 / source_views.len() as f64).clamp(0.0, 1.0);

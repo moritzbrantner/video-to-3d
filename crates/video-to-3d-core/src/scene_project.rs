@@ -191,6 +191,11 @@ impl OperationKind {
         match self {
             // 2: the built-in executor and the versioned surface-textures format.
             Self::TextureBake => 2,
+            // 2: native classic stages and canonical observed-environment assembly.
+            Self::SparseReconstruction
+            | Self::DenseReconstruction
+            | Self::SurfaceMesh
+            | Self::SceneAssembly => 2,
             _ => 1,
         }
     }

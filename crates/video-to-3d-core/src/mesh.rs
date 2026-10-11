@@ -48,6 +48,7 @@ pub(super) struct MeshAnalysis {
     pub triangles: Vec<MeshTriangle>,
 }
 
+#[cfg(test)]
 pub(super) fn reconstruct_dense_mesh(
     dense_points: &[Point3],
     grid_sites: &[crate::dense::DenseGridSite],
@@ -57,15 +58,44 @@ pub(super) fn reconstruct_dense_mesh(
     height: u32,
     focal: f64,
 ) -> MeshAnalysis {
+    reconstruct_dense_mesh_with_control(
+        dense_points,
+        grid_sites,
+        dense,
+        cameras,
+        width,
+        height,
+        focal,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reconstruct_dense_mesh_with_control(
+    dense_points: &[Point3],
+    grid_sites: &[crate::dense::DenseGridSite],
+    dense: &DenseStats,
+    cameras: &[RegisteredCamera],
+    width: u32,
+    height: u32,
+    focal: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> MeshAnalysis {
     if dense.reference_patches.is_empty() {
-        return from_legacy(legacy::reconstruct_dense_mesh(
-            dense_points,
-            grid_sites,
+        if dense.attempted && dense_points.len() >= 3 && dense_points.len() != grid_sites.len() {
+            return from_legacy(legacy::MeshAnalysis::skipped(
+                dense.reference_frame,
+                "dense point and reference-grid evidence counts disagree",
+            ));
+        }
+        return from_legacy(legacy::reconstruct_dense_mesh_samples(
+            dense_points.iter().zip(grid_sites),
             dense,
             cameras,
             width,
             height,
             focal,
+            control,
         ));
     }
 
@@ -80,6 +110,9 @@ pub(super) fn reconstruct_dense_mesh(
     let mut rejected_degenerate = 0usize;
 
     for patch in &dense.reference_patches {
+        if control.is_canceled() {
+            return MeshAnalysis::default();
+        }
         let Some(global_indices) = patch_point_indices(patch, dense_points.len(), grid_sites.len())
         else {
             patch_stats.push(MeshReferencePatchStats {
@@ -91,21 +124,14 @@ pub(super) fn reconstruct_dense_mesh(
             continue;
         };
 
-        let local_points = global_indices
-            .iter()
-            .map(|index| dense_points[*index])
-            .collect::<Vec<_>>();
-        let local_sites = global_indices
-            .iter()
-            .map(|index| grid_sites[*index])
-            .collect::<Vec<_>>();
+        // Borrow ranges through their existing index mapping; never copy dense geometry.
         let mut patch_dense = dense.clone();
         patch_dense.attempted = true;
         patch_dense.skip_reason = None;
         patch_dense.reference_frame = Some(patch.reference_frame);
         patch_dense.source_views = patch.source_frames.len();
         patch_dense.source_frames = patch.source_frames.clone();
-        patch_dense.accepted_points = local_points.len();
+        patch_dense.accepted_points = global_indices.len();
         patch_dense.surface_completed_points = patch.completed_points;
         patch_dense.grid_stride = patch.grid_stride;
         patch_dense.grid_border = patch.grid_border;
@@ -114,14 +140,16 @@ pub(super) fn reconstruct_dense_mesh(
         patch_dense.reference_frames = vec![patch.reference_frame];
         patch_dense.reference_patches.clear();
 
-        let result = legacy::reconstruct_dense_mesh(
-            &local_points,
-            &local_sites,
+        let result = legacy::reconstruct_dense_mesh_samples(
+            global_indices
+                .iter()
+                .map(|index| (&dense_points[*index], &grid_sites[*index])),
             &patch_dense,
             cameras,
             width,
             height,
             focal,
+            control,
         );
         attempted |= result.stats.attempted;
         grid_vertices += result.stats.grid_vertices;
@@ -149,7 +177,7 @@ pub(super) fn reconstruct_dense_mesh(
 
         patch_stats.push(MeshReferencePatchStats {
             reference_frame: patch.reference_frame,
-            point_count: local_points.len(),
+            point_count: global_indices.len(),
             attempted: result.stats.attempted,
             skip_reason: result.stats.skip_reason,
             grid_vertices: result.stats.grid_vertices,
@@ -200,9 +228,7 @@ fn patch_point_indices(
         return None;
     }
     let primary_end = patch.primary_start.checked_add(patch.primary_points)?;
-    let completion_end = patch
-        .completion_start
-        .checked_add(patch.completed_points)?;
+    let completion_end = patch.completion_start.checked_add(patch.completed_points)?;
     if primary_end > point_count || completion_end > point_count {
         return None;
     }
