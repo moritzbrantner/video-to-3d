@@ -21,9 +21,11 @@ Checks, each reported individually; the process exits non-zero unless all pass:
 - every matched node owns its mesh data (no other object shares it), and has
   polygons, non-degenerate bounds, a finite transform and a material;
 - world bounds agree with the expectation within `bounds_tolerance_m` when given;
-- no matched node has a parent or constraints, and moving each matched node in
-  turn by `edit_translation_m` moves exactly its bounds by that amount and leaves
-  every other object's transform and world-space vertices unchanged.
+- by default no matched node has a parent or constraints; an optional fixture-owned
+  `expected_parent_ids` instead checks exact canonical grouping without constraints;
+- moving each matched node by `edit_translation_m` moves exactly its world bounds
+  by that amount and leaves every other object's transform and world-space vertices
+  unchanged (grouped fixtures use a world-space edit).
 
 The report also lists the imported hierarchy (names, parents, mesh data,
 materials, custom properties) and, with `--render`, writes a canonical render.
@@ -215,12 +217,21 @@ def main():
                 report.check(f"{element}:bounds", error <= tolerance, f"max bounds error {error:.6f} m")
 
         delta = Vector(expected.get("edit_translation_m", [0.5, 0.0, 0.0]))
+        expected_parents = expected.get("expected_parent_ids")
         for element, obj in sorted(matched.items()):
-            report.check(
-                f"{element}:unparented",
-                obj.parent is None and len(obj.constraints) == 0,
-                f"parent {obj.parent.name if obj.parent else None}, {len(obj.constraints)} constraint(s)",
-            )
+            if expected_parents is None:
+                report.check(
+                    f"{element}:unparented",
+                    obj.parent is None and len(obj.constraints) == 0,
+                    f"parent {obj.parent.name if obj.parent else None}, {len(obj.constraints)} constraint(s)",
+                )
+            else:
+                report.check(
+                    f"{element}:parent",
+                    object_id(obj.parent) == expected_parents.get(element) if obj.parent else expected_parents.get(element) is None,
+                    f"parent id {object_id(obj.parent) if obj.parent else None}, expected {expected_parents.get(element)}",
+                )
+                report.check(f"{element}:constraints", len(obj.constraints) == 0, f"{len(obj.constraints)} constraints")
         # Every matched node, architecture included, is a potential coupling source.
         for element in expected["architecture"] + expected["objects"]:
             moved = matched.get(element)
@@ -229,7 +240,14 @@ def main():
             others = [obj for obj in meshes if obj != moved]
             before = {obj.name: (obj.matrix_world.copy(), world_vertex_digest(obj)) for obj in others}
             low_before = Vector(world_bounds(moved)[0])
-            moved.location = moved.location + delta
+            moved_world = moved.matrix_world.copy()
+            if expected_parents is None:
+                moved.location = moved.location + delta
+            else:
+                # Optional canonical grouping does not change the requested world edit.
+                translated = moved_world.copy()
+                translated.translation += delta
+                moved.matrix_world = translated
             bpy.context.view_layer.update()
             shift = Vector(world_bounds(moved)[0]) - low_before
             changed = [
@@ -242,7 +260,10 @@ def main():
                 (shift - delta).length < 1e-6 and not changed,
                 f"moved by {list(shift)}; other objects changed: {changed}",
             )
-            moved.location = moved.location - delta
+            if expected_parents is None:
+                moved.location = moved.location - delta
+            else:
+                moved.matrix_world = moved_world
             bpy.context.view_layer.update()
 
         if args.render and meshes:
