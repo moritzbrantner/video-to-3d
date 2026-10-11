@@ -545,7 +545,17 @@ fn reserved_native_directory_is_uncharged_and_corrected_build_resumes() {
         "{}",
         rejected.stderr
     );
-    assert_eq!(rejected.json["operations"]["sparse"]["attempts"], 0);
+    // Reports count the capability probe; only persisted charged usage consumes
+    // the default one-attempt budget. Unsupported releases that reservation.
+    assert_eq!(rejected.json["operations"]["sparse"]["attempts"], 1);
+    let (_, rejected_manifest) = project.open();
+    assert_eq!(
+        rejected_manifest.attempt_usage.iter()
+            .filter(|usage| usage.operation == "sparse")
+            .map(|usage| usage.attempts)
+            .sum::<u32>(),
+        0
+    );
     assert!(!project
         .root
         .join("artifacts/native/sparse/artifact.json")
