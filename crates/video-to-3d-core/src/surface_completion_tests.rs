@@ -584,10 +584,38 @@ impl PanSurface {
         bake
     }
 
-    /// For every triangle of `after`, the index of the `before` triangle it
-    /// was retained from. Consolidation keeps the triangle order, removes
-    /// owned duplicates, and re-indexes a corner only onto a fused partner,
-    /// which fusion moved to the same position.
+    /// Indices (in `after`) of the seam stitch triangles consolidation
+    /// appended after the retained triangles: the only triangles it creates,
+    /// over existing vertices of two reference patches.
+    fn seam_stitches(&self) -> Vec<usize> {
+        let total = self.after.mesh_triangles.len();
+        (total - self.stitched_seam_triangles()..total).collect()
+    }
+
+    /// Seam stitch triangles consolidation appended after the retained
+    /// triangles, as its merge diagnostic reports them.
+    fn stitched_seam_triangles(&self) -> usize {
+        let phrase = " seam stitch triangle(s)";
+        let warning = self
+            .after
+            .warnings
+            .iter()
+            .find(|warning| warning.starts_with("Overlapping reference patches:"))
+            .expect("merge diagnostic");
+        let end = warning
+            .find(phrase)
+            .expect("stitch count in the diagnostic");
+        let start = warning[..end]
+            .rfind(|c: char| !c.is_ascii_digit())
+            .map_or(0, |index| index + 1);
+        warning[start..end].parse().expect("stitch count")
+    }
+
+    /// For every retained triangle of `after` (all but the trailing seam
+    /// stitches), the index of the `before` triangle it was retained from.
+    /// Consolidation keeps the triangle order, removes owned duplicates, and
+    /// re-indexes a corner only onto a fused partner, which fusion moved to
+    /// the same position.
     fn retained_from(&self) -> Vec<usize> {
         let points = &self.after.dense_points;
         let same_position = |left: usize, right: usize| {
@@ -596,9 +624,10 @@ impl PanSurface {
                 && l.y.to_bits() == r.y.to_bits()
                 && l.z.to_bits() == r.z.to_bits()
         };
-        let mut origin = Vec::with_capacity(self.after.mesh_triangles.len());
+        let retained = self.after.mesh_triangles.len() - self.stitched_seam_triangles();
+        let mut origin = Vec::with_capacity(retained);
         let mut next = 0;
-        for triangle in &self.after.mesh_triangles {
+        for triangle in &self.after.mesh_triangles[..retained] {
             let after = [triangle.a, triangle.b, triangle.c];
             let found = (next..self.before.mesh_triangles.len()).find(|&index| {
                 let source = &self.before.mesh_triangles[index];
@@ -719,6 +748,8 @@ fn assert_retained_triangles_keep_their_reference(
 
 #[test]
 fn canonicalized_seam_triangles_keep_their_original_reference_texture() {
+    use crate::surface_materials::MaterialRule;
+
     let surface = pan_surface(false);
     for projection in [true, false] {
         let before = surface.bake(&surface.before, projection);
@@ -731,19 +762,33 @@ fn canonicalized_seam_triangles_keep_their_original_reference_texture() {
             !born.is_empty(),
             "overlap canonicalization must re-index retained lower-priority seam triangles onto higher-priority vertices"
         );
-        // No triangle of this surface has genuinely mixed support.
+        // Only the seam stitches (#137) have genuinely mixed support: they
+        // go to the seam rule (or fail closed to the fallback without
+        // intrinsics); no canonicalization-born triangle does.
+        let stitches = surface.seam_stitches();
         assert_eq!(
-            after.fallback.reasons.mixed_reference,
-            0,
+            after.fallback.reasons.mixed_reference + after.seam_triangles(),
+            stitches.len(),
             "canonicalization-born seam triangles must not count as mixed_reference (projection: {projection}): {}",
             after.diagnostic()
         );
-        assert_eq!(
-            after.seam_triangles(),
-            0,
-            "canonicalization-born seam triangles must not go to the seam rule: {}",
-            after.diagnostic()
-        );
+        for material in after
+            .materials
+            .iter()
+            .filter(|material| material.rule == MaterialRule::SeamSingleCameraProjection)
+        {
+            assert!(
+                material
+                    .triangles
+                    .iter()
+                    .all(|index| stitches.contains(index)),
+                "canonicalization-born seam triangles must not go to the seam rule: {}",
+                after.diagnostic()
+            );
+        }
+        if !projection {
+            assert_eq!(after.seam_triangles(), 0, "{}", after.diagnostic());
+        }
     }
 }
 
@@ -775,11 +820,13 @@ fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
         !born.is_empty(),
         "the connected surface must contain canonicalization-born cross-reference triangles"
     );
-    // ...so the only mixed-reference triangle is the genuinely mixed seam,
-    // and the single-camera rule textures it.
+    // ...so the only mixed-reference triangles are the genuinely mixed seam
+    // and the seam stitches (#137), and the single-camera rule textures them.
+    let mut mixed = surface.seam_stitches();
+    mixed.push(stitched);
     assert_eq!(
         bake.seam_triangles() + bake.fallback.reasons.mixed_reference,
-        1,
+        mixed.len(),
         "only the genuinely mixed seam is decided by the seam rule: {}",
         bake.diagnostic()
     );
@@ -799,20 +846,20 @@ fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
         .iter()
         .filter(|material| material.rule == MaterialRule::SeamSingleCameraProjection)
     {
-        assert_eq!(material.triangles, vec![stitched]);
+        assert!(material.triangles.iter().all(|index| mixed.contains(index)));
         assert!(material.seam_reference_frames.len() >= 2);
         assert_eq!(material.focal_pixels, Some(surface.focal as f32));
     }
 
     // Without intrinsics the seam rule fails closed for the genuinely mixed
-    // seam only; canonicalization-born triangles stay textured.
+    // triangles only; canonicalization-born triangles stay textured.
     let before = surface.bake(&surface.before, false);
     let closed = surface.bake(&surface.after, false);
     assert_retained_triangles_keep_their_reference(&surface, &before, &closed);
     assert_eq!(closed.seam_triangles(), 0);
     assert_eq!(
         closed.fallback.reasons.mixed_reference,
-        1,
+        mixed.len(),
         "{}",
         closed.diagnostic()
     );
