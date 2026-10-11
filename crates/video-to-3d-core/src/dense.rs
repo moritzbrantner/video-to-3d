@@ -10,7 +10,7 @@ const MIN_REFERENCE_PATCH_POINTS: usize = 3;
 const MAX_SOURCE_VIEWS_PER_REFERENCE: usize = 4;
 const DENSE_GRID_BORDER: usize = 3;
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseWorkingSetEstimate {
     pub frame_bytes: usize,
     pub retry_frame_bytes: usize,
@@ -52,13 +52,13 @@ mod legacy {
     include!("dense_legacy.rs");
 }
 
-#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct DenseGridSite {
     pub x: u32,
     pub y: u32,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseReferenceAttemptStats {
     pub reference_frame: usize,
     pub attempted: bool,
@@ -78,7 +78,7 @@ pub struct DenseReferenceAttemptStats {
     pub surface_completion_rejected_footprint: usize,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseReferencePatchStats {
     pub reference_frame: usize,
     pub source_frames: Vec<usize>,
@@ -95,7 +95,7 @@ pub struct DenseReferencePatchStats {
     pub search_max_depth: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseStats {
     pub attempted: bool,
     pub skip_reason: Option<String>,

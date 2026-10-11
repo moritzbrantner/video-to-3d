@@ -1,4 +1,9 @@
 //! Reusable reconstruction semantics and interchange contracts.
+//!
+//! The classic pipeline is available as one call ([`reconstruct`], [`reconstruct_browser`])
+//! and as three public stages with versioned artifacts ([`reconstruct_cameras`] →
+//! [`reconstruct_dense`] → [`reconstruct_mesh`], joined by [`compose_reconstruction`]);
+//! both give the same [`ReconstructionResult`].
 
 pub mod coarse_collision;
 pub mod colmap;
@@ -21,7 +26,6 @@ include!("reconstruction.rs");
 mod browser_contract;
 mod learned_depth;
 mod reconstruction_evidence;
-// contract: implemented by #172 (stub signatures; see tests/reconstruction_stages.rs)
 mod reconstruction_stages;
 mod surface_fusion;
 mod surface_merge;
@@ -39,7 +43,6 @@ pub use reconstruction_evidence::{
     ReconstructionEvidenceView, ReconstructionProviderClass, ReconstructionProviderDescriptor,
     SurfaceEvidenceRegion, TriangleSourceCorners, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
-// contract: implemented by #172
 pub use reconstruction_stages::{
     compose_reconstruction, reconstruct_cameras, reconstruct_dense, reconstruct_mesh,
     request_content_hash, CameraStageArtifact, DenseStageArtifact, MeshStageArtifact,

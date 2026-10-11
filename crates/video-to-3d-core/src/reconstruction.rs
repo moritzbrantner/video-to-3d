@@ -16,6 +16,7 @@ pub use multi_view::{
 };
 pub use revisit::{RevisitCandidateStats, RevisitClosureStats, RevisitRecoveryStats, RevisitStats};
 
+use reconstruction_stages::{SparseReconstruction, StageCamera};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -43,7 +44,7 @@ pub struct FrameInput {
     pub rgba: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ReconstructionOptions {
     pub max_features: usize,
@@ -79,7 +80,7 @@ pub struct ReconstructionRequest {
     pub options: ReconstructionOptions,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct CameraPose {
     pub frame_index: usize,
     pub x: f32,
@@ -99,7 +100,7 @@ pub struct Point3 {
     pub b: u8,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct PairStats {
     pub from_frame: usize,
     pub to_frame: usize,
@@ -114,7 +115,7 @@ pub struct PairStats {
     pub low_parallax: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct CalibratedPairStats {
     pub from_frame: usize,
     pub to_frame: usize,
@@ -129,7 +130,7 @@ pub struct CalibratedPairStats {
     pub translation_direction: [f32; 3],
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct RegisteredViewStats {
     pub frame_index: usize,
     pub correspondences: usize,
@@ -144,7 +145,7 @@ pub struct RegisteredViewStats {
 /// The independent solve of one clip segment. Each segment with a usable seed pair is
 /// seeded, registered and bundle-adjusted on its own; its cameras live in that segment's
 /// arbitrary monocular frame and are never related to another segment's frame here.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct SegmentSolveStats {
     pub segment: usize,
     pub first_frame: usize,
@@ -167,7 +168,7 @@ pub struct SegmentSolveStats {
 
 /// The gate that rejected a calibrated seed-pair candidate, in pipeline order. The
 /// first two are frame-selection gates; the rest are calibrated two-view gates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedGate {
     /// A frame of the pair failed the blur or exposure quality gate.
@@ -236,7 +237,7 @@ impl SeedGate {
 /// Machine-readable evidence of one frame pair as a calibrated seed-pair candidate: every
 /// adjacent pair, plus wider pairs of a segment none of whose adjacent pairs seeded.
 /// Calibrated measurements are `None` when an earlier gate stopped the attempt.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct SeedCandidateStats {
     pub from_frame: usize,
     pub to_frame: usize,
@@ -293,14 +294,25 @@ impl Serialize for BootstrapGate {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+impl<'de> Deserialize<'de> for BootstrapGate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        let name = String::deserialize(deserializer)?;
+        if name == "registration" {
+            return Ok(Self::Registration);
+        }
+        SeedGate::deserialize(name.as_str().into_deserializer()).map(Self::Seed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SeedGateCount {
     pub gate: SeedGate,
     pub candidates: usize,
 }
 
 /// Which kind of evidence could lift a bootstrap failure. Reported only; never invoked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BootstrapEscalation {
     /// Correspondences are the limit: learned matching may supply more consistent matches.
@@ -314,7 +326,7 @@ pub enum BootstrapEscalation {
     LearnedMultiView,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct BootstrapDiagnosis {
     /// `None` when a seed pair and at least one further camera were accepted.
     pub decisive_gate: Option<BootstrapGate>,
@@ -350,13 +362,12 @@ pub struct ReconstructionResult {
     pub seed_candidates: Vec<SeedCandidateStats>,
     pub bootstrap: BootstrapDiagnosis,
     pub warnings: Vec<String>,
-    /// Track evidence for recovery ranking, which compares candidates over one frame range.
-    #[serde(skip)]
-    pub(crate) track_scope: TrackScope,
 }
 
-/// Per-frame track evidence of one reconstruction, kept out of the serialized result.
-#[derive(Clone, Debug, Default)]
+/// Per-frame track evidence of one camera solve, for recovery ranking, which compares
+/// candidates over one frame range. Not part of [`ReconstructionResult`]; the camera
+/// stage artifact keeps it with the rest of the sparse evidence.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TrackScope {
     /// First and last frame of every feature track.
     spans: Vec<(usize, usize)>,
@@ -395,28 +406,42 @@ struct Feature {
     descriptor: Vec<i16>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct FeatureMatch {
     a: usize,
     b: usize,
     distance: f32,
 }
 
+/// The classic pipeline in one call. It composes the same three stage cores as the public
+/// staged entry points ([`reconstruct_cameras`] → [`reconstruct_dense`] →
+/// [`reconstruct_mesh`], joined by [`compose_reconstruction`]): registration with its
+/// bounded recovery, dense evidence of the selected solve, then the mesh and surface
+/// consolidation. It only skips the stage artifacts' identity hashing and storage.
 pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
+    let sparse = reconstruct_sparse(request)?;
+    let dense = reconstruction_stages::estimate_dense_evidence(&request.frames, &sparse);
+    reconstruction_stages::finish_reconstruction(sparse, dense)
+}
+
+/// The camera stage: one ordinary solve plus, when it lacks multi-view evidence, the
+/// bounded recovery retries. Recovery ranks sparse evidence only, so no candidate needs
+/// dense depth or a mesh; the selected solve records its effective options.
+fn reconstruct_sparse(request: &ReconstructionRequest) -> Result<SparseReconstruction, String> {
     let initial = reconstruct_once(request)?;
     if !needs_registration_recovery(request, &initial) {
-        return finalize_reconstruction(initial);
+        return Ok(initial);
     }
 
     let Some(first_frame) = request.frames.first() else {
-        return finalize_reconstruction(initial);
+        return Ok(initial);
     };
     let retry_radius =
         pan_recovery_radius(first_frame.width, request.options.match_radius, &initial);
     // Every candidate's track evidence is compared over the first solve's primary frames,
     // even when a retry segments the clip differently.
     let scope = initial.track_scope.primary;
-    let score = |result: &ReconstructionResult| reconstruction_score(result, scope);
+    let score = |result: &SparseReconstruction| reconstruction_score(result, scope);
     let mut best = initial;
     let mut selected_recovery = None;
 
@@ -469,22 +494,17 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
     }
 
     if let Some(recovery) = selected_recovery {
-        best.warnings.push(format!(
+        best.warnings_after_mesh.push(format!(
             "The Rust core selected {recovery} after the ordinary reconstruction lacked sufficient accepted multi-view evidence. Seed-pair, PnP, bundle-adjustment, dense-depth, and mesh acceptance gates remain unchanged."
         ));
     }
 
-    finalize_reconstruction(best)
+    Ok(best)
 }
 
-fn finalize_reconstruction(
-    mut reconstruction: ReconstructionResult,
-) -> Result<ReconstructionResult, String> {
-    crate::surface_fusion::consolidate_surface_evidence(&mut reconstruction)?;
-    Ok(reconstruction)
-}
-
-fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionResult, String> {
+/// One deterministic camera solve with the request's options: the sparse result and the
+/// camera-stage diagnostics, but no dense depth or mesh (those are later stages).
+fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruction, String> {
     validate_request(request)?;
 
     let width = request.frames[0].width;
@@ -885,31 +905,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         .chain(&optimized_new_landmark_positions)
         .copied()
         .collect();
-    let dense_analysis = dense::estimate_depth_points_with_budget(
-        &request.frames,
-        &registered_geometry,
-        &dense_sparse_points,
-        focal as f64,
-        options.max_dense_working_set_bytes,
-        options.max_features,
-        options.descriptor_radius,
-    );
-    let mesh_analysis = mesh::reconstruct_dense_mesh(
-        &dense_analysis.points,
-        &dense_analysis.grid_sites,
-        &dense_analysis.stats,
-        &registered_geometry,
-        width,
-        height,
-        focal as f64,
-    );
-    let mesh = mesh_analysis.stats;
-    let mesh_triangles = mesh_analysis.triangles;
-    let dense = dense_analysis.stats;
-    let dense_grid_sites = dense_analysis.grid_sites;
-    let dense_point_attributes = dense_analysis.point_attributes;
-    let dense_points = dense_analysis.points;
-    let multi_view = multi_view_analysis.stats;
+    let mut multi_view = multi_view_analysis.stats;
 
     let calibrated_pair = best_two_view.map(|(seed_frames, estimate)| {
         let source_features = &features[seed_frames[0]];
@@ -1066,20 +1062,9 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         );
     }
 
-    if let Some(limit) = dense.reference_view_limit {
-        warnings.push(format!(
-            "The dense working set for every reference view ({} MiB) exceeds the {} MiB budget, so dense reconstruction kept the first {limit} reference view(s) in its usual order ({} MiB). Each kept view passed the same gates as a full run; the remaining views were not reconstructed.",
-            dense.full_working_set_bytes / (1024 * 1024),
-            dense.working_set_budget_bytes / (1024 * 1024),
-            dense.working_set_estimate.total_bytes / (1024 * 1024),
-        ));
-    }
-    if let Some(dense_warning) = dense_warning(&dense) {
-        warnings.push(dense_warning);
-    }
-    if let Some(mesh_warning) = mesh_warning(&mesh) {
-        warnings.push(mesh_warning);
-    }
+    // The dense and mesh stages report here, between the camera stage's warnings above
+    // and below (see `reconstruction_stages::ordered_warnings`).
+    let warnings_before_dense = std::mem::take(&mut warnings);
 
     let recovered_from_revisit = revisits
         .recoveries
@@ -1183,16 +1168,16 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         ));
     }
 
-    Ok(ReconstructionResult {
+    let final_cameras = std::mem::take(&mut multi_view.bundle_adjustment.final_cameras);
+    let mut revisits = revisits;
+    revisits.release_solver_evidence();
+    Ok(SparseReconstruction {
+        options,
+        image_width: width,
+        image_height: height,
+        focal_length_pixels: focal,
         cameras,
         points,
-        dense_points,
-        dense_grid_sites,
-        dense_point_attributes,
-        dense,
-        mesh_triangles,
-        mesh_triangle_sources: Vec::new(),
-        mesh,
         pairs,
         calibrated_pair,
         multi_view,
@@ -1200,8 +1185,15 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<ReconstructionRes
         registered_views,
         seed_candidates: seed_evidence,
         bootstrap,
-        warnings,
+        final_cameras: final_cameras.iter().map(StageCamera::from).collect(),
+        dense_cameras: registered_geometry.iter().map(StageCamera::from).collect(),
+        dense_sparse_points: dense_sparse_points
+            .iter()
+            .map(|point| [point.x, point.y, point.z])
+            .collect(),
         track_scope,
+        warnings_before_dense,
+        warnings_after_mesh: warnings,
     })
 }
 
@@ -2115,7 +2107,7 @@ fn dense_warning(dense: &DenseStats) -> Option<String> {
 
 fn needs_registration_recovery(
     request: &ReconstructionRequest,
-    result: &ReconstructionResult,
+    result: &SparseReconstruction,
 ) -> bool {
     if request.frames.len() < 3 {
         return false;
@@ -2144,7 +2136,7 @@ fn needs_registration_recovery(
 }
 
 fn secondary_segment_solves(
-    result: &ReconstructionResult,
+    result: &SparseReconstruction,
 ) -> impl Iterator<Item = &SegmentSolveStats> {
     result
         .multi_view
@@ -2156,7 +2148,7 @@ fn secondary_segment_solves(
 fn pan_recovery_radius(
     width: u32,
     current_radius: u32,
-    result: &ReconstructionResult,
+    result: &SparseReconstruction,
 ) -> u32 {
     if current_radius >= PAN_RECOVERY_MAX_RADIUS {
         return current_radius;
@@ -2174,7 +2166,7 @@ fn pan_recovery_radius(
         .clamp(current_radius, PAN_RECOVERY_MAX_RADIUS)
 }
 
-fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
+fn accepted_registered_camera_count(result: &SparseReconstruction) -> usize {
     if result.calibrated_pair.is_some() {
         result.cameras.len()
     } else {
@@ -2182,7 +2174,7 @@ fn accepted_registered_camera_count(result: &ReconstructionResult) -> usize {
     }
 }
 
-fn reconstruction_score(result: &ReconstructionResult, scope: (usize, usize)) -> [usize; 10] {
+fn reconstruction_score(result: &SparseReconstruction, scope: (usize, usize)) -> [usize; 10] {
     // Recovery chooses the strongest sparse reconstruction before dense geometry is accepted.
     // Dense output may be suppressed by the working-set budget, so it cannot safely decide which
     // camera/point solution survives. Every field up to the sparse points describes the primary
@@ -2940,32 +2932,23 @@ mod tests {
 
     #[test]
     fn recovery_score_is_independent_of_dense_budget_output() {
+        // Recovery ranks the camera stage's sparse solve, which carries no dense depth or
+        // mesh; the dense working-set budget only reaches the later dense stage.
         let request = ReconstructionRequest {
             frames: vec![synthetic_frame(96, 80, 0), synthetic_frame(96, 80, 0)],
             options: ReconstructionOptions::default(),
         };
-        let without_dense = reconstruct_once(&request).expect("fixture should reconstruct");
-        let mut with_dense = without_dense.clone();
-        with_dense.dense_points.push(Point3 {
-            x: 1.0,
-            y: 2.0,
-            z: 3.0,
-            confidence: 0.9,
-            r: 10,
-            g: 20,
-            b: 30,
-        });
-        with_dense.mesh_triangles.push(MeshTriangle {
-            a: 0,
-            b: 0,
-            c: 0,
-            confidence: 0.8,
-        });
+        let mut starved = request.clone();
+        starved.options.max_dense_working_set_bytes = 1;
+        let ordinary = reconstruct_once(&request).expect("fixture should reconstruct");
+        let mut budgeted = reconstruct_once(&starved).expect("fixture should reconstruct");
 
         assert_eq!(
-            reconstruction_score(&without_dense, without_dense.track_scope.primary),
-            reconstruction_score(&with_dense, with_dense.track_scope.primary)
+            reconstruction_score(&ordinary, ordinary.track_scope.primary),
+            reconstruction_score(&budgeted, budgeted.track_scope.primary)
         );
+        budgeted.options.max_dense_working_set_bytes = request.options.max_dense_working_set_bytes;
+        assert_eq!(budgeted, ordinary, "the budget changes no camera-stage output");
     }
 
     #[test]
@@ -3514,7 +3497,7 @@ mod tests {
         assert_eq!(initial_secondary.len(), 1);
         assert!(initial_secondary[0].seed_pair.is_none());
 
-        let result = reconstruct(&request).expect("reconstruction should succeed");
+        let result = reconstruct_sparse(&request).expect("reconstruction should succeed");
         let secondary: Vec<_> = secondary_segment_solves(&result).collect();
         assert_eq!(secondary.len(), 1);
         assert!(secondary[0].seed_pair.is_some(), "{:?}", secondary[0]);
