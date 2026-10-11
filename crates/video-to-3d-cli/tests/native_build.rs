@@ -550,7 +550,9 @@ fn reserved_native_directory_is_uncharged_and_corrected_build_resumes() {
     assert_eq!(rejected.json["operations"]["sparse"]["attempts"], 1);
     let (_, rejected_manifest) = project.open();
     assert_eq!(
-        rejected_manifest.attempt_usage.iter()
+        rejected_manifest
+            .attempt_usage
+            .iter()
             .filter(|usage| usage.operation == "sparse")
             .map(|usage| usage.attempts)
             .sum::<u32>(),
