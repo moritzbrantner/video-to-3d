@@ -46,10 +46,14 @@ an unrelated working directory and the public runner/store seam:
   `SurfaceMeshArtifact`, validates through `ReconstructionEvidenceView`, and equals
   the single-call classic evidence on all serialized fields.
 - The canonical `AssembledScene` has real cameras and an environment visual whose
-  mesh resource is hash-verified GLB data. Its provenance is geometric multi-view;
+  mesh resource is hash-verified GLB data. Its provenance exactly preserves the
+  standalone classic evidence, including separately labeled image-revalidated
+  completion when present; learned/generative geometry cannot be fabricated;
   the smoke does not claim editable object decomposition.
-- Rebuild executes no operations. Dense corruption rebuilds only dense, mesh and
-  assembly while preserving the upstream sparse bytes and verified ingest receipt.
+- Rebuild executes no operations. Dense corruption rebuilds dense and restores
+  identical deterministic bytes while preserving upstream and valid descendants.
+  Descendants rebuild only when their verified input content actually changes, as
+  independently covered by the protected existing store contract.
   Corrupting the assembled scene's mesh resource invalidates its scene receipt and
   rebuilds assembly rather than reporting a current unusable scene.
 - Cancellation after actual sparse computation persists its receipt, dispatches no

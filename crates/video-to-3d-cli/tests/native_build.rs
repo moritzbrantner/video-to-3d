@@ -5,6 +5,7 @@
 //! all reconstruction/assembly operations must run through the actual CLI/core.
 
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -302,10 +303,11 @@ fn native_build_computes_real_stages_and_environment_with_verified_receipts() {
         "native output retains exact classic evidence"
     );
     assert!(!mesh.triangles.is_empty());
-    assert!(mesh
-        .regions
-        .iter()
-        .all(|region| region.origin == video_to_3d_core::EvidenceOrigin::GeometricMultiView));
+    assert!(mesh.regions.iter().all(|region| matches!(
+        region.origin,
+        video_to_3d_core::EvidenceOrigin::GeometricMultiView
+            | video_to_3d_core::EvidenceOrigin::RevalidatedCompletion
+    )));
 
     let scene = AssembledScene::from_json(&project.document("assemble")).unwrap();
     scene.validate().unwrap();
@@ -328,7 +330,13 @@ fn native_build_computes_real_stages_and_environment_with_verified_receipts() {
         .unwrap();
     assert_eq!(
         resource.provenance,
-        vec![SceneProvenance::GeometricMultiView]
+        expected
+            .regions
+            .iter()
+            .map(|region| SceneProvenance::from(region.origin))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
     );
     let bytes = fs::read(resource.path.resolve(&project.root)).unwrap();
     assert_eq!(ContentHash::of_bytes(&bytes), resource.content_hash);
@@ -347,20 +355,25 @@ fn native_build_computes_real_stages_and_environment_with_verified_receipts() {
 }
 
 #[test]
-fn corrupt_dense_output_rebuilds_only_dense_and_descendants() {
+fn corrupt_dense_output_restores_identical_bytes_and_reuses_valid_descendants() {
     let project = Project::new("dense-corruption", true);
     project.assert_complete();
     let sparse = project.document("sparse");
+    let dense = project.document("dense");
+    let mesh = project.document("mesh");
+    let scene = project.document("assemble");
     fs::write(project.output("dense"), b"corrupt dense artifact").unwrap();
     let result = project.build();
     assert_eq!(result.code, 0, "{}", result.stderr);
-    assert_eq!(
-        result.json["executed"],
-        json!(["assemble", "dense", "mesh"])
-    );
+    assert_eq!(result.json["executed"], json!(["dense"]));
     assert_eq!(result.json["operations"]["ingest"]["state"], "reused");
     assert_eq!(result.json["operations"]["sparse"]["state"], "reused");
     assert_eq!(project.document("sparse"), sparse);
+    assert_eq!(project.document("dense"), dense);
+    assert_eq!(project.document("mesh"), mesh);
+    assert_eq!(project.document("assemble"), scene);
+    assert_eq!(result.json["operations"]["mesh"]["state"], "reused");
+    assert_eq!(result.json["operations"]["assemble"]["state"], "reused");
 }
 
 #[test]
@@ -459,6 +472,7 @@ fn unavailable_local_provider_remains_nonpassing_without_fabricated_scene() {
     document["provider_policy"]["providers"] = json!([
         {"id":"absent-depth", "location":"local", "capabilities":["learned_reconstruction"]}
     ]);
+    document["provider_policy"]["fallback_order"] = json!(["absent-depth"]);
     document["operations"].as_array_mut().unwrap().insert(
         2,
         json!({
