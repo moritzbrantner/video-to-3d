@@ -341,8 +341,8 @@ pub fn decode_evidence(
     }
     let header_length = u32_at(&prefix, 12) as usize;
     bounded("header bytes", header_length, limits.max_header_bytes)?;
-    let mut header = vec![0_u8; header_length];
-    read_exact(input, &mut header, "header")?;
+    // Grow with the bytes actually received, like the geometry buffers.
+    let header = read_records(input, header_length, 1, "header", |bytes| bytes[0])?;
     // Collection lengths are counted first; nested data is then bounded by the
     // header byte limit.
     let counts: HeaderCounts = serde_json::from_slice(&header)
