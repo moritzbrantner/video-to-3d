@@ -261,3 +261,43 @@ separate cancelable stage serialization from still-atomic JSON parsing, numerica
 SVD, sorts and disclosed nonserialization metadata windows. Until then, the old
 limitation describes baseline only and is not an acceptance exemption. This is
 not hard real-time cancellation, reconstruction recognition or product #77 closure.
+
+### Actual native mesh JSON read/write boundaries before repair
+
+Supplemental protected coverage authored against frozen parser baseline `9f7e485`
+and current acceptance head `0ef55b8` before the JSON repair. Existing mesh fixture
+vertices/provenance are retained; 8192 repetitions of its valid triangles produce
+about1.5MB of actual geometry JSON, not whitespace or dummy pre-work polls. Native
+mesh validation accepts that fixture. No-op controlled parsing equals existing
+parsed artifact serialization and geometry. Adding trailing invalid JSON makes
+existing parsing fail; a callback requesting cancellation after reads2/4 must instead
+abort before reaching the trailing syntax error. Frozen9f is genuinely one GREEN/
+one RED: cancellation test receives trailing characters with polls=0. The after4
+iteration remains unexecuted in that fail-fast RED run.
+
+`native_mesh_json_write_acceptance_tests.rs` separately protects the **actual**
+SurfaceMeshArtifact used by native SurfaceMesh output: false callback equals existing
+pretty JSON plus newline, mid-write cancellation returns no output, and nonfinite
+geometry rejects. Current0ef compiles RED because actual SurfaceMeshArtifact lacks
+to_json_with_cancel (earlier MeshStageArtifact tests are complementary, not proof
+of this native branch). API spelling may be translated independently; preserve
+legacy byte format and active-token wiring, not an alternate artifact format.
+
+Source audit required after repair: use existing serde deserialization through an
+actual cancel-aware Read, and serde serialization through actual cancel-aware Write;
+no custom parser/schema, input pre-scan, whitespace padding or dummy callback loop.
+Both version-header skip traversal and typed full traversal must use that control.
+Native CameraStageArtifact/DenseStageArtifact readers currently use the analogous
+two uncancelable serde traversals; their native read call sites must receive the
+active token as well. Those analogous paths are source-audit requirements, not new
+runtime coverage claimed by the two mesh parser tests. Existing constructor/evidence
+validation must preserve its token, schema/hash/provenance and no large duplicate
+geometry guarantees.
+
+All four native output branches require source-audited active-token writers:
+SparseCamera/DenseEvidence preserve compact stage JSON; SurfaceMesh preserves actual
+SurfaceMeshArtifact pretty JSON/newline; SceneAssembly preserves assembled-scene
+pretty JSON/newline. No-op callback parity and nonfinite safeguards must remain.
+These linear JSON walks are now explicit required cooperative boundaries; earlier
+notes disclosing atomic JSON were honest limitations, not proof of interruption.
+Individual SVD/sorts remain their separately disclosed indivisible operations.

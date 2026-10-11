@@ -1937,3 +1937,9 @@ fn parsed_trusted_mesh_reuses_borrowed_evidence_without_geometry_copy() {
     // This proves the trusted borrow seam, not that assembly wires it correctly.
     // Native token routing/no redundant validation requires the recorded source audit.
 }
+
+#[path = "mesh_json_read_acceptance_tests.rs"]
+mod mesh_json_read_acceptance;
+
+#[path = "native_mesh_json_write_acceptance_tests.rs"]
+mod native_mesh_json_write_acceptance;
