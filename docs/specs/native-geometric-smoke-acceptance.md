@@ -152,3 +152,43 @@ intermediate work boundary. Exact implementation poll counts and wall-clock limi
 are not acceptance requirements. Native dispatch must wire its existing token into
 these variants and publish neither a success receipt nor partial accepted output.
 Existing between-wave cancellation remains a separate regression.
+
+## Independent cancellation adjacency repair (frozen9f7e485)
+
+Review4243558325 identifies native assembly reading with a token, then calling
+SurfaceMeshArtifact::from_json with no-op validation and evidence() with a second
+whole-mesh noncancelable validation. Existing
+scene_artifacts_tests::surface_mesh_parsing_polls_for_cancellation_during_validation
+already independently proves cancellation after entry aborts validation of the
+real accepted mesh fixture. Reuse it; do not manufacture a new parser authority.
+The added parsed_trusted_mesh_reuses_borrowed_evidence_without_geometry_copy test
+proves validated parsing can yield the existing borrowed evidence_view sharing
+owned point/triangle allocations, exact geometry/provenance and regions.
+
+Native assembly must parse/validate once with the actual token and reuse that
+trusted borrow, avoiding another raw/evidence validation traversal. This wiring
+is a mandatory source/call-graph audit, not mechanically proven by the parser unit
+test. GLB consumers must not reintroduce token-free whole-geometry validation at
+this same trusted boundary; record any unavoidable independent export trust check
+explicitly and carry cooperative cancellation through expensive work. No new
+schema/provenance label or geometry authority is introduced.
+
+Review4243558328 identifies vertex_surface_evidence's initial whole-triangle
+prepass outside controlled fusion. fusion_prepass_acceptance_tests exercises that
+actual private boundary with real Point3/triangle data. The proposed routine
+vertex_surface_evidence_with_control returns no accepted evidence on cancellation
+requested at callbacks2/4, after initial entry; noop control preserves normals,
+local edge scales, incident triangle membership and median edge scale versus the
+original helper and a simple exact geometric oracle. API/result spelling is
+independently translatable; no arbitrary wall-time/thread-race test is allowed.
+
+Callback counts alone cannot distinguish work-loop polling from dummy entry polls.
+Review actual triangle processing, point-derived normalization/scales and edge
+sorting/cancellation boundaries after repair: no whole prepass may remain
+uncontrolled before later fusion polls. The existing controlled fusion caller must
+pass the same sticky ReconstructionControl, not a fresh no-op/second solver.
+Repeated triangles here are deterministic private prepass inputs, not product
+scene or object-recognition evidence. Baseline helper lacks the controlled seam:
+new prepass tests are compile-red until distinct production repair; assembly parse/
+borrow tests can be green while native wiring remains defective. Record chronology
+as independent repair acceptance before this fix, not original feature tests-first.

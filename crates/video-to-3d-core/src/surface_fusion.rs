@@ -1042,3 +1042,8 @@ mod tests {
         assert!(warnings[0].contains(POST_FUSION_WARNING_CLAIM));
     }
 }
+
+// Independent test-only prepass acceptance; routine API translation is allowed.
+#[cfg(test)]
+#[path = "fusion_prepass_acceptance_tests.rs"]
+mod fusion_prepass_acceptance_tests;
