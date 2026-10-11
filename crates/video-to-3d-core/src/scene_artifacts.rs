@@ -1,5 +1,5 @@
 //! On-disk formats of the scene-project artifacts that built-in operations
-//! exchange, and the built-in `texture_bake` executor that reads and writes
+//! exchange, and the native built-in executors that read and write
 //! them.
 //!
 //! The formats are intentionally minimal and versioned so they can change
@@ -25,6 +25,8 @@
 //! artifact, so it is rebuilt) and readers verify them again on use.
 
 use crate::scene_model::{Material, ResourceKind, SceneProvenance, SceneResource};
+
+mod native;
 use crate::scene_project::{
     ArtifactKind, ContentHash, OperationKind, ProjectPath, SceneProjectManifest,
 };
@@ -1311,6 +1313,17 @@ pub fn artifact_sidecars(
                 byte_length: None,
             })
             .collect(),
+        ArtifactKind::AssembledScene => crate::scene_model::AssembledScene::from_json(document)
+            .map_err(|error| error.to_string())?
+            .resources
+            .into_iter()
+            .map(|resource| ArtifactSidecar {
+                path: resource.path,
+                content_hash: resource.content_hash,
+                byte_length: None,
+                png_rgb8: None,
+            })
+            .collect(),
         _ => Vec::new(),
     })
 }
@@ -1658,9 +1671,9 @@ pub fn texture_bake_output(operation_id: &str) -> Result<ProjectPath, String> {
 }
 
 /// Native executor for the built-in operations that have an implementation.
-/// Today that is `texture_bake`; every other kind reports an explicit
-/// unsupported outcome instead of fabricating output (video decoding is
-/// browser-owned and provider adapters are not integrated).
+/// Classic sparse/dense/mesh stages, observed environment assembly and
+/// texture_bake are available. Video decoding remains browser-owned; other
+/// capabilities and unintegrated provider adapters report unsupported.
 #[derive(Clone, Debug)]
 pub struct BuiltInExecutor {
     root: PathBuf,
@@ -1669,7 +1682,10 @@ pub struct BuiltInExecutor {
 
 #[derive(Clone, Debug)]
 enum Reservations {
-    Fixed(Vec<(String, ProjectPath)>),
+    Fixed {
+        paths: Vec<(String, ProjectPath)>,
+        manifest: Box<SceneProjectManifest>,
+    },
     /// Re-read at execution, so the reconciled manifest a build persisted
     /// before running decides (dropped stale records do not block an output).
     ManifestFile(PathBuf),
@@ -1718,7 +1734,7 @@ pub(crate) fn recorded_sidecar_paths(
 ) -> Vec<ProjectPath> {
     if !matches!(
         artifact.kind,
-        ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
+        ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures | ArtifactKind::AssembledScene
     ) {
         return Vec::new();
     }
@@ -1737,7 +1753,10 @@ impl BuiltInExecutor {
     /// Reservations from an in-memory manifest.
     pub fn new(project_root: impl Into<PathBuf>, manifest: &SceneProjectManifest) -> Self {
         let root = project_root.into();
-        let reservations = Reservations::Fixed(reserved_paths(&root, manifest));
+        let reservations = Reservations::Fixed {
+            paths: reserved_paths(&root, manifest),
+            manifest: Box::new(manifest.clone()),
+        };
         Self { root, reservations }
     }
 
@@ -1759,7 +1778,7 @@ impl BuiltInExecutor {
     fn collision(&self, operation: &str, directory: &str) -> Result<Option<ProjectPath>, String> {
         let loaded;
         let reserved = match &self.reservations {
-            Reservations::Fixed(reserved) => reserved,
+            Reservations::Fixed { paths, .. } => paths,
             Reservations::ManifestFile(path) => {
                 loaded = reserved_paths(
                     &self.root,
@@ -1871,6 +1890,11 @@ impl OperationExecutor for BuiltInExecutor {
         let kind = request.operation.kind;
         if kind == OperationKind::TextureBake && request.provider.is_none() {
             return self.texture_bake(request, cancel);
+        }
+        if request.provider.is_none() {
+            if let Some(outcome) = self.native_stage(request, cancel) {
+                return outcome;
+            }
         }
         let name = serde_json::to_value(kind)
             .ok()

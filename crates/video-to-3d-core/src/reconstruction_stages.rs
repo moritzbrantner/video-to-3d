@@ -229,7 +229,7 @@ impl From<&RegisteredCamera> for StageCamera {
 }
 
 impl StageCamera {
-    fn registered(&self) -> RegisteredCamera {
+    pub(crate) fn registered(&self) -> RegisteredCamera {
         RegisteredCamera {
             frame_index: self.frame_index,
             rotation: Matrix3::from_column_slice(&self.rotation),
