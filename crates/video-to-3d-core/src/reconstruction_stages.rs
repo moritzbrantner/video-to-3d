@@ -87,6 +87,13 @@ pub enum ReconstructionStageError {
     },
     /// The reconstruction itself failed (the `String` error of the single-call pipeline).
     Reconstruction(String),
+    /// A stage produced a NaN or infinite value at `field` (a dotted path into the
+    /// artifact). JSON cannot store it, so the stage returns no artifact rather than one
+    /// whose document [`CameraStageArtifact::from_json`] and its siblings would reject.
+    NonFinite {
+        artifact: ReconstructionStage,
+        field: String,
+    },
 }
 
 impl fmt::Display for ReconstructionStageError {
@@ -115,6 +122,10 @@ impl fmt::Display for ReconstructionStageError {
                 write!(formatter, "malformed {artifact:?} stage artifact: {message}")
             }
             Self::Reconstruction(message) => formatter.write_str(message),
+            Self::NonFinite { artifact, field } => write!(
+                formatter,
+                "{artifact:?} stage produced a non-finite value at `{field}`, which its stored document cannot represent"
+            ),
         }
     }
 }
@@ -297,6 +308,16 @@ macro_rules! stage_artifact_document {
             fn check_schema_version(&self) -> Result<(), ReconstructionStageError> {
                 check_schema_version($stage, self.schema_version, $version)
             }
+
+            /// Every float of the artifact is finite, so its document reloads.
+            fn check_finite(self) -> Result<Self, ReconstructionStageError> {
+                finite::first_non_finite(&self).map_or(Ok(self), |field| {
+                    Err(ReconstructionStageError::NonFinite {
+                        artifact: $stage,
+                        field,
+                    })
+                })
+            }
         }
     };
 }
@@ -398,11 +419,12 @@ pub fn reconstruct_cameras(
 ) -> Result<CameraStageArtifact, ReconstructionStageError> {
     let sparse =
         crate::reconstruct_sparse(request).map_err(ReconstructionStageError::Reconstruction)?;
-    Ok(CameraStageArtifact {
+    CameraStageArtifact {
         schema_version: CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
         request_hash: request_content_hash(request),
         sparse,
-    })
+    }
+    .check_finite()
 }
 
 /// Stage 2: cameras + frames → dense evidence. Rejects a camera artifact of another
@@ -419,12 +441,13 @@ pub fn reconstruct_dense(
         &cameras.request_hash,
         request_content_hash(request),
     )?;
-    Ok(DenseStageArtifact {
+    DenseStageArtifact {
         schema_version: DENSE_STAGE_ARTIFACT_SCHEMA_VERSION,
         request_hash: cameras.request_hash.clone(),
         cameras_hash: cameras.content_hash(),
         dense: estimate_dense_evidence(&request.frames, &cameras.sparse),
-    })
+    }
+    .check_finite()
 }
 
 /// Stage 3: dense evidence (+ the cameras it was computed from) → consolidated mesh.
@@ -441,15 +464,16 @@ pub fn reconstruct_mesh(
         &dense.cameras_hash,
         cameras.content_hash(),
     )?;
-    // Consolidation reads the whole classic result and moves dense vertices in place,
-    // so it runs on a working copy; the artifact keeps only what it changed.
-    let (mut result, surface_inputs, _) = into_result(cameras.sparse.clone(), dense.dense.clone());
-    let (mesh_warning, consolidation_warnings) = build_surface(&mut result, &surface_inputs)
+    // Surface consolidation borrows every other stage field; only the points fusion may
+    // move need a working buffer, since the dense artifact stays unchanged. The
+    // artifact keeps just the points that moved.
+    let original = &dense.dense.points;
+    let mut points = original.clone();
+    let mut surface = build_surface(&cameras.sparse, DenseFields::of(&dense.dense), &mut points)
         .map_err(ReconstructionStageError::Reconstruction)?;
-    let consolidated_points = result
-        .dense_points
+    surface.consolidated_points = points
         .iter()
-        .zip(&dense.dense.points)
+        .zip(original)
         .enumerate()
         .filter(|(_, (consolidated, original))| consolidated != original)
         .map(|(index, (point, _))| ConsolidatedPoint {
@@ -457,18 +481,12 @@ pub fn reconstruct_mesh(
             point: *point,
         })
         .collect();
-    Ok(MeshStageArtifact {
+    MeshStageArtifact {
         schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
         dense_hash: dense.content_hash(),
-        mesh: SurfaceMesh {
-            stats: std::mem::take(&mut result.mesh),
-            triangles: std::mem::take(&mut result.mesh_triangles),
-            triangle_sources: std::mem::take(&mut result.mesh_triangle_sources),
-            consolidated_points,
-            mesh_warning,
-            consolidation_warnings,
-        },
-    })
+        mesh: surface,
+    }
+    .check_finite()
 }
 
 /// The single-call [`ReconstructionResult`] from the three artifacts of one chain,
@@ -495,10 +513,10 @@ pub fn compose_reconstruction(
         &mesh.dense_hash,
         dense.content_hash(),
     )?;
-    let (mut result, _, warnings) = into_result(cameras.sparse.clone(), dense.dense.clone());
-    let surface = &mesh.mesh;
-    for consolidated in &surface.consolidated_points {
-        let Some(point) = result.dense_points.get_mut(consolidated.index) else {
+    // The result owns its buffers, so this is the one place the stage outputs are copied.
+    let mut dense_evidence = dense.dense.clone();
+    for consolidated in &mesh.mesh.consolidated_points {
+        let Some(point) = dense_evidence.points.get_mut(consolidated.index) else {
             return Err(ReconstructionStageError::Malformed {
                 artifact: ReconstructionStage::Mesh,
                 message: format!(
@@ -510,15 +528,11 @@ pub fn compose_reconstruction(
         };
         *point = consolidated.point;
     }
-    result.mesh = surface.stats.clone();
-    result.mesh_triangles = surface.triangles.clone();
-    result.mesh_triangle_sources = surface.triangle_sources.clone();
-    result.warnings = ordered_warnings(
-        warnings,
-        surface.mesh_warning.clone(),
-        surface.consolidation_warnings.clone(),
-    );
-    Ok(result)
+    Ok(into_result(
+        cameras.sparse.clone(),
+        dense_evidence,
+        mesh.mesh.clone(),
+    ))
 }
 
 /// Dense stage core: dense depth of the camera solve's registered views, with the
@@ -527,11 +541,7 @@ pub(crate) fn estimate_dense_evidence(
     frames: &[FrameInput],
     sparse: &SparseReconstruction,
 ) -> DenseEvidence {
-    let cameras: Vec<RegisteredCamera> = sparse
-        .dense_cameras
-        .iter()
-        .map(StageCamera::registered)
-        .collect();
+    let cameras = registered_cameras(&sparse.dense_cameras);
     let sparse_points: Vec<Vector3<f64>> = sparse
         .dense_sparse_points
         .iter()
@@ -567,43 +577,104 @@ pub(crate) fn estimate_dense_evidence(
     }
 }
 
-/// Single-call tail: the mesh stage core on the owned stage outputs, without the working
-/// copy the public mesh stage needs to keep its dense input unchanged.
+/// Single-call tail: the mesh stage core consolidates the dense stage's own points in
+/// place (nothing else needs them unchanged), then the outputs move into the result.
 pub(crate) fn finish_reconstruction(
     sparse: SparseReconstruction,
-    dense: DenseEvidence,
+    mut dense: DenseEvidence,
 ) -> Result<ReconstructionResult, String> {
-    let (mut result, surface_inputs, warnings) = into_result(sparse, dense);
-    let (mesh_warning, consolidation_warnings) = build_surface(&mut result, &surface_inputs)?;
-    result.warnings = ordered_warnings(warnings, mesh_warning, consolidation_warnings);
-    Ok(result)
+    let mut points = std::mem::take(&mut dense.points);
+    let surface = build_surface(&sparse, DenseFields::of(&dense), &mut points)?;
+    dense.points = points;
+    Ok(into_result(sparse, dense, surface))
 }
 
-/// What the mesh stage reads from the camera stage besides the assembled result.
-struct SurfaceInputs {
-    cameras: Vec<RegisteredCamera>,
-    width: u32,
-    height: u32,
-    focal: f64,
+/// The dense-stage fields the mesh stage reads; its points are passed separately, as
+/// the buffer consolidation may move.
+#[derive(Clone, Copy)]
+struct DenseFields<'a> {
+    stats: &'a DenseStats,
+    grid_sites: &'a [DenseGridSite],
+    point_attributes: &'a [EvidencePointAttributes],
 }
 
-/// The camera and dense stage warnings, in result order around the mesh stage's.
-struct StageWarnings {
-    before_dense: Vec<String>,
-    dense: Vec<String>,
-    after_mesh: Vec<String>,
+impl<'a> DenseFields<'a> {
+    fn of(dense: &'a DenseEvidence) -> Self {
+        Self {
+            stats: &dense.stats,
+            grid_sites: &dense.grid_sites,
+            point_attributes: &dense.point_attributes,
+        }
+    }
 }
 
-/// The result of the camera and dense outputs, with no mesh and no warnings yet.
+fn registered_cameras(cameras: &[StageCamera]) -> Vec<RegisteredCamera> {
+    cameras.iter().map(StageCamera::registered).collect()
+}
+
+/// Mesh stage core: the bounded dense mesh, then cross-reference surface fusion and the
+/// connected-surface merge. It borrows the camera and dense outputs and changes only
+/// `points` (the seam vertices fusion moves) and the surface it returns. Consolidation
+/// sees only the mesh stage's own warning, so it cannot rewrite another stage's.
+fn build_surface(
+    sparse: &SparseReconstruction,
+    dense: DenseFields<'_>,
+    points: &mut [Point3],
+) -> Result<SurfaceMesh, String> {
+    let final_cameras = registered_cameras(&sparse.final_cameras);
+    let analysis = crate::mesh::reconstruct_dense_mesh(
+        points,
+        dense.grid_sites,
+        dense.stats,
+        &registered_cameras(&sparse.dense_cameras),
+        sparse.image_width,
+        sparse.image_height,
+        sparse.focal_length_pixels as f64,
+    );
+    let mut surface = SurfaceMesh {
+        stats: analysis.stats,
+        triangles: analysis.triangles,
+        triangle_sources: Vec::new(),
+        consolidated_points: Vec::new(),
+        mesh_warning: None,
+        consolidation_warnings: Vec::new(),
+    };
+    let mut warnings: Vec<String> = crate::mesh_warning(&surface.stats).into_iter().collect();
+    let owned = warnings.len();
+    crate::surface_fusion::consolidate_surface(
+        crate::surface_fusion::SurfaceSupport {
+            calibrated_pair: sparse.calibrated_pair.as_ref(),
+            registered_views: &sparse.registered_views,
+            final_cameras: &final_cameras,
+            reference_patches: &dense.stats.reference_patches,
+            point_attributes: dense.point_attributes,
+        },
+        crate::surface_fusion::SurfaceTarget {
+            points,
+            triangles: &mut surface.triangles,
+            triangle_sources: &mut surface.triangle_sources,
+            mesh: &mut surface.stats,
+            warnings: &mut warnings,
+        },
+    )?;
+    surface.consolidation_warnings = warnings.split_off(owned);
+    surface.mesh_warning = warnings.pop();
+    Ok(surface)
+}
+
+/// The classic result of one chain's owned outputs. `dense.points` must already be the
+/// consolidated points; warnings follow the single-call order: camera warnings before
+/// dense, dense, mesh, camera warnings after the mesh (recovery last), consolidation.
 fn into_result(
     sparse: SparseReconstruction,
     dense: DenseEvidence,
-) -> (ReconstructionResult, SurfaceInputs, StageWarnings) {
+    surface: SurfaceMesh,
+) -> ReconstructionResult {
     let SparseReconstruction {
         options: _,
-        image_width,
-        image_height,
-        focal_length_pixels,
+        image_width: _,
+        image_height: _,
+        focal_length_pixels: _,
         cameras,
         points,
         pairs,
@@ -614,24 +685,36 @@ fn into_result(
         seed_candidates,
         bootstrap,
         final_cameras,
-        dense_cameras,
+        dense_cameras: _,
         dense_sparse_points: _,
         track_scope: _,
         warnings_before_dense,
         warnings_after_mesh,
     } = sparse;
-    multi_view.bundle_adjustment.final_cameras =
-        final_cameras.iter().map(StageCamera::registered).collect();
-    let result = ReconstructionResult {
+    let SurfaceMesh {
+        stats: mesh,
+        triangles: mesh_triangles,
+        triangle_sources: mesh_triangle_sources,
+        consolidated_points: _,
+        mesh_warning,
+        consolidation_warnings,
+    } = surface;
+    multi_view.bundle_adjustment.final_cameras = registered_cameras(&final_cameras);
+    let mut warnings = warnings_before_dense;
+    warnings.extend(dense.warnings);
+    warnings.extend(mesh_warning);
+    warnings.extend(warnings_after_mesh);
+    warnings.extend(consolidation_warnings);
+    ReconstructionResult {
         cameras,
         points,
         dense_points: dense.points,
         dense_grid_sites: dense.grid_sites,
         dense_point_attributes: dense.point_attributes,
         dense: dense.stats,
-        mesh_triangles: Vec::new(),
-        mesh_triangle_sources: Vec::new(),
-        mesh: MeshStats::default(),
+        mesh_triangles,
+        mesh_triangle_sources,
+        mesh,
         pairs,
         calibrated_pair,
         multi_view,
@@ -639,64 +722,359 @@ fn into_result(
         registered_views,
         seed_candidates,
         bootstrap,
-        warnings: Vec::new(),
-    };
-    let surface_inputs = SurfaceInputs {
-        cameras: dense_cameras.iter().map(StageCamera::registered).collect(),
-        width: image_width,
-        height: image_height,
-        focal: focal_length_pixels as f64,
-    };
-    let warnings = StageWarnings {
-        before_dense: warnings_before_dense,
-        dense: dense.warnings,
-        after_mesh: warnings_after_mesh,
-    };
-    (result, surface_inputs, warnings)
+        warnings,
+    }
 }
 
-/// Mesh stage core: the bounded dense mesh, then cross-reference surface fusion and the
-/// connected-surface merge, on `result` in place. Returns the mesh diagnostic (refreshed
-/// by the merge) and the consolidation diagnostics; the other stages' warnings are not
-/// in `result` meanwhile, so consolidation can only rewrite the mesh stage's own.
-fn build_surface(
-    result: &mut ReconstructionResult,
-    inputs: &SurfaceInputs,
-) -> Result<(Option<String>, Vec<String>), String> {
-    let analysis = crate::mesh::reconstruct_dense_mesh(
-        &result.dense_points,
-        &result.dense_grid_sites,
-        &result.dense,
-        &inputs.cameras,
-        inputs.width,
-        inputs.height,
-        inputs.focal,
+/// Finds the first NaN or infinite float of a serializable value without building its
+/// document: a serializer that only inspects floats and tracks the field path.
+mod finite {
+    use serde::ser::{self, Serialize};
+    use std::fmt;
+
+    pub(super) fn first_non_finite<T: Serialize>(value: &T) -> Option<String> {
+        let mut probe = Probe { path: Vec::new() };
+        match value.serialize(&mut probe) {
+            Ok(()) => None,
+            Err(Found(field)) => Some(field),
+        }
+    }
+
+    struct Probe {
+        path: Vec<String>,
+    }
+
+    impl Probe {
+        fn check(&self, finite: bool) -> Result<(), Found> {
+            if finite {
+                Ok(())
+            } else {
+                Err(Found(self.path.join(".")))
+            }
+        }
+
+        fn nested<T: ?Sized + Serialize>(&mut self, key: String, value: &T) -> Result<(), Found> {
+            self.path.push(key);
+            value.serialize(&mut *self)?;
+            self.path.pop();
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct Found(String);
+
+    impl fmt::Display for Found {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "non-finite value at `{}`", self.0)
+        }
+    }
+
+    impl std::error::Error for Found {}
+
+    impl ser::Error for Found {
+        fn custom<T: fmt::Display>(message: T) -> Self {
+            Self(message.to_string())
+        }
+    }
+
+    macro_rules! ignore {
+        ($($method:ident: $type:ty),* $(,)?) => {
+            $(fn $method(self, _: $type) -> Result<(), Found> { Ok(()) })*
+        };
+    }
+
+    impl ser::Serializer for &mut Probe {
+        type Ok = ();
+        type Error = Found;
+        type SerializeSeq = Self;
+        type SerializeTuple = Self;
+        type SerializeTupleStruct = Self;
+        type SerializeTupleVariant = Self;
+        type SerializeMap = Self;
+        type SerializeStruct = Self;
+        type SerializeStructVariant = Self;
+
+        ignore!(
+            serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
+            serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
+            serialize_u64: u64, serialize_char: char, serialize_str: &str,
+            serialize_bytes: &[u8], serialize_unit_struct: &'static str,
+        );
+
+        fn serialize_f32(self, value: f32) -> Result<(), Found> {
+            self.check(value.is_finite())
+        }
+
+        fn serialize_f64(self, value: f64) -> Result<(), Found> {
+            self.check(value.is_finite())
+        }
+
+        fn serialize_none(self) -> Result<(), Found> {
+            Ok(())
+        }
+
+        fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<(), Found> {
+            value.serialize(self)
+        }
+
+        fn serialize_unit(self) -> Result<(), Found> {
+            Ok(())
+        }
+
+        fn serialize_unit_variant(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+        ) -> Result<(), Found> {
+            Ok(())
+        }
+
+        fn serialize_newtype_struct<T: ?Sized + Serialize>(
+            self,
+            _: &'static str,
+            value: &T,
+        ) -> Result<(), Found> {
+            value.serialize(self)
+        }
+
+        fn serialize_newtype_variant<T: ?Sized + Serialize>(
+            self,
+            _: &'static str,
+            _: u32,
+            variant: &'static str,
+            value: &T,
+        ) -> Result<(), Found> {
+            self.nested(variant.to_owned(), value)
+        }
+
+        fn serialize_seq(self, _: Option<usize>) -> Result<Self, Found> {
+            self.path.push(String::new());
+            Ok(self)
+        }
+
+        fn serialize_tuple(self, len: usize) -> Result<Self, Found> {
+            self.serialize_seq(Some(len))
+        }
+
+        fn serialize_tuple_struct(self, _: &'static str, len: usize) -> Result<Self, Found> {
+            self.serialize_seq(Some(len))
+        }
+
+        fn serialize_tuple_variant(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+            len: usize,
+        ) -> Result<Self, Found> {
+            self.serialize_seq(Some(len))
+        }
+
+        fn serialize_map(self, _: Option<usize>) -> Result<Self, Found> {
+            Ok(self)
+        }
+
+        fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self, Found> {
+            Ok(self)
+        }
+
+        fn serialize_struct_variant(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+            _: usize,
+        ) -> Result<Self, Found> {
+            Ok(self)
+        }
+    }
+
+    /// Sequences keep a running element index as the last path segment.
+    macro_rules! sequence {
+        ($($trait:ident :: $method:ident),* $(,)?) => {
+            $(impl ser::$trait for &mut Probe {
+                type Ok = ();
+                type Error = Found;
+
+                fn $method<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Found> {
+                    let index = self.path.last_mut().expect("sequence path segment");
+                    let current: usize = index.parse().map_or(0, |last: usize| last + 1);
+                    *index = current.to_string();
+                    value.serialize(&mut **self)
+                }
+
+                fn end(self) -> Result<(), Found> {
+                    self.path.pop();
+                    Ok(())
+                }
+            })*
+        };
+    }
+
+    sequence!(
+        SerializeSeq::serialize_element,
+        SerializeTuple::serialize_element,
+        SerializeTupleStruct::serialize_field,
+        SerializeTupleVariant::serialize_field,
     );
-    result.mesh = analysis.stats;
-    result.mesh_triangles = analysis.triangles;
-    result.mesh_triangle_sources = Vec::new();
-    result.warnings = crate::mesh_warning(&result.mesh).into_iter().collect();
-    let owned = result.warnings.len();
-    crate::surface_fusion::consolidate_surface_evidence(result)?;
-    let mut mesh_warning = std::mem::take(&mut result.warnings);
-    let consolidation_warnings = mesh_warning.split_off(owned);
-    Ok((mesh_warning.pop(), consolidation_warnings))
+
+    impl ser::SerializeMap for &mut Probe {
+        type Ok = ();
+        type Error = Found;
+
+        fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Found> {
+            key.serialize(&mut **self)
+        }
+
+        fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Found> {
+            self.nested("[value]".to_owned(), value)
+        }
+
+        fn end(self) -> Result<(), Found> {
+            Ok(())
+        }
+    }
+
+    macro_rules! fields {
+        ($($trait:ident),* $(,)?) => {
+            $(impl ser::$trait for &mut Probe {
+                type Ok = ();
+                type Error = Found;
+
+                fn serialize_field<T: ?Sized + Serialize>(
+                    &mut self,
+                    key: &'static str,
+                    value: &T,
+                ) -> Result<(), Found> {
+                    self.nested(key.to_owned(), value)
+                }
+
+                fn end(self) -> Result<(), Found> {
+                    Ok(())
+                }
+            })*
+        };
+    }
+
+    fields!(SerializeStruct, SerializeStructVariant);
 }
 
-fn ordered_warnings(
-    stages: StageWarnings,
-    mesh_warning: Option<String>,
-    consolidation_warnings: Vec<String>,
-) -> Vec<String> {
-    let StageWarnings {
-        before_dense,
-        dense,
-        after_mesh,
-    } = stages;
-    let mut warnings = before_dense;
-    warnings.extend(dense);
-    warnings.extend(mesh_warning);
-    warnings.extend(after_mesh);
-    warnings.extend(consolidation_warnings);
-    warnings
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flat_request() -> ReconstructionRequest {
+        let flat = FrameInput {
+            width: 48,
+            height: 32,
+            rgba: [120, 120, 120, 255].repeat(48 * 32),
+        };
+        ReconstructionRequest {
+            frames: vec![flat.clone(), flat],
+            options: ReconstructionOptions::default(),
+        }
+    }
+
+    #[test]
+    fn non_finite_options_are_rejected_before_any_artifact() {
+        type Edit = (&'static str, fn(&mut ReconstructionOptions));
+        let edits: [Edit; 6] = [
+            ("max descriptor distance", |o| {
+                o.max_descriptor_distance = f32::NAN
+            }),
+            ("max descriptor distance", |o| {
+                o.max_descriptor_distance = f32::INFINITY
+            }),
+            ("max descriptor distance", |o| {
+                o.max_descriptor_distance = f32::NEG_INFINITY
+            }),
+            ("ratio threshold", |o| o.ratio_threshold = f32::NAN),
+            ("ratio threshold", |o| o.ratio_threshold = f32::INFINITY),
+            ("focal length", |o| o.focal_length_pixels = Some(f32::NAN)),
+        ];
+        for (option, edit) in edits {
+            let mut request = flat_request();
+            edit(&mut request.options);
+            let single = crate::reconstruct(&request).expect_err("the single call rejects it");
+            assert!(
+                single.contains(option) && single.contains("finite"),
+                "{single}"
+            );
+            assert_eq!(
+                reconstruct_cameras(&request).expect_err("the camera stage rejects it"),
+                ReconstructionStageError::Reconstruction(single)
+            );
+        }
+    }
+
+    #[test]
+    fn artifacts_with_non_finite_values_are_refused_not_stored() {
+        let request = flat_request();
+        let cameras = reconstruct_cameras(&request).expect("camera stage");
+        let dense = reconstruct_dense(&request, &cameras).expect("dense stage");
+        let mesh = reconstruct_mesh(&cameras, &dense).expect("mesh stage");
+        assert_eq!(finite::first_non_finite(&cameras), None);
+        assert_eq!(finite::first_non_finite(&dense), None);
+        assert_eq!(finite::first_non_finite(&mesh), None);
+
+        let mut nan_cameras = cameras.clone();
+        nan_cameras.sparse.pairs[0].median_motion = f32::NAN;
+        // Why the guard exists: the stored document would not reload.
+        assert!(CameraStageArtifact::from_json(&nan_cameras.to_json()).is_err());
+        assert_eq!(
+            nan_cameras.check_finite(),
+            Err(ReconstructionStageError::NonFinite {
+                artifact: ReconstructionStage::Cameras,
+                field: "sparse.pairs.0.median_motion".into(),
+            })
+        );
+
+        let mut infinite_dense = dense.clone();
+        infinite_dense.dense.stats.median_photometric_error = Some(f32::INFINITY);
+        assert_eq!(
+            infinite_dense.check_finite(),
+            Err(ReconstructionStageError::NonFinite {
+                artifact: ReconstructionStage::Dense,
+                field: "dense.stats.median_photometric_error".into(),
+            })
+        );
+
+        let mut nan_mesh = mesh.clone();
+        let point = Point3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+            confidence: 1.0,
+            r: 0,
+            g: 0,
+            b: 0,
+        };
+        nan_mesh.mesh.consolidated_points = vec![
+            ConsolidatedPoint { index: 0, point },
+            ConsolidatedPoint {
+                index: 1,
+                point: Point3 {
+                    y: f32::NEG_INFINITY,
+                    ..point
+                },
+            },
+        ];
+        assert_eq!(
+            nan_mesh.check_finite(),
+            Err(ReconstructionStageError::NonFinite {
+                artifact: ReconstructionStage::Mesh,
+                field: "mesh.consolidated_points.1.point.y".into(),
+            })
+        );
+        // f64 payloads are checked too.
+        let mut nan_pose = cameras;
+        nan_pose.sparse.dense_sparse_points = vec![[0.0, f64::NAN, 1.0]];
+        assert!(matches!(
+            nan_pose.check_finite(),
+            Err(ReconstructionStageError::NonFinite { field, .. })
+                if field == "sparse.dense_sparse_points.0.1"
+        ));
+    }
 }

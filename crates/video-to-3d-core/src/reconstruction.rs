@@ -2205,8 +2205,16 @@ fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
     if request.frames.len() < 2 {
         return Err("at least two sampled frames are required".into());
     }
+    // Non-finite options would also make the camera stage artifact unreloadable: JSON
+    // has no NaN or infinity, so they would be stored as `null`.
+    if !request.options.max_descriptor_distance.is_finite() {
+        return Err("max descriptor distance must be finite".into());
+    }
     if request.options.max_descriptor_distance <= 0.0 {
         return Err("max descriptor distance must be positive".into());
+    }
+    if !request.options.ratio_threshold.is_finite() {
+        return Err("descriptor ratio threshold must be finite".into());
     }
     if request.options.max_dense_working_set_bytes == 0 {
         return Err("dense working-set budget must be positive".into());
