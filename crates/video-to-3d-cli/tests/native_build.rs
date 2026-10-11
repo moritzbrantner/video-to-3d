@@ -499,3 +499,173 @@ fn unavailable_local_provider_remains_nonpassing_without_fabricated_scene() {
         .iter()
         .any(|artifact| artifact.kind == ArtifactKind::AssembledScene));
 }
+
+#[test]
+fn cold_public_in_memory_executor_runs_every_ancestry_wave() {
+    let project = Project::new("cold-public-memory", true);
+    let (store, mut manifest) = project.open();
+    let executor = BuiltInExecutor::new(&project.root, &manifest);
+    let report = store
+        .build(
+            &mut manifest,
+            &executor,
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(report.run.is_complete(), "{:?}", report.run.states);
+    assert!(AssembledScene::from_json(&project.document("assemble")).is_ok());
+}
+
+#[test]
+fn newly_enabled_native_semantics_do_not_reuse_revision_one_identities() {
+    for kind in [
+        OperationKind::SparseReconstruction,
+        OperationKind::DenseReconstruction,
+        OperationKind::SurfaceMesh,
+        OperationKind::SceneAssembly,
+    ] {
+        assert!(
+            kind.implementation_revision() > 1,
+            "{kind:?} still aliases pre-native opaque output semantics"
+        );
+    }
+}
+
+#[test]
+fn reserved_native_directory_is_uncharged_and_corrected_build_resumes() {
+    let project = Project::new("native-reservation", true);
+    let mut document: Value =
+        serde_json::from_slice(&fs::read(project.manifest()).unwrap()).unwrap();
+    document["exports"] = json!([{"id":"reserved", "format":"glb", "path":"artifacts/native", "includes":["assembled_scene"]}]);
+    fs::write(project.manifest(), document.to_string()).unwrap();
+    let rejected = project.build();
+    assert_eq!(
+        rejected.json["operations"]["sparse"]["state"], "unsupported",
+        "{}",
+        rejected.stderr
+    );
+    assert_eq!(rejected.json["operations"]["sparse"]["attempts"], 0);
+    assert!(!project
+        .root
+        .join("artifacts/native/sparse/artifact.json")
+        .exists());
+    document["exports"] = json!([]);
+    fs::write(project.manifest(), document.to_string()).unwrap();
+    project.assert_complete();
+}
+
+#[test]
+fn same_arity_wrong_kind_is_unsupported_before_reading_payload() {
+    use video_to_3d_core::scene_runner::ResolvedInput;
+    let project = Project::new("wrong-input-kinds", true);
+    let (_, manifest) = project.open();
+    let ingest = manifest
+        .artifacts
+        .iter()
+        .find(|a| a.produced_by == "ingest")
+        .unwrap();
+    let executor = BuiltInExecutor::new(&project.root, &manifest);
+    for (id, kinds) in [
+        ("sparse", vec![ArtifactKind::LearnedEvidence]),
+        (
+            "dense",
+            vec![ArtifactKind::Keyframes, ArtifactKind::LearnedEvidence],
+        ),
+        ("mesh", vec![ArtifactKind::LearnedEvidence]),
+        (
+            "assemble",
+            vec![ArtifactKind::SurfaceMesh, ArtifactKind::SurfaceTextures],
+        ),
+    ] {
+        let operation = manifest
+            .operations
+            .iter()
+            .find(|op| op.id == id)
+            .unwrap()
+            .clone();
+        let request = OperationRequest {
+            operation,
+            identity: manifest.operation_identities().unwrap()[id].clone(),
+            provider: None,
+            attempt: 1,
+            inputs: kinds
+                .into_iter()
+                .map(|kind| {
+                    let mut record = ingest.clone();
+                    record.kind = kind;
+                    ResolvedInput::Artifact(record)
+                })
+                .collect(),
+        };
+        assert!(
+            matches!(
+                executor.execute(&request, &CancellationToken::new()),
+                AttemptOutcome::Unsupported(_)
+            ),
+            "{id} charged an unsupported input shape"
+        );
+    }
+}
+
+struct OpaqueLegacySparse(PathBuf);
+impl OperationExecutor for OpaqueLegacySparse {
+    fn execute(&self, request: &OperationRequest, _: &CancellationToken) -> AttemptOutcome {
+        if request.operation.kind != OperationKind::SparseReconstruction {
+            return AttemptOutcome::Unsupported("legacy fixture records sparse only".into());
+        }
+        let bytes = b"opaque pre-native sparse payload";
+        let path = ProjectPath::new("artifacts/legacy-sparse.bin").unwrap();
+        fs::write(path.resolve(&self.0), bytes).unwrap();
+        AttemptOutcome::Succeeded(ProducedArtifact::new(
+            path,
+            ContentHash::of_bytes(bytes),
+            Reproducibility::Deterministic,
+        ))
+    }
+}
+
+#[test]
+fn actual_opaque_revision_one_receipt_is_rebuilt_before_downstream_dispatch() {
+    let project = Project::new("legacy-receipt", true);
+    let (store, mut manifest) = project.open();
+    let ingest = manifest
+        .artifacts
+        .iter()
+        .find(|a| a.produced_by == "ingest")
+        .unwrap();
+    // Frozen revision-1 identity wire order from baseline 3553210. This does
+    // not ask the changed implementation to calculate its own old expectation.
+    let old_wire = format!("{{\"schema_version\":1,\"kind\":\"sparse_reconstruction\",\"implementation\":[1,\"0.1.0\"],\"providers\":[],\"max_attempts\":1,\"inputs\":[\"operation:{}:{}\"]}}", ingest.operation_identity.as_str(), ingest.content_hash.as_str());
+    let old_identity = ContentHash::of_bytes(old_wire.as_bytes());
+    store
+        .build(
+            &mut manifest,
+            &OpaqueLegacySparse(project.root.clone()),
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let record = manifest
+        .artifacts
+        .iter_mut()
+        .find(|a| a.produced_by == "sparse")
+        .unwrap();
+    record.operation_identity = old_identity.clone();
+    fs::write(project.manifest(), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let receipt_path = project.root.join(".video-to-3d/receipts/sparse.json");
+    let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["operation_identity"] = json!(old_identity.as_str());
+    fs::write(receipt_path, receipt.to_string()).unwrap();
+    let result = project.build();
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    assert_eq!(result.json["operations"]["ingest"]["state"], "reused");
+    for id in ["sparse", "dense", "mesh", "assemble"] {
+        assert_eq!(
+            result.json["operations"][id]["state"], "succeeded",
+            "{id}: {}",
+            result.stderr
+        );
+    }
+    assert!(CameraStageArtifact::from_json(&project.document("sparse")).is_ok());
+}

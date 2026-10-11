@@ -1078,3 +1078,8 @@ mod tests {
         ));
     }
 }
+
+// Independently authored acceptance only; shared-stage API translation is allowed.
+#[cfg(test)]
+#[path = "native_stage_acceptance_tests.rs"]
+mod native_stage_acceptance_tests;

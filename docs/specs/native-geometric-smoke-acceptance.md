@@ -114,3 +114,41 @@ check passes. Native acceptance is expected red: five pass, five fail because
 native sparse reconstruction is unsupported. Both golden and this room invocation
 must pass after implementation. Keep #150 open until that demonstration succeeds;
 #74/#77 still require the owner-approved real controlled recording and handhelds.
+
+## Independent review regression contract (4606303)
+
+The public in-memory `BuiltInExecutor::new` must execute a cold complete pipeline
+through the existing runner/store. A constructor snapshot must not strand later
+waves: mesh and assembly must resolve the verified sparse/dense ancestry actually
+produced in that run. File-backed CLI success does not prove this public path.
+
+Sparse, dense, mesh and assembly implementation identities must differ from their
+pre-native revision-1 identities. Opaque revision-1 receipts must become stale and
+rebuild through current semantics, rather than being reused or consuming a dense
+attempt on an incompatible sparse payload. Revision identity coverage is necessary
+but the migration gate must also exercise an actual legacy receipt and descendants.
+
+Unsupported artifact-kind combinations are rejected before payload parsing even
+when the arity is correct. Reserved native output declarations are unsupported,
+write no result and charge zero attempts. Removing that declaration allows the same
+operation identity to run with the default one-attempt budget. Malformed supported
+payloads remain failures; do not hide genuine corruption as unsupported.
+
+The adapter already owns dense evidence. Consolidation must consume that ownership
+without allocating a second full dense point buffer. An independently observable
+core test must record its existing point allocation pointer/capacity, pass ownership
+through mesh consolidation, and assert preserved allocation and exact borrowed-path
+mesh/output parity. Pointer preservation alone cannot detect a temporary clone;
+source/call-graph review must confirm no full working copy. The existing borrowed
+API remains immutable and byte-identical. Function names and tuple/struct result
+shape are implementation translation details, not an additional geometry authority.
+
+Cancellation-aware variants of the same staged solvers must accept a cheap
+`FnMut() -> bool` callback. Each real golden fixture stage must abort without an
+artifact when cancellation is requested after its initial poll, with deterministic
+observable intermediate work polling. Tests compare uncanceled variants byte-for-byte
+with existing public staged APIs, and exercise cancellation at more than one
+intermediate work boundary. Exact implementation poll counts and wall-clock limits
+are not acceptance requirements. Native dispatch must wire its existing token into
+these variants and publish neither a success receipt nor partial accepted output.
+Existing between-wave cancellation remains a separate regression.
