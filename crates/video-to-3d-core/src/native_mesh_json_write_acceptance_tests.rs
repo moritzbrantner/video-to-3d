@@ -45,3 +45,48 @@ fn native_surface_mesh_writer_rejects_nonfinite_geometry() {
     mesh.points[0].x = f32::NAN;
     assert!(mesh.to_json_with_cancel(|| Ok(())).is_err());
 }
+
+#[test]
+fn native_surface_mesh_cancels_after_validation_inside_json_emission() {
+    let mesh = mesh();
+    let before = mesh.to_json();
+    let mut validation_polls = 0;
+    mesh.validate_with_cancel(|| {
+        validation_polls += 1;
+        Ok(())
+    })
+    .unwrap();
+    let mut total_polls = 0;
+    assert_eq!(
+        mesh.to_json_with_cancel(|| {
+            total_polls += 1;
+            Ok(())
+        })
+        .unwrap(),
+        before
+    );
+    assert!(total_polls > validation_polls + 4);
+    for cancel_at in [
+        validation_polls + (total_polls - validation_polls) / 2,
+        total_polls - 1,
+    ] {
+        assert!(cancel_at > validation_polls);
+        let mut polls = 0;
+        let result = mesh.to_json_with_cancel(|| {
+            polls += 1;
+            if polls >= cancel_at {
+                Err("acceptance native mesh emission canceled".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("canceled"));
+        assert!(polls >= cancel_at && polls < total_polls);
+        assert_eq!(
+            mesh.to_json(),
+            before,
+            "Canceled emission mutated the source mesh"
+        );
+    }
+}

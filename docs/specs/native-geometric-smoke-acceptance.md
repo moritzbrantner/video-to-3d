@@ -315,3 +315,35 @@ force source-corner coverage. Reuse the same existing golden module across both
 acceptance files instead of including example/common twice (strictClippy duplicate_mod).
 This fixture correction follows production work and is not claimed test-first; the
 original missing-serializer compile RED remains honest baseline evidence.
+
+### Independent verification of JSON repair 96cc102
+
+Read-only source audit confirms the active token reaches Sparse/Dense compact
+writers, actual SurfaceMeshArtifact pretty/newline writer and assembled-scene
+pretty/newline writer. Both version-header skip and typed Serde read traversals use
+the bounded Read (8KiB refills). Dense ancestry header skips geometry through that
+same reader; camera ancestry identity hashes stream the existing compact serialization
+through a cancel-aware hashing writer. SurfaceMesh parses/validates once with token,
+then assembly borrows trusted evidence. Writes poll actual bounded Serde fragments,
+not a pre-work callback loop, and preserve UTF8 and existing byte format.
+
+Independent protected runs on96cc102:22 cancellation-filter cases,2 fusion-prepass
+cases,1owned-allocation/byte-parity case and1trusted-borrow case pass. Supplemental
+actual native mesh witness (authored after96cc102) counts its exact real validation
+polls and total no-op polls, then cancels halfway through remaining emission and
+near completion **after** validation. Both abort without output or source mutation;
+this strengthens the earlier2/4cases that could stop during validation alone.
+
+Using the producer-built current96cc102 release CLI, a private copy of the retained
+canonical#75 synthetic room project first reuses all5verified receipts. Corrupting
+only its own dense output causes one real dense execution, restores every original
+native artifact hash and preserves valid descendants. A following build executes
+nothing. Removing only that copy's native outputs executes all4actualnative stages
+(sparse/dense/mesh/assemble), preserves imported sampled-frame evidence, and restores
+all original native file hashes. EnvironmentGLB remains8216bytes, SHA256
+`d030900c4f98b2f14ce1e406648abe49d7ea178da2a8fcaaa11eaaac8dd9c5df`.
+Local evidence is under coding-agent/video174-independent-room-*.json; copied project
+video174-json-independent-room. This is real deterministic synthetic geometry,
+not owner-filmed-room or#77 product acceptance. No desktop/Blender result is claimed.
+Individual SVD, std sorts and disclosed metadata/range-fill windows remain atomic;
+this is cooperative cancellation, not a fixed response-time guarantee.
