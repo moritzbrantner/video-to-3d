@@ -1,0 +1,61 @@
+name: Blender scene acceptance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tools/blender/**"
+      - "crates/video-to-3d-core/examples/synthetic_room_fixture.rs"
+      - ".github/workflows/blender-acceptance.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/blender/**"
+      - "crates/video-to-3d-core/examples/synthetic_room_fixture.rs"
+      - ".github/workflows/blender-acceptance.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BLENDER_VERSION: 5.0.1
+  BLENDER_SHA256: 8019580ee1b7262e505f4196a00237ccf743c88d205b38d34201510676e60b09
+
+jobs:
+  blender-acceptance:
+    name: Headless Blender import/edit acceptance (synthetic oracle)
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install pinned Blender
+        run: |
+          archive="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/$archive"
+          echo "${BLENDER_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          sudo apt-get update
+          sudo apt-get install -y libxi6 libxkbcommon0 libxrender1 libxxf86vm1 libxfixes3 libsm6 libgl1 libegl1
+          echo "BLENDER=$RUNNER_TEMP/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
+
+      - name: Run the acceptance self-test
+        run: tools/blender/self_test.sh "$RUNNER_TEMP/blender-acceptance" "$BLENDER"
+
+      - name: Upload reports, hierarchy and render
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: blender-scene-acceptance
+          path: |
+            ${{ runner.temp }}/blender-acceptance/*.json
+            ${{ runner.temp }}/blender-acceptance/*.png
+          if-no-files-found: warn
