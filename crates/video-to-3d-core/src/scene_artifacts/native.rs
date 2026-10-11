@@ -35,8 +35,18 @@ impl BuiltInExecutor {
         Ok(record)
     }
 
-    fn document(&self, record: &crate::scene_project::ArtifactRecord) -> Result<String, String> {
-        let bytes = read_verified(&self.root, &record.path, &record.content_hash)?;
+    fn document(
+        &self,
+        record: &crate::scene_project::ArtifactRecord,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let bytes = read_verified_with_cancel(
+            &self.root,
+            &record.path,
+            &record.content_hash,
+            None,
+            || cancel.is_canceled(),
+        )?;
         String::from_utf8(bytes).map_err(|e| e.to_string())
     }
 
@@ -46,10 +56,13 @@ impl BuiltInExecutor {
         cancel: &CancellationToken,
     ) -> Result<ReconstructionRequest, String> {
         let keyframes = KeyframesArtifact::from_json(
-            &self.document(self.input(request, ArtifactKind::Keyframes)?)?,
+            &self.document(self.input(request, ArtifactKind::Keyframes)?, cancel)?,
         )?;
         let mut frames = Vec::with_capacity(keyframes.frames.len());
         for (index, frame) in keyframes.frames.iter().enumerate() {
+            if cancel.is_canceled() {
+                return Err("native frame loading canceled".into());
+            }
             // The classic request uses contiguous sampled-frame ordinals.
             if frame.frame_index != index {
                 return Err(
@@ -76,6 +89,7 @@ impl BuiltInExecutor {
         &self,
         dense_record: &crate::scene_project::ArtifactRecord,
         cameras_hash: &ContentHash,
+        cancel: &CancellationToken,
     ) -> Result<CameraStageArtifact, String> {
         let manifest = self.manifest()?;
         let identities = manifest.operation_identities().map_err(|e| e.to_string())?;
@@ -95,7 +109,7 @@ impl BuiltInExecutor {
                     if identities.get(id) != Some(&record.operation_identity) {
                         return Err("camera ancestor has stale operation identity".into());
                     }
-                    let camera = CameraStageArtifact::from_json(&self.document(record)?)
+                    let camera = CameraStageArtifact::from_json(&self.document(record, cancel)?)
                         .map_err(|e| e.to_string())?;
                     if camera.content_hash() != *cameras_hash {
                         return Err("dense camera ancestor content hash does not match".into());
@@ -170,26 +184,36 @@ impl BuiltInExecutor {
             ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
         let document = match request.operation.kind {
             OperationKind::SparseReconstruction => {
-                crate::reconstruct_cameras(&self.frames(request, cancel)?)
-                    .map_err(|e| e.to_string())?
-                    .to_json()
+                crate::reconstruct_cameras_with_cancel(&self.frames(request, cancel)?, || {
+                    cancel.is_canceled()
+                })
+                .map_err(|e| e.to_string())?
+                .to_json()
             }
             OperationKind::DenseReconstruction => {
-                let cameras = CameraStageArtifact::from_json(
-                    &self.document(self.input(request, ArtifactKind::SparseReconstruction)?)?,
-                )
+                let cameras = CameraStageArtifact::from_json(&self.document(
+                    self.input(request, ArtifactKind::SparseReconstruction)?,
+                    cancel,
+                )?)
                 .map_err(|e| e.to_string())?;
-                crate::reconstruct_dense(&self.frames(request, cancel)?, &cameras)
-                    .map_err(|e| e.to_string())?
-                    .to_json()
+                crate::reconstruct_dense_with_cancel(
+                    &self.frames(request, cancel)?,
+                    &cameras,
+                    || cancel.is_canceled(),
+                )
+                .map_err(|e| e.to_string())?
+                .to_json()
             }
             OperationKind::SurfaceMesh => {
                 let record = self.input(request, ArtifactKind::DenseEvidence)?;
-                let dense = DenseStageArtifact::from_json(&self.document(record)?)
+                let dense = DenseStageArtifact::from_json(&self.document(record, cancel)?)
                     .map_err(|e| e.to_string())?;
-                let cameras = self.dense_cameras(record, &dense.cameras_hash)?;
+                let cameras = self.dense_cameras(record, &dense.cameras_hash, cancel)?;
                 let (dense, mesh) =
-                    crate::reconstruct_mesh_owned(&cameras, dense).map_err(|e| e.to_string())?;
+                    crate::reconstruct_mesh_owned_with_cancel(&cameras, dense, || {
+                        cancel.is_canceled()
+                    })
+                    .map_err(|e| e.to_string())?;
                 let final_cameras: Vec<_> = cameras
                     .sparse
                     .final_cameras
@@ -249,7 +273,7 @@ impl BuiltInExecutor {
         cancel: &CancellationToken,
     ) -> Result<AssembledScene, String> {
         let sparse_record = self.input(request, ArtifactKind::SparseReconstruction)?;
-        let sparse = CameraStageArtifact::from_json(&self.document(sparse_record)?)
+        let sparse = CameraStageArtifact::from_json(&self.document(sparse_record, cancel)?)
             .map_err(|e| e.to_string())?;
         let mesh_record = self.input(request, ArtifactKind::SurfaceMesh)?;
         // Validate the full declared mesh -> dense -> sparse ancestry rather
@@ -278,7 +302,7 @@ impl BuiltInExecutor {
             request_hash: ContentHash,
             cameras_hash: ContentHash,
         }
-        let dense: DenseIdentity = serde_json::from_str(&self.document(dense_record)?)
+        let dense: DenseIdentity = serde_json::from_str(&self.document(dense_record, cancel)?)
             .map_err(|error| error.to_string())?;
         if dense.schema_version != crate::DENSE_STAGE_ARTIFACT_SCHEMA_VERSION {
             return Err("unsupported dense ancestor schema version".into());
@@ -291,13 +315,13 @@ impl BuiltInExecutor {
         }
         if dense.request_hash != sparse.request_hash
             || self
-                .dense_cameras(dense_record, &dense.cameras_hash)?
+                .dense_cameras(dense_record, &dense.cameras_hash, cancel)?
                 .content_hash()
                 != sparse.content_hash()
         {
             return Err("scene camera does not match mesh ancestry".into());
         }
-        let mesh = SurfaceMeshArtifact::from_json(&self.document(mesh_record)?)?;
+        let mesh = SurfaceMeshArtifact::from_json(&self.document(mesh_record, cancel)?)?;
         let evidence = mesh.evidence()?;
         if mesh.triangles.is_empty() {
             return Err("no observed surface triangles available for scene assembly".into());

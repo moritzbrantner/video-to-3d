@@ -44,9 +44,11 @@ pub use reconstruction_evidence::{
     SurfaceEvidenceRegion, TriangleSourceCorners, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 pub use reconstruction_stages::{
-    compose_reconstruction, reconstruct_cameras, reconstruct_dense, reconstruct_mesh,
-    reconstruct_mesh_owned, request_content_hash, CameraStageArtifact, DenseStageArtifact,
-    MeshStageArtifact, ReconstructionStage, ReconstructionStageError, StageInput,
+    compose_reconstruction, reconstruct_cameras, reconstruct_cameras_with_cancel,
+    reconstruct_dense, reconstruct_dense_with_cancel, reconstruct_mesh, reconstruct_mesh_owned,
+    reconstruct_mesh_owned_with_cancel, reconstruct_mesh_with_cancel, request_content_hash,
+    CameraStageArtifact, ConsumedDenseGeometry, DenseStageArtifact, MeshStageArtifact,
+    ReconstructionStage, ReconstructionStageError, StageInput,
     CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION, DENSE_STAGE_ARTIFACT_SCHEMA_VERSION,
     MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
 };

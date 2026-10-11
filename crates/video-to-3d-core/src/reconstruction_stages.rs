@@ -21,6 +21,7 @@
 use crate::dense::{DenseGridSite, DenseStats};
 use crate::multi_view::RegisteredCamera;
 use crate::scene_project::ContentHash;
+use crate::ReconstructionControl;
 use crate::{
     BootstrapDiagnosis, CalibratedPairStats, CameraPose, EvidencePointAttributes, FrameInput,
     MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionOptions,
@@ -375,6 +376,14 @@ fn check_identity(
 /// Identity of a request's frames and options. Deterministic; any change to a
 /// frame's dimensions or pixels, the frame order or the options changes it.
 pub fn request_content_hash(request: &ReconstructionRequest) -> ContentHash {
+    request_content_hash_with_control(request, &mut ReconstructionControl::new(&mut || false))
+        .unwrap_or_else(|_| unreachable!("uncancelable request hashing"))
+}
+
+fn request_content_hash_with_control(
+    request: &ReconstructionRequest,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<ContentHash, ReconstructionStageError> {
     // Destructured so that a new option cannot silently fall out of the identity.
     let ReconstructionOptions {
         max_features,
@@ -407,9 +416,14 @@ pub fn request_content_hash(request: &ReconstructionRequest) -> ContentHash {
         hasher.update(frame.width.to_le_bytes());
         hasher.update(frame.height.to_le_bytes());
         hasher.update((frame.rgba.len() as u64).to_le_bytes());
-        hasher.update(&frame.rgba);
+        for pixels in frame.rgba.chunks(64 * 1024) {
+            hasher.update(pixels);
+            control
+                .check()
+                .map_err(ReconstructionStageError::Reconstruction)?;
+        }
     }
-    ContentHash::of_digest(&hasher.finalize())
+    Ok(ContentHash::of_digest(&hasher.finalize()))
 }
 
 /// Stage 1: frames → cameras, including the bounded registration recovery of
@@ -417,11 +431,22 @@ pub fn request_content_hash(request: &ReconstructionRequest) -> ContentHash {
 pub fn reconstruct_cameras(
     request: &ReconstructionRequest,
 ) -> Result<CameraStageArtifact, ReconstructionStageError> {
-    let sparse =
-        crate::reconstruct_sparse(request).map_err(ReconstructionStageError::Reconstruction)?;
+    reconstruct_cameras_with_cancel(request, || false)
+}
+
+pub fn reconstruct_cameras_with_cancel(
+    request: &ReconstructionRequest,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<CameraStageArtifact, ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    let sparse = crate::reconstruct_sparse_with_control(request, &mut control)
+        .map_err(ReconstructionStageError::Reconstruction)?;
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
     CameraStageArtifact {
         schema_version: CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
-        request_hash: request_content_hash(request),
+        request_hash: request_content_hash_with_control(request, &mut control)?,
         sparse,
     }
     .check_finite()
@@ -434,18 +459,35 @@ pub fn reconstruct_dense(
     request: &ReconstructionRequest,
     cameras: &CameraStageArtifact,
 ) -> Result<DenseStageArtifact, ReconstructionStageError> {
+    reconstruct_dense_with_cancel(request, cameras, || false)
+}
+
+pub fn reconstruct_dense_with_cancel(
+    request: &ReconstructionRequest,
+    cameras: &CameraStageArtifact,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<DenseStageArtifact, ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
     cameras.check_schema_version()?;
     check_identity(
         ReconstructionStage::Cameras,
         StageInput::Request,
         &cameras.request_hash,
-        request_content_hash(request),
+        request_content_hash_with_control(request, &mut control)?,
     )?;
+    let dense =
+        estimate_dense_evidence_with_control(&request.frames, &cameras.sparse, &mut control);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
     DenseStageArtifact {
         schema_version: DENSE_STAGE_ARTIFACT_SCHEMA_VERSION,
         request_hash: cameras.request_hash.clone(),
         cameras_hash: cameras.content_hash(),
-        dense: estimate_dense_evidence(&request.frames, &cameras.sparse),
+        dense,
     }
     .check_finite()
 }
@@ -456,6 +498,18 @@ pub fn reconstruct_mesh(
     cameras: &CameraStageArtifact,
     dense: &DenseStageArtifact,
 ) -> Result<MeshStageArtifact, ReconstructionStageError> {
+    reconstruct_mesh_with_cancel(cameras, dense, || false)
+}
+
+pub fn reconstruct_mesh_with_cancel(
+    cameras: &CameraStageArtifact,
+    dense: &DenseStageArtifact,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<MeshStageArtifact, ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
     cameras.check_schema_version()?;
     dense.check_schema_version()?;
     check_identity(
@@ -469,8 +523,13 @@ pub fn reconstruct_mesh(
     // artifact keeps just the points that moved.
     let original = &dense.dense.points;
     let mut points = original.clone();
-    let surface = build_surface(&cameras.sparse, DenseFields::of(&dense.dense), &mut points)
-        .map_err(ReconstructionStageError::Reconstruction)?;
+    let surface = build_surface_with_control(
+        &cameras.sparse,
+        DenseFields::of(&dense.dense),
+        &mut points,
+        &mut control,
+    )
+    .map_err(ReconstructionStageError::Reconstruction)?;
     MeshStageArtifact {
         schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
         dense_hash: dense.content_hash(),
@@ -479,13 +538,33 @@ pub fn reconstruct_mesh(
     .check_finite()
 }
 
+/// Owned geometry after surface consolidation. This is a working buffer, not a
+/// reusable dense stage snapshot: consolidation may change its vertex positions.
+/// The accompanying mesh retains the consumed input artifact's content identity.
+#[derive(Debug)]
+pub struct ConsumedDenseGeometry {
+    pub(crate) dense: DenseEvidence,
+}
+
 /// Consume dense evidence and consolidate its existing point allocation in
 /// place. The mesh records the original dense content identity and only changed
 /// vertices, exactly as the immutable borrowed entrypoint does.
 pub fn reconstruct_mesh_owned(
     cameras: &CameraStageArtifact,
+    dense: DenseStageArtifact,
+) -> Result<(ConsumedDenseGeometry, MeshStageArtifact), ReconstructionStageError> {
+    reconstruct_mesh_owned_with_cancel(cameras, dense, || false)
+}
+
+pub fn reconstruct_mesh_owned_with_cancel(
+    cameras: &CameraStageArtifact,
     mut dense: DenseStageArtifact,
-) -> Result<(DenseStageArtifact, MeshStageArtifact), ReconstructionStageError> {
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<(ConsumedDenseGeometry, MeshStageArtifact), ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
     cameras.check_schema_version()?;
     dense.check_schema_version()?;
     check_identity(
@@ -496,8 +575,13 @@ pub fn reconstruct_mesh_owned(
     )?;
     let dense_hash = dense.content_hash();
     let mut points = std::mem::take(&mut dense.dense.points);
-    let surface = build_surface(&cameras.sparse, DenseFields::of(&dense.dense), &mut points)
-        .map_err(ReconstructionStageError::Reconstruction)?;
+    let surface = build_surface_with_control(
+        &cameras.sparse,
+        DenseFields::of(&dense.dense),
+        &mut points,
+        &mut control,
+    )
+    .map_err(ReconstructionStageError::Reconstruction)?;
     dense.dense.points = points;
     let mesh = MeshStageArtifact {
         schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
@@ -505,7 +589,7 @@ pub fn reconstruct_mesh_owned(
         mesh: surface,
     }
     .check_finite()?;
-    Ok((dense, mesh))
+    Ok((ConsumedDenseGeometry { dense: dense.dense }, mesh))
 }
 
 /// The single-call [`ReconstructionResult`] from the three artifacts of one chain,
@@ -560,6 +644,18 @@ pub(crate) fn estimate_dense_evidence(
     frames: &[FrameInput],
     sparse: &SparseReconstruction,
 ) -> DenseEvidence {
+    estimate_dense_evidence_with_control(
+        frames,
+        sparse,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn estimate_dense_evidence_with_control(
+    frames: &[FrameInput],
+    sparse: &SparseReconstruction,
+    control: &mut ReconstructionControl<'_>,
+) -> DenseEvidence {
     let cameras = registered_cameras(&sparse.dense_cameras);
     let sparse_points: Vec<Vector3<f64>> = sparse
         .dense_sparse_points
@@ -567,7 +663,7 @@ pub(crate) fn estimate_dense_evidence(
         .map(|point| Vector3::from(*point))
         .collect();
     let options = sparse.options;
-    let analysis = crate::dense::estimate_depth_points_with_budget(
+    let analysis = crate::dense::estimate_depth_points_with_budget_and_control(
         frames,
         &cameras,
         &sparse_points,
@@ -575,6 +671,7 @@ pub(crate) fn estimate_dense_evidence(
         options.max_dense_working_set_bytes,
         options.max_features,
         options.descriptor_radius,
+        control,
     );
     let dense = &analysis.stats;
     let mut warnings = Vec::new();
@@ -640,8 +737,22 @@ fn build_surface(
     dense: DenseFields<'_>,
     points: &mut [Point3],
 ) -> Result<SurfaceMesh, String> {
+    build_surface_with_control(
+        sparse,
+        dense,
+        points,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn build_surface_with_control(
+    sparse: &SparseReconstruction,
+    dense: DenseFields<'_>,
+    points: &mut [Point3],
+    control: &mut ReconstructionControl<'_>,
+) -> Result<SurfaceMesh, String> {
     let final_cameras = registered_cameras(&sparse.final_cameras);
-    let analysis = crate::mesh::reconstruct_dense_mesh(
+    let analysis = crate::mesh::reconstruct_dense_mesh_with_control(
         points,
         dense.grid_sites,
         dense.stats,
@@ -649,7 +760,9 @@ fn build_surface(
         sparse.image_width,
         sparse.image_height,
         sparse.focal_length_pixels as f64,
+        control,
     );
+    control.check()?;
     let mut surface = SurfaceMesh {
         stats: analysis.stats,
         triangles: analysis.triangles,
@@ -660,7 +773,7 @@ fn build_surface(
     };
     let mut warnings: Vec<String> = crate::mesh_warning(&surface.stats).into_iter().collect();
     let owned = warnings.len();
-    let moved_indices = crate::surface_fusion::consolidate_surface_recording(
+    let moved_indices = crate::surface_fusion::consolidate_surface_recording_with_control(
         crate::surface_fusion::SurfaceSupport {
             calibrated_pair: sparse.calibrated_pair.as_ref(),
             registered_views: &sparse.registered_views,
@@ -675,6 +788,7 @@ fn build_surface(
             mesh: &mut surface.stats,
             warnings: &mut warnings,
         },
+        control,
     )?;
     surface.consolidated_points = moved_indices
         .into_iter()

@@ -53,13 +53,15 @@ struct LandmarkState {
     source: LandmarkSource,
 }
 
-pub(super) fn optimize(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn optimize_with_control(
     analysis: &MultiViewAnalysis,
     seed_points: &[Vector3<f64>],
     new_landmarks: &[NewLandmark],
     cameras: &[RegisteredCamera],
     features: &[Vec<Feature>],
     projection: ProjectionModel,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> BundleAdjustmentResult {
     let original_seed_points = seed_points.to_vec();
     let original_new_points: Vec<Vector3<f64>> = new_landmarks
@@ -146,13 +148,14 @@ pub(super) fn optimize(
     }
     stats.attempted = true;
 
-    let Some(initial_metrics) = error_metrics(
+    let Some(initial_metrics) = error_metrics_with_control(
         cameras,
         &landmarks,
         &observations,
         projection.width,
         projection.height,
         projection.focal_pixels,
+        control,
     ) else {
         return BundleAdjustmentResult {
             stats,
@@ -166,7 +169,7 @@ pub(super) fn optimize(
 
     let mut working_cameras = cameras.to_vec();
     let mut working_landmarks = landmarks.clone();
-    let iterations = run_iterations(
+    let iterations = run_iterations_with_control(
         &mut working_cameras,
         &mut working_landmarks,
         &observations,
@@ -176,16 +179,18 @@ pub(super) fn optimize(
         projection.width,
         projection.height,
         projection.focal_pixels,
+        control,
     );
     stats.iterations = iterations;
 
-    let Some(final_metrics) = error_metrics(
+    let Some(final_metrics) = error_metrics_with_control(
         &working_cameras,
         &working_landmarks,
         &observations,
         projection.width,
         projection.height,
         projection.focal_pixels,
+        control,
     ) else {
         return BundleAdjustmentResult {
             stats,
@@ -307,6 +312,7 @@ fn observation_indices_by_camera(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn run_iterations(
     cameras: &mut [RegisteredCamera],
     landmarks: &mut [LandmarkState],
@@ -318,21 +324,55 @@ fn run_iterations(
     height: u32,
     focal_pixels: f64,
 ) -> usize {
-    let Some(mut previous_cost) = total_cost(
+    run_iterations_with_control(
+        cameras,
+        landmarks,
+        observations,
+        camera_observations,
+        landmark_observations,
+        fixed_frames,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_iterations_with_control(
+    cameras: &mut [RegisteredCamera],
+    landmarks: &mut [LandmarkState],
+    observations: &[BundleObservation],
+    camera_observations: &[Vec<usize>],
+    landmark_observations: &[Vec<usize>],
+    fixed_frames: &[usize; 2],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> usize {
+    let Some(mut previous_cost) = total_cost_with_control(
         cameras,
         landmarks,
         observations,
         width,
         height,
         focal_pixels,
+        control,
     ) else {
         return 0;
     };
     let mut completed_iterations = 0;
 
     for iteration in 0..MAX_ITERATIONS {
+        if control.is_canceled() {
+            return completed_iterations;
+        }
         let mut accepted_blocks = 0usize;
         for (landmark_index, observation_indices) in landmark_observations.iter().enumerate() {
+            if control.is_canceled() {
+                return completed_iterations;
+            }
             if observation_indices.len() < MIN_LANDMARK_OBSERVATIONS {
                 continue;
             }
@@ -345,12 +385,16 @@ fn run_iterations(
                 width,
                 height,
                 focal_pixels,
+                control,
             ) {
                 accepted_blocks += 1;
             }
         }
 
         for (camera_index, observation_indices) in camera_observations.iter().enumerate() {
+            if control.is_canceled() {
+                return completed_iterations;
+            }
             if fixed_frames.contains(&cameras[camera_index].frame_index)
                 || observation_indices.len() < MIN_CAMERA_OBSERVATIONS
             {
@@ -365,19 +409,21 @@ fn run_iterations(
                 width,
                 height,
                 focal_pixels,
+                control,
             ) {
                 accepted_blocks += 1;
             }
         }
 
         completed_iterations = iteration + 1;
-        let Some(current_cost) = total_cost(
+        let Some(current_cost) = total_cost_with_control(
             cameras,
             landmarks,
             observations,
             width,
             height,
             focal_pixels,
+            control,
         ) else {
             break;
         };
@@ -402,6 +448,7 @@ fn refine_landmark(
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> bool {
     let current_position = landmarks[landmark_index].position;
     let Some(current_cost) = landmark_cost(
@@ -412,6 +459,7 @@ fn refine_landmark(
         width,
         height,
         focal_pixels,
+        control,
     ) else {
         return false;
     };
@@ -419,6 +467,9 @@ fn refine_landmark(
     let mut hessian = Matrix3::<f64>::zeros();
     let mut gradient = Vector3::<f64>::zeros();
     for &observation_index in observation_indices {
+        if control.is_canceled() {
+            return false;
+        }
         let observation = &observations[observation_index];
         let camera = &cameras[observation.camera_index];
         let Some((residual, camera_point)) = residual_and_camera_point(
@@ -459,6 +510,7 @@ fn refine_landmark(
         width,
         height,
         focal_pixels,
+        control,
     ) else {
         return false;
     };
@@ -480,6 +532,7 @@ fn refine_camera(
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> bool {
     let current_camera = cameras[camera_index].clone();
     let Some(current_cost) = camera_cost(
@@ -490,6 +543,7 @@ fn refine_camera(
         width,
         height,
         focal_pixels,
+        control,
     ) else {
         return false;
     };
@@ -497,6 +551,9 @@ fn refine_camera(
     let mut hessian = Matrix6::zeros();
     let mut gradient = Vector6::zeros();
     for &observation_index in observation_indices {
+        if control.is_canceled() {
+            return false;
+        }
         let observation = &observations[observation_index];
         let landmark = &landmarks[observation.landmark_index];
         let Some((residual, camera_point)) = residual_and_camera_point(
@@ -565,6 +622,7 @@ fn refine_camera(
         width,
         height,
         focal_pixels,
+        control,
     ) else {
         return false;
     };
@@ -585,9 +643,13 @@ fn landmark_cost(
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> Option<f64> {
     let mut cost = 0.0;
     for &observation_index in observation_indices {
+        if control.is_canceled() {
+            return None;
+        }
         let observation = &observations[observation_index];
         let error = reprojection_error(
             &cameras[observation.camera_index],
@@ -611,9 +673,13 @@ fn camera_cost(
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> Option<f64> {
     let mut cost = 0.0;
     for &observation_index in observation_indices {
+        if control.is_canceled() {
+            return None;
+        }
         let observation = &observations[observation_index];
         let error = reprojection_error(
             camera,
@@ -635,6 +701,7 @@ struct ErrorMetrics {
     rmse: f64,
 }
 
+#[cfg(test)]
 fn error_metrics(
     cameras: &[RegisteredCamera],
     landmarks: &[LandmarkState],
@@ -643,6 +710,27 @@ fn error_metrics(
     height: u32,
     focal_pixels: f64,
 ) -> Option<ErrorMetrics> {
+    error_metrics_with_control(
+        cameras,
+        landmarks,
+        observations,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn error_metrics_with_control(
+    cameras: &[RegisteredCamera],
+    landmarks: &[LandmarkState],
+    observations: &[BundleObservation],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> Option<ErrorMetrics> {
     if observations.is_empty() {
         return None;
     }
@@ -650,6 +738,9 @@ fn error_metrics(
     let mut squared_sum = 0.0;
     let mut cost = 0.0;
     for observation in observations {
+        if control.is_canceled() {
+            return None;
+        }
         let error = reprojection_error(
             &cameras[observation.camera_index],
             &landmarks[observation.landmark_index].position,
@@ -670,21 +761,24 @@ fn error_metrics(
     })
 }
 
-fn total_cost(
+#[allow(clippy::too_many_arguments)]
+fn total_cost_with_control(
     cameras: &[RegisteredCamera],
     landmarks: &[LandmarkState],
     observations: &[BundleObservation],
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> Option<f64> {
-    error_metrics(
+    error_metrics_with_control(
         cameras,
         landmarks,
         observations,
         width,
         height,
         focal_pixels,
+        control,
     )
     .map(|metrics| metrics.cost)
 }

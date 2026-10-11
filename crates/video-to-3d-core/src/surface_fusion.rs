@@ -1,3 +1,4 @@
+use crate::ReconstructionControl;
 use crate::{MeshTriangle, Point3, ReconstructionEvidenceView, SurfaceEvidenceRegion};
 use nalgebra::Vector3;
 use std::collections::HashMap;
@@ -108,9 +109,22 @@ pub(crate) fn consolidate_surface(
 
 /// Record only vertices whose final value actually changed, without retaining a
 /// second dense geometry buffer to discover those changes afterward.
+#[cfg(test)]
 pub(crate) fn consolidate_surface_recording(
     support: SurfaceSupport<'_>,
     target: SurfaceTarget<'_>,
+) -> Result<Vec<usize>, String> {
+    consolidate_surface_recording_with_control(
+        support,
+        target,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+pub(crate) fn consolidate_surface_recording_with_control(
+    support: SurfaceSupport<'_>,
+    target: SurfaceTarget<'_>,
+    control: &mut ReconstructionControl<'_>,
 ) -> Result<Vec<usize>, String> {
     let SurfaceTarget {
         points,
@@ -155,8 +169,9 @@ pub(crate) fn consolidate_surface_recording(
         stats,
         pairs,
         moved_indices,
-    } = fuse_mutually_supported_vertices(points, triangles, &membership);
+    } = fuse_mutually_supported_vertices_with_control(points, triangles, &membership, control);
 
+    control.check()?;
     if stats.fused_pairs > 0 {
         remove_stale_surface_fusion_claim(warnings);
     }
@@ -179,14 +194,16 @@ pub(crate) fn consolidate_surface_recording(
     };
     warnings.push(diagnostic);
 
-    let mut merge = crate::surface_merge::merge_fused_patches(
+    let mut merge = crate::surface_merge::merge_fused_patches_with_control(
         points,
         triangles,
         &membership,
         &pairs,
         &reference_cameras,
         &point_origins,
+        control,
     );
+    control.check()?;
     *triangle_sources = std::mem::take(&mut merge.triangle_sources);
     refresh_mesh_after_merge(
         mesh,
@@ -323,10 +340,25 @@ fn remove_stale_surface_fusion_claim(warnings: &mut [String]) {
     }
 }
 
+#[cfg(test)]
 fn fuse_mutually_supported_vertices(
     points: &mut [Point3],
     triangles: &[MeshTriangle],
     membership: &[Option<usize>],
+) -> FusionOutcome {
+    fuse_mutually_supported_vertices_with_control(
+        points,
+        triangles,
+        membership,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn fuse_mutually_supported_vertices_with_control(
+    points: &mut [Point3],
+    triangles: &[MeshTriangle],
+    membership: &[Option<usize>],
+    control: &mut ReconstructionControl<'_>,
 ) -> FusionOutcome {
     if points.len() != membership.len() {
         return FusionOutcome::default();
@@ -346,6 +378,9 @@ fn fuse_mutually_supported_vertices(
     let mut buckets: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
     let mut eligible_vertices = 0usize;
     for index in 0..points.len() {
+        if control.is_canceled() {
+            return FusionOutcome::default();
+        }
         if membership[index].is_none() || normals[index].is_none() || local_scales[index].is_none()
         {
             continue;
@@ -365,6 +400,9 @@ fn fuse_mutually_supported_vertices(
     let mut rejected_normal_pairs = 0usize;
 
     for index in 0..points.len() {
+        if control.is_canceled() {
+            return FusionOutcome::default();
+        }
         let (Some(support_group), Some(normal), Some(local_scale), Some(position)) = (
             membership[index],
             normals[index],
@@ -429,6 +467,9 @@ fn fuse_mutually_supported_vertices(
 
     let mut proposed_moves = Vec::new();
     for index in 0..points.len() {
+        if control.is_canceled() {
+            return FusionOutcome::default();
+        }
         let Some((other_index, _)) = nearest[index] else {
             continue;
         };
@@ -453,8 +494,16 @@ fn fuse_mutually_supported_vertices(
         });
     }
 
-    let (accepted_moves, rejected_topology_pairs) =
-        topology_safe_moves(points, triangles, &incident_triangles, proposed_moves);
+    let (accepted_moves, rejected_topology_pairs) = topology_safe_moves_with_control(
+        points,
+        triangles,
+        &incident_triangles,
+        proposed_moves,
+        control,
+    );
+    if control.is_canceled() {
+        return FusionOutcome::default();
+    }
     let mut moved_indices = Vec::new();
     for movement in &accepted_moves {
         for index in [movement.first, movement.second] {
@@ -483,11 +532,28 @@ fn fuse_mutually_supported_vertices(
     }
 }
 
+#[cfg(test)]
 fn topology_safe_moves(
     points: &[Point3],
     triangles: &[MeshTriangle],
     incident_triangles: &[Vec<usize>],
     moves: Vec<FusionMove>,
+) -> (Vec<FusionMove>, usize) {
+    topology_safe_moves_with_control(
+        points,
+        triangles,
+        incident_triangles,
+        moves,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn topology_safe_moves_with_control(
+    points: &[Point3],
+    triangles: &[MeshTriangle],
+    incident_triangles: &[Vec<usize>],
+    moves: Vec<FusionMove>,
+    control: &mut ReconstructionControl<'_>,
 ) -> (Vec<FusionMove>, usize) {
     if moves.is_empty() {
         return (moves, 0);
@@ -496,6 +562,9 @@ fn topology_safe_moves(
     let mut active = vec![true; moves.len()];
     let mut move_by_vertex = vec![None; points.len()];
     for (move_index, movement) in moves.iter().enumerate() {
+        if control.is_canceled() {
+            return (Vec::new(), 0);
+        }
         if movement.first >= points.len() || movement.second >= points.len() {
             active[move_index] = false;
             continue;
@@ -505,9 +574,15 @@ fn topology_safe_moves(
     }
 
     loop {
+        if control.is_canceled() {
+            return (Vec::new(), 0);
+        }
         let mut touched = vec![false; triangles.len()];
         let mut touched_triangles = Vec::new();
         for (move_index, movement) in moves.iter().enumerate() {
+            if control.is_canceled() {
+                return (Vec::new(), 0);
+            }
             if !active[move_index] {
                 continue;
             }

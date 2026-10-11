@@ -55,6 +55,23 @@ pub(super) fn estimate_pose(
     height: u32,
     focal_pixels: f64,
 ) -> Option<PnpEstimate> {
+    estimate_pose_with_control(
+        correspondences,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn estimate_pose_with_control(
+    correspondences: &[PnpCorrespondence],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> Option<PnpEstimate> {
     if correspondences.len() < MIN_ACCEPTED_INLIERS
         || !focal_pixels.is_finite()
         || focal_pixels <= 0.0
@@ -64,6 +81,9 @@ pub(super) fn estimate_pose(
 
     let mut best: Option<EvaluatedPose> = None;
     for trial in 0..RANSAC_TRIALS {
+        if control.is_canceled() {
+            return None;
+        }
         let Some(sample_indices) = deterministic_sample(trial, correspondences.len()) else {
             continue;
         };
@@ -71,16 +91,19 @@ pub(super) fn estimate_pose(
             .iter()
             .map(|&index| correspondences[index])
             .collect();
-        let Some((rotation, translation)) = fit_pose(&sample, width, height, focal_pixels) else {
+        let Some((rotation, translation)) =
+            fit_pose_with_control(&sample, width, height, focal_pixels, control)
+        else {
             continue;
         };
-        let evaluated = evaluate_pose(
+        let evaluated = evaluate_pose_with_control(
             correspondences,
             rotation,
             translation,
             width,
             height,
             focal_pixels,
+            control,
         );
         if evaluated.inlier_indices.len() < MIN_ACCEPTED_INLIERS {
             continue;
@@ -99,19 +122,26 @@ pub(super) fn estimate_pose(
         .iter()
         .map(|&index| correspondences[index])
         .collect();
-    let refined = fit_pose(&inlier_correspondences, width, height, focal_pixels)
-        .map(|(rotation, translation)| {
-            evaluate_pose(
-                correspondences,
-                rotation,
-                translation,
-                width,
-                height,
-                focal_pixels,
-            )
-        })
-        .filter(|candidate| passes_acceptance(candidate, correspondences.len()))
-        .filter(|candidate| is_better(candidate, &best));
+    let refined = fit_pose_with_control(
+        &inlier_correspondences,
+        width,
+        height,
+        focal_pixels,
+        control,
+    )
+    .map(|(rotation, translation)| {
+        evaluate_pose_with_control(
+            correspondences,
+            rotation,
+            translation,
+            width,
+            height,
+            focal_pixels,
+            control,
+        )
+    })
+    .filter(|candidate| passes_acceptance(candidate, correspondences.len()))
+    .filter(|candidate| is_better(candidate, &best));
     let accepted = refined.as_ref().unwrap_or(&best);
 
     if !passes_acceptance(accepted, correspondences.len()) {
@@ -127,16 +157,21 @@ pub(super) fn estimate_pose(
     })
 }
 
-fn fit_pose(
+
+#[allow(clippy::too_many_arguments)]
+fn fit_pose_with_control(
     correspondences: &[PnpCorrespondence],
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> Option<(Matrix3<f64>, Vector3<f64>)> {
     match classify_landmarks(correspondences) {
-        LandmarkGeometry::Spatial => fit_spatial_dlt(correspondences, width, height, focal_pixels),
+        LandmarkGeometry::Spatial => {
+            fit_spatial_dlt(correspondences, width, height, focal_pixels, control)
+        }
         LandmarkGeometry::Planar(plane) => {
-            fit_planar_homography(correspondences, plane, width, height, focal_pixels)
+            fit_planar_homography(correspondences, plane, width, height, focal_pixels, control)
         }
         LandmarkGeometry::Degenerate => None,
     }
@@ -206,6 +241,7 @@ fn fit_spatial_dlt(
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> Option<(Matrix3<f64>, Vector3<f64>)> {
     let centroid = correspondences
         .iter()
@@ -227,6 +263,9 @@ fn fit_spatial_dlt(
     let center_y = height as f64 * 0.5;
     let mut design = DMatrix::<f64>::zeros(correspondences.len() * 2, 12);
     for (index, correspondence) in correspondences.iter().enumerate() {
+        if control.is_canceled() {
+            return None;
+        }
         let normalized = (correspondence.point - centroid) / rms;
         let world = [normalized.x, normalized.y, normalized.z, 1.0];
         let x = (correspondence.x_pixels - center_x) / focal_pixels;
@@ -245,7 +284,13 @@ fn fit_spatial_dlt(
         }
     }
 
+    if control.is_canceled() {
+        return None;
+    }
     let svd = design.svd(false, true);
+    if control.is_canceled() {
+        return None;
+    }
     if has_extra_null_direction(&svd.singular_values) {
         return None;
     }
@@ -297,6 +342,7 @@ fn fit_planar_homography(
     width: u32,
     height: u32,
     focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> Option<(Matrix3<f64>, Vector3<f64>)> {
     let plane_coordinates: Vec<(f64, f64)> = correspondences
         .iter()
@@ -321,6 +367,9 @@ fn fit_planar_homography(
     for (index, (correspondence, &(u, v))) in
         correspondences.iter().zip(&plane_coordinates).enumerate()
     {
+        if control.is_canceled() {
+            return None;
+        }
         let u = u / rms;
         let v = v / rms;
         let x = (correspondence.x_pixels - center_x) / focal_pixels;
@@ -345,7 +394,13 @@ fn fit_planar_homography(
         design[(row_y, 8)] = -y;
     }
 
+    if control.is_canceled() {
+        return None;
+    }
     let svd = design.svd(false, true);
+    if control.is_canceled() {
+        return None;
+    }
     if has_extra_null_direction(&svd.singular_values) {
         return None;
     }
@@ -436,12 +491,36 @@ fn evaluate_pose(
     height: u32,
     focal_pixels: f64,
 ) -> EvaluatedPose {
+    evaluate_pose_with_control(
+        correspondences,
+        rotation,
+        translation,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_pose_with_control(
+    correspondences: &[PnpCorrespondence],
+    rotation: Matrix3<f64>,
+    translation: Vector3<f64>,
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> EvaluatedPose {
     let center_x = width as f64 * 0.5;
     let center_y = height as f64 * 0.5;
     let mut inlier_indices = Vec::new();
     let mut inlier_errors = Vec::new();
 
     for (index, correspondence) in correspondences.iter().enumerate() {
+        if control.is_canceled() {
+            break;
+        }
         let camera_point = rotation * correspondence.point + translation;
         if !camera_point.iter().all(|value| value.is_finite()) || camera_point.z <= 1e-6 {
             continue;

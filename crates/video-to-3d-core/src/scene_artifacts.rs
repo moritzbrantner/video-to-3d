@@ -1779,7 +1779,8 @@ impl BuiltInExecutor {
             Reservations::Fixed { manifest } => {
                 let snapshot = manifest
                     .read()
-                    .map_err(|_| "executor manifest lock poisoned")?;
+                    .map_err(|_| "executor manifest lock poisoned")?
+                    .clone();
                 loaded = reserved_paths(&self.root, &snapshot);
                 &loaded
             }
