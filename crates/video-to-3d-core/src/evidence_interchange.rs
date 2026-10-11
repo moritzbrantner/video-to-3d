@@ -232,13 +232,16 @@ fn read_records<T>(
     what: &str,
     decode: impl Fn(&[u8]) -> T,
 ) -> Result<Vec<T>, String> {
-    let mut records = Vec::with_capacity(count);
+    // Grow with the bytes actually received: a header that declares many records
+    // over a short stream fails as truncated before it can reserve them all.
+    let mut records = Vec::with_capacity(count.min(CHUNK_ITEMS));
     let mut block = vec![0_u8; CHUNK_ITEMS.min(count) * record_bytes];
     let mut remaining = count;
     while remaining > 0 {
         let items = remaining.min(CHUNK_ITEMS);
         let bytes = &mut block[..items * record_bytes];
         read_exact(input, bytes, what)?;
+        records.reserve(items);
         records.extend(bytes.chunks_exact(record_bytes).map(&decode));
         remaining -= items;
     }
