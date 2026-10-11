@@ -1,0 +1,112 @@
+# Approved handheld fixture preparation acceptance (#176)
+
+Independent author/context: video_172_acceptance. Protected baseline2f47f3c;
+shared conventions sourceRevision46d8793bb3034326561f876dcc67dbaa5aa1e432.
+Authority: Decision Atlas3.1.2,3.2–3.6,4.3,6.1–6.2; owner approval in
+[issue74](https://github.com/moritzbrantner/video-to-3d/issues/74#issuecomment-6113239395).
+This contract prepares real input fixtures; it does not claim implementation,
+recognizable reconstructed output, Blender acceptance or the #77 three-video gate.
+
+## Immutable source-owned expectations
+
+`tools/tests/fixtures/approved-handheld-expectations.json` is independently authored
+acceptance, not a production corpus planner. It records the two approved original
+SHA256/byte lengths, official original/description URLs, CC BY3.0 title/creator/
+license attribution, authorized trim and per-item visibility/uncertainty. Production
+uses the existing `benchmarks/real-video-corpus.json` and existing tools. Routine
+field/API translations require independent re-verification; semantic expectations
+must not change to fit reconstructed output. Existing unapproved provider/manual
+canary redistribution stays rejected; these approved licensed originals are the
+explicitly attributed exception, not a global relaxation.
+
+H1: Andrew Mason, hotel room tour; originalSHA256
+`9d08559f3c18725848d0b53849dbc528c6ec803d4bc617cdafb2c16bdaf3304e`,
+11770437bytes,128.821s,VP9,640x480,30fps. Authorized indoor source interval[60,86),
+26s, selected before reconstruction. H3: Obakeneko, Noi Bai airport waiting room;
+SHA256`7885f38454d5ecd9bfc7f1e0a74d5522d8e2d1deea1d65338fbcd07871267fe4`,
+14334086bytes,25.3s,Theora,640x480,30fps; whole clip. Both are CC BY3.0 Unported,
+not Commons structured-data CC0. Retain original bytes/hash and attribution;
+identify trim, scale and contact-sheet changes. No controlled-room input is
+approved by this contract. Depth/pose/metric truth is not provided.
+
+## Preparation boundary
+
+Reuse `buildVideoSamplingPlan`:1.25fps,max18,360x270 analysis,5%..95% inclusive
+samples. H1 segment-relative1.3..24.7s maps source61.3..84.7s; H3
+1.265..24.035s. Requested times, actual selected decoded ordinals/PTS, decoder/
+version/scaling/colorspace boundary and per-frame hashes are retained. Request
+arithmetic is checked by `scripts/test-handheld-sampling-acceptance.ts` against the
+existing public helper. This proves the plan, not pixel equivalence.
+
+The independent source review used nearest original decoded best-effort PTS,
+earlier tie wins, ffmpeg8.0.1 bilinear360x270P6PPM; requested/selected time errors
+were≤0.016571s. Browser `video.ts` uses HTMLVideoElement seek/presented-time and
+canvas scaling. FFmpeg and browser selection, colorspace and scaled pixels are
+not automatically equivalent. The production preparation must declare its actual
+boundary; it may reuse existing runner's offline decoder. Do not label offline
+frames as browser-verified. Actual browser source seek/canvas verification is
+preferred and remains an explicit gap until run, including H1 trim duration/PTS.
+A changed decoder/frame selection that materially changes inventory coverage must
+be independently inspected, not silently substituted.
+
+H1 requires actual deterministic derived clip bytes/hash plus original/trim
+provenance, so a browser can consume the indoor input rather than unknowingly
+sampling the whole tour. If an implementation instead uses a virtual trim, its
+explicit boundary must enforce the interval, produce the matching source frames,
+and demonstrate truthful browser segment handling; coordinate independently before
+translating the encoded-clip expectation. Never fabricate a derived hash. H3 whole
+clip may use the unchanged original as its derived input. Preparation-only mode
+reuses `tools/run_real_video_case.ts` and emits no reconstruction output; it must
+not invoke Rust reconstruction, learned providers, geometry generation or Blender.
+
+Extend existing `sampling.json` receipt with verified original/derived file path,
+SHA256/length/source hash/trim transform, decoder boundary/version and18 frame
+path/hash/ordinal/PTS/requested timestamp entries. Paths resolve safely within
+asset/prepared roots; escaping paths, symlinks outside roots and mismatching bytes
+fail closed. Case ID/plan/inventory must agree with immutable source expectations.
+The proposed existing checker seam `verify_prepared_case(case,asset_root,
+prepared_root)->errors` is a routine signature, not a new framework; it may be
+translated independently while retaining successful real-source verification and
+original/derived/frame tamper rejection. Normal validation must not trust receipts
+without checking their actual files. Original media remains local product input.
+
+## Observable inventory and limits
+
+Zero-based fixed sample indices were independently inspected before reconstruction:
+H1 bed3–7; desk1–2/13; deskchair1 (coat-occluded); armchair2–3/7–8/13–15;
+sofa16–17 (partial16); coffee-table17 (single sampled view). Floor/interior wall/
+balcony opening are architecture. Deskchair, sofa and table have limited coverage;
+retain uncertainty, not invented hidden backsides or observed labels for completion.
+Additional foreground chair is not added to inflate counts. People, moving
+occluders, mirror reflections and exterior sea/buildings are not static furnishings.
+
+H3 waiting-seat bank0–2/16–17; queue-barrier assembly10–12/16; freestanding shop
+merchandise display10–11. Hall floor/shop front/column/gate-window opening are
+architecture. Travelers/luggage/strollers/reflection copies are excluded static
+inventory. These three semantic assemblies derive from footage, not the controlled
+room's numeric minimum. Each named expected furnishing must eventually be recognized
+and independently editable, not pass through a count of arbitrary mesh chunks.
+
+Existing Blender expectation schema can consume independently owned architecture/
+object IDs, materials/mesh/edit independence; physical bounds are omitted without
+true scale. Source visibility references do not supply fixture-authored geometry.
+A generic named node is not proof of recognition. Actual pipeline-produced meshes,
+source-view recognition, observed/completed provenance and Blender independent edit
+remain separate unrun #77 gates. H1 limited views must remain visible in that gate.
+
+## Commands and fail-closed handoff
+
+- `python3 -m unittest discover -s tools/tests -p 'test_approved_handheld_acceptance.py'`
+- `bun scripts/test-handheld-sampling-acceptance.ts`
+- Reused `bun scripts/test-video-sampling-contract.ts` and existing corpus tests.
+- Real-source tier: set `VIDEO_HANDHELD_ASSET_ROOT` to the licensed original root,
+  `VIDEO_HANDHELD_PREPARED_ROOT` to actual production preparation outputs, then run
+  the same Python tests. Absence is reported skipped, never counted as a pass.
+
+Initial baseline lacks both corpus entries, approved attribution/hash validation,
+derived preparation integrity verification and protected inventory validation.
+Independent tests are expected red until a distinct implementation context adds
+preparation. Initial source review exists locally, but production preparation and
+browser decode acceptance remain unrun. No decoder, corpus entry or production
+geometry is added by this acceptance commit. Full applicable verification is needed
+when impact mapping cannot select affected checks reliably.
