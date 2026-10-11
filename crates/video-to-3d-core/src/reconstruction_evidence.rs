@@ -59,7 +59,7 @@ pub enum EvidenceCameraAuthority {
     ProviderEstimated,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceCamera {
     pub frame_index: usize,
     pub authority: EvidenceCameraAuthority,
@@ -129,7 +129,7 @@ pub struct TriangleSourceCorners {
     pub corners: [usize; 3],
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceEvidenceRegion {
     pub origin: EvidenceOrigin,
     pub reference_frame: Option<usize>,
