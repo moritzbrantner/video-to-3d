@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - name: Install verified wasm-bindgen CLI
         uses: moritzbrantner/reusable-workflows/.github/actions/install-verified-wasm-cli@e60855ad67f3dad72c283c355d544d6d296241d7
         with:
