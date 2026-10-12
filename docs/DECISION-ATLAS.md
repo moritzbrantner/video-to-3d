@@ -132,6 +132,10 @@ Sources seeded into this atlas:
   Status: adopted 2026-10-10.  
   Provider/model choice adapts to available CPU/GPU resources. CPU-only operation must remain usable, potentially at reduced quality or speed, and requires a CPU-only smoke check. The exact minimum quality tier remains unanswered in 8.2. Requested versus attainable quality and unavailable capabilities must be explicit; there is no hidden cloud fallback. See 4.1.
 
+- **4.6 CPU-only operation preserves a useful observation-only workflow.**  
+  Status: adopted 2026-10-12. Answers 8.2 (owner selected B).  
+  On machines without a suitable GPU, users can locally reconstruct video-supported geometry, inspect the accepted scene, and export supported independently editable geometry via the existing scene/Blender handoff. CPU-only processing may be slower or lower quality; GPU-dependent AI-completion providers and their representations may be unavailable. Report unavailable or degraded capabilities and reasons explicitly rather than silently skipping stages, fabricating observed geometry, calling a cloud service, or marking a missing AI-completed representation as present. A CPU-only smoke test must exercise real local observed reconstruction, inspection and supported export when accepted geometry is available, and honest unavailable-completion reporting when it is not. This does not waive the full three-real-video product gate on declared capable local hardware in 3.6. See 1.2–1.5, 3.3–3.6, and 4.1–4.5.  
+
 ## 5. Quality and correction
 
 - **5.1 Every algorithmic change requires deterministic Rust coverage and observable diagnostics.**  
