@@ -1943,3 +1943,6 @@ mod mesh_json_read_acceptance;
 
 #[path = "native_mesh_json_write_acceptance_tests.rs"]
 mod native_mesh_json_write_acceptance;
+
+#[path = "derived_lineage_artifact_acceptance_tests.rs"]
+mod derived_lineage_acceptance;

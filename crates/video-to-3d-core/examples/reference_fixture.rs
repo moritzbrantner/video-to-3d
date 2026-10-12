@@ -1063,6 +1063,16 @@ fn format_metric(value: Option<f64>) -> String {
     value.map_or_else(|| "nan".to_owned(), |value| format!("{value:.6}"))
 }
 
+/// Canonical sampled inputs for independent native/store acceptance. This
+/// exposes the existing generator; it adds no reconstruction or scoring path.
+pub fn sampled_request(case: &str) -> ReconstructionRequest {
+    let fixture = generate(Case::parse(case));
+    ReconstructionRequest {
+        frames: fixture.views.into_iter().map(|view| view.frame).collect(),
+        options: browser_options(),
+    }
+}
+
 fn main() {
     let output_dir = env::args().nth(1);
     let case = Case::parse(env::args().nth(2).as_deref().unwrap_or("slow-lateral-pan"));
