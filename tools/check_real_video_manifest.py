@@ -223,7 +223,7 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
                 errors.append(f"{prefix}.asset.{field} differs from the approved canonical source")
         if not isinstance(preparation, dict):
             return errors + [f"{prefix}: approved canonical preparation must be an object"]
-        for field in ("trim", "original_duration_seconds", "plan"):
+        for field in ("trim", "original_duration_seconds", "plan", "inventory"):
             if preparation.get(field) != canonical["preparation"].get(field):
                 errors.append(f"{prefix}: {field} differs from the approved fixed preparation")
     if not isinstance(preparation, dict):
