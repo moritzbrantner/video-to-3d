@@ -171,3 +171,66 @@ Field canaries are observational evidence, not merge gates. Their published thir
 - Quantitative real-video cases remain evidence-only until repeated runs establish repository-owned envelopes for registration, camera error, geometry accuracy/completeness, and dense coverage.
 - Real-image and real-video datasets should be pinned to an immutable or checksum-verified source before becoming required gates.
 - Larger public datasets belong in slower scheduled/manual lanes unless their cost is small enough to justify every pull request.
+
+## Approved handheld input preparation
+
+`approved-handheld-h1` (Andrew Mason, *Porto Santo Maria hotel room tour in
+Funchal, Madeira*) and `approved-handheld-h3` (Obakeneko, *Waiting room of Noi Bai
+International Airport*) are the owner-approved CC BY 3.0 inputs. Their original
+Commons description/download URLs, attribution, license, SHA256 and byte lengths
+are pinned in `real-video-corpus.json`. This attributed licensed pair is the
+explicit redistribution exception; other corpus assets retain their restrictions.
+Do not substitute the unapproved controlled-room candidate or retune the fixed
+sample inventories against reconstruction output.
+
+Put the unchanged originals at `h1.webm` and `h3.ogv` within an explicit local asset
+root, then prepare without dispatching reconstruction:
+
+```sh
+bun tools/run_real_video_case.ts --case approved-handheld-h1 --asset-root /path/to/originals --output-root /path/to/prepared --prepare-only
+bun tools/run_real_video_case.ts --case approved-handheld-h3 --asset-root /path/to/originals --output-root /path/to/prepared --prepare-only
+```
+
+H1 produces a deterministic lossless VP9 WebM carrier for the authorized indoor
+interval `[60,86)`; H3 produces the same lossless VP9 WebM format for its whole
+authorized recording. The original Ogg/Theora source remains retained and hashed. The source
+files remain unchanged. Eighteen P6 RGB frames are selected from decoded original
+best-effort PTS within the half-open authorized interval, nearest each fixed
+request with earlier PTS/ordinal ties, scaled bilinearly to360×270. The sampling
+requests come from the existing browser plan helper. This is **offline FFmpeg
+preparation**, not verified HTMLVideoElement/canvas pixel equivalence or a new
+runtime decoder. Actual Chromium consumption through the existing browser sampler is checked
+separately for both carriers; source-to-canvas pixel equivalence remains unverified.
+Obsolete whole-original OGV prepared receipts fail source-derived carrier
+verification and are not silently reused or overwritten.
+
+`sampling.json` records actual original identity, derived hash/length/trim,
+FFmpeg version and decoder boundary, requested relative/source times, selected
+original ordinal/PTS, and frame paths/hashes. The existing Python checker verifies
+contained real paths (including symlink targets), original integrity, actual
+deterministic derived bytes, source-selected ordinals and decoded pixel payloads.
+Self-consistent substituted frame hashes or in-range wrong PTS do not pass.
+Reapplying valid preparation is a verified no-op; existing invalid outputs fail
+closed instead of overwriting them. Generated carriers/frames stay outside Git.
+
+Run actual-source acceptance with both explicit roots:
+
+```sh
+VIDEO_HANDHELD_ASSET_ROOT=/path/to/originals VIDEO_HANDHELD_PREPARED_ROOT=/path/to/prepared python3 -m unittest discover -s tools/tests -p 'test_approved_handheld_acceptance.py'
+```
+
+Without `--prepare-only`, the runner retains its normal existing Rust
+`real_video_fixture` dispatch after preparation. Existing provider/canary behavior
+and decoding are preserved. Prepared fixtures do not establish recognized object
+meshes, physical scale, Blender independent editing, or the three-video product
+exit; those gates remain open under #77.
+
+For the approved case IDs, custom manifests cannot redefine the pinned source
+attribution, licensing, original file identity, trim, original duration or fixed
+18-frame plan. Approval comparisons use this
+repository’s production corpus, never caller metadata or the working directory.
+The CLI and direct preparation/receipt entrypoints reject differences before
+source decoding or output writes. The runner checks selected approved identities
+through the same Python authority before choosing its preparation or legacy path;
+omitting the required preparation record cannot enable legacy replacement. Other
+corpus cases retain their existing rules.
