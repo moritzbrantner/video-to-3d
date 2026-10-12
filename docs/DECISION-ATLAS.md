@@ -101,6 +101,15 @@ Sources seeded into this atlas:
   Status: adopted 2026-10-10.  
   The aggregate gate is green only when the complete local video → scene → Blender workflow passes for all three pinned real clips. Unit tests, one curated clip, successful camera estimation, or a visually pleasing flat mesh do not close the product gate.
 
+
+- **3.7** [question] **Controlled-room source for the initial three-video gate.**  
+  Resolved 2026-10-12: should the original RGB movie from TUM RGB-D `freiburg3_long_office_household` become the controlled-room fixture required by 3.1.1, or should the repository keep searching/recording another source?
+
+- **3.8 Controlled-room fixture uses the TUM RGB-D office/household RGB movie.**  
+  Status: adopted 2026-10-12. Answers 3.7.  
+  Use the original RGB movie from TUM RGB-D `freiburg3_long_office_household` as the controlled-room member of the three-real-video initial release gate. Preserve its CC BY 4.0 attribution and pinned content identity. The fixture must satisfy 3.1.1 through independently authored observable acceptance expectations; TUM depth and trajectory data are not production reconstruction inputs. Selecting the source does not itself satisfy the end-to-end product gate in 3.6.
+
+
 ## 4. Application and execution
 
 - **4.1 Initial release processing is fully local.**  
