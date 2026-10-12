@@ -99,6 +99,18 @@ class SourceSelectionAcceptance(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(ppm).hexdigest(), fixed['ppm_sha256'])
                 self.assertEqual(p6_pixels(ppm)[:2], (360, 270))
 
+def unapproved_trim_cases(expected):
+    changed = copy.deepcopy(expected)
+    changed['cases'][0]['preparation']['trim'] = {'start_seconds': 59, 'end_seconds': 85}
+    h3 = changed['cases'][1]
+    h3['preparation']['trim'] = {'start_seconds': 0, 'end_seconds': 24.3}
+    # Ask the actual public planner: a plan mismatch must not fake approval rejection.
+    planned = subprocess.run(['bun', '-e',
+        'import {buildVideoSamplingPlan} from "./apps/web/src/videoSampling"; console.log(JSON.stringify(buildVideoSamplingPlan({duration:24.3,videoWidth:640,videoHeight:480},{framesPerSecond:1.25,maxFrames:18})))'],
+        cwd=ROOT, capture_output=True, text=True, check=True)
+    h3['preparation']['plan'] = json.loads(planned.stdout)
+    return changed
+
 class HandheldMetadataAcceptance(unittest.TestCase):
     def setUp(self):
         self.expected = json.loads(ORACLE.read_text())
@@ -140,10 +152,81 @@ class HandheldMetadataAcceptance(unittest.TestCase):
                 self.assertTrue(checker.validate_manifest(changed))
                 self.assertNotEqual(checker.validate_manifest(changed), checker.validate_manifest(self.expected), "mutation was not independently rejected")
 
+    def test_unapproved_trim_cannot_inherit_fixed_source_approval(self):
+        changed = unapproved_trim_cases(self.expected)
+        for case in changed['cases']:
+            with self.subTest(case=case['id']):
+                manifest = copy.deepcopy(self.expected)
+                manifest['cases'] = [case]
+                errors = checker.validate_manifest(manifest)
+                self.assertTrue(errors, 'unapproved interval inherited the source approval')
+                self.assertTrue(any('trim' in error.lower() or 'interval' in error.lower() for error in errors), errors)
+
+    def test_alternate_plan_or_duration_cannot_inherit_fixed_source_approval(self):
+        for field in ['plan', 'original_duration_seconds']:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(self.expected)
+                preparation = changed['cases'][0]['preparation']
+                if field == 'plan':
+                    preparation['plan']['times'][0] += 0.001
+                else:
+                    preparation[field] += 0.1
+                errors = checker.validate_manifest(changed)
+                self.assertTrue(errors, 'alternate source preparation inherited fixed approval')
+                self.assertTrue(any(field in error.lower() or 'approved' in error.lower() for error in errors), errors)
+
     def test_unapproved_canary_redistribution_remains_rejected(self):
         corpus = checker.load_manifest(ROOT / 'benchmarks/real-video-corpus.json')
         corpus['cases'][0]['asset']['redistribute'] = True
         self.assertTrue(checker.validate_manifest(corpus))
+
+class ActualUnapprovedTrimAcceptance(unittest.TestCase):
+    def test_existing_prepare_only_rejects_unapproved_trim_before_writes(self):
+        source = os.environ.get('VIDEO_HANDHELD_ASSET_ROOT')
+        if not source:
+            self.skipTest('licensed original sources required; public prepare rejection unrun')
+        changed = unapproved_trim_cases(json.loads(ORACLE.read_text()))
+        for case in changed['cases']:
+            with self.subTest(case=case['id']), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                output = base / 'outputs'
+                output.mkdir()
+                sentinel = output / 'retained.txt'
+                sentinel.write_text('unchanged independent evidence')
+                manifest = base / 'unapproved.json'
+                document = copy.deepcopy(changed)
+                document['cases'] = [case]
+                manifest.write_text(json.dumps(document))
+                result = subprocess.run(['bun', 'tools/run_real_video_case.ts', '--case', case['id'],
+                    '--asset-root', source, '--output-root', str(output), '--manifest', str(manifest),
+                    '--prepare-only'], cwd=ROOT, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, 'public preparation encoded an unapproved source interval; actual outputs=' + str(sorted(str(path.relative_to(output)) for path in output.rglob('*') if path.is_file())) + '; stdout=' + result.stdout)
+                reason = (result.stdout + result.stderr).lower()
+                self.assertTrue('trim' in reason or 'interval' in reason, 'failure did not explain authorization boundary: ' + reason)
+                self.assertEqual(sentinel.read_text(), 'unchanged independent evidence')
+                self.assertEqual(sorted(path.name for path in output.iterdir()), ['retained.txt'], 'rejected preparation wrote output')
+
+    def test_direct_python_preparation_rejects_alternate_approved_plan_before_writes(self):
+        source = os.environ.get('VIDEO_HANDHELD_ASSET_ROOT')
+        if not source:
+            self.skipTest('licensed original sources required; direct preparation rejection unrun')
+        document = json.loads(ORACLE.read_text())
+        document['cases'] = [document['cases'][0]]
+        case = document['cases'][0]
+        case['preparation']['plan']['times'][0] += 0.001
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            output = base / 'outputs'
+            output.mkdir()
+            manifest = base / 'unapproved-plan.json'
+            manifest.write_text(json.dumps(document))
+            result = subprocess.run(['python3', 'tools/check_real_video_manifest.py', str(manifest),
+                '--prepare-case', case['id'], '--asset-root', source, '--output-root', str(output)],
+                cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0, 'direct preparation accepted alternative fixed-plan request; actual outputs=' + str(sorted(str(path.relative_to(output)) for path in output.rglob('*') if path.is_file())) + '; stdout=' + result.stdout)
+            reason = (result.stdout + result.stderr).lower()
+            self.assertTrue('plan' in reason or 'approved' in reason, 'unrelated failure: ' + reason)
+            self.assertEqual(list(output.iterdir()), [], 'rejected direct preparation wrote output')
 
 class ActualPreparedHandheldAcceptance(unittest.TestCase):
     """Explicit real-source tier: run after production preparation, never fake bytes."""

@@ -184,3 +184,30 @@ actual-prepared tier invokes the same witness when that environment variable is
 provided. Missing automation is explicitly skipped and is not browser acceptance.
 This headless carrier proof does not claim physical desktop/phone inspection,
 owner visual approval, source inventory recognition or reconstructed #77 output.
+
+## Fixed approval boundary negatives before authorization repair
+
+Independent source audit at frozen143a1eb found that validated original SHA/approval
+URL did not enforce the authorized interval or fixed plan at the public custom
+manifest boundary. Supplementary tests preserve canonical positives and challenge:
+H1[59,85), keeping exactly the same26s/browser plan; H3[0,24.3), using the actual
+public browser helper's corresponding plan; H1's first requested time shifted by
+0.001s, still ordered/in-range with18 samples; and altered declared original duration.
+Approval rejection must identify trim/interval, plan or approved-source metadata,
+rather than accidentally rejecting an unrelated schema or planner mismatch.
+
+Frozen baseline metadata validation accepts all four mutations (genuine RED).
+Actual existing Bun prepare-only H1 shifted-interval command returns zero (RED),
+and actual direct Python preparation with the alternate H1 time also returns zero
+(RED). These execute real licensed sources and the existing preparation boundary;
+no geometry or substitute decoder is supplied. The H3 negative preparation was
+started before repair; its completion is reported separately, not assumed here.
+Early-rejection/no-output assertions remain required after repair; those later
+assertions are unexecuted when the initial expected rejection already fails.
+
+The approved IDs bind the precise authorized trim, original duration and existing
+18-sample public-helper plan; other generic corpus cases do not inherit this policy.
+A changed manifest may not retain the fixed owner approval while changing those
+inputs. Both public preparation entry points must reject before creating files or
+altering an existing sentinel. This adds no new source approval, inventory, sampling
+policy or browser/offline pixel equivalence claim.
