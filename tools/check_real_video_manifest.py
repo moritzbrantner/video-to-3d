@@ -81,10 +81,10 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         errors.append("cases must be a non-empty array")
         return errors
 
-    approved_preparations: dict[str, dict[str, Any]] = {}
+    approved_cases: dict[str, dict[str, Any]] = {}
     if any(isinstance(case, dict) and isinstance(case.get("preparation"), dict) for case in cases):
         try:
-            approved_preparations = _approved_preparations()
+            approved_cases = _approved_cases()
         except (OSError, ValueError, KeyError, TypeError) as error:
             errors.append(f"approved preparation definitions unavailable: {error}")
 
@@ -122,7 +122,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         if asset.get("redistribute") is not False and not (approved and asset.get("redistribute") is True):
             errors.append(f"{prefix}.asset.redistribute must be false unless explicitly approved and licensed")
         if approved:
-            errors.extend(_validate_preparation(case, prefix, approved_preparations))
+            errors.extend(_validate_preparation(case, prefix, approved_cases))
 
         automation = case.get("automation")
         scheduled = isinstance(automation, dict) and automation.get("scheduled") is True
@@ -183,7 +183,7 @@ def _finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _approved_preparations() -> dict[str, dict[str, Any]]:
+def _approved_cases() -> dict[str, dict[str, Any]]:
     # Public --manifest input cannot redefine approval. Reuse the repository's
     # pinned production corpus, independently protected by the source contract.
     path = Path(__file__).resolve().parents[1] / "benchmarks/real-video-corpus.json"
@@ -193,7 +193,7 @@ def _approved_preparations() -> dict[str, dict[str, Any]]:
         if case.get("id") in APPROVED_HANDHELD:
             if case["asset"]["sha256"] != APPROVED_HANDHELD[case["id"]] or not isinstance(case.get("preparation"), dict):
                 raise ValueError("canonical approved source/preparation mismatch")
-            approved[case["id"]] = case["preparation"]
+            approved[case["id"]] = case
     if set(approved) != set(APPROVED_HANDHELD):
         raise ValueError("canonical approved preparations missing")
     return approved
@@ -204,15 +204,21 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
     asset, preparation = case["asset"], case["preparation"]
     if approved is None:
         try:
-            approved = _approved_preparations()
+            approved = _approved_cases()
         except (OSError, ValueError, KeyError, TypeError) as error:
             return [f"{prefix}: approved preparation definitions unavailable: {error}"]
     canonical = approved.get(case.get("id"))
     if canonical is None:
         errors.append(f"{prefix}: no approved preparation for this case")
     else:
+        canonical_asset = canonical["asset"]
+        for field in ("creator", "title", "source_url", "download_url", "license_url",
+                      "owner_approval_url", "sha256", "byte_length", "expected_file",
+                      "mode", "redistribute"):
+            if asset.get(field) != canonical_asset.get(field):
+                errors.append(f"{prefix}.asset.{field} differs from the approved canonical source")
         for field in ("trim", "original_duration_seconds", "plan"):
-            if preparation.get(field) != canonical.get(field):
+            if preparation.get(field) != canonical["preparation"].get(field):
                 errors.append(f"{prefix}: {field} differs from the approved fixed preparation")
     if case.get("id") not in APPROVED_HANDHELD or asset.get("sha256") != APPROVED_HANDHELD.get(case.get("id")) or asset.get("owner_approval_url") != HANDHELD_APPROVAL:
         errors.append(f"{prefix}: source is not the owner-approved handheld pair")
