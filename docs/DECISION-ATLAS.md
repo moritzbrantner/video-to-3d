@@ -2,12 +2,14 @@
 
 Product: `video-to-3d`. This is the repository's single source of truth for **what the product should be**, not a feature-progress checklist.
 
+**Open question:** [8.5 — Post-v1 cloud policy](#7-further-decisions) (under Further decisions).
+
 ## Reading and editing
 
-- Each entry has an **explicit, stable ID**. Its position in the Markdown list never determines its identity; never renumber or reuse IDs. Headings are only navigation.
+- Each entry has an **explicit, stable ID**. Its position in the Markdown list never determines its identity; never renumber or reuse IDs. Headings are only navigation; historical Question IDs retain their original numbers even when filed with a different topic.
 - **[x] means settled product intent**, not implemented: for a Decision, its rule is approved; for a historical Question, an owner-approved answer exists. **[ ] means an unanswered Question**. These markers never assert code, test or real-product acceptance. An answered Question remains visible with its ID and an `Answered by` link to the answering Decision.
 - Decisions and Questions are the only semantic leaf kinds. `[question]` preserves Question identity even after being answered. Do not introduce additional kinds for constraints, deferral, proposals or implementation.
-- Follow current Decisions; ask one relevant unanswered Question at a time when it materially affects work. A Question may remain deferred without blocking unrelated implementation.
+- Keep Questions next to the topic they concern rather than in a separate Questions category. Follow current Decisions; ask one relevant unanswered Question at a time when it materially affects work. A Question may remain deferred without blocking unrelated implementation.
 - New answers append a Decision with `Answers ID`. If intent changes, retain earlier IDs and record an explicitly linked `Supersedes ID` Decision. Do not silently rewrite settled product direction.
 - Implementation and verification evidence is separate from owner approval. A Decision is not a claim that code or acceptance tests already satisfy it.
 - Preserve the current owner-approved meaning when reformatting; Git history and reviewed issue/PR discussions provide provenance.
@@ -40,6 +42,9 @@ Sources seeded into this atlas:
 - [x] **1.7** Hybrid per-region mesh/splat viewing is the default when both exist.
   Answers 8.4 (owner selected B).
   Show high-fidelity splat surroundings and independently editable mesh objects together in one aligned scene when those representations exist. Let users select individual objects or scene regions and switch between mesh and splat display wherever both representations are actually available, without replacing the rest of the scene, jumping the camera, or modifying the underlying geometry, transforms, object identity, or evidence provenance. Meshes remain the editable representation and the default Blender/DCC export; splats are visual companions, not a substitute for mesh editability. When a region has only one representation, show it honestly and indicate that the other is unavailable rather than fabricating it. Preserve observation-only versus AI-completed provenance independently of display choice. Do not make optional splat generation or optimization a prerequisite for the initial three-real-video editable-mesh acceptance gate. See 1.2–1.3, 2.3, 3.2–3.4, and 4.2.  
+
+- [x] **8.4** [question] Representation switching UX.
+  Exact behavior for mesh/splat switching when both exist, subject to 1.3 and 4.2. Answered by 1.7.
 
 ## 2. Authority and provenance
 
@@ -117,9 +122,15 @@ Sources seeded into this atlas:
   Answers 8.2 (owner selected B).
   On machines without a suitable GPU, users can locally reconstruct video-supported geometry, inspect the accepted scene, and export supported independently editable geometry via the existing scene/Blender handoff. CPU-only processing may be slower or lower quality; GPU-dependent AI-completion providers and their representations may be unavailable. Report unavailable or degraded capabilities and reasons explicitly rather than silently skipping stages, fabricating observed geometry, calling a cloud service, or marking a missing AI-completed representation as present. A CPU-only smoke test must exercise real local observed reconstruction, inspection and supported export when accepted geometry is available, and honest unavailable-completion reporting when it is not. This does not waive the full three-real-video product gate on declared capable local hardware in 3.6. See 1.2–1.5, 3.3–3.6, and 4.1–4.5.  
 
+- [x] **8.2** [question] Minimum acceptable CPU-only product experience.
+  Which stages/quality tier are required versus explicitly unavailable on CPU-only hardware under 4.5. Answered by 4.6.
+
 - [x] **4.7** First learned multi-view provider prioritizes a reproducible 8 GB local GPU fit.
   Answers 8.1 (owner delegated provider choice based on GeForce RTX 3060 with 8 GB VRAM).
   Evaluate `facebook/map-anything-apache` (Apache 2.0 checkpoint) first as the candidate local learned multi-view evidence provider, using its documented memory-efficient inference, mixed precision and minimal inference minibatch, and existing camera/calibration inputs when available. This is a prioritized **candidate, not a verified claim that it fits 8 GB or satisfies the product**. Before enabling it as a supported production profile, run a reproducible native on-device benchmark on an RTX 3060-class **8 GB** GPU, recording model/checkpoint and license, software versions, image resolution, view counts, actual peak device VRAM, runtime, success/OOM and accepted geometric evidence on relevant pinned clips. Select the largest demonstrably supported batch/view policy rather than guessing; if it cannot fit or produce useful accepted evidence, report unavailable capability, retain the existing local observed-geometry fallback, and revisit provider selection using measured evidence instead of silently substituting a model. Learned output remains subject to the common Rust `ReconstructionEvidenceView` validation/fusion boundary, explicit provenance and the unchanged three-real-video scene-to-Blender product acceptance. No cloud inference, media upload or implicit CPU/GPU equivalence. Source: [MapAnything repository](https://github.com/facebookresearch/map-anything) and [Apache checkpoint](https://huggingface.co/facebook/map-anything-apache). See 2.2–2.3, 3.1–3.6, 4.1–4.6.  
+
+- [x] **8.1** [question] First local learned provider selection.
+  Which concrete local model/provider family becomes the first production learned multi-view evidence source under 2.2 and 4.5. Answered by 4.7.
 
 ## 5. Quality and correction
 
@@ -135,6 +146,9 @@ Sources seeded into this atlas:
 - [x] **5.4** Provide meaningful corrections throughout the processing pipeline, starting in source frames.
   Answers 8.3 (owner chose B as the first slice).
   Every meaningful processing stage should ultimately allow the user to review and correct its derived interpretations or outputs when appropriate, rather than forcing an all-or-nothing rerun. Begin with optional video-based correction of object identities, masks and cross-frame tracks in sampled source frames before expensive local reconstruction or completion stages. Preserve automatic processing as the default; no user checkpoint is mandatory for normal operation. Corrections must not modify original video or reclassify generated guesses as observed evidence, must retain provenance, and should invalidate/recompute only dependent downstream work through the existing deterministic project runner. Other stage-specific correction affordances may be delivered incrementally as their outputs become inspectable; this direction does not require inventing an editor for every internal algorithmic substep in the first bounded slice. See 1.6, 4.4, 5.2 and 5.3.  
+
+- [x] **8.3** [question] User correction semantics at review checkpoints.
+  Which edits are permitted in the first release checkpoint UI and which changes require recomputation, subject to 4.4 and 5.3. Answered by 5.4.
 
 ## 6. Delivery priority
 
@@ -157,27 +171,11 @@ Sources seeded into this atlas:
 - [x] **7.1** Cloud execution is deferred.
   Cloud providers, upload policy, paid-provider exposure, and cloud/local profile selection are not part of the initial release. Their eventual shape remains unanswered in Question 8.5, subject to the source-video privacy invariant in 4.3. Nothing in the current schema implies permission to use cloud execution. See 4.1.
 
+- [ ] **8.5** [question] Post-v1 cloud policy.
+  Unresolved and intentionally deferred by 7.1. Any later cloud/derived-frame upload policy remains subject to 4.3: source video must not leave the device.
+
 - [x] **7.2** User-configurable scene granularity is deferred.
   The initial default remains major architectural elements plus meaningful objects from 1.1. The exact UI and supported granularity levels remain unanswered rather than forming a separate "deferred decision" category.
 
 - [x] **7.3** Exact numerical quality tolerances remain fixture-owned where not already defined.
   Agents must not invent arbitrary universal thresholds merely to make implementation decisions. Fixture-specific tolerances belong to independently authored acceptance evidence.
-
-## 8. Questions
-
-Questions are retained for context. A checked Question has a linked answer; an unchecked Question remains open and need not block unrelated work.
-
-- [x] **8.1** [question] First local learned provider selection.
-  Which concrete local model/provider family becomes the first production learned multi-view evidence source under 2.2 and 4.5. Answered by 4.7.
-
-- [x] **8.2** [question] Minimum acceptable CPU-only product experience.
-  Which stages/quality tier are required versus explicitly unavailable on CPU-only hardware under 4.5. Answered by 4.6.
-
-- [x] **8.3** [question] User correction semantics at review checkpoints.
-  Which edits are permitted in the first release checkpoint UI and which changes require recomputation, subject to 4.4 and 5.3. Answered by 5.4.
-
-- [x] **8.4** [question] Representation switching UX.
-  Exact behavior for mesh/splat switching when both exist, subject to 1.3 and 4.2. Answered by 1.7.
-
-- [ ] **8.5** [question] Post-v1 cloud policy.
-  Unresolved and intentionally deferred by 7.1. Any later cloud/derived-frame upload policy remains subject to 4.3: source video must not leave the device.
