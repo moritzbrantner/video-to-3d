@@ -150,6 +150,10 @@ Sources seeded into this atlas:
   Status: adopted product direction.  
   User corrections alter proposed interpretation or generated/completed scene state, not the original captured evidence. Derived artifacts should invalidate only along their actual dependency graph.
 
+- **5.4 Provide meaningful corrections throughout the processing pipeline, starting in source frames.**  
+  Status: adopted 2026-10-12. Answers 8.3 (owner chose B as the first slice).  
+  Every meaningful processing stage should ultimately allow the user to review and correct its derived interpretations or outputs when appropriate, rather than forcing an all-or-nothing rerun. Begin with optional video-based correction of object identities, masks and cross-frame tracks in sampled source frames before expensive local reconstruction or completion stages. Preserve automatic processing as the default; no user checkpoint is mandatory for normal operation. Corrections must not modify original video or reclassify generated guesses as observed evidence, must retain provenance, and should invalidate/recompute only dependent downstream work through the existing deterministic project runner. Other stage-specific correction affordances may be delivered incrementally as their outputs become inspectable; this direction does not require inventing an editor for every internal algorithmic substep in the first bounded slice. See 1.6, 4.4, 5.2 and 5.3.  
+
 ## 6. Delivery priority
 
 - **6.1 Product-exit work outranks unrelated reconstruction polish while the product gate is red.**  
