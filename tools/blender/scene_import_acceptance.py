@@ -267,7 +267,7 @@ def main():
             bpy.context.view_layer.update()
 
         if args.render and meshes:
-            render(args.render, meshes)
+            render(args.render, list(matched.values()))
             output["render"] = args.render
     except Exception as error:  # noqa: BLE001 - every failure is a failed report
         report.check("harness", False, f"{type(error).__name__}: {error}")
