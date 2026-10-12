@@ -1562,3 +1562,42 @@ fn only_the_linked_patch_of_three_is_stitched() {
         .iter()
         .all(|t| { [t.a, t.b, t.c].iter().all(|v| !third_vertices.contains(v)) }));
 }
+
+/// Unlike the retained-vertex gap fixture above, the lower patch's remaining
+/// column crosses the owner boundary. Its intersection lies inside source
+/// edges/triangles, so keeping whole triangles duplicates observed coverage.
+#[test]
+fn a_partial_overlap_seam_preserves_the_union_without_double_coverage() {
+    let mut fixture = SeamFixture::default();
+    let owner = push_grid(&mut fixture, &OWNER_XS, &SEAM_ROWS, 5.0, 0);
+    let lower = push_grid(
+        &mut fixture,
+        &[-0.46, -0.04, 0.46, 0.96],
+        &SEAM_ROWS,
+        5.0,
+        1,
+    );
+    fixture.pairs = (0..SEAM_ROWS.len())
+        .map(|row| (owner[row][3], lower[row][0]))
+        .collect();
+    fixture.cameras = vec![Some(identity_camera(0.0)), Some(identity_camera(0.4))];
+    let original_positions: Vec<_> = fixture.points.iter().map(|p| (p.x, p.y, p.z)).collect();
+    let (triangles, stats) = fixture.merge();
+    assert!(
+        stats.fused_pairs > 0,
+        "requires a real accepted overlap link"
+    );
+    assert_eq!(
+        fixture
+            .points
+            .iter()
+            .map(|p| (p.x, p.y, p.z))
+            .collect::<Vec<_>>(),
+        original_positions,
+        "the oracle's immutable pre-clip geometry must not be rewritten"
+    );
+    // This independent positive-area oracle fails the old implementation on
+    // actual remaining owner/lower overlap, rather than accepting connectivity.
+    assert_tiles_owner_image(&fixture, &triangles, -1.84, 0.96);
+    assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 1);
+}
