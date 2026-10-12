@@ -224,3 +224,9 @@ Without `--prepare-only`, the runner retains its normal existing Rust
 and decoding are preserved. Prepared fixtures do not establish recognized object
 meshes, physical scale, Blender independent editing, or the three-video product
 exit; those gates remain open under #77.
+
+For the approved case IDs, custom manifests cannot redefine the pinned trim,
+original duration or fixed 18-frame plan. Approval comparisons use this
+repository’s production corpus, never caller metadata or the working directory.
+The CLI and direct preparation/receipt entrypoints reject differences before
+source decoding or output writes. Other corpus cases retain their existing rules.
