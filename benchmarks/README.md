@@ -230,4 +230,7 @@ attribution, licensing, original file identity, trim, original duration or fixed
 18-frame plan. Approval comparisons use this
 repository’s production corpus, never caller metadata or the working directory.
 The CLI and direct preparation/receipt entrypoints reject differences before
-source decoding or output writes. Other corpus cases retain their existing rules.
+source decoding or output writes. The runner checks selected approved identities
+through the same Python authority before choosing its preparation or legacy path;
+omitting the required preparation record cannot enable legacy replacement. Other
+corpus cases retain their existing rules.

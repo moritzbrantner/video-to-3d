@@ -82,7 +82,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         return errors
 
     approved_cases: dict[str, dict[str, Any]] = {}
-    if any(isinstance(case, dict) and isinstance(case.get("preparation"), dict) for case in cases):
+    if any(isinstance(case, dict) and (isinstance(case.get("id"), str) and case["id"] in APPROVED_HANDHELD or isinstance(case.get("preparation"), dict)) for case in cases):
         try:
             approved_cases = _approved_cases()
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -118,7 +118,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.asset.expected_file must be a safe relative path")
         if not _https_url(asset.get("source_url")):
             errors.append(f"{prefix}.asset.source_url must be https")
-        approved = isinstance(case.get("preparation"), dict)
+        approved = isinstance(case_id, str) and case_id in APPROVED_HANDHELD or isinstance(case.get("preparation"), dict)
         if asset.get("redistribute") is not False and not (approved and asset.get("redistribute") is True):
             errors.append(f"{prefix}.asset.redistribute must be false unless explicitly approved and licensed")
         if approved:
@@ -201,7 +201,11 @@ def _approved_cases() -> dict[str, dict[str, Any]]:
 
 def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str, dict[str, Any]] | None = None) -> list[str]:
     errors: list[str] = []
-    asset, preparation = case["asset"], case["preparation"]
+    if prefix != case.get("id"):
+        prefix = f"{prefix} ({case.get('id')})"
+    asset, preparation = case.get("asset"), case.get("preparation")
+    if not isinstance(asset, dict):
+        return [f"{prefix}.asset must be an object for approved preparation"]
     if approved is None:
         try:
             approved = _approved_cases()
@@ -217,9 +221,13 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
                       "mode", "redistribute"):
             if asset.get(field) != canonical_asset.get(field):
                 errors.append(f"{prefix}.asset.{field} differs from the approved canonical source")
+        if not isinstance(preparation, dict):
+            return errors + [f"{prefix}: approved canonical preparation must be an object"]
         for field in ("trim", "original_duration_seconds", "plan"):
             if preparation.get(field) != canonical["preparation"].get(field):
                 errors.append(f"{prefix}: {field} differs from the approved fixed preparation")
+    if not isinstance(preparation, dict):
+        return errors + [f"{prefix}: approved preparation must be an object"]
     if case.get("id") not in APPROVED_HANDHELD or asset.get("sha256") != APPROVED_HANDHELD.get(case.get("id")) or asset.get("owner_approval_url") != HANDHELD_APPROVAL:
         errors.append(f"{prefix}: source is not the owner-approved handheld pair")
     for field in ("creator", "title", "license_url", "owner_approval_url", "download_url"):
@@ -461,6 +469,20 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_selected_case_approval(manifest: dict[str, Any], case_id: str) -> list[str]:
+    """Guard pinned identities without changing the generic runner contract."""
+    if case_id not in APPROVED_HANDHELD:
+        return []
+    approved = _approved_cases()
+    cases = manifest.get("cases")
+    if not isinstance(cases, list):
+        return [f"{case_id}: approved case selection requires a cases array"]
+    selected = [case for case in cases if isinstance(case, dict) and case.get("id") == case_id]
+    if len(selected) != 1:
+        return [f"{case_id}: approved case selection must be unique (found {len(selected)})"]
+    return _validate_preparation(selected[0], case_id, approved)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the real-video benchmark corpus manifest")
     parser.add_argument(
@@ -474,6 +496,7 @@ def main() -> int:
         action="store_true",
         help="print validated scheduled case ids, one per line",
     )
+    parser.add_argument("--validate-case-approval", help="validate a selected pinned identity before runner dispatch")
     parser.add_argument("--prepare-case")
     parser.add_argument("--asset-root", type=Path)
     parser.add_argument("--output-root", type=Path)
@@ -484,6 +507,15 @@ def main() -> int:
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"real-video-manifest: {error}")
         return 1
+
+    if args.validate_case_approval is not None:
+        try:
+            errors = validate_selected_case_approval(manifest, args.validate_case_approval)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            errors = [f"{args.validate_case_approval}: approved case definitions unavailable: {error}"]
+        for error in errors:
+            print(f"real-video-case-approval: {error}")
+        return 1 if errors else 0
 
     errors = validate_manifest(manifest)
     if errors:

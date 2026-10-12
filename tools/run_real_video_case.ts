@@ -81,6 +81,9 @@ if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(caseId)) { throw new Error("unsafe benc
 const assetRoot = resolve(argument("--asset-root", ".benchmark-data"));
 const outputRoot = resolve(argument("--output-root", "target/real-video"));
 const manifestPath = resolve(argument("--manifest", "benchmarks/real-video-corpus.json"));
+// Approval is selected by immutable case identity, not caller-supplied presence
+// of preparation. The existing checker owns that policy before any legacy IO.
+run("python3", ["tools/check_real_video_manifest.py", manifestPath, "--validate-case-approval", caseId]);
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as CorpusManifest;
 const benchmarkCase = manifest.cases.find((candidate) => candidate.id === caseId);
 if (!benchmarkCase) throw new Error(`unknown real-video benchmark case ${caseId}`);
