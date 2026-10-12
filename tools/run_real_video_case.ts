@@ -1,12 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { buildVideoSamplingPlan } from "../apps/web/src/videoSampling";
 
 type CorpusCase = {
   id: string;
   asset: {
     expected_file: string;
+  };
+  preparation?: {
+    trim: {start_seconds: number; end_seconds: number};
+    plan: unknown;
   };
 };
 
@@ -50,15 +54,58 @@ function parseFrameRate(value: string | undefined): number {
   return denominator > 0 ? numerator / denominator : Number.NaN;
 }
 
+function canonicalPath(path: string): string {
+  const tail: string[] = [];
+  let existing = path;
+  while (!existsSync(existing)) {
+    tail.unshift(basename(existing));
+    existing = dirname(existing);
+  }
+  return join(realpathSync(existing), ...tail);
+}
+
+function containedPath(root: string, relative: string): string {
+  if (isAbsolute(relative) || relative.split(/[\\/]/).includes("..") || relative.includes("\\")) {
+    throw new Error("benchmark path must be a safe relative path");
+  }
+  const base = canonicalPath(root);
+  const path = canonicalPath(resolve(base, relative));
+  if (!path.startsWith(base + sep)) {
+    throw new Error("benchmark path escapes declared root");
+  }
+  return path;
+}
+
 const caseId = argument("--case");
+if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(caseId)) { throw new Error("unsafe benchmark case id"); }
 const assetRoot = resolve(argument("--asset-root", ".benchmark-data"));
 const outputRoot = resolve(argument("--output-root", "target/real-video"));
 const manifestPath = resolve(argument("--manifest", "benchmarks/real-video-corpus.json"));
+// Approval is selected by immutable case identity, not caller-supplied presence
+// of preparation. The existing checker owns that policy before any legacy IO.
+run("python3", ["tools/check_real_video_manifest.py", manifestPath, "--validate-case-approval", caseId]);
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as CorpusManifest;
 const benchmarkCase = manifest.cases.find((candidate) => candidate.id === caseId);
 if (!benchmarkCase) throw new Error(`unknown real-video benchmark case ${caseId}`);
 
-const videoPath = resolve(assetRoot, benchmarkCase.asset.expected_file);
+const prepareOnly = process.argv.includes("--prepare-only");
+if (benchmarkCase.preparation) {
+  const trim = benchmarkCase.preparation.trim;
+  const approvedPlan = buildVideoSamplingPlan(
+    {duration: trim.end_seconds-trim.start_seconds, videoWidth:640, videoHeight:480},
+    {framesPerSecond:manifest.sampling.frames_per_second,maxFrames:manifest.sampling.max_frames},
+  );
+  if (JSON.stringify(approvedPlan) !== JSON.stringify(benchmarkCase.preparation.plan)) {
+    throw new Error("approved preparation plan differs from existing browser sampling helper");
+  }
+  run("python3", ["tools/check_real_video_manifest.py", manifestPath, "--prepare-case", caseId, "--asset-root", assetRoot, "--output-root", outputRoot]);
+  if (!prepareOnly) {
+    run("cargo", ["run", "--locked", "--release", "-p", "video-to-3d-core", "--example", "real_video_fixture", "--", resolve(outputRoot, caseId, "frames"), resolve(outputRoot, caseId)]);
+  }
+  console.log(`real-video-case=${caseId} preparation=offline-ffmpeg output=${resolve(outputRoot,caseId)}`);
+  process.exit(0);
+}
+const videoPath = containedPath(assetRoot, benchmarkCase.asset.expected_file);
 if (!existsSync(videoPath)) {
   throw new Error(
     `missing benchmark asset ${videoPath}; acquire it according to benchmarks/README.md`,
@@ -98,7 +145,11 @@ const plan = buildVideoSamplingPlan(
   },
 );
 
-const caseOutput = resolve(outputRoot, caseId);
+const lexicalCaseOutput = resolve(outputRoot, caseId);
+if (existsSync(lexicalCaseOutput) && lstatSync(lexicalCaseOutput).isSymbolicLink()) {
+  throw new Error("case output cannot be a symlink for replacement");
+}
+const caseOutput = containedPath(outputRoot, caseId);
 const framesDirectory = resolve(caseOutput, "frames");
 rmSync(caseOutput, { recursive: true, force: true });
 mkdirSync(framesDirectory, { recursive: true });
@@ -139,6 +190,7 @@ writeFileSync(
   )}\n`,
 );
 
+if (!prepareOnly) {
 run("cargo", [
   "run",
   "--locked",
@@ -151,5 +203,6 @@ run("cargo", [
   framesDirectory,
   caseOutput,
 ]);
+}
 
 console.log(`real-video-case=${caseId} output=${caseOutput}`);
