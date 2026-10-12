@@ -352,6 +352,7 @@ pub(super) fn triangulate_new_landmarks(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn bundle_adjust(
     analysis: &MultiViewAnalysis,
     seed_points: &[Vector3<f64>],
@@ -362,13 +363,39 @@ pub(super) fn bundle_adjust(
     height: u32,
     focal_pixels: f64,
 ) -> BundleAdjustmentResult {
-    let mut result = bundle_adjustment::optimize(
+    bundle_adjust_with_control(
+        analysis,
+        seed_points,
+        new_landmarks,
+        cameras,
+        features,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn bundle_adjust_with_control(
+    analysis: &MultiViewAnalysis,
+    seed_points: &[Vector3<f64>],
+    new_landmarks: &[NewLandmark],
+    cameras: &[RegisteredCamera],
+    features: &[Vec<Feature>],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> BundleAdjustmentResult {
+    let mut result = bundle_adjustment::optimize_with_control(
         analysis,
         seed_points,
         new_landmarks,
         cameras,
         features,
         bundle_adjustment::ProjectionModel::new(width, height, focal_pixels),
+        control,
     );
     result.stats.final_cameras = result.cameras.clone();
     result

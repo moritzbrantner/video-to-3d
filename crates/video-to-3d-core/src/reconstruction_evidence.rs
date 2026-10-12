@@ -239,6 +239,28 @@ impl<'a> ReconstructionEvidenceView<'a> {
         .with_triangle_sources(parts.triangle_sources)
     }
 
+    /// Construct the existing borrowed classic evidence with one cancel-aware
+    /// validation traversal, including its attributes and source corners.
+    pub(crate) fn from_classic_parts_with_cancel(
+        parts: &ClassicEvidenceParts<'a>,
+        poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let evidence = Self {
+            schema_version: RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+            provider: ReconstructionProviderDescriptor::classic(),
+            scale: EvidenceScale::ArbitraryMonocular,
+            cameras: classic_camera_evidence(parts)?,
+            regions: classic_reference_patch_regions(parts.reference_patches),
+            points: parts.points,
+            triangles: parts.triangles,
+            point_attributes: Some(parts.point_attributes),
+            triangle_sources: (!parts.triangle_sources.is_empty())
+                .then_some(parts.triangle_sources),
+        };
+        evidence.validate_with_cancel(poll)?;
+        Ok(evidence)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.validate_with_cancel(|| Ok(()))
     }

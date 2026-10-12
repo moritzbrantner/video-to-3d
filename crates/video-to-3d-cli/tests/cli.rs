@@ -53,7 +53,7 @@ impl Project {
     }
 
     /// Complete the build through the core API with a test executor that
-    /// writes deterministic outputs (the CLI has no native executors yet).
+    /// writes deterministic outputs to isolate command/reporting contracts.
     fn complete(&self) {
         let (store, mut manifest) = ProjectStore::open(&self.manifest()).unwrap();
         let report = store
@@ -81,7 +81,7 @@ const SCENE: &str = r#"{
   "frame": { "unit": "arbitrary_monocular", "handedness": "right_handed", "up_axis": "positive_y" },
   "resources": [
     { "id": "chair-mesh", "kind": "mesh", "path": "objects/chair.glb",
-      "content_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "content_hash": null,
       "provenance": ["generative_completion"] }
   ],
   "assets": [
@@ -91,11 +91,50 @@ const SCENE: &str = r#"{
   ]
 }"#;
 
+// A real, self-contained triangle GLB keeps this command fixture honest about
+// resource integrity. It is synthetic test data, not reconstruction evidence.
+fn triangle_glb() -> Vec<u8> {
+    let document = json!({
+        "asset": {"version": "2.0"}, "scene": 0,
+        "scenes": [{"nodes": [0]}], "nodes": [{"name": "chair", "mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+        "buffers": [{"byteLength": 36}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3,
+            "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]}]
+    });
+    let mut json_bytes = serde_json::to_vec(&document).unwrap();
+    while !json_bytes.len().is_multiple_of(4) {
+        json_bytes.push(b' ');
+    }
+    let mut bytes = b"glTF".to_vec();
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&((12 + 8 + json_bytes.len() + 8 + 36) as u32).to_le_bytes());
+    bytes.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&0x4e4f534a_u32.to_le_bytes());
+    bytes.extend_from_slice(&json_bytes);
+    bytes.extend_from_slice(&36_u32.to_le_bytes());
+    bytes.extend_from_slice(&0x004e4942_u32.to_le_bytes());
+    for position in [[0_f32, 0., 0.], [1., 0., 0.], [0., 1., 0.]] {
+        for coordinate in position {
+            bytes.extend_from_slice(&coordinate.to_le_bytes());
+        }
+    }
+    bytes
+}
+
 impl OperationExecutor for Writer {
     fn execute(&self, request: &OperationRequest, _cancel: &CancellationToken) -> AttemptOutcome {
         let id = &request.operation.id;
         let bytes = if id == "assemble" {
-            SCENE.as_bytes().to_vec()
+            let resource = triangle_glb();
+            let file = self.0.join("objects/chair.glb");
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, &resource).unwrap();
+            let mut scene: Value = serde_json::from_str(SCENE).unwrap();
+            scene["resources"][0]["content_hash"] =
+                json!(ContentHash::of_bytes(&resource).as_str());
+            serde_json::to_vec(&scene).unwrap()
         } else {
             request.identity.as_str().as_bytes().to_vec()
         };

@@ -1,5 +1,5 @@
 //! On-disk formats of the scene-project artifacts that built-in operations
-//! exchange, and the built-in `texture_bake` executor that reads and writes
+//! exchange, and the native built-in executors that read and write
 //! them.
 //!
 //! The formats are intentionally minimal and versioned so they can change
@@ -25,6 +25,8 @@
 //! artifact, so it is rebuilt) and readers verify them again on use.
 
 use crate::scene_model::{Material, ResourceKind, SceneProvenance, SceneResource};
+
+mod native;
 use crate::scene_project::{
     ArtifactKind, ContentHash, OperationKind, ProjectPath, SceneProjectManifest,
 };
@@ -64,6 +66,15 @@ fn parse_versioned<T: DeserializeOwned>(
     label: &str,
     expected: u32,
 ) -> Result<T, String> {
+    parse_versioned_with_cancel(document, label, expected, &mut || Ok(()))
+}
+
+fn parse_versioned_with_cancel<T: DeserializeOwned>(
+    document: &str,
+    label: &str,
+    expected: u32,
+    poll: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<T, String> {
     // Only the version is read first; every other field is skipped without
     // building a generic JSON tree, so a dense mesh is materialized once.
     #[derive(Deserialize)]
@@ -71,8 +82,8 @@ fn parse_versioned<T: DeserializeOwned>(
         #[serde(default)]
         schema_version: Option<serde_json::Value>,
     }
-    let header: Version =
-        serde_json::from_str(document).map_err(|error| format!("{label}: {error}"))?;
+    let header: Version = crate::controlled_json::from_str(document, poll)
+        .map_err(|error| format!("{label}: {error}"))?;
     match header
         .schema_version
         .as_ref()
@@ -86,7 +97,7 @@ fn parse_versioned<T: DeserializeOwned>(
         }
         None => return Err(format!("{label}: `schema_version` is missing")),
     }
-    serde_json::from_str(document).map_err(|error| format!("{label}: {error}"))
+    crate::controlled_json::from_str(document, poll).map_err(|error| format!("{label}: {error}"))
 }
 
 fn to_document<T: Serialize>(value: &T) -> String {
@@ -262,18 +273,34 @@ fn rgba_length(width: u32, height: u32) -> Option<usize> {
 
 impl KeyframesArtifact {
     pub fn from_json(document: &str) -> Result<Self, String> {
-        let artifact: Self = parse_versioned(
+        Self::from_json_with_cancel(document, || Ok(()))
+    }
+
+    pub(crate) fn from_json_with_cancel(
+        document: &str,
+        mut poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let artifact: Self = parse_versioned_with_cancel(
             document,
             "keyframes artifact",
             KEYFRAMES_ARTIFACT_SCHEMA_VERSION,
+            &mut poll,
         )?;
-        artifact.validate()?;
+        artifact.validate_with_cancel(&mut poll)?;
         Ok(artifact)
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_cancel(&mut || Ok(()))
+    }
+
+    fn validate_with_cancel(
+        &self,
+        poll: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut previous = None;
         for frame in &self.frames {
+            poll()?;
             if previous.is_some_and(|index| index >= frame.frame_index) {
                 return Err(format!(
                     "keyframes artifact: frame {} is duplicated or out of order",
@@ -555,12 +582,13 @@ impl SurfaceMeshArtifact {
     /// traversal, so a large artifact can be canceled while it is checked.
     pub(crate) fn from_json_with_cancel(
         document: &str,
-        poll: impl FnMut() -> Result<(), String>,
+        mut poll: impl FnMut() -> Result<(), String>,
     ) -> Result<Self, String> {
-        let artifact: Self = parse_versioned(
+        let artifact: Self = parse_versioned_with_cancel(
             document,
             "surface mesh artifact",
             SURFACE_MESH_ARTIFACT_SCHEMA_VERSION,
+            &mut poll,
         )?;
         artifact.validate_with_cancel(poll)?;
         Ok(artifact)
@@ -608,6 +636,16 @@ impl SurfaceMeshArtifact {
 
     pub fn to_json(&self) -> String {
         to_document(self)
+    }
+
+    /// Preserve the native pretty document/newline, validating and emitting
+    /// geometry cooperatively without publishing a partial buffer.
+    pub fn to_json_with_cancel(
+        &self,
+        mut poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<String, String> {
+        self.validate_with_cancel(&mut poll)?;
+        crate::controlled_json::to_string(self, true, true, &mut poll)
     }
 }
 
@@ -1311,6 +1349,17 @@ pub fn artifact_sidecars(
                 byte_length: None,
             })
             .collect(),
+        ArtifactKind::AssembledScene => crate::scene_model::AssembledScene::from_json(document)
+            .map_err(|error| error.to_string())?
+            .resources
+            .into_iter()
+            .map(|resource| ArtifactSidecar {
+                path: resource.path,
+                content_hash: resource.content_hash,
+                byte_length: None,
+                png_rgb8: None,
+            })
+            .collect(),
         _ => Vec::new(),
     })
 }
@@ -1658,9 +1707,9 @@ pub fn texture_bake_output(operation_id: &str) -> Result<ProjectPath, String> {
 }
 
 /// Native executor for the built-in operations that have an implementation.
-/// Today that is `texture_bake`; every other kind reports an explicit
-/// unsupported outcome instead of fabricating output (video decoding is
-/// browser-owned and provider adapters are not integrated).
+/// Classic sparse/dense/mesh stages, observed environment assembly and
+/// texture_bake are available. Video decoding remains browser-owned; other
+/// capabilities and unintegrated provider adapters report unsupported.
 #[derive(Clone, Debug)]
 pub struct BuiltInExecutor {
     root: PathBuf,
@@ -1669,7 +1718,9 @@ pub struct BuiltInExecutor {
 
 #[derive(Clone, Debug)]
 enum Reservations {
-    Fixed(Vec<(String, ProjectPath)>),
+    Fixed {
+        manifest: std::sync::Arc<std::sync::RwLock<SceneProjectManifest>>,
+    },
     /// Re-read at execution, so the reconciled manifest a build persisted
     /// before running decides (dropped stale records do not block an output).
     ManifestFile(PathBuf),
@@ -1718,7 +1769,7 @@ pub(crate) fn recorded_sidecar_paths(
 ) -> Vec<ProjectPath> {
     if !matches!(
         artifact.kind,
-        ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
+        ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures | ArtifactKind::AssembledScene
     ) {
         return Vec::new();
     }
@@ -1737,7 +1788,9 @@ impl BuiltInExecutor {
     /// Reservations from an in-memory manifest.
     pub fn new(project_root: impl Into<PathBuf>, manifest: &SceneProjectManifest) -> Self {
         let root = project_root.into();
-        let reservations = Reservations::Fixed(reserved_paths(&root, manifest));
+        let reservations = Reservations::Fixed {
+            manifest: std::sync::Arc::new(std::sync::RwLock::new(manifest.clone())),
+        };
         Self { root, reservations }
     }
 
@@ -1759,7 +1812,14 @@ impl BuiltInExecutor {
     fn collision(&self, operation: &str, directory: &str) -> Result<Option<ProjectPath>, String> {
         let loaded;
         let reserved = match &self.reservations {
-            Reservations::Fixed(reserved) => reserved,
+            Reservations::Fixed { manifest } => {
+                let snapshot = manifest
+                    .read()
+                    .map_err(|_| "executor manifest lock poisoned")?
+                    .clone();
+                loaded = reserved_paths(&self.root, &snapshot);
+                &loaded
+            }
             Reservations::ManifestFile(path) => {
                 loaded = reserved_paths(
                     &self.root,
@@ -1867,10 +1927,29 @@ impl BuiltInExecutor {
 }
 
 impl OperationExecutor for BuiltInExecutor {
+    fn prepare_wave(
+        &self,
+        manifest: &SceneProjectManifest,
+    ) -> Result<(), crate::scene_project::SceneProjectError> {
+        if let Reservations::Fixed { manifest: current } = &self.reservations {
+            *current.write().map_err(|_| {
+                crate::scene_project::SceneProjectError::Invalid(
+                    "executor manifest lock poisoned".into(),
+                )
+            })? = manifest.clone();
+        }
+        Ok(())
+    }
+
     fn execute(&self, request: &OperationRequest, cancel: &CancellationToken) -> AttemptOutcome {
         let kind = request.operation.kind;
         if kind == OperationKind::TextureBake && request.provider.is_none() {
             return self.texture_bake(request, cancel);
+        }
+        if request.provider.is_none() {
+            if let Some(outcome) = self.native_stage(request, cancel) {
+                return outcome;
+            }
         }
         let name = serde_json::to_value(kind)
             .ok()

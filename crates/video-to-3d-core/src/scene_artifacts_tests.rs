@@ -1914,3 +1914,32 @@ fn a_failed_keyframe_index_write_leaves_no_new_sidecars() {
 }
 const BASELINE_144_BAKE_HASH: &str =
     "sha256:4561a455e335e787b7f4655e8c9652aaaba2b4e248c9d82dd0ce1ca0f252f8ea";
+
+#[test]
+fn parsed_trusted_mesh_reuses_borrowed_evidence_without_geometry_copy() {
+    // Reuse the actual accepted mesh fixture, validated once with cancellation.
+    let source = Fixture::new().mesh();
+    let document = source.to_json();
+    let mut polls = 0;
+    let parsed = SurfaceMeshArtifact::from_json_with_cancel(&document, || {
+        polls += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert!(polls > 2);
+    let view = parsed.evidence_view();
+    assert_eq!(view.points.as_ptr(), parsed.points.as_ptr());
+    assert_eq!(view.triangles.as_ptr(), parsed.triangles.as_ptr());
+    assert_eq!(view.points, source.points.as_slice());
+    assert_eq!(view.triangles, source.triangles.as_slice());
+    assert_eq!(view.regions, source.regions);
+    assert_eq!(view.provider, source.provider);
+    // This proves the trusted borrow seam, not that assembly wires it correctly.
+    // Native token routing/no redundant validation requires the recorded source audit.
+}
+
+#[path = "mesh_json_read_acceptance_tests.rs"]
+mod mesh_json_read_acceptance;
+
+#[path = "native_mesh_json_write_acceptance_tests.rs"]
+mod native_mesh_json_write_acceptance;
