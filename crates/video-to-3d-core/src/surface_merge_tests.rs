@@ -1601,3 +1601,6 @@ fn a_partial_overlap_seam_preserves_the_union_without_double_coverage() {
     assert_tiles_owner_image(&fixture, &triangles, -1.84, 0.96);
     assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 1);
 }
+
+#[path = "surface_merge_derived_acceptance_tests.rs"]
+mod derived_acceptance;
