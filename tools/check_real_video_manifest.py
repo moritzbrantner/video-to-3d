@@ -5,7 +5,6 @@ import argparse
 import json
 import hashlib
 import math
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -269,15 +268,17 @@ def _original(case: dict[str, Any], asset_root: Path) -> Path:
     return original
 
 
+# Both approved inputs use this browser-consumable deterministic carrier policy.
+# Keep recipe identity in reference-cache keys when its implementation changes.
+_DERIVATION_RECIPE = "lossless-vp9-webm-v1"
+
+
 def _derive(original: Path, case: dict[str, Any], destination: Path) -> None:
     trim = case["preparation"]["trim"]
-    if trim["start_seconds"] == 0 and trim["end_seconds"] == case["preparation"]["original_duration_seconds"]:
-        shutil.copyfile(original, destination)
-    else:
-        _run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(original), "-an", "-vf",
-              f"trim=start={trim['start_seconds']}:end={trim['end_seconds']},setpts=PTS-STARTPTS",
-              "-c:v", "libvpx-vp9", "-lossless", "1", "-cpu-used", "8", "-threads", "1", "-row-mt", "0",
-              "-fflags", "+bitexact", "-flags:v", "+bitexact", "-map_metadata", "-1", "-y", str(destination)])
+    _run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(original), "-an", "-vf",
+          f"trim=start={trim['start_seconds']}:end={trim['end_seconds']},setpts=PTS-STARTPTS",
+          "-c:v", "libvpx-vp9", "-lossless", "1", "-cpu-used", "8", "-threads", "1", "-row-mt", "0",
+          "-fflags", "+bitexact", "-flags:v", "+bitexact", "-map_metadata", "-1", "-y", str(destination)])
 
 
 # Reuse verified immutable original-derived representations across receipt checks.
@@ -286,7 +287,7 @@ _references: dict[str, tuple[list[tuple[int, Decimal, bytes]], str, int]] = {}
 
 
 def _reference(original: Path, case: dict[str, Any], version: str) -> tuple[list[tuple[int, Decimal, bytes]], str, int]:
-    key = json.dumps([case["asset"]["sha256"], case["preparation"], version], sort_keys=True)
+    key = json.dumps([case["asset"]["sha256"], case["preparation"], version, _DERIVATION_RECIPE], sort_keys=True)
     if key in _references:
         return _references[key]
     probe = json.loads(_run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(original)]))
@@ -302,7 +303,7 @@ def _reference(original: Path, case: dict[str, Any], version: str) -> tuple[list
         expression = "+".join(f"eq(n,{i})" for i in selected)
         _run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(original), "-vf", f"select='{expression}',scale={plan['analysisWidth']}:{plan['analysisHeight']}:flags=bilinear", "-fps_mode", "passthrough", "-start_number", "0", str(base / "%03d.ppm")])
         frames = [(ordinal, pts[ordinal], (base / f"{i:03d}.ppm").read_bytes()) for i, ordinal in enumerate(selected)]
-        derived = base / ("derived" + (original.suffix if start == 0 and end == Decimal(str(case["preparation"]["original_duration_seconds"])) else ".webm"))
+        derived = base / "derived.webm"
         _derive(original, case, derived)
         result = frames, _sha(derived), derived.stat().st_size
     if len(_references) >= 2:
@@ -391,8 +392,7 @@ def prepare_case(case: dict[str, Any], asset_root: Path, prepared_root: Path) ->
     with tempfile.TemporaryDirectory(prefix=".handheld-", dir=base.parent) as temporary:
         staging = Path(temporary)
         (staging / "frames").mkdir()
-        suffix = original.suffix if case["preparation"]["trim"]["start_seconds"] == 0 else ".webm"
-        carrier = staging / ("derived" + suffix)
+        carrier = staging / "derived.webm"
         _derive(original, case, carrier)
         frames = []
         start = case["preparation"]["trim"]["start_seconds"]

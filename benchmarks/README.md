@@ -192,14 +192,17 @@ bun tools/run_real_video_case.ts --case approved-handheld-h3 --asset-root /path/
 ```
 
 H1 produces a deterministic lossless VP9 WebM carrier for the authorized indoor
-interval `[60,86)`; H3 copies the whole original Ogg/Theora recording. The source
+interval `[60,86)`; H3 produces the same lossless VP9 WebM format for its whole
+authorized recording. The original Ogg/Theora source remains retained and hashed. The source
 files remain unchanged. Eighteen P6 RGB frames are selected from decoded original
 best-effort PTS within the half-open authorized interval, nearest each fixed
 request with earlier PTS/ordinal ties, scaled bilinearly to360×270. The sampling
 requests come from the existing browser plan helper. This is **offline FFmpeg
 preparation**, not verified HTMLVideoElement/canvas pixel equivalence or a new
-runtime decoder. Carrier format is browser-consumable; actual browser decode and
-source-to-canvas equivalence remain separate acceptance work.
+runtime decoder. Actual Chromium consumption through the existing browser sampler is checked
+separately for both carriers; source-to-canvas pixel equivalence remains unverified.
+Obsolete whole-original OGV prepared receipts fail source-derived carrier
+verification and are not silently reused or overwritten.
 
 `sampling.json` records actual original identity, derived hash/length/trim,
 FFmpeg version and decoder boundary, requested relative/source times, selected
