@@ -110,3 +110,40 @@ preparation. Initial source review exists locally, but production preparation an
 browser decode acceptance remain unrun. No decoder, corpus entry or production
 geometry is added by this acceptance commit. Full applicable verification is needed
 when impact mapping cannot select affected checks reliably.
+
+## Independent source-correspondence strengthening (before #176 production)
+
+Supplemental authoring baseline3318546 (default3861cd1 integrated); original
+expectationsbb3a8f0 remain unchanged. `approved-handheld-source-review.json` retains
+all36 previously reviewed source ordinals/PTS/PPM hashes under FFmpeg8.0.1. It is
+acceptance evidence, not a production corpus or fixture generator. The acceptance
+oracle independently runs ffprobe on the hash-verified original, enumerates decoded
+video frames in their original order, restricts candidates to the authorized
+half-open trim interval, and minimizes exact decimal distance to each fixed source
+request. Equal distances select earlier decoded PTS, then earlier ordinal. The
+small tie/trim-end case protects that reference rule without asserting FFmpeg and
+browser seek equivalence.
+
+The source-only tier requires `VIDEO_HANDHELD_ASSET_ROOT` but no prepared outputs.
+It decodes those selected original ordinals in one FFmpeg pass, using bilinear
+360x270 scaling and passthrough timing, and reproduces every source-review PPM
+hash. Prepared receipts must match the independently recomputed original ordinal
+and best-effort PTS; their P6 dimensions and RGB pixel payload must equal the
+independent original decode, not merely their own receipt hash. P6 header formatting
+alone is not pixel identity. This is the explicit offline decoder boundary; it
+still supplies no HTMLVideoElement/canvas acceptance or reconstructed geometry.
+
+The actual-prepared negative tier substitutes another real sampled frame and
+updates its receipt hash, separately substitutes another real in-range ordinal/PTS,
+and combines both substitutions. Each must fail the production checker, despite
+self-consistent bytes/hash and valid in-range timestamps. The frame requests,
+source approval, trim,18-sample plan and visibility inventory stay fixed. Tests
+copy existing actual preparation outputs for these mutations; no preparation or
+geometry stand-in is authored here.
+
+On unchanged3318546, both source-reference tests pass against the actual approved
+originals; all36 frame hashes match the pre-reconstruction review. The preexisting
+metadata tier remains1 passing method/4 failing methods (14 failed subcases), and
+the actual-prepared class is skipped because production outputs do not exist. The
+new wrong-frame receipt negatives are therefore authored but unrun, not claimed
+as reproduced production failures. The fixed browser sampling-plan test passes.

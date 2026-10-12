@@ -1,6 +1,8 @@
 """Independent #176 source preparation; no reconstructed geometry oracle."""
 from __future__ import annotations
 import copy
+from decimal import Decimal
+from functools import lru_cache
 import hashlib
 import importlib.util
 import json
@@ -17,6 +19,85 @@ spec = importlib.util.spec_from_file_location('corpus_checker', ROOT / 'tools/ch
 assert spec and spec.loader
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
+
+REVIEW = Path(__file__).parent / 'fixtures/approved-handheld-source-review.json'
+
+def nearest_original_frame(pts, requested, start, end):
+    """Independent linear reference: exact decimal distance, earlier PTS/ordinal ties."""
+    candidates = [n for n, value in enumerate(pts) if start <= value < end]
+    if not candidates:
+        raise ValueError('authorized interval has no decoded frame')
+    return min(candidates, key=lambda n: (abs(pts[n] - requested), pts[n], n))
+
+@lru_cache(maxsize=2)
+def decoded_source_reference(original_text, case_json):
+    # Explicit offline acceptance oracle; never imports the producer's selection code.
+    original = Path(original_text)
+    case = json.loads(case_json)
+    assert hashlib.sha256(original.read_bytes()).hexdigest() == case['asset']['sha256']
+    assert original.stat().st_size == case['asset']['byte_length']
+    probe = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_frames', '-show_entries', 'frame=best_effort_timestamp_time',
+        '-of', 'json', str(original)], capture_output=True, text=True, check=True)
+    pts = [Decimal(frame['best_effort_timestamp_time'])
+           for frame in json.loads(probe.stdout)['frames']]
+    trim, plan = case['preparation']['trim'], case['preparation']['plan']
+    start, end = Decimal(str(trim['start_seconds'])), Decimal(str(trim['end_seconds']))
+    ordinals = [nearest_original_frame(pts, Decimal(str(t)) + start, start, end)
+                for t in plan['times']]
+    selection = '+'.join(f'eq(n,{n})' for n in ordinals)
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory)
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-i', str(original),
+            '-vf', f"select='{selection}',scale={plan['analysisWidth']}:{plan['analysisHeight']}:flags=bilinear",
+            '-fps_mode', 'passthrough', str(output / 'frame-%02d.ppm')], check=True)
+        frames = [(output / f'frame-{i+1:02d}.ppm').read_bytes() for i in range(len(ordinals))]
+    return [(ordinal, pts[ordinal], frame) for ordinal, frame in zip(ordinals, frames)]
+
+def p6_pixels(data):
+    # Header formatting is not pixel identity. Support comments and exact binary length.
+    position, tokens = 0, []
+    while len(tokens) < 4:
+        while data[position:position+1].isspace():
+            position += 1
+        if data[position:position+1] == b'#':
+            position = data.index(b'\n', position) + 1
+            continue
+        end = position
+        while end < len(data) and not data[end:end+1].isspace():
+            end += 1
+        tokens.append(data[position:end])
+        position = end
+    if tokens[0] != b'P6' or tokens[3] != b'255' or not data[position:position+1].isspace():
+        raise ValueError('expected 8-bit binary P6')
+    position += 2 if data[position:position+2] == b'\r\n' else 1
+    width, height = int(tokens[1]), int(tokens[2])
+    pixels = data[position:]
+    if len(pixels) != width * height * 3:
+        raise ValueError('P6 pixel length does not match dimensions')
+    return width, height, pixels
+
+class SourceSelectionAcceptance(unittest.TestCase):
+    def test_nearest_selection_has_earlier_tie_and_excludes_trim_end(self):
+        pts = list(map(Decimal, ['0', '0.2', '0.4', '0.6']))
+        self.assertEqual(nearest_original_frame(pts, Decimal('0.3'), Decimal('0.2'), Decimal('0.6')), 1)
+        self.assertEqual(nearest_original_frame(pts, Decimal('0.39'), Decimal('0.2'), Decimal('0.6')), 2)
+        self.assertEqual(nearest_original_frame(pts, Decimal('0.59'), Decimal('0.2'), Decimal('0.6')), 2)
+
+    def test_actual_original_selection_and_pixels_reproduce_fixed_source_review(self):
+        source = os.environ.get('VIDEO_HANDHELD_ASSET_ROOT')
+        if not source:
+            self.skipTest('licensed original sources required; offline correspondence unrun')
+        review = json.loads(REVIEW.read_text())['cases']
+        for case in json.loads(ORACLE.read_text())['cases']:
+            reference = decoded_source_reference(str(Path(source) / case['asset']['expected_file']), json.dumps(case))
+            self.assertEqual(len(reference), 18)
+            self.assertEqual(len(review[case['id']]['samples']), 18)
+            for (ordinal, pts, ppm), fixed in zip(reference, review[case['id']]['samples']):
+                self.assertEqual(ordinal, fixed['selected_source_ordinal'])
+                self.assertEqual(pts, Decimal(str(fixed['selected_source_pts'])))
+                self.assertEqual(hashlib.sha256(ppm).hexdigest(), fixed['ppm_sha256'])
+                self.assertEqual(p6_pixels(ppm)[:2], (360, 270))
 
 class HandheldMetadataAcceptance(unittest.TestCase):
     def setUp(self):
@@ -119,6 +200,32 @@ class ActualPreparedHandheldAcceptance(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), frame['sha256'])
                 # Real source-derived PPMs; no generated geometry or stand-in frame.
                 self.assertTrue(path.read_bytes().startswith(b'P6'))
+            reference = decoded_source_reference(str(self.source / case['asset']['expected_file']), json.dumps(case))
+            for frame, (ordinal, pts, ppm) in zip(receipt['frames'], reference):
+                self.assertEqual(frame['selected_source_ordinal'], ordinal, 'receipt selected a non-nearest original frame')
+                self.assertEqual(Decimal(str(frame['selected_source_pts'])), pts, 'receipt PTS is not decoded source PTS')
+                self.assertEqual(p6_pixels((base / frame['path']).read_bytes()), p6_pixels(ppm), 'matching receipt hash does not prove original source pixels')
+
+    def test_self_consistent_wrong_frame_or_pts_receipt_is_rejected(self):
+        for case in self.expected:
+            for mutation in ['pixels-and-hash', 'ordinal-and-pts', 'pixels-hash-ordinal-pts']:
+                with self.subTest(case=case['id'], mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory)
+                    base = output / case['id']
+                    shutil.copytree(self.prepared / case['id'], base)
+                    receipt_path = base / 'sampling.json'
+                    receipt = json.loads(receipt_path.read_text())
+                    first, other = receipt['frames'][:2]
+                    self.assertNotEqual(first['sha256'], other['sha256'], 'actual source negative requires distinct frames')
+                    if mutation != 'ordinal-and-pts':
+                        replacement = (base / other['path']).read_bytes()
+                        (base / first['path']).write_bytes(replacement)
+                        first['sha256'] = hashlib.sha256(replacement).hexdigest()
+                    if mutation != 'pixels-and-hash':
+                        first['selected_source_ordinal'] = other['selected_source_ordinal']
+                        first['selected_source_pts'] = other['selected_source_pts']
+                    receipt_path.write_text(json.dumps(receipt))
+                    self.assertTrue(self.verify(case, self.source, output), 'self-consistent wrong source correspondence was accepted')
 
     def test_existing_runner_preparation_is_repeatable_without_geometry(self):
         for case in self.expected:
