@@ -832,3 +832,5 @@ fn authored_container(source: &[u8], document: &Value) -> Vec<u8> {
     output.extend_from_slice(suffix);
     output
 }
+
+include!("acceptance/scene_export_adjacent.rs");
