@@ -9,7 +9,7 @@ Product: `video-to-3d`. This is the repository's single source of truth for **wh
 - Decisions and Questions are the only semantic leaf kinds. `[question]` preserves Question identity even after being answered. Do not introduce additional kinds for constraints, deferral, proposals or implementation.
 - Follow current Decisions; ask one relevant unanswered Question at a time when it materially affects work. A Question may remain deferred without blocking unrelated implementation.
 - New answers append a Decision with `Answers ID`. If intent changes, retain earlier IDs and record an explicitly linked `Supersedes ID` Decision. Do not silently rewrite settled product direction.
-- **Traceability stays light:** implementation issues, pull requests and important independent acceptance tests cite Atlas IDs. Add a short `Decision Atlas 2.2` code comment only when an otherwise surprising invariant needs explanation. Use code search or a derived `daq` index for reverse links rather than maintaining a duplicate code-symbol inventory in this Atlas. The authoritative product statement remains here; code existence and green tests are separate evidence.
+- Implementation and verification evidence is separate from owner approval. A Decision is not a claim that code or acceptance tests already satisfy it.
 - Preserve the current owner-approved meaning when reformatting; Git history and reviewed issue/PR discussions provide provenance.
 
 Sources seeded into this atlas:
