@@ -162,6 +162,15 @@ class ActualPreparedHandheldAcceptance(unittest.TestCase):
         self.assertTrue(callable(verify), 'prepared original/derived integrity verification missing')
         return verify(case, source, prepared)
 
+    def test_actual_browser_can_decode_both_approved_carriers(self):
+        automation = os.environ.get('VIDEO_BROWSER_AUTOMATION_MODULE')
+        if not automation:
+            self.skipTest('actual Chromium automation module required; browser-carrier acceptance unrun')
+        result = subprocess.run(['bun', 'scripts/test-handheld-browser-carrier-acceptance.ts',
+            '--prepared-root', str(self.prepared), '--automation-module', automation],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_actual_originals_and_derived_clip_frames_verify(self):
         for case in self.expected:
             original = self.source / case['asset']['expected_file']

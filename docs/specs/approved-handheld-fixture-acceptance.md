@@ -147,3 +147,40 @@ metadata tier remains1 passing method/4 failing methods (14 failed subcases), an
 the actual-prepared class is skipped because production outputs do not exist. The
 new wrong-frame receipt negatives are therefore authored but unrun, not claimed
 as reproduced production failures. The fixed browser sampling-plan test passes.
+
+## Actual browser-carrier witness before compatibility repair
+
+Supplemental protected witness baseline1dc364d, authored before the carrier repair.
+`scripts/test-handheld-browser-carrier-acceptance.ts` bundles and executes the
+existing `apps/web/src/video.ts` in actual Chromium. It uses the receipt's real
+hash-checked derived bytes as a browser File, then calls `sampleVideoWithInfo`
+through HTMLVideoElement seek and canvas readback. It checks both approved interval
+durations, usable640x480 source dimensions,18 actual nonempty360x270 frames and
+finite in-interval presented times. Receipt source hash and approved trim remain
+fixed. It does not decode media through a test substitute or equate browser pixels
+to FFmpeg PPMs. Browser version and per-case pass/failure observations are emitted.
+
+Baseline actual run: H1 `derived.webm` passes; copied H3 `derived.ogv` fails with
+`the selected video does not expose usable dimensions`. The offline real-source /
+prepared tier remains independent of this actual browser compatibility failure.
+H3's unchanged original as carrier was optional, not required: a deterministic
+whole-content lossless VP9 derivative is an allowed carrier while preserving the
+original approved OGV bytes/hash/attribution, whole-clip interval, original source
+ordinal/PTS/PPM expectations and truthful transform/decoder receipt. This permission
+does not approve a different source, content interval or browser pixel equivalence.
+
+Mandatory actual witness after preparation:
+
+```sh
+bun scripts/test-handheld-browser-carrier-acceptance.ts \
+  --prepared-root "$VIDEO_HANDHELD_PREPARED_ROOT" \
+  --automation-module "$VIDEO_BROWSER_AUTOMATION_MODULE" \
+  --report /path/to/browser-carrier-evidence.json
+```
+
+The automation module is the existing environment's installed Playwright module
+with real Chromium available, not an application media dependency. The Python
+actual-prepared tier invokes the same witness when that environment variable is
+provided. Missing automation is explicitly skipped and is not browser acceptance.
+This headless carrier proof does not claim physical desktop/phone inspection,
+owner visual approval, source inventory recognition or reconstructed #77 output.
