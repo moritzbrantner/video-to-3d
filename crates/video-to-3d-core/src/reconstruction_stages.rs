@@ -21,6 +21,7 @@
 use crate::dense::{DenseGridSite, DenseStats};
 use crate::multi_view::RegisteredCamera;
 use crate::scene_project::ContentHash;
+use crate::ReconstructionControl;
 use crate::{
     BootstrapDiagnosis, CalibratedPairStats, CameraPose, EvidencePointAttributes, FrameInput,
     MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionOptions,
@@ -229,7 +230,7 @@ impl From<&RegisteredCamera> for StageCamera {
 }
 
 impl StageCamera {
-    fn registered(&self) -> RegisteredCamera {
+    pub(crate) fn registered(&self) -> RegisteredCamera {
         RegisteredCamera {
             frame_index: self.frame_index,
             rotation: Matrix3::from_column_slice(&self.rotation),
@@ -285,18 +286,75 @@ macro_rules! stage_artifact_document {
             /// a missing `schema_version` or another stage's document with
             /// [`ReconstructionStageError::Malformed`].
             pub fn from_json(document: &str) -> Result<Self, ReconstructionStageError> {
+                Self::from_json_with_cancel(document, || false)
+            }
+
+            pub fn from_json_with_cancel(
+                document: &str,
+                mut is_canceled: impl FnMut() -> bool,
+            ) -> Result<Self, ReconstructionStageError> {
+                let mut control = ReconstructionControl::new(&mut is_canceled);
+                let mut poll = || control.check();
                 #[derive(Deserialize)]
                 struct Version {
                     schema_version: u32,
                 }
-                let malformed = |error: serde_json::Error| ReconstructionStageError::Malformed {
+                let malformed = |error: String| ReconstructionStageError::Malformed {
                     artifact: $stage,
                     message: error.to_string(),
                 };
                 let Version { schema_version } =
-                    serde_json::from_str(document).map_err(malformed)?;
+                    crate::controlled_json::from_str(document, &mut poll).map_err(malformed)?;
                 check_schema_version($stage, schema_version, $version)?;
-                serde_json::from_str(document).map_err(malformed)
+                let artifact: Self =
+                    crate::controlled_json::from_str(document, &mut poll).map_err(malformed)?;
+                artifact.check_finite_with_control(&mut control)?;
+                Ok(artifact)
+            }
+
+            /// Serialize with the existing JSON encoding while polling real
+            /// finite-value validation and byte emission. No partial output escapes.
+            pub fn to_json_with_cancel(
+                &self,
+                mut is_canceled: impl FnMut() -> bool,
+            ) -> Result<String, ReconstructionStageError> {
+                let mut control = ReconstructionControl::new(&mut is_canceled);
+                self.check_schema_version()?;
+                self.check_finite_with_control(&mut control)?;
+                crate::controlled_json::to_string(self, false, false, &mut || control.check())
+                    .map_err(ReconstructionStageError::Reconstruction)
+            }
+
+            pub fn content_hash_with_cancel(
+                &self,
+                mut is_canceled: impl FnMut() -> bool,
+            ) -> Result<ContentHash, ReconstructionStageError> {
+                self.content_hash_with_control(&mut ReconstructionControl::new(&mut is_canceled))
+            }
+
+            fn content_hash_with_control(
+                &self,
+                control: &mut ReconstructionControl<'_>,
+            ) -> Result<ContentHash, ReconstructionStageError> {
+                struct HashWriter(Sha256);
+                impl std::io::Write for HashWriter {
+                    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                        self.0.update(bytes);
+                        Ok(bytes.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        Ok(())
+                    }
+                }
+                let mut writer = HashWriter(Sha256::new());
+                crate::controlled_json::to_writer(self, &mut writer, false, &mut || {
+                    control.check()
+                })
+                .map_err(ReconstructionStageError::Reconstruction)?;
+                control
+                    .check()
+                    .map_err(ReconstructionStageError::Reconstruction)?;
+                Ok(ContentHash::of_digest(&writer.0.finalize()))
             }
 
             /// `ContentHash::of_bytes(self.to_json().as_bytes())`: the identity a
@@ -310,13 +368,25 @@ macro_rules! stage_artifact_document {
             }
 
             /// Every float of the artifact is finite, so its document reloads.
+            #[cfg(test)]
             fn check_finite(self) -> Result<Self, ReconstructionStageError> {
-                finite::first_non_finite(&self).map_or(Ok(self), |field| {
-                    Err(ReconstructionStageError::NonFinite {
+                self.check_finite_with_control(&mut ReconstructionControl::new(&mut || false))?;
+                Ok(self)
+            }
+
+            fn check_finite_with_control(
+                &self,
+                control: &mut ReconstructionControl<'_>,
+            ) -> Result<(), ReconstructionStageError> {
+                match finite::first_non_finite_with_cancel(self, &mut || control.check())
+                    .map_err(ReconstructionStageError::Reconstruction)?
+                {
+                    None => Ok(()),
+                    Some(field) => Err(ReconstructionStageError::NonFinite {
                         artifact: $stage,
                         field,
-                    })
-                })
+                    }),
+                }
             }
         }
     };
@@ -375,6 +445,14 @@ fn check_identity(
 /// Identity of a request's frames and options. Deterministic; any change to a
 /// frame's dimensions or pixels, the frame order or the options changes it.
 pub fn request_content_hash(request: &ReconstructionRequest) -> ContentHash {
+    request_content_hash_with_control(request, &mut ReconstructionControl::new(&mut || false))
+        .unwrap_or_else(|_| unreachable!("uncancelable request hashing"))
+}
+
+fn request_content_hash_with_control(
+    request: &ReconstructionRequest,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<ContentHash, ReconstructionStageError> {
     // Destructured so that a new option cannot silently fall out of the identity.
     let ReconstructionOptions {
         max_features,
@@ -407,9 +485,14 @@ pub fn request_content_hash(request: &ReconstructionRequest) -> ContentHash {
         hasher.update(frame.width.to_le_bytes());
         hasher.update(frame.height.to_le_bytes());
         hasher.update((frame.rgba.len() as u64).to_le_bytes());
-        hasher.update(&frame.rgba);
+        for pixels in frame.rgba.chunks(64 * 1024) {
+            hasher.update(pixels);
+            control
+                .check()
+                .map_err(ReconstructionStageError::Reconstruction)?;
+        }
     }
-    ContentHash::of_digest(&hasher.finalize())
+    Ok(ContentHash::of_digest(&hasher.finalize()))
 }
 
 /// Stage 1: frames → cameras, including the bounded registration recovery of
@@ -417,14 +500,26 @@ pub fn request_content_hash(request: &ReconstructionRequest) -> ContentHash {
 pub fn reconstruct_cameras(
     request: &ReconstructionRequest,
 ) -> Result<CameraStageArtifact, ReconstructionStageError> {
-    let sparse =
-        crate::reconstruct_sparse(request).map_err(ReconstructionStageError::Reconstruction)?;
-    CameraStageArtifact {
+    reconstruct_cameras_with_cancel(request, || false)
+}
+
+pub fn reconstruct_cameras_with_cancel(
+    request: &ReconstructionRequest,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<CameraStageArtifact, ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    let sparse = crate::reconstruct_sparse_with_control(request, &mut control)
+        .map_err(ReconstructionStageError::Reconstruction)?;
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
+    let artifact = CameraStageArtifact {
         schema_version: CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
-        request_hash: request_content_hash(request),
+        request_hash: request_content_hash_with_control(request, &mut control)?,
         sparse,
-    }
-    .check_finite()
+    };
+    artifact.check_finite_with_control(&mut control)?;
+    Ok(artifact)
 }
 
 /// Stage 2: cameras + frames → dense evidence. Rejects a camera artifact of another
@@ -434,20 +529,38 @@ pub fn reconstruct_dense(
     request: &ReconstructionRequest,
     cameras: &CameraStageArtifact,
 ) -> Result<DenseStageArtifact, ReconstructionStageError> {
+    reconstruct_dense_with_cancel(request, cameras, || false)
+}
+
+pub fn reconstruct_dense_with_cancel(
+    request: &ReconstructionRequest,
+    cameras: &CameraStageArtifact,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<DenseStageArtifact, ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
     cameras.check_schema_version()?;
     check_identity(
         ReconstructionStage::Cameras,
         StageInput::Request,
         &cameras.request_hash,
-        request_content_hash(request),
+        request_content_hash_with_control(request, &mut control)?,
     )?;
-    DenseStageArtifact {
+    let dense =
+        estimate_dense_evidence_with_control(&request.frames, &cameras.sparse, &mut control);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
+    let artifact = DenseStageArtifact {
         schema_version: DENSE_STAGE_ARTIFACT_SCHEMA_VERSION,
         request_hash: cameras.request_hash.clone(),
-        cameras_hash: cameras.content_hash(),
-        dense: estimate_dense_evidence(&request.frames, &cameras.sparse),
-    }
-    .check_finite()
+        cameras_hash: cameras.content_hash_with_control(&mut control)?,
+        dense,
+    };
+    artifact.check_finite_with_control(&mut control)?;
+    Ok(artifact)
 }
 
 /// Stage 3: dense evidence (+ the cameras it was computed from) → consolidated mesh.
@@ -456,37 +569,102 @@ pub fn reconstruct_mesh(
     cameras: &CameraStageArtifact,
     dense: &DenseStageArtifact,
 ) -> Result<MeshStageArtifact, ReconstructionStageError> {
+    reconstruct_mesh_with_cancel(cameras, dense, || false)
+}
+
+pub fn reconstruct_mesh_with_cancel(
+    cameras: &CameraStageArtifact,
+    dense: &DenseStageArtifact,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<MeshStageArtifact, ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
     cameras.check_schema_version()?;
     dense.check_schema_version()?;
     check_identity(
         ReconstructionStage::Dense,
         StageInput::Cameras,
         &dense.cameras_hash,
-        cameras.content_hash(),
+        cameras.content_hash_with_control(&mut control)?,
     )?;
     // Surface consolidation borrows every other stage field; only the points fusion may
     // move need a working buffer, since the dense artifact stays unchanged. The
     // artifact keeps just the points that moved.
     let original = &dense.dense.points;
     let mut points = original.clone();
-    let mut surface = build_surface(&cameras.sparse, DenseFields::of(&dense.dense), &mut points)
-        .map_err(ReconstructionStageError::Reconstruction)?;
-    surface.consolidated_points = points
-        .iter()
-        .zip(original)
-        .enumerate()
-        .filter(|(_, (consolidated, original))| consolidated != original)
-        .map(|(index, (point, _))| ConsolidatedPoint {
-            index,
-            point: *point,
-        })
-        .collect();
-    MeshStageArtifact {
+    let surface = build_surface_with_control(
+        &cameras.sparse,
+        DenseFields::of(&dense.dense),
+        &mut points,
+        &mut control,
+    )
+    .map_err(ReconstructionStageError::Reconstruction)?;
+    let artifact = MeshStageArtifact {
         schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
-        dense_hash: dense.content_hash(),
+        dense_hash: dense.content_hash_with_control(&mut control)?,
         mesh: surface,
-    }
-    .check_finite()
+    };
+    artifact.check_finite_with_control(&mut control)?;
+    Ok(artifact)
+}
+
+/// Owned geometry after surface consolidation. This is a working buffer, not a
+/// reusable dense stage snapshot: consolidation may change its vertex positions.
+/// Only the accompanying mesh's `dense_hash` records the consumed input identity.
+/// This buffer cannot be passed to [`compose_reconstruction`] as a stage snapshot.
+#[derive(Debug)]
+pub struct ConsumedDenseGeometry {
+    pub(crate) dense: DenseEvidence,
+}
+
+/// Consume dense evidence and consolidate its existing point allocation in
+/// place. The mesh records the original dense content identity and only changed
+/// vertices, exactly as the immutable borrowed entrypoint does.
+pub fn reconstruct_mesh_owned(
+    cameras: &CameraStageArtifact,
+    dense: DenseStageArtifact,
+) -> Result<(ConsumedDenseGeometry, MeshStageArtifact), ReconstructionStageError> {
+    reconstruct_mesh_owned_with_cancel(cameras, dense, || false)
+}
+
+/// Consume and consolidate dense geometry with cooperative cancellation.
+/// A canceled call returns no accepted mesh or reusable dense stage snapshot.
+pub fn reconstruct_mesh_owned_with_cancel(
+    cameras: &CameraStageArtifact,
+    mut dense: DenseStageArtifact,
+    mut is_canceled: impl FnMut() -> bool,
+) -> Result<(ConsumedDenseGeometry, MeshStageArtifact), ReconstructionStageError> {
+    let mut control = ReconstructionControl::new(&mut is_canceled);
+    control
+        .check()
+        .map_err(ReconstructionStageError::Reconstruction)?;
+    cameras.check_schema_version()?;
+    dense.check_schema_version()?;
+    check_identity(
+        ReconstructionStage::Dense,
+        StageInput::Cameras,
+        &dense.cameras_hash,
+        cameras.content_hash_with_control(&mut control)?,
+    )?;
+    let dense_hash = dense.content_hash_with_control(&mut control)?;
+    let mut points = std::mem::take(&mut dense.dense.points);
+    let surface = build_surface_with_control(
+        &cameras.sparse,
+        DenseFields::of(&dense.dense),
+        &mut points,
+        &mut control,
+    )
+    .map_err(ReconstructionStageError::Reconstruction)?;
+    dense.dense.points = points;
+    let mesh = MeshStageArtifact {
+        schema_version: MESH_STAGE_ARTIFACT_SCHEMA_VERSION,
+        dense_hash,
+        mesh: surface,
+    };
+    mesh.check_finite_with_control(&mut control)?;
+    Ok((ConsumedDenseGeometry { dense: dense.dense }, mesh))
 }
 
 /// The single-call [`ReconstructionResult`] from the three artifacts of one chain,
@@ -541,6 +719,18 @@ pub(crate) fn estimate_dense_evidence(
     frames: &[FrameInput],
     sparse: &SparseReconstruction,
 ) -> DenseEvidence {
+    estimate_dense_evidence_with_control(
+        frames,
+        sparse,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn estimate_dense_evidence_with_control(
+    frames: &[FrameInput],
+    sparse: &SparseReconstruction,
+    control: &mut ReconstructionControl<'_>,
+) -> DenseEvidence {
     let cameras = registered_cameras(&sparse.dense_cameras);
     let sparse_points: Vec<Vector3<f64>> = sparse
         .dense_sparse_points
@@ -548,7 +738,7 @@ pub(crate) fn estimate_dense_evidence(
         .map(|point| Vector3::from(*point))
         .collect();
     let options = sparse.options;
-    let analysis = crate::dense::estimate_depth_points_with_budget(
+    let analysis = crate::dense::estimate_depth_points_with_budget_and_control(
         frames,
         &cameras,
         &sparse_points,
@@ -556,6 +746,7 @@ pub(crate) fn estimate_dense_evidence(
         options.max_dense_working_set_bytes,
         options.max_features,
         options.descriptor_radius,
+        control,
     );
     let dense = &analysis.stats;
     let mut warnings = Vec::new();
@@ -621,8 +812,22 @@ fn build_surface(
     dense: DenseFields<'_>,
     points: &mut [Point3],
 ) -> Result<SurfaceMesh, String> {
+    build_surface_with_control(
+        sparse,
+        dense,
+        points,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn build_surface_with_control(
+    sparse: &SparseReconstruction,
+    dense: DenseFields<'_>,
+    points: &mut [Point3],
+    control: &mut ReconstructionControl<'_>,
+) -> Result<SurfaceMesh, String> {
     let final_cameras = registered_cameras(&sparse.final_cameras);
-    let analysis = crate::mesh::reconstruct_dense_mesh(
+    let analysis = crate::mesh::reconstruct_dense_mesh_with_control(
         points,
         dense.grid_sites,
         dense.stats,
@@ -630,7 +835,9 @@ fn build_surface(
         sparse.image_width,
         sparse.image_height,
         sparse.focal_length_pixels as f64,
+        control,
     );
+    control.check()?;
     let mut surface = SurfaceMesh {
         stats: analysis.stats,
         triangles: analysis.triangles,
@@ -641,7 +848,7 @@ fn build_surface(
     };
     let mut warnings: Vec<String> = crate::mesh_warning(&surface.stats).into_iter().collect();
     let owned = warnings.len();
-    crate::surface_fusion::consolidate_surface(
+    let moved_indices = crate::surface_fusion::consolidate_surface_recording_with_control(
         crate::surface_fusion::SurfaceSupport {
             calibrated_pair: sparse.calibrated_pair.as_ref(),
             registered_views: &sparse.registered_views,
@@ -656,7 +863,15 @@ fn build_surface(
             mesh: &mut surface.stats,
             warnings: &mut warnings,
         },
+        control,
     )?;
+    surface.consolidated_points = moved_indices
+        .into_iter()
+        .map(|index| ConsolidatedPoint {
+            index,
+            point: points[index],
+        })
+        .collect();
     surface.consolidation_warnings = warnings.split_off(owned);
     surface.mesh_warning = warnings.pop();
     Ok(surface)
@@ -732,28 +947,47 @@ mod finite {
     use serde::ser::{self, Serialize};
     use std::fmt;
 
+    #[cfg(test)]
     pub(super) fn first_non_finite<T: Serialize>(value: &T) -> Option<String> {
-        let mut probe = Probe { path: Vec::new() };
+        first_non_finite_with_cancel(value, &mut || Ok(())).expect("no-op validation cannot cancel")
+    }
+
+    pub(super) fn first_non_finite_with_cancel<T: Serialize>(
+        value: &T,
+        poll: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<Option<String>, String> {
+        let mut probe = Probe {
+            path: Vec::new(),
+            poll,
+        };
         match value.serialize(&mut probe) {
-            Ok(()) => None,
-            Err(Found(field)) => Some(field),
+            Ok(()) => Ok(None),
+            Err(Found::NonFinite(field)) => Ok(Some(field)),
+            Err(Found::Canceled(message)) => Err(message),
         }
     }
 
-    struct Probe {
+    struct Probe<'a> {
         path: Vec<String>,
+        poll: &'a mut dyn FnMut() -> Result<(), String>,
     }
 
-    impl Probe {
-        fn check(&self, finite: bool) -> Result<(), Found> {
+    impl Probe<'_> {
+        fn poll(&mut self) -> Result<(), Found> {
+            (self.poll)().map_err(Found::Canceled)
+        }
+
+        fn check(&mut self, finite: bool) -> Result<(), Found> {
+            self.poll()?;
             if finite {
                 Ok(())
             } else {
-                Err(Found(self.path.join(".")))
+                Err(Found::NonFinite(self.path.join(".")))
             }
         }
 
         fn nested<T: ?Sized + Serialize>(&mut self, key: String, value: &T) -> Result<(), Found> {
+            self.poll()?;
             self.path.push(key);
             value.serialize(&mut *self)?;
             self.path.pop();
@@ -762,11 +996,17 @@ mod finite {
     }
 
     #[derive(Debug)]
-    struct Found(String);
+    enum Found {
+        NonFinite(String),
+        Canceled(String),
+    }
 
     impl fmt::Display for Found {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(formatter, "non-finite value at `{}`", self.0)
+            match self {
+                Self::NonFinite(field) => write!(formatter, "non-finite value at `{field}`"),
+                Self::Canceled(message) => formatter.write_str(message),
+            }
         }
     }
 
@@ -774,17 +1014,17 @@ mod finite {
 
     impl ser::Error for Found {
         fn custom<T: fmt::Display>(message: T) -> Self {
-            Self(message.to_string())
+            Self::NonFinite(message.to_string())
         }
     }
 
     macro_rules! ignore {
         ($($method:ident: $type:ty),* $(,)?) => {
-            $(fn $method(self, _: $type) -> Result<(), Found> { Ok(()) })*
+            $(fn $method(self, _: $type) -> Result<(), Found> { self.poll() })*
         };
     }
 
-    impl ser::Serializer for &mut Probe {
+    impl ser::Serializer for &mut Probe<'_> {
         type Ok = ();
         type Error = Found;
         type SerializeSeq = Self;
@@ -894,11 +1134,12 @@ mod finite {
     /// Sequences keep a running element index as the last path segment.
     macro_rules! sequence {
         ($($trait:ident :: $method:ident),* $(,)?) => {
-            $(impl ser::$trait for &mut Probe {
+            $(impl ser::$trait for &mut Probe<'_> {
                 type Ok = ();
                 type Error = Found;
 
                 fn $method<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Found> {
+                    self.poll()?;
                     let index = self.path.last_mut().expect("sequence path segment");
                     let current: usize = index.parse().map_or(0, |last: usize| last + 1);
                     *index = current.to_string();
@@ -920,7 +1161,7 @@ mod finite {
         SerializeTupleVariant::serialize_field,
     );
 
-    impl ser::SerializeMap for &mut Probe {
+    impl ser::SerializeMap for &mut Probe<'_> {
         type Ok = ();
         type Error = Found;
 
@@ -939,7 +1180,7 @@ mod finite {
 
     macro_rules! fields {
         ($($trait:ident),* $(,)?) => {
-            $(impl ser::$trait for &mut Probe {
+            $(impl ser::$trait for &mut Probe<'_> {
                 type Ok = ();
                 type Error = Found;
 
@@ -1078,3 +1319,12 @@ mod tests {
         ));
     }
 }
+
+// Independently authored acceptance only; shared-stage API translation is allowed.
+#[cfg(test)]
+#[path = "native_stage_acceptance_tests.rs"]
+mod native_stage_acceptance_tests;
+
+#[cfg(test)]
+#[path = "stage_serialization_cancel_acceptance_tests.rs"]
+mod stage_serialization_cancel_acceptance_tests;

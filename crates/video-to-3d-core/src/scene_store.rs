@@ -639,7 +639,7 @@ impl ProjectStore {
     ) -> Result<(), Invalidation> {
         if matches!(
             kind,
-            ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures
+            ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures | ArtifactKind::AssembledScene
         ) {
             let bytes = fs::read(self.resolve(document_path))
                 .map_err(|error| Invalidation::CorruptSidecar(error.to_string()))?;

@@ -205,7 +205,7 @@ video-to-3d export project.json --target web
 
 Tauri/browser UI may invoke the same project semantics.
 
-Status: `crates/video-to-3d-cli` provides the `video-to-3d` binary with `build`, `status` (read-only, cached verification), `inspect` (operations, identities, providers, receipts, verification results, assembled-scene provenance), and `export --target web`. Output is one JSON document on stdout with diagnostics on stderr. Exit codes: 0 success, 1 internal, 2 invalid project, 3 unsupported capability, 4 operation/provider failure, 5 incomplete, 64 usage. No native operation executors or web exporter exist yet, so `build` and `export` currently report `unsupported` explicitly.
+Status: `crates/video-to-3d-cli` provides the `video-to-3d` binary with `build`, `status` (read-only, cached verification), `inspect` (operations, identities, providers, receipts, verification results, assembled-scene provenance), and `export --target web`. Output is one JSON document on stdout with diagnostics on stderr. Exit codes: 0 success, 1 internal, 2 invalid project, 3 unsupported capability, 4 operation/provider failure, 5 incomplete, 64 usage. Native `build` consumes previously imported browser-sampled, hash-verified keyframes and executes independent classic sparse, dense and mesh stages, then assembles an observed environment GLB resource in canonical `AssembledScene`. It also supports texture baking. Missing sampled-frame handoff, unintegrated local providers and the web exporter report `unsupported` explicitly. This geometric smoke does not claim object decomposition, Blender scene export or the three-real-video product gate.
 
 ---
 

@@ -437,6 +437,13 @@ impl AssembledScene {
     }
 
     pub fn validate(&self) -> Result<(), SceneProjectError> {
+        self.validate_with_cancel(&mut || Ok(()))
+    }
+
+    pub(crate) fn validate_with_cancel(
+        &self,
+        poll: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<(), SceneProjectError> {
         if self.schema_version != ASSEMBLED_SCENE_SCHEMA_VERSION {
             return Err(SceneProjectError::UnsupportedSchemaVersion(u64::from(
                 self.schema_version,
@@ -455,6 +462,7 @@ impl AssembledScene {
 
         let mut frames = BTreeSet::new();
         for camera in &self.cameras {
+            poll().map_err(SceneProjectError::Malformed)?;
             declare(&camera.id)?;
             camera.transform.validate(&camera.id)?;
             if camera.transform.scale != [1.0; 3] {
@@ -482,6 +490,7 @@ impl AssembledScene {
         let mut resources: BTreeMap<&str, &SceneResource> = BTreeMap::new();
         let mut paths = BTreeSet::new();
         for resource in &self.resources {
+            poll().map_err(SceneProjectError::Malformed)?;
             declare(&resource.id)?;
             if !paths.insert(resource.path.as_str().to_ascii_lowercase()) {
                 return invalid(format!(
@@ -495,6 +504,7 @@ impl AssembledScene {
             }
             let mut classes = BTreeSet::new();
             for provenance in &resource.provenance {
+                poll().map_err(SceneProjectError::Malformed)?;
                 if !classes.insert(*provenance) {
                     return invalid(format!(
                         "resource `{}` lists provenance {provenance:?} more than once",
@@ -538,6 +548,7 @@ impl AssembledScene {
             }
             let mut unique_frames = BTreeSet::new();
             for frame in &resource.source_frames {
+                poll().map_err(SceneProjectError::Malformed)?;
                 if !unique_frames.insert(*frame) {
                     return invalid(format!(
                         "resource `{}` lists source frame {frame} more than once",
@@ -564,6 +575,7 @@ impl AssembledScene {
 
         let mut materials = BTreeSet::new();
         for material in &self.materials {
+            poll().map_err(SceneProjectError::Malformed)?;
             declare(&material.id)?;
             if material.provenance.requires_camera_evidence() {
                 return invalid(format!(
@@ -590,12 +602,13 @@ impl AssembledScene {
             materials.insert(material.id.as_str());
         }
 
-        let assets: BTreeMap<&str, &SceneAsset> = self
-            .assets
-            .iter()
-            .map(|asset| (asset.id.as_str(), asset))
-            .collect();
+        let mut assets = BTreeMap::new();
         for asset in &self.assets {
+            poll().map_err(SceneProjectError::Malformed)?;
+            assets.insert(asset.id.as_str(), asset);
+        }
+        for asset in &self.assets {
+            poll().map_err(SceneProjectError::Malformed)?;
             declare(&asset.id)?;
             asset.transform.validate(&asset.id)?;
             if asset.visual.is_none() && asset.collision.is_none() {
@@ -678,6 +691,7 @@ impl AssembledScene {
             }
             let mut labels = BTreeSet::new();
             for label in &asset.labels {
+                poll().map_err(SceneProjectError::Malformed)?;
                 if label.name.trim().is_empty() || label.name.chars().any(char::is_control) {
                     return invalid(format!("asset `{}` has an empty semantic label", asset.id));
                 }
@@ -699,9 +713,11 @@ impl AssembledScene {
             }
         }
         for asset in &self.assets {
+            poll().map_err(SceneProjectError::Malformed)?;
             let mut visited = BTreeSet::new();
             let mut current = Some(asset);
             while let Some(node) = current {
+                poll().map_err(SceneProjectError::Malformed)?;
                 if !visited.insert(node.id.as_str()) {
                     return invalid(format!("asset `{}` has a cyclic parent chain", asset.id));
                 }
@@ -713,6 +729,7 @@ impl AssembledScene {
         }
 
         for light in &self.lights {
+            poll().map_err(SceneProjectError::Malformed)?;
             declare(&light.id)?;
             light.transform.validate(&light.id)?;
             if light
@@ -759,6 +776,7 @@ impl AssembledScene {
         }
 
         for anchor in &self.audio {
+            poll().map_err(SceneProjectError::Malformed)?;
             declare(&anchor.id)?;
             resource_of(&anchor.id, &anchor.clip, ResourceKind::AudioClip)?;
             if anchor.ambient && (anchor.attached_to.is_some() || anchor.transform.is_some()) {

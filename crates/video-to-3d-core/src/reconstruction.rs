@@ -21,6 +21,32 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+/// Per-invocation cooperative cancellation. Sticky state prevents an interrupted
+/// internal analysis from becoming accepted if a later callback returns false.
+pub(crate) struct ReconstructionControl<'a> {
+    poll: &'a mut dyn FnMut() -> bool,
+    canceled: bool,
+}
+impl<'a> ReconstructionControl<'a> {
+    pub(crate) fn new(poll: &'a mut dyn FnMut() -> bool) -> Self {
+        Self {
+            poll,
+            canceled: false,
+        }
+    }
+    pub(crate) fn is_canceled(&mut self) -> bool {
+        self.canceled = self.canceled || (self.poll)();
+        self.canceled
+    }
+    pub(crate) fn check(&mut self) -> Result<(), String> {
+        if self.is_canceled() {
+            Err("reconstruction canceled".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 const PAN_RECOVERY_WIDTH_FRACTION: f32 = 0.30;
 const PAN_RECOVERY_MAX_RADIUS: u32 = 112;
 const PAN_RECOVERY_RATIO_THRESHOLD: f32 = 0.78;
@@ -386,7 +412,10 @@ impl TrackScope {
                 .iter()
                 .fold((0, 0), |(three_plus, longest), &(start, end)| {
                     let observed = (end.min(last) + 1).saturating_sub(start.max(first));
-                    (three_plus + usize::from(observed >= 3), longest.max(observed))
+                    (
+                        three_plus + usize::from(observed >= 3),
+                        longest.max(observed),
+                    )
                 });
         let linked = self
             .linked
@@ -428,7 +457,15 @@ pub fn reconstruct(request: &ReconstructionRequest) -> Result<ReconstructionResu
 /// bounded recovery retries. Recovery ranks sparse evidence only, so no candidate needs
 /// dense depth or a mesh; the selected solve records its effective options.
 fn reconstruct_sparse(request: &ReconstructionRequest) -> Result<SparseReconstruction, String> {
-    let initial = reconstruct_once(request)?;
+    reconstruct_sparse_with_control(request, &mut ReconstructionControl::new(&mut || false))
+}
+
+pub(crate) fn reconstruct_sparse_with_control(
+    request: &ReconstructionRequest,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<SparseReconstruction, String> {
+    control.check()?;
+    let initial = reconstruct_once_with_control(request, control)?;
     if !needs_registration_recovery(request, &initial) {
         return Ok(initial);
     }
@@ -452,7 +489,7 @@ fn reconstruct_sparse(request: &ReconstructionRequest) -> Result<SparseReconstru
             .options
             .ratio_threshold
             .min(PAN_RECOVERY_RATIO_THRESHOLD);
-        let pan_retry = reconstruct_once(&pan_request)?;
+        let pan_retry = reconstruct_once_with_control(&pan_request, control)?;
         if score(&pan_retry) > score(&best) {
             best = pan_retry;
             selected_recovery = Some("bounded displacement-informed match-radius recovery");
@@ -484,7 +521,7 @@ fn reconstruct_sparse(request: &ReconstructionRequest) -> Result<SparseReconstru
             != (b.match_radius, b.max_features, b.min_feature_distance)
             || a.ratio_threshold != b.ratio_threshold
     }) {
-        let registration_retry = reconstruct_once(&registration_request)?;
+        let registration_retry = reconstruct_once_with_control(&registration_request, control)?;
         if score(&registration_retry) > score(&best) {
             best = registration_retry;
             selected_recovery = Some(
@@ -504,17 +541,31 @@ fn reconstruct_sparse(request: &ReconstructionRequest) -> Result<SparseReconstru
 
 /// One deterministic camera solve with the request's options: the sparse result and the
 /// camera-stage diagnostics, but no dense depth or mesh (those are later stages).
+#[cfg(test)]
 fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruction, String> {
+    reconstruct_once_with_control(request, &mut ReconstructionControl::new(&mut || false))
+}
+
+fn reconstruct_once_with_control(
+    request: &ReconstructionRequest,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<SparseReconstruction, String> {
     validate_request(request)?;
 
     let width = request.frames[0].width;
     let height = request.frames[0].height;
     let options = request.options;
-    let luma_frames: Vec<Vec<u8>> = request.frames.iter().map(to_luma).collect();
-    let features: Vec<Vec<Feature>> = luma_frames
-        .iter()
-        .map(|luma| detect_features(luma, width, height, options))
-        .collect();
+    let mut luma_frames = Vec::with_capacity(request.frames.len());
+    for frame in &request.frames {
+        luma_frames.push(to_luma(frame));
+        control.check()?;
+    }
+    let mut features = Vec::with_capacity(luma_frames.len());
+    for luma in &luma_frames {
+        features.push(detect_features_with_control(
+            luma, width, height, options, control,
+        )?);
+    }
 
     let focal = options
         .focal_length_pixels
@@ -528,6 +579,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
     let mut motion_guided_pairs = 0usize;
     // Every calibrated pair that passes the seed gates, in pair order. Each segment seeds
     // from its own best candidate.
+    control.check()?;
     let mut seed_candidates: Vec<([usize; 2], two_view::TwoViewEstimate)> = Vec::new();
     // Whether each adjacent link may carry a seed: both frames usable and the link
     // seed-eligible. A wider seed pair needs every link between its frames.
@@ -541,6 +593,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
     let mut segmentation =
         keyframe_selection::SegmentationContext::new(&frame_evidence, width, height);
     for (before, after) in segmentation.rejected_runs() {
+        control.check()?;
         let (source, target) = (&features[before], &features[after]);
         let mut matches = match_features(source, target, options);
         if let Some(guided) = motion_guided_matches(source, target, options) {
@@ -574,25 +627,24 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
     cameras.push(camera);
 
     for pair_index in 0..request.frames.len() - 1 {
+        control.check()?;
         let source_features = &features[pair_index];
         let target_features = &features[pair_index + 1];
         let ordinary_matches = match_features(source_features, target_features, options);
         let ordinary_overlap = if source_features.is_empty() || target_features.is_empty() {
             0.0
         } else {
-            ordinary_matches.len() as f32
-                / source_features.len().min(target_features.len()) as f32
+            ordinary_matches.len() as f32 / source_features.len().min(target_features.len()) as f32
         };
-        let (matches, used_motion_guidance) = if ordinary_matches.len() < MIN_TRACK_MATCHES
-            || ordinary_overlap < MIN_TRACK_OVERLAP
-        {
-            match motion_guided_matches(source_features, target_features, options) {
-                Some(guided) if guided.len() > ordinary_matches.len() => (guided, true),
-                _ => (ordinary_matches, false),
-            }
-        } else {
-            (ordinary_matches, false)
-        };
+        let (matches, used_motion_guidance) =
+            if ordinary_matches.len() < MIN_TRACK_MATCHES || ordinary_overlap < MIN_TRACK_OVERLAP {
+                match motion_guided_matches(source_features, target_features, options) {
+                    Some(guided) if guided.len() > ordinary_matches.len() => (guided, true),
+                    _ => (ordinary_matches, false),
+                }
+            } else {
+                (ordinary_matches, false)
+            };
         if used_motion_guidance {
             motion_guided_pairs += 1;
         }
@@ -660,14 +712,16 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
         } else if low_parallax {
             seed.rejected_gate = Some(SeedGate::Parallax);
         } else {
-            let outcome = two_view::evaluate_two_view(
+            let outcome = two_view::evaluate_two_view_with_control(
                 source_features,
                 target_features,
                 &matches,
                 width,
                 height,
                 focal as f64,
+                control,
             );
+            control.check()?;
             record_two_view_evidence(&mut seed, &outcome.evidence);
             match outcome.result {
                 Ok(estimate) => seed_candidates.push(([pair_index, pair_index + 1], estimate)),
@@ -743,8 +797,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
         adjacent_matches.push(matches);
     }
 
-    let mut keyframe_selection =
-        keyframe_selection::select(&pairs, &frame_evidence, &segmentation);
+    let mut keyframe_selection = keyframe_selection::select(&pairs, &frame_evidence, &segmentation);
     let revisit_context =
         revisit::RevisitContext::new(&features, width, height, focal as f64, options);
     let frame_segments: Vec<usize> = keyframe_selection
@@ -759,6 +812,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
     // without an adjacent seed tries wider pairs of the same segment, composing matches
     // along the tracked links, under the same fail-closed gates (#127).
     for (segment, span) in keyframe_selection.stats.segments.iter().enumerate() {
+        control.check()?;
         if seed_candidates
             .iter()
             .any(|(frames, _)| segment_of_pair(frames[0]) == segment)
@@ -770,11 +824,12 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
         let mut best: Option<([usize; 2], two_view::TwoViewEstimate)> = None;
         for interval in 2..=MAX_SEED_SPAN_INTERVALS {
             for from in span.first_frame..=span.last_frame.saturating_sub(interval) {
+                control.check()?;
                 let to = from + interval;
                 if to > span.last_frame || !seed_links[from..to].iter().all(|usable| *usable) {
                     continue;
                 }
-                let (seed, estimate) = wide_seed_candidate(
+                let (seed, estimate) = wide_seed_candidate_with_control(
                     [&features[from], &features[to]],
                     [&luma_frames[from], &luma_frames[to]],
                     &compose_track_matches(&adjacent_matches[from..to]),
@@ -782,6 +837,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
                     width,
                     height,
                     focal,
+                    control,
                 );
                 seed_evidence.push(seed);
                 if let Some(estimate) = estimate {
@@ -818,22 +874,32 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
                     segment_of_pair(pair_index) == segment
                 })
                 .map(|index| &seed_candidates[index]);
-                let solve = seed.map(|seed| {
-                    solve_segment(
-                        Some(seed),
-                        &keyframe_selection,
-                        &adjacent_matches,
-                        &features,
-                        &revisit_context,
-                        width,
-                        height,
-                        focal as f64,
-                        true,
-                    )
-                });
-                segment_solve_stats(segment, span, false, seed, solve.as_ref(), focal)
+                let solve = seed
+                    .map(|seed| {
+                        solve_segment(
+                            Some(seed),
+                            &keyframe_selection,
+                            &adjacent_matches,
+                            &features,
+                            &revisit_context,
+                            width,
+                            height,
+                            focal as f64,
+                            true,
+                            control,
+                        )
+                    })
+                    .transpose()?;
+                Ok(segment_solve_stats(
+                    segment,
+                    span,
+                    false,
+                    seed,
+                    solve.as_ref(),
+                    focal,
+                ))
             })
-            .collect()
+            .collect::<Result<Vec<_>, String>>()?
     } else {
         Vec::new()
     };
@@ -846,6 +912,7 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
         }
     };
     for solve in &segment_solves {
+        control.check()?;
         if let Some(seed) = &solve.seed_pair {
             mark_selected(seed.from_frame, seed.to_frame);
         }
@@ -866,7 +933,8 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
         height,
         focal as f64,
         false,
-    );
+        control,
+    )?;
     if let Some(segment) = primary_segment.filter(|_| clip_segments.len() > 1) {
         segment_solves.push(segment_solve_stats(
             segment,
@@ -878,14 +946,21 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
         ));
         segment_solves.sort_by_key(|solve| solve.segment);
     }
-    let (primary_first, primary_last) = primary_segment
-        .filter(|_| clip_segments.len() > 1)
-        .map_or((0, request.frames.len() - 1), |segment| {
-            (clip_segments[segment].first_frame, clip_segments[segment].last_frame)
-        });
+    let (primary_first, primary_last) = primary_segment.filter(|_| clip_segments.len() > 1).map_or(
+        (0, request.frames.len() - 1),
+        |segment| {
+            (
+                clip_segments[segment].first_frame,
+                clip_segments[segment].last_frame,
+            )
+        },
+    );
     let track_scope = TrackScope {
         spans: primary_solve.multi_view_analysis.track_spans(),
-        linked: adjacent_matches.iter().map(|matches| !matches.is_empty()).collect(),
+        linked: adjacent_matches
+            .iter()
+            .map(|matches| !matches.is_empty())
+            .collect(),
         primary: (primary_first, primary_last),
     };
     let SegmentSolve {
@@ -1004,10 +1079,10 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
     }
 
     if motion_guided_pairs > 0 {
-    warnings.push(format!(
+        warnings.push(format!(
         "Motion-guided adjacent matching recovered {motion_guided_pairs} sampled frame pair(s) after the ordinary origin-centered local search was starved. A strict global descriptor consensus only predicts the dominant displacement used to center the existing bounded local search; all calibrated geometry still passes the normal epipolar, PnP, bundle-adjustment, dense-depth, and mesh gates."
     ));
-}
+    }
 
     let segments = &multi_view.keyframe_selection.segments;
     if segments.len() > 1 {
@@ -1101,8 +1176,12 @@ fn reconstruct_once(request: &ReconstructionRequest) -> Result<SparseReconstruct
             .keyframe_selection
             .segments
             .iter()
-            .find(|segment| segment.first_frame <= pair.from_frame && pair.to_frame <= segment.last_frame)
-            .map_or(pairs.len() <= 1, |segment| segment.last_frame - segment.first_frame <= 1)
+            .find(|segment| {
+                segment.first_frame <= pair.from_frame && pair.to_frame <= segment.last_frame
+            })
+            .map_or(pairs.len() <= 1, |segment| {
+                segment.last_frame - segment.first_frame <= 1
+            })
     });
     let bootstrap = diagnose_bootstrap(
         &seed_evidence,
@@ -1210,8 +1289,10 @@ fn compose_track_matches(links: &[Vec<FeatureMatch>]) -> Vec<FeatureMatch> {
     };
     let mut composed: Vec<FeatureMatch> = first.clone();
     for link in rest {
-        let next: HashMap<usize, &FeatureMatch> =
-            link.iter().map(|feature_match| (feature_match.a, feature_match)).collect();
+        let next: HashMap<usize, &FeatureMatch> = link
+            .iter()
+            .map(|feature_match| (feature_match.a, feature_match))
+            .collect();
         composed = composed
             .into_iter()
             .filter_map(|feature_match| {
@@ -1233,6 +1314,7 @@ fn compose_track_matches(links: &[Vec<FeatureMatch>]) -> Vec<FeatureMatch> {
 /// must leave more than the rotation-only gate, so a pure rotation (whose wide pairs fit
 /// it to about a tenth of a pixel) is rejected before an essential matrix is tried. Then
 /// the shared two-view gates apply unchanged.
+#[cfg(test)]
 fn wide_seed_candidate(
     [source, target]: [&[Feature]; 2],
     luma: [&[u8]; 2],
@@ -1241,6 +1323,29 @@ fn wide_seed_candidate(
     width: u32,
     height: u32,
     focal: f32,
+) -> (SeedCandidateStats, Option<two_view::TwoViewEstimate>) {
+    wide_seed_candidate_with_control(
+        [source, target],
+        luma,
+        matches,
+        seed_frames,
+        width,
+        height,
+        focal,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wide_seed_candidate_with_control(
+    [source, target]: [&[Feature]; 2],
+    luma: [&[u8]; 2],
+    matches: &[FeatureMatch],
+    seed_frames: [usize; 2],
+    width: u32,
+    height: u32,
+    focal: f32,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> (SeedCandidateStats, Option<two_view::TwoViewEstimate>) {
     let mut motion: Vec<f32> = matches
         .iter()
@@ -1296,8 +1401,13 @@ fn wide_seed_candidate(
         seed.rejected_gate = Some(SeedGate::Matches);
         return (seed, None);
     }
-    let rotation_residual =
-        two_view::least_median_rotation_residual_pixels(&points, width, height, focal as f64);
+    let rotation_residual = two_view::least_median_rotation_residual_pixels_with_control(
+        &points,
+        width,
+        height,
+        focal as f64,
+        control,
+    );
     if rotation_residual
         .is_none_or(|residual| residual <= two_view::MIN_SEED_ROTATION_RESIDUAL_PIXELS)
     {
@@ -1305,7 +1415,13 @@ fn wide_seed_candidate(
         seed.rejected_gate = Some(SeedGate::Baseline);
         return (seed, None);
     }
-    let outcome = two_view::evaluate_two_view_points(&points, width, height, focal as f64);
+    let outcome = two_view::evaluate_two_view_points_with_control(
+        &points,
+        width,
+        height,
+        focal as f64,
+        control,
+    );
     record_two_view_evidence(&mut seed, &outcome.evidence);
     // A wide pair reports the least-median fit it was gated on, unless the
     // shared baseline gate rejected it: then the residual that decided stays.
@@ -1348,8 +1464,8 @@ fn refine_subpixel(
         for oy in -SUBPIXEL_PATCH_RADIUS..=SUBPIXEL_PATCH_RADIUS {
             for ox in -SUBPIXEL_PATCH_RADIUS..=SUBPIXEL_PATCH_RADIUS {
                 let s = source[((i64::from(a[1]) + oy) * w + i64::from(a[0]) + ox) as usize];
-                let t = target
-                    [((i64::from(b[1]) + oy + dy) * w + i64::from(b[0]) + ox + dx) as usize];
+                let t =
+                    target[((i64::from(b[1]) + oy + dy) * w + i64::from(b[0]) + ox + dx) as usize];
                 let d = f64::from(s) - f64::from(t);
                 total += d * d;
             }
@@ -1502,7 +1618,9 @@ fn diagnose_bootstrap(
                 decisive_pair: None,
                 escalation: None,
                 rejections,
-                summary: "A calibrated seed pair was accepted and covers every frame of its segment.".into(),
+                summary:
+                    "A calibrated seed pair was accepted and covers every frame of its segment."
+                        .into(),
             };
         }
         let summary = if pnp_ready == 0 {
@@ -1595,7 +1713,8 @@ fn solve_segment(
     height: u32,
     focal: f64,
     secondary: bool,
-) -> SegmentSolve {
+    control: &mut ReconstructionControl<'_>,
+) -> Result<SegmentSolve, String> {
     let seed_landmarks = seed.map(|(seed_frames, estimate)| {
         (
             *seed_frames,
@@ -1634,6 +1753,7 @@ fn solve_segment(
         &seed_segment,
     );
 
+    control.check()?;
     let mut registered_views = Vec::new();
     let mut registered_cameras = Vec::new();
     let mut registered_geometry = Vec::new();
@@ -1650,6 +1770,7 @@ fn solve_segment(
         });
 
         for candidate in &multi_view_analysis.registration_candidates {
+            control.check()?;
             if candidate.correspondences.len() < 8 {
                 continue;
             }
@@ -1671,8 +1792,13 @@ fn solve_segment(
             if pnp_correspondences.len() != candidate.correspondences.len() {
                 continue;
             }
-            let Some(pose) = pnp::estimate_pose(&pnp_correspondences, width, height, focal)
-            else {
+            let Some(pose) = pnp::estimate_pose_with_control(
+                &pnp_correspondences,
+                width,
+                height,
+                focal,
+                control,
+            ) else {
                 continue;
             };
 
@@ -1798,7 +1924,7 @@ fn solve_segment(
         .map(|landmark| landmark.position)
         .collect();
     if let Some((seed_frames, estimate)) = seed {
-        let adjustment = multi_view::bundle_adjust(
+        let adjustment = multi_view::bundle_adjust_with_control(
             &multi_view_analysis,
             &optimized_seed_points,
             &new_landmarks,
@@ -1807,7 +1933,9 @@ fn solve_segment(
             width,
             height,
             focal,
+            control,
         );
+        control.check()?;
         multi_view_analysis.stats.bundle_adjustment = adjustment.stats.clone();
         optimized_seed_points = adjustment.seed_points;
         optimized_new_landmark_positions = adjustment.new_landmark_positions;
@@ -1833,6 +1961,7 @@ fn solve_segment(
 
         if !closures.is_empty() {
             for closure in &closures {
+                control.check()?;
                 if let Some(camera) = registered_geometry
                     .iter_mut()
                     .find(|camera| camera.frame_index == closure.frame_index)
@@ -1842,7 +1971,7 @@ fn solve_segment(
                 }
             }
 
-            let loop_adjustment = multi_view::bundle_adjust(
+            let loop_adjustment = multi_view::bundle_adjust_with_control(
                 &multi_view_analysis,
                 &optimized_seed_points,
                 &new_landmarks,
@@ -1851,7 +1980,9 @@ fn solve_segment(
                 width,
                 height,
                 focal,
+                control,
             );
+            control.check()?;
             let retained = loop_adjustment.stats.accepted
                 && revisit::closure_corrections_retained(
                     &closures,
@@ -1910,8 +2041,8 @@ fn solve_segment(
             .collect();
     }
 
-
-    SegmentSolve {
+    control.check()?;
+    Ok(SegmentSolve {
         multi_view_analysis,
         revisits,
         registered_views,
@@ -1920,7 +2051,7 @@ fn solve_segment(
         new_landmarks,
         optimized_seed_points,
         optimized_new_landmark_positions,
-    }
+    })
 }
 
 /// The best seed candidate among the pairs `include` accepts, using the same ordering
@@ -1940,7 +2071,10 @@ fn best_seed_index(
     best
 }
 
-fn seed_pair_cameras(seed_frames: [usize; 2], estimate: &two_view::TwoViewEstimate) -> Vec<CameraPose> {
+fn seed_pair_cameras(
+    seed_frames: [usize; 2],
+    estimate: &two_view::TwoViewEstimate,
+) -> Vec<CameraPose> {
     vec![
         CameraPose {
             frame_index: seed_frames[0],
@@ -2016,7 +2150,8 @@ fn segment_solve_stats(
         first_frame: span.first_frame,
         last_frame: span.last_frame,
         primary,
-        seed_pair: seed.map(|(seed_frames, estimate)| calibrated_pair_stats(*seed_frames, estimate, focal)),
+        seed_pair: seed
+            .map(|(seed_frames, estimate)| calibrated_pair_stats(*seed_frames, estimate, focal)),
         registration_candidates: stats.map_or(0, |stats| stats.registration_candidates.len()),
         pnp_ready_candidates: stats.map_or(0, |stats| {
             stats
@@ -2126,7 +2261,9 @@ fn needs_registration_recovery(
     let secondary_segment_short = secondary_segment_solves(result).any(|solve| {
         (solve.seed_pair.is_none() && solve.last_frame > solve.first_frame)
             || solve.pnp_ready_candidates
-                > solve.registered_views.saturating_sub(solve.recovered_from_revisit)
+                > solve
+                    .registered_views
+                    .saturating_sub(solve.recovered_from_revisit)
     });
     missing_seed
         || starved_adjacent_pair
@@ -2145,11 +2282,7 @@ fn secondary_segment_solves(
         .filter(|solve| !solve.primary)
 }
 
-fn pan_recovery_radius(
-    width: u32,
-    current_radius: u32,
-    result: &SparseReconstruction,
-) -> u32 {
+fn pan_recovery_radius(width: u32, current_radius: u32, result: &SparseReconstruction) -> u32 {
     if current_radius >= PAN_RECOVERY_MAX_RADIUS {
         return current_radius;
     }
@@ -2337,10 +2470,29 @@ fn detect_features(
     height: u32,
     options: ReconstructionOptions,
 ) -> Vec<Feature> {
+    // A callback that always returns false cannot interrupt feature extraction.
+    detect_features_with_control(
+        luma,
+        width,
+        height,
+        options,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+    .unwrap_or_else(|_| unreachable!("uncancelable feature extraction"))
+}
+
+fn detect_features_with_control(
+    luma: &[u8],
+    width: u32,
+    height: u32,
+    options: ReconstructionOptions,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<Vec<Feature>, String> {
     let border = options.descriptor_radius.max(3) + 2;
     let mut candidates = Vec::new();
 
     for y in border..height.saturating_sub(border) {
+        control.check()?;
         for x in border..width.saturating_sub(border) {
             let mut sxx = 0.0f32;
             let mut syy = 0.0f32;
@@ -2389,7 +2541,7 @@ fn detect_features(
         }
     }
 
-    selected
+    Ok(selected)
 }
 
 fn descriptor(luma: &[u8], width: u32, x: u32, y: u32, radius: u32) -> Vec<i16> {
@@ -2488,7 +2640,10 @@ fn coarse_global_matches(
                 .iter()
                 .enumerate()
                 .map(|(a_index, source)| {
-                    (a_index, descriptor_distance(&source.descriptor, &target.descriptor))
+                    (
+                        a_index,
+                        descriptor_distance(&source.descriptor, &target.descriptor),
+                    )
                 })
                 .min_by(|left, right| {
                     left.1
@@ -2596,8 +2751,7 @@ fn match_features_around_offset(
             }
         }
         if let Some((b_index, best_distance)) = best {
-            let ratio_ok =
-                second.is_infinite() || best_distance < second * options.ratio_threshold;
+            let ratio_ok = second.is_infinite() || best_distance < second * options.ratio_threshold;
             if ratio_ok && best_distance <= options.max_descriptor_distance {
                 proposals.push(FeatureMatch {
                     a: a_index,

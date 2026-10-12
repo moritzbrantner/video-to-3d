@@ -1,3 +1,4 @@
+use crate::ReconstructionControl;
 use crate::{MeshTriangle, Point3, ReconstructionEvidenceView, SurfaceEvidenceRegion};
 use nalgebra::Vector3;
 use std::collections::HashMap;
@@ -27,6 +28,7 @@ struct FusionStats {
 struct FusionOutcome {
     stats: FusionStats,
     pairs: Vec<(usize, usize)>,
+    moved_indices: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -97,10 +99,33 @@ pub(super) fn consolidate_surface_evidence(
 
 /// Cross-reference surface fusion and the connected-surface merge over borrowed
 /// classic evidence, changing only `target`.
+#[cfg(test)]
 pub(crate) fn consolidate_surface(
     support: SurfaceSupport<'_>,
     target: SurfaceTarget<'_>,
 ) -> Result<(), String> {
+    consolidate_surface_recording(support, target).map(drop)
+}
+
+/// Record only vertices whose final value actually changed, without retaining a
+/// second dense geometry buffer to discover those changes afterward.
+#[cfg(test)]
+pub(crate) fn consolidate_surface_recording(
+    support: SurfaceSupport<'_>,
+    target: SurfaceTarget<'_>,
+) -> Result<Vec<usize>, String> {
+    consolidate_surface_recording_with_control(
+        support,
+        target,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+pub(crate) fn consolidate_surface_recording_with_control(
+    support: SurfaceSupport<'_>,
+    target: SurfaceTarget<'_>,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<Vec<usize>, String> {
     let SurfaceTarget {
         points,
         triangles,
@@ -109,7 +134,7 @@ pub(crate) fn consolidate_surface(
         warnings,
     } = target;
     if triangles.is_empty() || points.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let (membership, support_group_count, group_frames, reference_cameras, point_origins) = {
@@ -123,12 +148,14 @@ pub(crate) fn consolidate_surface(
             triangles,
             triangle_sources,
         };
-        let evidence = ReconstructionEvidenceView::from_classic_parts(&parts)?;
+        let evidence =
+            ReconstructionEvidenceView::from_classic_parts_with_cancel(&parts, || control.check())?;
         let (membership, count) =
             evidence_support_membership(&evidence.regions, evidence.points.len());
         let (frames, cameras) = support_group_references(&evidence, count);
         let mut origins = vec![None; evidence.points.len()];
         for region in &evidence.regions {
+            control.check()?;
             let end = region.points.start.saturating_add(region.points.count);
             if let Some(range) = origins.get_mut(region.points.start..end) {
                 range.fill(Some(region.origin));
@@ -137,12 +164,16 @@ pub(crate) fn consolidate_surface(
         (membership, count, frames, cameras, origins)
     };
     if support_group_count < 2 {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    let FusionOutcome { stats, pairs } =
-        fuse_mutually_supported_vertices(points, triangles, &membership);
+    let FusionOutcome {
+        stats,
+        pairs,
+        moved_indices,
+    } = fuse_mutually_supported_vertices_with_control(points, triangles, &membership, control);
 
+    control.check()?;
     if stats.fused_pairs > 0 {
         remove_stale_surface_fusion_claim(warnings);
     }
@@ -165,14 +196,16 @@ pub(crate) fn consolidate_surface(
     };
     warnings.push(diagnostic);
 
-    let mut merge = crate::surface_merge::merge_fused_patches(
+    let mut merge = crate::surface_merge::merge_fused_patches_with_control(
         points,
         triangles,
         &membership,
         &pairs,
         &reference_cameras,
         &point_origins,
+        control,
     );
+    control.check()?;
     *triangle_sources = std::mem::take(&mut merge.triangle_sources);
     refresh_mesh_after_merge(
         mesh,
@@ -182,7 +215,7 @@ pub(crate) fn consolidate_surface(
         &merge.retained_by_group,
     );
     warnings.push(merge.diagnostic(support_group_count));
-    Ok(())
+    Ok(moved_indices)
 }
 
 /// The mesh diagnostic was rendered before the merge: bring the aggregate and
@@ -309,10 +342,25 @@ fn remove_stale_surface_fusion_claim(warnings: &mut [String]) {
     }
 }
 
+#[cfg(test)]
 fn fuse_mutually_supported_vertices(
     points: &mut [Point3],
     triangles: &[MeshTriangle],
     membership: &[Option<usize>],
+) -> FusionOutcome {
+    fuse_mutually_supported_vertices_with_control(
+        points,
+        triangles,
+        membership,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn fuse_mutually_supported_vertices_with_control(
+    points: &mut [Point3],
+    triangles: &[MeshTriangle],
+    membership: &[Option<usize>],
+    control: &mut ReconstructionControl<'_>,
 ) -> FusionOutcome {
     if points.len() != membership.len() {
         return FusionOutcome::default();
@@ -323,7 +371,10 @@ fn fuse_mutually_supported_vertices(
         local_scales,
         incident_triangles,
         global_edge_scale,
-    } = vertex_surface_evidence(points, triangles);
+    } = match vertex_surface_evidence_with_control(points, triangles, control) {
+        Ok(evidence) => evidence,
+        Err(_) => return FusionOutcome::default(),
+    };
     let Some(global_edge_scale) = global_edge_scale else {
         return FusionOutcome::default();
     };
@@ -332,6 +383,9 @@ fn fuse_mutually_supported_vertices(
     let mut buckets: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
     let mut eligible_vertices = 0usize;
     for index in 0..points.len() {
+        if control.is_canceled() {
+            return FusionOutcome::default();
+        }
         if membership[index].is_none() || normals[index].is_none() || local_scales[index].is_none()
         {
             continue;
@@ -351,6 +405,9 @@ fn fuse_mutually_supported_vertices(
     let mut rejected_normal_pairs = 0usize;
 
     for index in 0..points.len() {
+        if control.is_canceled() {
+            return FusionOutcome::default();
+        }
         let (Some(support_group), Some(normal), Some(local_scale), Some(position)) = (
             membership[index],
             normals[index],
@@ -415,6 +472,9 @@ fn fuse_mutually_supported_vertices(
 
     let mut proposed_moves = Vec::new();
     for index in 0..points.len() {
+        if control.is_canceled() {
+            return FusionOutcome::default();
+        }
         let Some((other_index, _)) = nearest[index] else {
             continue;
         };
@@ -439,14 +499,30 @@ fn fuse_mutually_supported_vertices(
         });
     }
 
-    let (accepted_moves, rejected_topology_pairs) =
-        topology_safe_moves(points, triangles, &incident_triangles, proposed_moves);
-    for movement in &accepted_moves {
-        set_point_position(&mut points[movement.first], movement.position);
-        set_point_position(&mut points[movement.second], movement.position);
+    let (accepted_moves, rejected_topology_pairs) = topology_safe_moves_with_control(
+        points,
+        triangles,
+        &incident_triangles,
+        proposed_moves,
+        control,
+    );
+    if control.is_canceled() {
+        return FusionOutcome::default();
     }
+    let mut moved_indices = Vec::new();
+    for movement in &accepted_moves {
+        for index in [movement.first, movement.second] {
+            let original = points[index];
+            set_point_position(&mut points[index], movement.position);
+            if points[index] != original {
+                moved_indices.push(index);
+            }
+        }
+    }
+    moved_indices.sort_unstable();
 
     FusionOutcome {
+        moved_indices,
         stats: FusionStats {
             eligible_vertices,
             candidate_pairs,
@@ -461,11 +537,28 @@ fn fuse_mutually_supported_vertices(
     }
 }
 
+#[cfg(test)]
 fn topology_safe_moves(
     points: &[Point3],
     triangles: &[MeshTriangle],
     incident_triangles: &[Vec<usize>],
     moves: Vec<FusionMove>,
+) -> (Vec<FusionMove>, usize) {
+    topology_safe_moves_with_control(
+        points,
+        triangles,
+        incident_triangles,
+        moves,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+fn topology_safe_moves_with_control(
+    points: &[Point3],
+    triangles: &[MeshTriangle],
+    incident_triangles: &[Vec<usize>],
+    moves: Vec<FusionMove>,
+    control: &mut ReconstructionControl<'_>,
 ) -> (Vec<FusionMove>, usize) {
     if moves.is_empty() {
         return (moves, 0);
@@ -474,6 +567,9 @@ fn topology_safe_moves(
     let mut active = vec![true; moves.len()];
     let mut move_by_vertex = vec![None; points.len()];
     for (move_index, movement) in moves.iter().enumerate() {
+        if control.is_canceled() {
+            return (Vec::new(), 0);
+        }
         if movement.first >= points.len() || movement.second >= points.len() {
             active[move_index] = false;
             continue;
@@ -483,9 +579,15 @@ fn topology_safe_moves(
     }
 
     loop {
+        if control.is_canceled() {
+            return (Vec::new(), 0);
+        }
         let mut touched = vec![false; triangles.len()];
         let mut touched_triangles = Vec::new();
         for (move_index, movement) in moves.iter().enumerate() {
+            if control.is_canceled() {
+                return (Vec::new(), 0);
+            }
             if !active[move_index] {
                 continue;
             }
@@ -598,7 +700,22 @@ fn proposed_position(
     points.get(vertex).copied().and_then(point_position)
 }
 
+#[cfg(test)]
 fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> VertexSurfaceEvidence {
+    vertex_surface_evidence_with_control(
+        points,
+        triangles,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+    .unwrap_or_else(|_| unreachable!("uncancelable surface evidence"))
+}
+
+fn vertex_surface_evidence_with_control(
+    points: &[Point3],
+    triangles: &[MeshTriangle],
+    control: &mut ReconstructionControl<'_>,
+) -> Result<VertexSurfaceEvidence, String> {
+    control.check()?;
     let mut normal_sums = vec![Vector3::zeros(); points.len()];
     let mut edge_sums = vec![0.0f64; points.len()];
     let mut edge_counts = vec![0usize; points.len()];
@@ -606,6 +723,7 @@ fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> Ver
     let mut edge_lengths = Vec::with_capacity(triangles.len() * 3);
 
     for (triangle_index, triangle) in triangles.iter().enumerate() {
+        control.check()?;
         if triangle.a == triangle.b
             || triangle.b == triangle.c
             || triangle.c == triangle.a
@@ -656,27 +774,33 @@ fn vertex_surface_evidence(points: &[Point3], triangles: &[MeshTriangle]) -> Ver
         edge_lengths.extend_from_slice(&[ab_length, ac_length, bc_length]);
     }
 
+    control.check()?;
     edge_lengths.sort_by(f64::total_cmp);
+    control.check()?;
     let global_edge_scale = median(&edge_lengths);
     let normals = normal_sums
         .into_iter()
         .map(|normal| {
+            control.check()?;
             let length = normal.norm();
-            (length.is_finite() && length > GEOMETRIC_EPSILON).then_some(normal / length)
+            Ok((length.is_finite() && length > GEOMETRIC_EPSILON).then_some(normal / length))
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     let local_scales = edge_sums
         .into_iter()
         .zip(edge_counts)
-        .map(|(sum, count)| (count > 0 && sum.is_finite()).then_some(sum / count as f64))
-        .collect();
+        .map(|(sum, count)| {
+            control.check()?;
+            Ok((count > 0 && sum.is_finite()).then_some(sum / count as f64))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
-    VertexSurfaceEvidence {
+    Ok(VertexSurfaceEvidence {
         normals,
         local_scales,
         incident_triangles,
         global_edge_scale,
-    }
+    })
 }
 
 fn spatial_cell(position: Vector3<f64>, cell_size: f64) -> (i64, i64, i64) {
@@ -945,3 +1069,8 @@ mod tests {
         assert!(warnings[0].contains(POST_FUSION_WARNING_CLAIM));
     }
 }
+
+// Independent test-only prepass acceptance; routine API translation is allowed.
+#[cfg(test)]
+#[path = "fusion_prepass_acceptance_tests.rs"]
+mod fusion_prepass_acceptance_tests;
