@@ -229,3 +229,48 @@ Actual verification uses the genuine completed prepared root and must reject a d
 Authored against frozen `b24b121c88ab3320112d028d6a898400e3c581af` before the adjacent repair. Removing preparation cannot turn either approved fixed ID into an unrelated generic source: the existing canonical asset and preparation authority still apply. Exact approved positives and all four existing nonapproved legacy corpus cases remain accepted. Metadata validator and its actual public Python CLI must reject with the known case ID and an approved/canonical preparation reason. Direct prepare/verify must reject before source or receipt access and writes.
 
 The initial actual-source baseline records two genuine metadata admissions and two successful public metadata CLI admissions. Actual Bun H3 prepare-only additionally deletes a throwaway retained sentinel before failing later; this is a genuine prewrite violation, not a claim that unauthorized reconstruction completed. Python prepare-only already rejects generically without touching the sentinel; its missing case-specific diagnostic and the raw direct-helper KeyError are complementary diagnostic gaps, not successful unauthorized preparation. No actual prepared root is mutated. All previous twenty-one methods remain unchanged; this supplement does not alter approvals, source bytes, inventory, eighteen-sample plan, or legacy sampling.
+
+## Supplemental immutable approved inventory boundary (4244183071)
+
+Independent acceptance context, frozen production
+`fecbfd9d0229a4a81a58a65ad47092f8636e30fb`, BEFORE the next repair. Atlas3.1.2
+and5.3 and the original independently reviewed fixture require inventory to stay
+fixed rather than following custom-manifest reconstruction expectations.
+`tools/tests/test_approved_inventory_immutability.py` adds four methods; the
+previous25 defined methods and every source-review/PTS/prepared-byte oracle are
+unchanged. Current local instructions and all25 live resolved conventions were
+read (sourceRevision46d8793bb3034326561f876dcc67dbaa5aa1e432, diagnostics[]).
+
+The exact approved inventory remains a positive in both existing validation APIs
+and both actual public Python CLI modes: normal validation and
+`--validate-case-approval`. Negative cases change ONLY the inventory subtree,
+retaining valid structure and all other case/source/preparation data: object
+identity, visibility, coverage, uncertainty, added/removed objects; architecture
+identity/visibility/addition/removal; and added/removed dynamic exclusions. Both
+approved cases exercise all12 mutations. Full canonical inventory equality must
+reject these with the case ID and an inventory-specific approved/canonical/fixed
+reason. This includes uncertainty and exclusions, not merely a set of IDs or
+minimum object counts. No inventory or visibility retuning is authorized.
+
+Actual baseline: **1 method GREEN,3 RED**, including **48 actual API admissions**
+and **48 successful actual public CLI admissions** (24 mutations×2 modes in each
+tier). All are collected before the final assertion; later mutation cases were
+actually executed, not inferred after a fail-fast error. Direct prepare and
+verify are independently exercised for both cases with nonexistent source/
+receipt roots; all4 fail the useful metadata-first reason at unrelated file IO.
+These are eligibility/diagnostic failures, not claims unauthorized media was
+successfully prepared or tampered prepared bytes were accepted. No sources,
+prepared output or retained receipts are mutated. Log
+`/tmp/video177-inventory-red.log`; Python syntax and diff checks pass.
+
+Adjacent source audit: trim, original duration and whole sampling plan already
+compare to the pinned preparation; known decoder-boundary semantics are checked
+exactly. The reported canonical inventory comparison omission is confirmed.
+No additional speculative metadata key or new decoder authority is invented by
+this supplement. Preserve existing canonical source checks, known-ID omission
+protection, legacy cases, all18 frame/PTS and real-source tiers. Existing25 methods
+were loaded unchanged; cheap execution reports18 run and7 skip events because
+seven real-prepared methods are skipped as one class without asset/prepared
+environment. Those unexecuted real-source methods are not green evidence here.
+Full actual-original/prepared and browser tiers remain required after repair.
+No production checker/runner edit or second validator is included.
