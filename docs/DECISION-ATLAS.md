@@ -43,6 +43,10 @@ Sources seeded into this atlas:
   Status: adopted 2026-10-10.  
   Normal runs require no human or agent orchestration. Optional review checkpoints may appear before expensive local stages so a user can correct proposed object identities or scene decisions. See 4.4.
 
+- **1.7 Hybrid per-region mesh/splat viewing is the default when both exist.**  
+  Status: adopted 2026-10-12. Answers 8.4 (owner selected B).  
+  Show high-fidelity splat surroundings and independently editable mesh objects together in one aligned scene when those representations exist. Let users select individual objects or scene regions and switch between mesh and splat display wherever both representations are actually available, without replacing the rest of the scene, jumping the camera, or modifying the underlying geometry, transforms, object identity, or evidence provenance. Meshes remain the editable representation and the default Blender/DCC export; splats are visual companions, not a substitute for mesh editability. When a region has only one representation, show it honestly and indicate that the other is unavailable rather than fabricating it. Preserve observation-only versus AI-completed provenance independently of display choice. Do not make optional splat generation or optimization a prerequisite for the initial three-real-video editable-mesh acceptance gate. See 1.2–1.3, 2.3, 3.2–3.4, and 4.2.  
+
 ## 2. Authority and provenance
 
 - **2.1 Rust owns reusable reconstruction semantics.**  
