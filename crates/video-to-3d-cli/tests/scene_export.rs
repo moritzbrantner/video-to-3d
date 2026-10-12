@@ -2,6 +2,8 @@
 //! Explicit acceptance tier: generate unchanged #75 truth resources first.
 //! The test importer records a synthetic canonical scene through ProjectStore;
 //! it does not execute or claim reconstruction, semantic decomposition or #77.
+#[path = "acceptance/scene_export_receipt.rs"]
+mod receipt_consumer;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -26,6 +28,9 @@ impl Project {
         Self::with_observed(false)
     }
     fn with_observed(observed: bool) -> Self {
+        Self::with_appearance(observed, false)
+    }
+    fn with_appearance(observed: bool, generated_appearance: bool) -> Self {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let input = PathBuf::from(
             std::env::var_os("VIDEO_TO_3D_EXPORT_FIXTURE")
@@ -44,6 +49,34 @@ impl Project {
         let input_scene = fs::read_to_string(input.join("scene.json")).unwrap();
         let input_scene = if observed {
             observed_scene(&input, &root, &input_scene)
+        } else {
+            input_scene
+        };
+        let input_scene = if generated_appearance {
+            assert!(observed);
+            let mut scene: Value = serde_json::from_str(&input_scene).unwrap();
+            let material = scene["materials"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|material| material["id"] == "crate-material")
+                .unwrap();
+            material["provenance"] = json!("generative_completion");
+            // The actual observed fallback has vertex colors but no UVs.
+            // Generated material factors exercise appearance provenance without
+            // inventing UVs or geometry to force a textured success path.
+            material
+                .as_object_mut()
+                .unwrap()
+                .remove("base_color_texture");
+            let observed = scene["assets"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|asset| asset["id"] == "observed-smoke")
+                .unwrap();
+            observed["visual"]["mesh"]["material"] = json!("crate-material");
+            scene.to_string()
         } else {
             input_scene
         };
@@ -578,4 +611,224 @@ fn portable_bundle_survives_removal_of_its_project_workspace() {
             .join(destination.file_name().unwrap()),
     );
     assert_eq!(metadata["frame"]["unit"], "meters");
+}
+
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn observed_geometry_with_generated_appearance_is_explicit_or_usefully_unsupported() {
+    let project = Project::with_appearance(true, true);
+    let canonical = AssembledScene::from_json(&project.scene.to_string()).unwrap();
+    let provenance = canonical.asset_provenance("observed-smoke").unwrap();
+    assert!(provenance
+        .visual
+        .contains(&video_to_3d_core::scene_model::SceneProvenance::GeometricMultiView));
+    assert!(provenance
+        .visual
+        .contains(&video_to_3d_core::scene_model::SceneProvenance::GenerativeCompletion));
+    let before = project.source_snapshot();
+    let result = project.export(&["--scene-mode", "observed"]);
+    assert_eq!(project.source_snapshot(), before);
+    if !result.status.success() {
+        let reason = String::from_utf8_lossy(&result.stderr).to_lowercase();
+        assert!(
+            reason.contains("unsupported")
+                && [
+                    "appearance",
+                    "mixed",
+                    "generated material",
+                    "generative material",
+                    "generated texture",
+                    "generative texture"
+                ]
+                .iter()
+                .any(|token| reason.contains(token)),
+            "unrelated rejection: {reason}"
+        );
+        assert!(
+            !project.root.join("exports/scene.glb").exists(),
+            "unsupported adaptation cannot leave an apparently valid export"
+        );
+        return;
+    }
+    let document = glb_document(&fs::read(project.root.join("exports/scene.glb")).unwrap());
+    let node = identified(&document, "observed-smoke");
+    assert!(document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|node| node["extras"]["video_to_3d_id"] != "completion-sentinel"));
+    let mesh = &document["meshes"][node["mesh"].as_u64().unwrap() as usize];
+    assert!(!mesh["primitives"].as_array().unwrap().is_empty());
+    for primitive in mesh["primitives"].as_array().unwrap() {
+        let material = &document["materials"][primitive["material"]
+            .as_u64()
+            .expect("cannot silently discard explicit generated appearance")
+            as usize];
+        assert_eq!(material["name"], "crate-material");
+        let expected = project.scene["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|material| material["id"] == "crate-material")
+            .unwrap();
+        for (actual, wanted) in [
+            ("baseColorFactor", "base_color"),
+            ("metallicFactor", "metallic"),
+            ("roughnessFactor", "roughness"),
+        ] {
+            assert_eq!(
+                material["pbrMetallicRoughness"][actual], expected[wanted],
+                "appearance factors cannot be silently substituted"
+            );
+        }
+    }
+    let metadata = sidecar(&project.root);
+    // Whole original fields remain authoritative; export mappings carry selection.
+    assert_eq!(metadata["materials"], project.scene["materials"]);
+    assert_eq!(metadata["resources"], project.scene["resources"]);
+    assert_eq!(metadata["assets"], project.scene["assets"]);
+    assert_eq!(metadata["cameras"], project.scene["cameras"]);
+    let receipt = sidecar_document(&project.root.join("exports"));
+    assert_eq!(receipt["export_receipt"]["scene_mode"], "observed");
+    receipt_consumer::verify_bundle(&project.root.join("exports"), &receipt).unwrap();
+}
+
+fn sidecar_document(root: &Path) -> Value {
+    let found: Vec<_> = snapshot(root)
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            if path.extension().is_none_or(|extension| extension != "json") {
+                return None;
+            }
+            let value: Value = serde_json::from_slice(&bytes).ok()?;
+            value.get("export_receipt").is_some().then_some(value)
+        })
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "one versioned consumer-readable export receipt"
+    );
+    found[0].clone()
+}
+
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn production_bundle_receipt_verifies_final_hash_identity_and_portable_resources() {
+    let project = Project::new();
+    project.export_ok(&["--scene-mode", "completed"]);
+    let root = project.root.join("exports");
+    let metadata = sidecar_document(&root);
+    assert_eq!(metadata["export_receipt"]["scene_mode"], "completed");
+    assert_eq!(
+        sidecar(&project.root),
+        project.scene,
+        "whole canonical source document unchanged"
+    );
+    receipt_consumer::verify_bundle(&root, &metadata)
+        .expect("actual final portable export receipt");
+    let mut corrupt = metadata.clone();
+    corrupt["export_receipt"]["output"]["content_hash"] =
+        json!(ContentHash::of_bytes(b"different actual output").as_str());
+    assert!(receipt_consumer::verify_bundle(&root, &corrupt).is_err());
+}
+
+#[test]
+#[ignore = "explicit #84 verifier self-test: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn receipt_verifier_accepts_real_authored_payload_and_rejects_self_consistent_node_tamper() {
+    let project = Project::new();
+    let root = project.root.join("verifier-only");
+    fs::create_dir_all(root.join("resources")).unwrap();
+    let mut scene = project.scene.clone();
+    scene["assets"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|asset| ["room-group", "crate"].contains(&asset["id"].as_str().unwrap()));
+    let crate_asset = scene["assets"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|asset| asset["id"] == "crate")
+        .unwrap();
+    crate_asset["visual"]["mesh"]
+        .as_object_mut()
+        .unwrap()
+        .remove("material");
+    scene["materials"] = json!([]);
+    scene["resources"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|resource| resource["id"] == "crate-mesh");
+    AssembledScene::from_json(&scene.to_string()).unwrap();
+    let source = fs::read(project.root.join("resources/crate.glb")).unwrap();
+    fs::write(root.join("resources/crate.glb"), &source).unwrap();
+    let mut glb = glb_document(&source);
+    assert_eq!(glb["meshes"].as_array().unwrap().len(), 1);
+    let mut crate_node = glb["nodes"][0].clone();
+    crate_node["extras"] = json!({"video_to_3d_id":"crate"});
+    glb["nodes"] = json!([{"name":"room-group", "children":[1], "extras":{"video_to_3d_id":"room-group"}}, crate_node]);
+    glb["scenes"] = json!([{"nodes":[0]}]);
+    glb["scene"] = json!(0);
+    let bytes = authored_container(&source, &glb);
+    fs::write(root.join("scene.glb"), &bytes).unwrap();
+    let mut metadata = json!({"scene":scene,"export_receipt":{
+        "schema_version":1,"target":"glb","scene_mode":"completed",
+        "output":{"path":"scene.glb","content_hash":ContentHash::of_bytes(&bytes).as_str(),"byte_length":bytes.len()},
+        "assets":{"room-group":{"node_index":0,"selection":"ancestor"},"crate":{"node_index":1,"selection":"visual"}},
+        "resources":{"crate-mesh":{"path":"resources/crate.glb","content_hash":ContentHash::of_bytes(&source).as_str(),"byte_length":source.len(),"mesh_indices":[0],"material_indices":[]}}
+    }});
+    receipt_consumer::verify_bundle(&root, &metadata)
+        .expect("authored verifier fixture only, not product export");
+    let mut wrong_version = metadata.clone();
+    wrong_version["export_receipt"]["schema_version"] = json!(2);
+    assert!(receipt_consumer::verify_bundle(&root, &wrong_version)
+        .unwrap_err()
+        .contains("version"));
+    let mut wrong_map = metadata.clone();
+    wrong_map["export_receipt"]["assets"]["crate"]["node_index"] = json!(0);
+    assert!(receipt_consumer::verify_bundle(&root, &wrong_map).is_err());
+    let mut corrupt_resource = source.clone();
+    corrupt_resource[0] ^= 1;
+    fs::write(root.join("resources/crate.glb"), corrupt_resource).unwrap();
+    assert!(receipt_consumer::verify_bundle(&root, &metadata)
+        .unwrap_err()
+        .contains("hash"));
+    fs::write(root.join("resources/crate.glb"), source).unwrap();
+    glb["nodes"][1]["extras"]["video_to_3d_id"] = json!("wrong-asset");
+    let original = fs::read(project.root.join("resources/crate.glb")).unwrap();
+    let tampered = authored_container(&original, &glb);
+    fs::write(root.join("scene.glb"), &tampered).unwrap();
+    metadata["export_receipt"]["output"]["content_hash"] =
+        json!(ContentHash::of_bytes(&tampered).as_str());
+    metadata["export_receipt"]["output"]["byte_length"] = json!(tampered.len());
+    assert!(
+        receipt_consumer::verify_bundle(&root, &metadata)
+            .unwrap_err()
+            .contains("identity"),
+        "matching hash is not source identity proof"
+    );
+}
+
+// Test-only framing of independently authored metadata around real unchanged BIN.
+// No production exporter/parser/normalizer authority is implemented here.
+fn authored_container(source: &[u8], document: &Value) -> Vec<u8> {
+    let source_json_len = u32::from_le_bytes(source[12..16].try_into().unwrap()) as usize;
+    let suffix = &source[20 + source_json_len..];
+    let mut json = serde_json::to_vec(document).unwrap();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let mut output = vec![];
+    output.extend_from_slice(b"glTF");
+    output.extend_from_slice(&2u32.to_le_bytes());
+    output.extend_from_slice(
+        &u32::try_from(20 + json.len() + suffix.len())
+            .unwrap()
+            .to_le_bytes(),
+    );
+    output.extend_from_slice(&u32::try_from(json.len()).unwrap().to_le_bytes());
+    output.extend_from_slice(b"JSON");
+    output.extend_from_slice(&json);
+    output.extend_from_slice(suffix);
+    output
 }

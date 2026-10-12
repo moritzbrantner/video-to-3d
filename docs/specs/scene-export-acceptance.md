@@ -110,3 +110,116 @@ pinned real clips and production semantic inventories remain #74/#151/#77; this
 synthetic export fixture cannot close those product gates. Native assembly #150
 is an independent prerequisite, and its flat environment GLB does not substitute
 for this canonical scene adapter.
+
+
+## Supplemental mixed appearance safety before export implementation
+
+Atlas1.2/2.3/3.4 and hybrid acceptance distinguish observed geometry from invented
+geometry and preserve provenance in both modes. They do not settle exact product
+presentation of generated appearance on observed geometry. The supplemental eighth
+explicit test is a technical fail-closed boundary, not a new appearance decision:
+real unchanged75 reconstructed observed-smoke geometry receives explicitly labeled
+generative material factors through the canonical input fixture. Its real fallback
+mesh has no UVs; this input removes that material's texture binding rather than
+inventing a UV layout, inferred geometry or a textured reconstruction. Other seven
+fixtures/expectations are unchanged.
+
+Observed export may succeed only by retaining actual observed geometry and the
+explicit material factors/identity, excluding invented completion geometry, and
+preserving full original canonical material/resource/asset/camera provenance
+unchanged. It may instead reject mixed appearance with a useful unsupported
+capability explanation and no apparently valid GLB. It cannot silently omit the
+observed asset, substitute appearance or relabel it as observed. This does not
+mandate all visual provenance satisfy is_observed_geometry and does not require
+generated textures. Exact product presentation/full feature acceptance remains
+unresolved by this technical test.
+
+Honest baseline at d5530a5: the supplemental fixture genuinely reconstructs75
+frames, validates its canonical scene and both provenance classes, then the actual
+CLI rejects targetglb before adaptation. The test is RED at missing CLI capability;
+all successful output/late metadata assertions and useful mixed-appearance rejection
+are UNRUN. It is not a reproduced material-selection bug in implemented export.
+Log: /tmp/video84-mixed-appearance-baseline-final.log.
+
+Sidecar schema, final GLB hash and resource/node mapping integrity still require
+independent direct audit. Current flexible sidecar discovery strips its envelope;
+no existing production export receipt shape is available to validate or positively
+prove tampered final output rejection. Do not bless arbitrary hash/version fields
+or invent proof from a manufactured final bundle. The minimal independently authored consumer representation below now establishes
+that verifier before production. The original mandatory ownership/large-buffer
+audit and actual Blender gate remain controlling.
+
+
+## Portable export receipt consumer v1 (independent supplemental interface)
+
+A sidecar retains the complete unchanged canonical scene at its root or under
+`scene`. A sibling `export_receipt` is a narrowly scoped interchange receipt;
+it is not another ProjectStore artifact ledger or reconstruction authority.
+Names may be translated independently before producer implementation, while
+consumer semantic assertions remain fixed. Proposed interoperable shape:
+
+```json
+{
+  "scene": { "schema_version": 1, "frame": {}, "resources": [], "assets": [] },
+  "export_receipt": {
+    "schema_version": 1,
+    "target": "glb",
+    "scene_mode": "completed",
+    "output": { "path": "scene.glb", "content_hash": "...", "byte_length": 123 },
+    "assets": {
+      "canonical-id": { "node_index": 0, "selection": "visual" }
+    },
+    "resources": {
+      "canonical-resource-id": {
+        "path": "resources/copied-original.glb",
+        "content_hash": "...",
+        "byte_length": 123,
+        "mesh_indices": [0],
+        "material_indices": []
+      }
+    }
+  }
+}
+```
+
+The example omits real required scene fields; it describes receipt shape only.
+Output/resource paths resolve against the portable export directory, not the
+original project. Receipt output hash/length cover FINAL GLB bytes after extras
+annotation. Asset mappings identify actual stable-ID node extras exactly, include
+required ancestors, retain actual parent edges and declare selection as visual,
+ancestor or collision. Completed mode includes every canonical mesh visual;
+observed selection remains covered independently. Mesh resource mappings name
+actual selected GLB mesh indices and their material indices; texture resources
+map exported canonical materials that actually reference them. Index sets are
+exact, not arbitrary in-range suggestions. All canonical resources (including
+collision-only payloads) are copied as original bytes with unchanged source
+hashes and measured lengths. These mappings supplement, never overwrite,
+canonical source paths/provenance. Copy-all is a permissible simple portable
+closure; this does not invent source geometry or material normalization.
+
+The test-owned consumer checks version/target/mode, final GLB length/hash,
+canonical node identity/parent/selection/material bindings and portable original
+resource hash/length/index closure. A new actual production-output test first
+requires unchanged entire canonical metadata, then verifies the receipt. Its
+baseline fails at unsupported CLI GLB target; all final-output checks remain
+UNRUN. A separate self-test uses an actual prepared crate GLB payload with
+independently authored two-node metadata around its unchanged BIN, plus valid
+canonical source input. It passes and rejects wrong version, node map, corrupted
+resource bytes and changed node identity EVEN WHEN final hash/length are updated
+self-consistently. This is verifier harness proof, not a production export,
+coordinate/material normalization claim, or reconstructed semantic inventory.
+
+Baseline receipts: /tmp/video84-receipt-baseline.log. Existing seven contracts
+remain intact; explicit tier now has original7 + mixed appearance + actual receipt
++ verifier self-test (10 tests). All ten run through the existing mandatory
+export_acceptance.sh --ignored invocation; the Blender gate still consumes only
+actual CLI portable output, never the verifier-only authored container.
+
+
+Final supplemental pre-production gate: explicit tier2PASS/8RED (original real
+input test and new verifier harness pass; eight actual CLI-dependent cases stop
+at missingGLB export capability), strict focused release Clippy/workspacefmt and
+owned whitespace PASS. Log /tmp/video84-supplement-all-baseline-final.log and
+/tmp/video84-supplement-clippy.log. No production-export receipt/Blender/presentation
+success is claimed. Original seven test bodies remain unchanged; supplemental
+fixture factory is gated off for every original call.
