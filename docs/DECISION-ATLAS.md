@@ -79,7 +79,7 @@ Sources seeded into this atlas:
   Status: adopted 2026-10-10.  
   The first product exit requires three distinct, licensed, pinned real videos: one controlled room and two ordinary handheld recordings. All three must pass. A synthetic fixture supplements this gate but cannot replace it. See 1.4 and 3.5.
   - [x] Two approved handheld inputs (H1/H3) have source attribution, hashes and browser-consumable fixture preparation; exact manifest/candidate review is protected by `tools/check_real_video_manifest.py` and `tools/tests/test_approved_inventory_immutability.py` ([merged #177](https://github.com/moritzbrantner/video-to-3d/pull/177)).
-  - [x] The real controlled-room input **source** is approved (TUM RGB movie, Atlas 3.8; [#74](https://github.com/moritzbrantner/video-to-3d/issues/74)); source approval alone is not product input processing or output quality.
+  - [ ] The approved controlled-room TUM RGB video is not yet established as a reproducibly prepared real-video input fixture; source selection in Atlas 3.8 is a **decision**, not implemented footage-processing or independently passing reconstruction ([#74](https://github.com/moritzbrantner/video-to-3d/issues/74)).
   - [ ] An independent whole-scene acceptance run across all three real video sources and actual Blender outputs is still required ([#74](https://github.com/moritzbrantner/video-to-3d/issues/74), [#76](https://github.com/moritzbrantner/video-to-3d/issues/76), [#77](https://github.com/moritzbrantner/video-to-3d/issues/77)).
 
   - **3.1.1 Controlled-room fixture.**  
