@@ -369,8 +369,6 @@ class ActualPreparedHandheldAcceptance(unittest.TestCase):
                         handle.write(b'independent tamper')
                     self.assertTrue(self.verify(case, tmp / 'source', tmp / 'prepared'))
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class ApprovedAttributionAcceptance(unittest.TestCase):
@@ -469,3 +467,6 @@ class ApprovedAttributionAcceptance(unittest.TestCase):
                                 'verifier did not reject canonical source metadata: '+str(errors))
                 self.assertEqual(sorted((str(path.relative_to(output)),path.stat().st_size,path.stat().st_mtime_ns)
                                         for path in output.rglob('*') if path.is_file()),before)
+
+if __name__ == '__main__':
+    unittest.main()
