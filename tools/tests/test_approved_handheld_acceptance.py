@@ -468,5 +468,102 @@ class ApprovedAttributionAcceptance(unittest.TestCase):
                 self.assertEqual(sorted((str(path.relative_to(output)),path.stat().st_size,path.stat().st_mtime_ns)
                                         for path in output.rglob('*') if path.is_file()),before)
 
+class ApprovedIdentityWithoutPreparationAcceptance(unittest.TestCase):
+    """Supplemental known-ID bypass contract against frozen b24b121."""
+    def stripped(self, index):
+        document = json.loads(ORACLE.read_text())
+        document['cases'] = [document['cases'][index]]
+        case = document['cases'][0]
+        del case['preparation']
+        case['asset']['redistribute'] = False
+        case['asset']['creator'] = 'Unrelated creator'
+        return document
+
+    def assert_approved_reason(self, reason, case_id):
+        self.assertIn(case_id, reason, 'missing case-specific approved identity diagnostic: '+reason)
+        self.assertTrue(any(token in reason.lower() for token in ['approved', 'canonical', 'pinned']), reason)
+        self.assertIn('preparation', reason.lower(), reason)
+
+    def test_known_approved_identity_cannot_become_generic_by_omitting_preparation(self):
+        self.assertEqual(checker.validate_manifest(json.loads(ORACLE.read_text())), [])
+        legacy = json.loads((ROOT / 'benchmarks/real-video-corpus.json').read_text())
+        legacy['cases'] = [case for case in legacy['cases'] if not case.get('preparation')]
+        self.assertTrue(legacy['cases'], 'existing legacy corpus positive must be populated')
+        self.assertEqual(checker.validate_manifest(legacy), [])
+        for index in [0, 1]:
+            document = self.stripped(index)
+            with self.subTest(case=document['cases'][0]['id']):
+                errors = checker.validate_manifest(document)
+                self.assertTrue(errors, 'known approved ID admitted as generic falsely attributed source')
+                self.assert_approved_reason('; '.join(errors), document['cases'][0]['id'])
+
+    def test_public_metadata_cli_rejects_missing_approved_preparation(self):
+        for index in [0, 1]:
+            document = self.stripped(index)
+            with self.subTest(case=document['cases'][0]['id']), tempfile.TemporaryDirectory() as directory:
+                manifest = Path(directory) / 'missing-preparation.json'
+                manifest.write_text(json.dumps(document))
+                result = subprocess.run(['python3', 'tools/check_real_video_manifest.py', str(manifest)],
+                                        cwd=ROOT, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, 'public metadata CLI admitted stripped approved identity')
+                self.assert_approved_reason(result.stdout+result.stderr, document['cases'][0]['id'])
+
+    def test_direct_preparation_and_verifier_reject_known_identity_usefully(self):
+        # Nonexistent roots prove the identity check precedes any source/receipt IO.
+        document = self.stripped(0)
+        case = document['cases'][0]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for boundary in ['prepare', 'verify']:
+                with self.subTest(boundary=boundary):
+                    if boundary == 'prepare':
+                        try:
+                            checker.prepare_case(case, base / 'missing-originals', base / 'missing-output')
+                        except (ValueError, KeyError, OSError) as error:
+                            reason = str(error)
+                        else:
+                            self.fail('missing approved preparation admitted')
+                    else:
+                        reason = '; '.join(checker.verify_prepared_case(case, base / 'missing-originals', base / 'missing-output'))
+                    self.assert_approved_reason(reason, case['id'])
+                    self.assertEqual(list(base.iterdir()), [], 'rejected known identity wrote output')
+
+    def test_public_prepare_paths_reject_before_replacing_retained_output(self):
+        source = os.environ.get('VIDEO_HANDHELD_ASSET_ROOT')
+        if not source:
+            self.skipTest('actual licensed originals required; prewrite boundary unrun')
+        # H3 is real and compact; no mocked decoder or executable substitutes.
+        document = self.stripped(1)
+        case_id = document['cases'][0]['id']
+        for adapter in ['python', 'bun']:
+            with self.subTest(adapter=adapter), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                manifest = base / 'missing-preparation.json'
+                manifest.write_text(json.dumps(document))
+                output = base / 'outputs'
+                case_output = output / case_id
+                case_output.mkdir(parents=True)
+                sentinel = case_output / 'retained.txt'
+                sentinel.write_bytes(b'retained approved identity evidence')
+                modified = sentinel.stat().st_mtime_ns
+                if adapter == 'python':
+                    command = ['python3','tools/check_real_video_manifest.py',str(manifest),
+                               '--prepare-case',case_id,'--asset-root',source,'--output-root',str(output)]
+                else:
+                    command = ['bun','tools/run_real_video_case.ts','--case',case_id,'--manifest',str(manifest),
+                               '--asset-root',source,'--output-root',str(output),'--prepare-only']
+                try:
+                    result = subprocess.run(command,cwd=ROOT,capture_output=True,text=True,timeout=30)
+                except subprocess.TimeoutExpired:
+                    self.assertTrue(sentinel.is_file(), 'actual public runner deleted retained output before rejection')
+                    self.fail('approved identity must reject before decoder work, not continue preparation')
+                self.assertTrue(sentinel.is_file(), 'actual public runner deleted retained output before rejection')
+                self.assertEqual(sentinel.read_bytes(), b'retained approved identity evidence')
+                self.assertEqual(sentinel.stat().st_mtime_ns, modified)
+                self.assertEqual(sorted(str(path.relative_to(output)) for path in output.rglob('*') if path.is_file()),
+                                 [case_id+'/retained.txt'])
+                self.assertNotEqual(result.returncode,0,'missing approved preparation was executed')
+                self.assert_approved_reason(result.stdout+result.stderr, case_id)
+
 if __name__ == '__main__':
     unittest.main()
