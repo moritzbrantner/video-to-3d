@@ -96,8 +96,24 @@ fn owned_clip_contract(sloped: bool) {
     );
     for (before, after) in original_points.iter().zip(&output.points) {
         assert_eq!(
-            (before.x, before.y, before.z, before.r, before.g, before.b),
-            (after.x, after.y, after.z, after.r, after.g, after.b)
+            (
+                before.x,
+                before.y,
+                before.z,
+                before.confidence,
+                before.r,
+                before.g,
+                before.b
+            ),
+            (
+                after.x,
+                after.y,
+                after.z,
+                after.confidence,
+                after.r,
+                after.g,
+                after.b
+            )
         );
     }
     let mut derived = BTreeSet::new();
@@ -109,6 +125,11 @@ fn owned_clip_contract(sloped: bool) {
         let parent = original_triangles
             .get(record.source_triangle)
             .expect("immutable pre-clip source identity");
+        assert_eq!(
+            record.source_corners,
+            [parent.a, parent.b, parent.c],
+            "sparse immutable corners must resolve the named original source triangle"
+        );
         assert!(record
             .barycentric
             .iter()
@@ -165,4 +186,73 @@ fn flat_overlap_uses_owned_buffers_and_sparse_source_triangle_lineage() {
 #[test]
 fn sloped_overlap_reconstructs_derived_world_positions_from_immutable_parents() {
     owned_clip_contract(true);
+}
+
+#[test]
+fn owned_overlap_cancellation_aborts_without_a_partial_result_and_noop_is_identical() {
+    let fixture = partial_overlap(true);
+    let plain = merge_fused_patches_owned(
+        fixture.points,
+        fixture.triangles,
+        &fixture.membership,
+        &fixture.pairs,
+        &fixture.cameras,
+        &fixture.origins,
+    )
+    .unwrap();
+    let fixture = partial_overlap(true);
+    let mut polls = 0;
+    let mut never = || {
+        polls += 1;
+        false
+    };
+    let controlled = merge_fused_patches_owned_with_control(
+        fixture.points,
+        fixture.triangles,
+        &fixture.membership,
+        &fixture.pairs,
+        &fixture.cameras,
+        &fixture.origins,
+        &mut crate::ReconstructionControl::new(&mut never),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&plain.points).unwrap(),
+        serde_json::to_vec(&controlled.points).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&plain.triangles).unwrap(),
+        serde_json::to_vec(&controlled.triangles).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&plain.derived_vertices).unwrap(),
+        serde_json::to_vec(&controlled.derived_vertices).unwrap()
+    );
+    assert!(
+        polls > 2,
+        "cooperative checks must extend beyond entry/exit"
+    );
+    let stop = (polls / 2).max(2);
+    let fixture = partial_overlap(true);
+    let mut seen = 0;
+    let mut cancel = || {
+        seen += 1;
+        seen >= stop
+    };
+    let result = merge_fused_patches_owned_with_control(
+        fixture.points,
+        fixture.triangles,
+        &fixture.membership,
+        &fixture.pairs,
+        &fixture.cameras,
+        &fixture.origins,
+        &mut crate::ReconstructionControl::new(&mut cancel),
+    );
+    assert!(
+        result.is_err(),
+        "canceled owned merge must not publish partial geometry"
+    );
+    assert!(seen >= stop);
+    // This callback witness is accompanied by a source audit: the polls must
+    // occur in actual clipping/triangle work, not a dummy pre-work countdown.
 }
