@@ -371,3 +371,101 @@ class ActualPreparedHandheldAcceptance(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ApprovedAttributionAcceptance(unittest.TestCase):
+    """Supplemental 4244038768 contract, authored against frozen 1c1dbdd."""
+    def test_approved_source_attribution_and_integrity_are_canonical(self):
+        expected = json.loads(ORACLE.read_text())
+        self.assertEqual(checker.validate_manifest(expected), [])
+        for original in expected['cases']:
+            values = {
+                'creator': 'Unrelated creator',
+                'title': 'Unrelated source title',
+                'source_url': 'https://example.invalid/unrelated-source',
+                'download_url': 'https://example.invalid/unrelated-original.webm',
+                'license_url': 'https://creativecommons.org/licenses/by/4.0/',
+                'owner_approval_url': 'https://github.com/moritzbrantner/video-to-3d/issues/74#unrelated',
+                'sha256': '0' * 64,
+                'byte_length': original['asset']['byte_length'] + 1,
+                'expected_file': 'unrelated-original.webm',
+                'mode': 'provider',
+                'redistribute': False,
+            }
+            for field,value in values.items():
+                with self.subTest(case=original['id'], field=field):
+                    case = copy.deepcopy(original)
+                    case['asset'][field] = value
+                    document = copy.deepcopy(expected)
+                    document['cases'] = [case]
+                    errors = checker.validate_manifest(document)
+                    self.assertTrue(errors, f'approved ID accepted different canonical asset.{field}')
+                    reason = '; '.join(errors).lower()
+                    aliases = {'sha256': ['source'], 'owner_approval_url': ['owner-approved'],
+                               'license_url': ['cc by'], 'mode': ['manual']}
+                    self.assertTrue(any(token in reason for token in [field] + aliases.get(field, [])),
+                                    'unrelated generic rejection: ' + reason)
+
+    def test_actual_public_preparation_rejects_false_attribution_before_output_use(self):
+        source = os.environ.get('VIDEO_HANDHELD_ASSET_ROOT')
+        if not source:
+            self.skipTest('actual licensed originals required; public attribution boundary unrun')
+        expected = json.loads(ORACLE.read_text())
+        checks = [('bun', 0, 'creator', 'Unrelated creator'),
+                  ('python', 1, 'download_url', 'https://example.invalid/unrelated-original.ogv')]
+        for adapter,index,field,value in checks:
+            with self.subTest(adapter=adapter,field=field), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                document = copy.deepcopy(expected)
+                document['cases'] = [document['cases'][index]]
+                case = document['cases'][0]
+                case['asset'][field] = value
+                original = Path(source) / expected['cases'][index]['asset']['expected_file']
+                self.assertEqual(hashlib.sha256(original.read_bytes()).hexdigest(), expected['cases'][index]['asset']['sha256'])
+                output = base / 'outputs'
+                case_output = output / case['id']
+                case_output.mkdir(parents=True)
+                sentinel = case_output / 'retained.txt'
+                sentinel.write_bytes(b'unchanged attribution acceptance evidence')
+                before = [(str(path.relative_to(output)),path.read_bytes()) for path in output.rglob('*') if path.is_file()]
+                modified = sentinel.stat().st_mtime_ns
+                manifest = base / 'false-attribution.json'
+                manifest.write_text(json.dumps(document))
+                if adapter == 'bun':
+                    command = ['bun','tools/run_real_video_case.ts','--case',case['id'],'--asset-root',source,
+                               '--output-root',str(output),'--manifest',str(manifest),'--prepare-only']
+                else:
+                    command = ['python3','tools/check_real_video_manifest.py',str(manifest),
+                               '--prepare-case',case['id'],'--asset-root',source,'--output-root',str(output)]
+                result = subprocess.run(command,cwd=ROOT,capture_output=True,text=True)
+                self.assertNotEqual(result.returncode,0,'false attribution was prepared')
+                reason = (result.stdout+result.stderr).lower()
+                # The deliberately retained incomplete output bounds the old
+                # baseline: a missing receipt is NOT attribution rejection.
+                self.assertIn(field,reason,'public boundary admitted false attribution before unrelated failure: '+reason)
+                self.assertTrue(any(token in reason for token in ['approved','canonical','pinned']),reason)
+                self.assertEqual([(str(path.relative_to(output)),path.read_bytes()) for path in output.rglob('*') if path.is_file()],before)
+                self.assertEqual(sentinel.stat().st_mtime_ns,modified)
+
+    def test_actual_prepared_verification_rejects_false_source_metadata_first(self):
+        source = os.environ.get('VIDEO_HANDHELD_ASSET_ROOT')
+        prepared = os.environ.get('VIDEO_HANDHELD_PREPARED_ROOT')
+        if not source or not prepared:
+            self.skipTest('actual licensed originals/prepared receipts required; verifier boundary unrun')
+        output = Path(prepared)
+        before = sorted((str(path.relative_to(output)),path.stat().st_size,path.stat().st_mtime_ns)
+                        for path in output.rglob('*') if path.is_file())
+        self.assertTrue(before, 'actual prepared root must be populated')
+        expected = json.loads(ORACLE.read_text())
+        for original in expected['cases']:
+            with self.subTest(case=original['id']):
+                receipt = output / original['id'] / 'sampling.json'
+                self.assertTrue(receipt.is_file(), 'actual prepared receipt missing')
+                case = copy.deepcopy(original)
+                case['asset']['source_url'] = 'https://example.invalid/unrelated-source'
+                errors = checker.verify_prepared_case(case,Path(source),output)
+                self.assertTrue(errors,'actual verified bytes were admitted with false source metadata')
+                self.assertTrue(any('source_url' in error.lower() for error in errors),
+                                'verifier did not reject canonical source metadata: '+str(errors))
+                self.assertEqual(sorted((str(path.relative_to(output)),path.stat().st_size,path.stat().st_mtime_ns)
+                                        for path in output.rglob('*') if path.is_file()),before)

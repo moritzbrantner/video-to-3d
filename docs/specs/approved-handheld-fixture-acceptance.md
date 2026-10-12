@@ -211,3 +211,14 @@ A changed manifest may not retain the fixed owner approval while changing those
 inputs. Both public preparation entry points must reject before creating files or
 altering an existing sentinel. This adds no new source approval, inventory, sampling
 policy or browser/offline pixel equivalence claim.
+
+
+## Supplemental canonical attribution boundary (review 4244038768)
+
+Authored independently against frozen `1c1dbdd8f881e965ad3d21d32380a40d2b9618b1`, before repair. An approved case ID must not permit custom manifests to redefine its creator, source title, official source/download URLs, original byte length/filename, license/mode, source hash, redistribution value or owner-approval URL. Canonical metadata is the existing approved repository corpus, not a second hardcoded production catalog. Existing source approvals, trim, eighteen-sample plans, inventories and decoding boundaries remain unchanged. This scoped policy concerns the two approved fixed IDs, not a new global ban on custom generic corpus assets.
+
+The supplemental metadata method tests eleven immutable asset leaves for both cases while preserving nonempty valid strings/HTTPS where applicable. At the frozen head, fourteen mutations are genuinely admitted by `validate_manifest`: creator, title, source URL, download URL, byte length, expected filename and redistribution value for each case. License URL, mode, source hash and owner approval mutations already reject and remain complementary GREEN cases. The exact canonical pair remains GREEN.
+
+Actual public Bun prepare-only and direct Python prepare calls use the verified approved original bytes plus a controlled pre-existing case folder with a retained sentinel and no sampling receipt. At baseline, metadata admits these requests but the calls reject later for the unrelated missing receipt. This is **not successful unauthorized preparation and is not another independent defect reproduction**; the canonical prewrite guard is not witnessed at baseline. The supplemental post-repair boundary expectations require a useful offending attribution field/canonical rejection before output use, no new files and unchanged sentinel bytes/mtime. There is no substitute decoder, forged source, copied reconstruction output or injected provider result.
+
+Actual verification uses the genuine completed prepared root and must reject a different source URL before treating its otherwise valid receipts/bytes as approved. That actual prepared-root verifier test is UNRUN/SKIP in the cheap baseline run; it must run with the real prepared root after repair. Original eighteen methods are unchanged. No offline/browser pixel-equivalence or product/Blender/physical-device result is added by this provenance supplement.
