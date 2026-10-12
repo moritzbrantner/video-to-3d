@@ -24,7 +24,7 @@ const RELATIVE_BLUR_FRACTION: f32 = 0.8;
 /// Frames on each side that form a frame's local sharpness reference.
 const BLUR_WINDOW: usize = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameDecision {
     Keyframe,
@@ -34,7 +34,7 @@ pub enum FrameDecision {
     PoorExposure,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SegmentBreak {
     /// Overlap collapsed and exposure jumped: a hard cut.
@@ -45,7 +45,7 @@ pub enum SegmentBreak {
     MotionJump,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct FrameSelectionStats {
     pub frame_index: usize,
     pub segment: usize,
@@ -54,7 +54,7 @@ pub struct FrameSelectionStats {
     pub mean_luma: f32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ClipSegmentStats {
     pub first_frame: usize,
     pub last_frame: usize,
@@ -63,7 +63,7 @@ pub struct ClipSegmentStats {
     pub ends_with: Option<SegmentBreak>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
 pub struct KeyframeSelectionStats {
     pub segments: Vec<ClipSegmentStats>,
     pub frames: Vec<FrameSelectionStats>,

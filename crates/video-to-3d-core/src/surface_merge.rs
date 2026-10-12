@@ -208,6 +208,7 @@ impl MergeStats {
     }
 }
 
+#[cfg(test)]
 pub(super) fn merge_fused_patches(
     points: &[Point3],
     triangles: &mut Vec<MeshTriangle>,
@@ -215,6 +216,26 @@ pub(super) fn merge_fused_patches(
     pairs: &[(usize, usize)],
     reference_cameras: &[Option<ReferenceCamera>],
     point_origins: &[Option<crate::EvidenceOrigin>],
+) -> MergeStats {
+    merge_fused_patches_with_control(
+        points,
+        triangles,
+        membership,
+        pairs,
+        reference_cameras,
+        point_origins,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+pub(super) fn merge_fused_patches_with_control(
+    points: &[Point3],
+    triangles: &mut Vec<MeshTriangle>,
+    membership: &[Option<usize>],
+    pairs: &[(usize, usize)],
+    reference_cameras: &[Option<ReferenceCamera>],
+    point_origins: &[Option<crate::EvidenceOrigin>],
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> MergeStats {
     let group_of = |vertex: usize| membership.get(vertex).copied().flatten();
     let valid = |triangle: &MeshTriangle| {
@@ -231,6 +252,9 @@ pub(super) fn merge_fused_patches(
     // deleting an unrelated disconnected island from the same two cameras.
     let mut component_parent: Vec<usize> = (0..points.len()).collect();
     for triangle in triangles.iter() {
+        if control.is_canceled() {
+            return MergeStats::default();
+        }
         if group_of(triangle.a).is_none()
             || group_of(triangle.a) != group_of(triangle.b)
             || group_of(triangle.a) != group_of(triangle.c)
@@ -283,6 +307,9 @@ pub(super) fn merge_fused_patches(
     let mut fused_pairs = 0;
     let mut provenance_separated_pairs = 0;
     for &(first, second) in pairs {
+        if control.is_canceled() {
+            return MergeStats::default();
+        }
         if first >= points.len()
             || second >= points.len()
             || group_of(first).is_none()
@@ -335,6 +362,9 @@ pub(super) fn merge_fused_patches(
     // position before removal), so their reference support stays observable.
     let mut reindexed: Vec<(usize, [usize; 3])> = Vec::new();
     for (index, triangle) in triangles.iter_mut().enumerate() {
+        if control.is_canceled() {
+            return MergeStats::default();
+        }
         let original = [triangle.a, triangle.b, triangle.c];
         let mapped = original.map(|vertex| canonical[vertex]);
         // Never replace valid topology with a degenerate triangle.
@@ -438,6 +468,9 @@ pub(super) fn merge_fused_patches(
     };
 
     for (patch_rank, patch) in order.iter().enumerate() {
+        if control.is_canceled() {
+            return MergeStats::default();
+        }
         let members: Vec<usize> = patch_of
             .iter()
             .enumerate()
@@ -503,6 +536,9 @@ pub(super) fn merge_fused_patches(
                     && !footprints.iter().any(|footprint| footprint.patch == *owner)
             });
             for &index in &members {
+                if control.is_canceled() {
+                    return MergeStats::default();
+                }
                 let Some(candidate) = &geometry[index] else {
                     continue;
                 };
@@ -744,6 +780,9 @@ pub(super) fn merge_fused_patches(
     let mut cross_reference_triangles = 0;
     let mut links = Vec::new();
     for triangle in triangles.iter() {
+        if control.is_canceled() {
+            return MergeStats::default();
+        }
         let groups: Vec<Option<usize>> = [triangle.a, triangle.b, triangle.c]
             .iter()
             .map(|vertex| group_of(*vertex))

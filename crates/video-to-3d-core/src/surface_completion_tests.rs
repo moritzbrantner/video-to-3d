@@ -865,3 +865,111 @@ fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
     );
     assert!(closed.fallback.triangles.contains(&stitched));
 }
+
+/// The staged entry points on a clip whose surface fusion moves dense vertices (the
+/// acceptance clips of `tests/reconstruction_stages.rs` keep their support groups
+/// separate): the mesh artifact records exactly the moved points, round-trips, and
+/// the composed chain equals the single-call tail on the same stage outputs.
+#[test]
+fn staged_mesh_stage_records_the_dense_points_surface_fusion_moves() {
+    use crate::reconstruction_stages::{
+        estimate_dense_evidence, finish_reconstruction, StageCamera,
+    };
+    use crate::{
+        compose_reconstruction, reconstruct_dense, reconstruct_mesh, request_content_hash,
+        CameraStageArtifact, MeshStageArtifact, ReconstructionOptions, ReconstructionRequest,
+        CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
+    };
+
+    let (width, height, focal, depth) = (68, 48, 60.0, 4.0);
+    let request = ReconstructionRequest {
+        frames: vec![
+            plane_frame(width, height, focal, 0.0, depth),
+            plane_frame(width, height, focal, 0.25, depth),
+            plane_frame(width, height, focal, -0.22, depth),
+        ],
+        options: ReconstructionOptions::default(),
+    };
+    let cameras = vec![camera(0, 0.0), camera(1, 0.25), camera(2, -0.22)];
+    let sparse_points = plane_sparse_points(width, height, focal, depth);
+
+    // The camera stage output of these registered views, built the way `classic_result`
+    // builds the single-call result around them.
+    let shell = classic_result(
+        &cameras,
+        crate::dense::DenseAnalysis::default(),
+        crate::mesh::MeshAnalysis::default(),
+    );
+    let flat = FrameInput {
+        width: 48,
+        height: 32,
+        rgba: [120, 120, 120, 255].repeat(48 * 32),
+    };
+    let mut sparse = crate::reconstruct_sparse(&ReconstructionRequest {
+        frames: vec![flat.clone(), flat],
+        options: ReconstructionOptions::default(),
+    })
+    .expect("uncalibrated shell");
+    sparse.image_width = width;
+    sparse.image_height = height;
+    sparse.focal_length_pixels = focal as f32;
+    sparse.calibrated_pair = shell.calibrated_pair;
+    sparse.registered_views = shell.registered_views;
+    sparse.final_cameras = cameras.iter().map(StageCamera::from).collect();
+    sparse.dense_cameras = sparse.final_cameras.clone();
+    sparse.dense_sparse_points = sparse_points
+        .iter()
+        .map(|point| [point.x, point.y, point.z])
+        .collect();
+
+    let camera_artifact = CameraStageArtifact {
+        schema_version: CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
+        request_hash: request_content_hash(&request),
+        sparse: sparse.clone(),
+    };
+    let dense_artifact = reconstruct_dense(&request, &camera_artifact).expect("dense stage");
+    assert!(
+        dense_artifact.dense.stats.reference_patches.len() >= 2,
+        "fixture must produce overlapping reference patches"
+    );
+    let mesh_artifact = reconstruct_mesh(&camera_artifact, &dense_artifact).expect("mesh stage");
+    let surface = &mesh_artifact.mesh;
+    assert!(
+        surface
+            .consolidation_warnings
+            .iter()
+            .any(|warning| warning.starts_with("Cross-reference surface fusion aligned")),
+        "{:?}",
+        surface.consolidation_warnings
+    );
+    assert!(
+        !surface.consolidated_points.is_empty(),
+        "fusion moved seam vertices"
+    );
+    let dense_points = &dense_artifact.dense.points;
+    assert!(
+        surface.consolidated_points.len() < dense_points.len(),
+        "only moved points are recorded"
+    );
+    for consolidated in &surface.consolidated_points {
+        assert_ne!(dense_points[consolidated.index], consolidated.point);
+    }
+
+    let stored = MeshStageArtifact::from_json(&mesh_artifact.to_json()).expect("stored mesh");
+    assert_eq!(stored, mesh_artifact);
+    let composed = compose_reconstruction(&camera_artifact, &dense_artifact, &stored)
+        .expect("compose one chain");
+    let single = finish_reconstruction(
+        sparse.clone(),
+        estimate_dense_evidence(&request.frames, &sparse),
+    )
+    .expect("single-call tail");
+    assert_ne!(
+        composed.dense_points, *dense_points,
+        "consolidated points applied"
+    );
+    assert_eq!(
+        serde_json::to_value(&composed).unwrap(),
+        serde_json::to_value(&single).unwrap()
+    );
+}

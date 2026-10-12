@@ -219,18 +219,46 @@ impl<'a> ReconstructionEvidenceView<'a> {
     }
 
     pub fn from_classic(reconstruction: &'a ReconstructionResult) -> Result<Self, String> {
-        let cameras = classic_camera_evidence(reconstruction)?;
-        let regions = classic_reference_patch_regions(&reconstruction.dense.reference_patches);
+        Self::from_classic_parts(&ClassicEvidenceParts::of(reconstruction))
+    }
+
+    /// [`Self::from_classic`] over borrowed parts, for callers (the staged mesh stage)
+    /// that hold the classic fields in separate stage outputs rather than one result.
+    pub(crate) fn from_classic_parts(parts: &ClassicEvidenceParts<'a>) -> Result<Self, String> {
+        let cameras = classic_camera_evidence(parts)?;
+        let regions = classic_reference_patch_regions(parts.reference_patches);
         Self::new(
             ReconstructionProviderDescriptor::classic(),
             EvidenceScale::ArbitraryMonocular,
             cameras,
             regions,
-            &reconstruction.dense_points,
-            &reconstruction.mesh_triangles,
+            parts.points,
+            parts.triangles,
         )?
-        .with_point_attributes(&reconstruction.dense_point_attributes)?
-        .with_triangle_sources(&reconstruction.mesh_triangle_sources)
+        .with_point_attributes(parts.point_attributes)?
+        .with_triangle_sources(parts.triangle_sources)
+    }
+
+    /// Construct the existing borrowed classic evidence with one cancel-aware
+    /// validation traversal, including its attributes and source corners.
+    pub(crate) fn from_classic_parts_with_cancel(
+        parts: &ClassicEvidenceParts<'a>,
+        poll: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let evidence = Self {
+            schema_version: RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+            provider: ReconstructionProviderDescriptor::classic(),
+            scale: EvidenceScale::ArbitraryMonocular,
+            cameras: classic_camera_evidence(parts)?,
+            regions: classic_reference_patch_regions(parts.reference_patches),
+            points: parts.points,
+            triangles: parts.triangles,
+            point_attributes: Some(parts.point_attributes),
+            triangle_sources: (!parts.triangle_sources.is_empty())
+                .then_some(parts.triangle_sources),
+        };
+        evidence.validate_with_cancel(poll)?;
+        Ok(evidence)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -335,11 +363,40 @@ impl<'a> ReconstructionEvidenceView<'a> {
     }
 }
 
+/// The fields of a classic reconstruction its evidence view reads, all borrowed.
+#[derive(Clone, Copy)]
+pub(crate) struct ClassicEvidenceParts<'a> {
+    pub calibrated_pair: Option<&'a crate::CalibratedPairStats>,
+    pub registered_views: &'a [crate::RegisteredViewStats],
+    /// Final retained poses of the registered views.
+    pub final_cameras: &'a [crate::multi_view::RegisteredCamera],
+    pub reference_patches: &'a [crate::DenseReferencePatchStats],
+    pub points: &'a [Point3],
+    pub point_attributes: &'a [EvidencePointAttributes],
+    pub triangles: &'a [MeshTriangle],
+    pub triangle_sources: &'a [TriangleSourceCorners],
+}
+
+impl<'a> ClassicEvidenceParts<'a> {
+    pub(crate) fn of(reconstruction: &'a ReconstructionResult) -> Self {
+        Self {
+            calibrated_pair: reconstruction.calibrated_pair.as_ref(),
+            registered_views: &reconstruction.registered_views,
+            final_cameras: &reconstruction.multi_view.bundle_adjustment.final_cameras,
+            reference_patches: &reconstruction.dense.reference_patches,
+            points: &reconstruction.dense_points,
+            point_attributes: &reconstruction.dense_point_attributes,
+            triangles: &reconstruction.mesh_triangles,
+            triangle_sources: &reconstruction.mesh_triangle_sources,
+        }
+    }
+}
+
 fn classic_camera_evidence(
-    reconstruction: &ReconstructionResult,
+    reconstruction: &ClassicEvidenceParts<'_>,
 ) -> Result<Vec<EvidenceCamera>, String> {
-    let Some(seed) = reconstruction.calibrated_pair.as_ref() else {
-        if !reconstruction.registered_views.is_empty() || !reconstruction.dense_points.is_empty() {
+    let Some(seed) = reconstruction.calibrated_pair else {
+        if !reconstruction.registered_views.is_empty() || !reconstruction.points.is_empty() {
             return Err(
                 "classic reconstruction evidence contains registered/dense geometry without a calibrated seed pair"
                     .into(),
@@ -367,8 +424,8 @@ fn classic_camera_evidence(
         },
     ];
 
-    let final_cameras = &reconstruction.multi_view.bundle_adjustment.final_cameras;
-    for view in &reconstruction.registered_views {
+    let final_cameras = reconstruction.final_cameras;
+    for view in reconstruction.registered_views {
         if view.frame_index == seed.from_frame || view.frame_index == seed.to_frame {
             return Err(format!(
                 "classic reconstruction evidence duplicates calibrated seed frame {} in registered-view evidence",

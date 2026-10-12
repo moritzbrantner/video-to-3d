@@ -17,7 +17,7 @@ const MAX_LOOP_ROTATION_DELTA_DEGREES: f64 = 8.0;
 const MIN_LOOP_CENTER_DELTA_SEED_BASELINES: f64 = 0.005;
 const MIN_LOOP_ROTATION_DELTA_DEGREES: f64 = 0.1;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct RevisitCandidateStats {
     pub from_frame: usize,
     pub to_frame: usize,
@@ -25,7 +25,7 @@ pub struct RevisitCandidateStats {
     pub overlap_ratio: f32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct RevisitRecoveryStats {
     pub frame_index: usize,
     pub source_frame_index: usize,
@@ -36,7 +36,7 @@ pub struct RevisitRecoveryStats {
     pub median_reprojection_error_pixels: Option<f32>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct RevisitClosureStats {
     pub frame_index: usize,
     pub source_frame_index: usize,
@@ -49,13 +49,13 @@ pub struct RevisitClosureStats {
     pub rotation_delta_degrees: Option<f32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct SeedRevisitEvidence {
     target_frame: usize,
     matches: Vec<FeatureMatch>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct RevisitStats {
     pub evaluated_pairs: usize,
     pub candidates: Vec<RevisitCandidateStats>,
@@ -63,6 +63,15 @@ pub struct RevisitStats {
     pub closures: Vec<RevisitClosureStats>,
     #[serde(skip)]
     seed_evidence: Vec<SeedRevisitEvidence>,
+}
+
+impl RevisitStats {
+    /// Drop the solver-internal seed evidence once the camera solve is complete: only
+    /// recovery and closure inside that solve read it, and it is never serialized, so a
+    /// stored camera artifact round-trips to an equal value.
+    pub(super) fn release_solver_evidence(&mut self) {
+        self.seed_evidence = Vec::new();
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -190,13 +190,15 @@ fn pose_rejection_from_counts(
     required_points: usize,
 ) -> Option<TwoViewRejection> {
     if accepted_points < required_points {
-        return Some(if failed_triangulation > behind_camera.max(high_reprojection) {
-            TwoViewRejection::TriangulationAngle
-        } else if behind_camera >= high_reprojection {
-            TwoViewRejection::Cheirality
-        } else {
-            TwoViewRejection::Reprojection
-        });
+        return Some(
+            if failed_triangulation > behind_camera.max(high_reprojection) {
+                TwoViewRejection::TriangulationAngle
+            } else if behind_camera >= high_reprojection {
+                TwoViewRejection::Cheirality
+            } else {
+                TwoViewRejection::Reprojection
+            },
+        );
     }
     (median_triangulation_angle_degrees < MIN_TRIANGULATION_ANGLE_DEGREES)
         .then_some(TwoViewRejection::TriangulationAngle)
@@ -225,6 +227,7 @@ pub(super) fn estimate_two_view(
 
 /// Run every calibrated two-view gate and keep the measured evidence of the attempt, so
 /// a rejected seed pair reports which gate failed and by how much.
+#[cfg(test)]
 pub(super) fn evaluate_two_view(
     source_features: &[Feature],
     target_features: &[Feature],
@@ -232,6 +235,27 @@ pub(super) fn evaluate_two_view(
     width: u32,
     height: u32,
     focal_pixels: f64,
+) -> TwoViewOutcome {
+    evaluate_two_view_with_control(
+        source_features,
+        target_features,
+        matches,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate_two_view_with_control(
+    source_features: &[Feature],
+    target_features: &[Feature],
+    matches: &[FeatureMatch],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> TwoViewOutcome {
     let points: Vec<PixelCorrespondence> = matches
         .iter()
@@ -246,7 +270,7 @@ pub(super) fn evaluate_two_view(
             }
         })
         .collect();
-    evaluate_two_view_points(&points, width, height, focal_pixels)
+    evaluate_two_view_points_with_control(&points, width, height, focal_pixels, control)
 }
 
 /// One correspondence at (possibly sub-pixel) image positions.
@@ -260,11 +284,29 @@ pub(super) struct PixelCorrespondence {
 
 /// [`evaluate_two_view`] on explicit image positions, so refined (sub-pixel) matches pass
 /// through exactly the same gates.
+#[cfg(test)]
 pub(super) fn evaluate_two_view_points(
     points: &[PixelCorrespondence],
     width: u32,
     height: u32,
     focal_pixels: f64,
+) -> TwoViewOutcome {
+    evaluate_two_view_points_with_control(
+        points,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate_two_view_points_with_control(
+    points: &[PixelCorrespondence],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> TwoViewOutcome {
     let mut evidence = TwoViewEvidence {
         matches: points.len(),
@@ -305,6 +347,9 @@ pub(super) fn evaluate_two_view_points(
     let mut iteration = 0;
     let mut iteration_limit = required_ransac_iterations(MIN_INLIER_RATIO);
     while iteration < iteration_limit {
+        if control.is_canceled() {
+            return reject(evidence, TwoViewRejection::Matches);
+        }
         let sample = deterministic_sample(correspondences.len(), iteration);
         iteration += 1;
         let Some(essential) = estimate_essential(&correspondences, &sample) else {
@@ -313,6 +358,9 @@ pub(super) fn evaluate_two_view_points(
         let mut inliers = Vec::new();
         let mut errors = Vec::new();
         for (index, correspondence) in correspondences.iter().enumerate() {
+            if control.is_canceled() {
+                return reject(evidence, TwoViewRejection::Matches);
+            }
             let error = sampson_error(&essential, correspondence);
             if error.is_finite() && error <= threshold {
                 inliers.push(index);
@@ -468,11 +516,29 @@ fn required_ransac_iterations(inlier_ratio: f64) -> usize {
 /// samples (each refined by Kabsch on its half-best correspondences). Unlike the
 /// residual over essential inliers, it does not depend on which essential hypothesis
 /// won, which is arbitrary when the pair has no baseline.
+#[cfg(test)]
 pub(super) fn least_median_rotation_residual_pixels(
     points: &[PixelCorrespondence],
     width: u32,
     height: u32,
     focal_pixels: f64,
+) -> Option<f64> {
+    least_median_rotation_residual_pixels_with_control(
+        points,
+        width,
+        height,
+        focal_pixels,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn least_median_rotation_residual_pixels_with_control(
+    points: &[PixelCorrespondence],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+    control: &mut crate::ReconstructionControl<'_>,
 ) -> Option<f64> {
     if points.len() < 8 || focal_pixels <= 0.0 {
         return None;
@@ -500,14 +566,24 @@ pub(super) fn least_median_rotation_residual_pixels(
         }
         Some(u * v_t)
     };
-    let residuals = |rotation: &Matrix3<f64>| -> Vec<f64> {
-        rays.iter()
-            .map(|(source, target)| (rotation * source).dot(target).clamp(-1.0, 1.0).acos())
-            .collect()
+    let residuals = |rotation: &Matrix3<f64>,
+                     control: &mut crate::ReconstructionControl<'_>|
+     -> Option<Vec<f64>> {
+        let mut values = Vec::with_capacity(rays.len());
+        for (source, target) in &rays {
+            if control.is_canceled() {
+                return None;
+            }
+            values.push((rotation * source).dot(target).clamp(-1.0, 1.0).acos());
+        }
+        Some(values)
     };
     let mut best: Option<f64> = None;
     let mut state = 0xD1B5_4A32_D192_ED03u64;
     for _ in 0..LEAST_MEDIAN_ROTATION_SAMPLES {
+        if control.is_canceled() {
+            return None;
+        }
         let mut pick = || {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
@@ -522,17 +598,20 @@ pub(super) fn least_median_rotation_residual_pixels(
             continue;
         };
         // Refine on the better half, then score by the median over all.
-        let mut order: Vec<(f64, usize)> = residuals(&rotation)
+        let mut order: Vec<(f64, usize)> = residuals(&rotation, control)?
             .into_iter()
             .enumerate()
             .map(|(index, residual)| (residual, index))
             .collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let half: Vec<usize> = order[..order.len() / 2 + 1].iter().map(|(_, i)| *i).collect();
+        let half: Vec<usize> = order[..order.len() / 2 + 1]
+            .iter()
+            .map(|(_, i)| *i)
+            .collect();
         let Some(refined) = kabsch(&half) else {
             continue;
         };
-        let mut all = residuals(&refined);
+        let mut all = residuals(&refined, control)?;
         let median = median_f64(&mut all) * focal_pixels;
         if median.is_finite() && best.is_none_or(|current| median < current) {
             best = Some(median);

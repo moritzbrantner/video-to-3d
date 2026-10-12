@@ -1,4 +1,8 @@
-use crate::{dense::{DenseGridSite, DenseStats}, multi_view::RegisteredCamera, Point3};
+use crate::{
+    dense::{DenseGridSite, DenseStats},
+    multi_view::RegisteredCamera,
+    Point3,
+};
 use nalgebra::Vector3;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,7 +43,7 @@ pub(super) struct MeshAnalysis {
 }
 
 impl MeshAnalysis {
-    fn skipped(reference_frame: Option<usize>, reason: impl Into<String>) -> Self {
+    pub(super) fn skipped(reference_frame: Option<usize>, reason: impl Into<String>) -> Self {
         Self {
             stats: MeshStats {
                 reference_frame,
@@ -104,6 +108,7 @@ impl MeshBuildState {
     }
 }
 
+#[cfg(test)]
 pub(super) fn reconstruct_dense_mesh(
     dense_points: &[Point3],
     grid_sites: &[DenseGridSite],
@@ -131,6 +136,39 @@ pub(super) fn reconstruct_dense_mesh(
             "dense point and reference-grid evidence counts disagree",
         );
     }
+    reconstruct_dense_mesh_samples(
+        dense_points.iter().zip(grid_sites),
+        dense,
+        cameras,
+        width,
+        height,
+        focal,
+        &mut crate::ReconstructionControl::new(&mut || false),
+    )
+}
+
+pub(super) fn reconstruct_dense_mesh_samples<'a>(
+    samples: impl ExactSizeIterator<Item = (&'a Point3, &'a DenseGridSite)>,
+    dense: &DenseStats,
+    cameras: &[RegisteredCamera],
+    width: u32,
+    height: u32,
+    focal: f64,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> MeshAnalysis {
+    let point_count = samples.len();
+    if !dense.attempted {
+        return MeshAnalysis::skipped(
+            dense.reference_frame,
+            "dense reconstruction was not attempted",
+        );
+    }
+    if point_count < 3 {
+        return MeshAnalysis::skipped(
+            dense.reference_frame,
+            "fewer than three accepted fused dense points are available",
+        );
+    }
     if dense.grid_stride == 0 {
         return MeshAnalysis::skipped(
             dense.reference_frame,
@@ -145,7 +183,10 @@ pub(super) fn reconstruct_dense_mesh(
     }
 
     let Some(reference_frame) = dense.reference_frame else {
-        return MeshAnalysis::skipped(None, "dense reconstruction did not select a reference frame");
+        return MeshAnalysis::skipped(
+            None,
+            "dense reconstruction did not select a reference frame",
+        );
     };
     let Some(reference_camera) = cameras
         .iter()
@@ -160,25 +201,28 @@ pub(super) fn reconstruct_dense_mesh(
     let stride = dense.grid_stride as f64;
     let mut grid = BTreeMap::<(i32, i32), GridVertex>::new();
 
-    for (point_index, (point, grid_site)) in dense_points.iter().zip(grid_sites).enumerate() {
+    for (point_index, (point, grid_site)) in samples.enumerate() {
+        if control.is_canceled() {
+            return MeshAnalysis::skipped(dense.reference_frame, "mesh reconstruction canceled");
+        }
         let position = Vector3::new(point.x as f64, point.y as f64, point.z as f64);
         let Some((projected_x, projected_y, depth)) =
             project(reference_camera, position, width, height, focal)
         else {
             continue;
         };
-        if !within_original_grid_footprint(
-            projected_x,
-            projected_y,
-            *grid_site,
-            dense.grid_stride,
-        ) {
+        if !within_original_grid_footprint(projected_x, projected_y, *grid_site, dense.grid_stride)
+        {
             continue;
         }
-        let Some(gx) = original_grid_coordinate(grid_site.x, width, dense.grid_border, dense.grid_stride) else {
+        let Some(gx) =
+            original_grid_coordinate(grid_site.x, width, dense.grid_border, dense.grid_stride)
+        else {
             continue;
         };
-        let Some(gy) = original_grid_coordinate(grid_site.y, height, dense.grid_border, dense.grid_stride) else {
+        let Some(gy) =
+            original_grid_coordinate(grid_site.y, height, dense.grid_border, dense.grid_stride)
+        else {
             continue;
         };
         let vertex = GridVertex {
@@ -208,7 +252,7 @@ pub(super) fn reconstruct_dense_mesh(
                 ),
                 reference_frame: Some(reference_frame),
                 grid_vertices: grid.len(),
-                rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
+                rejected_grid_vertices: point_count.saturating_sub(grid.len()),
                 ..MeshStats::default()
             },
             triangles: Vec::new(),
@@ -228,6 +272,9 @@ pub(super) fn reconstruct_dense_mesh(
     let mut candidate_cells = 0usize;
 
     for (gx, gy) in cell_origins {
+        if control.is_canceled() {
+            return MeshAnalysis::skipped(dense.reference_frame, "mesh reconstruction canceled");
+        }
         let corners = [
             grid.get(&(gx, gy)).copied(),
             grid.get(&(gx + 1, gy)).copied(),
@@ -252,6 +299,12 @@ pub(super) fn reconstruct_dense_mesh(
 
     if maximum_x - minimum_x >= 2 {
         for gx in minimum_x..=maximum_x - 2 {
+            if control.is_canceled() {
+                return MeshAnalysis::skipped(
+                    dense.reference_frame,
+                    "mesh reconstruction canceled",
+                );
+            }
             for gy in minimum_y..=maximum_y {
                 if let Some(candidate) = horizontal_gap_bridge(&grid, gx, gy) {
                     candidate_cells += 1;
@@ -267,6 +320,12 @@ pub(super) fn reconstruct_dense_mesh(
     }
     if maximum_y - minimum_y >= 2 {
         for gx in minimum_x..=maximum_x {
+            if control.is_canceled() {
+                return MeshAnalysis::skipped(
+                    dense.reference_frame,
+                    "mesh reconstruction canceled",
+                );
+            }
             for gy in minimum_y..=maximum_y - 2 {
                 if let Some(candidate) = vertical_gap_bridge(&grid, gx, gy) {
                     candidate_cells += 1;
@@ -287,7 +346,7 @@ pub(super) fn reconstruct_dense_mesh(
             skip_reason: None,
             reference_frame: Some(reference_frame),
             grid_vertices: grid.len(),
-            rejected_grid_vertices: dense_points.len().saturating_sub(grid.len()),
+            rejected_grid_vertices: point_count.saturating_sub(grid.len()),
             candidate_cells,
             candidate_triangles: build.candidate_triangles,
             accepted_triangles: build.triangles.len(),
@@ -362,7 +421,8 @@ fn vertical_gap_bridge(
 
 fn better_grid_vertex(candidate: GridVertex, current: GridVertex) -> bool {
     candidate.confidence > current.confidence
-        || (candidate.confidence == current.confidence && candidate.point_index < current.point_index)
+        || (candidate.confidence == current.confidence
+            && candidate.point_index < current.point_index)
 }
 
 fn within_original_grid_footprint(
@@ -379,12 +439,7 @@ fn within_original_grid_footprint(
         && (projected_y - grid_site.y as f64).abs() < limit
 }
 
-fn original_grid_coordinate(
-    value: u32,
-    limit: u32,
-    border: u32,
-    stride: usize,
-) -> Option<i32> {
+fn original_grid_coordinate(value: u32, limit: u32, border: u32, stride: usize) -> Option<i32> {
     if stride == 0 || value < border || value >= limit.saturating_sub(border) {
         return None;
     }
@@ -431,19 +486,15 @@ fn accepted_triangle(
         return Err(TriangleRejection::Discontinuity);
     }
     let minimum_depth = depths.iter().copied().fold(f64::INFINITY, f64::min);
-    let maximum_depth = depths
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let maximum_depth = depths.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if (maximum_depth - minimum_depth) / maximum_depth > max_relative_depth_jump {
         return Err(TriangleRejection::Discontinuity);
     }
 
-    let signed_projected_double_area =
-        (b.projected_x - a.projected_x) * (c.projected_y - a.projected_y)
-            - (b.projected_y - a.projected_y) * (c.projected_x - a.projected_x);
-    let minimum_projected_double_area =
-        stride * stride * MIN_MESH_PROJECTED_AREA_FOOTPRINT_RATIO;
+    let signed_projected_double_area = (b.projected_x - a.projected_x)
+        * (c.projected_y - a.projected_y)
+        - (b.projected_y - a.projected_y) * (c.projected_x - a.projected_x);
+    let minimum_projected_double_area = stride * stride * MIN_MESH_PROJECTED_AREA_FOOTPRINT_RATIO;
     if !signed_projected_double_area.is_finite()
         || signed_projected_double_area <= minimum_projected_double_area
     {
@@ -452,9 +503,7 @@ fn accepted_triangle(
 
     let mean_depth = depths.iter().sum::<f64>() / 3.0;
     let local_step = mean_depth * stride / focal;
-    let maximum_edge = local_step
-        * std::f64::consts::SQRT_2
-        * MAX_MESH_EDGE_FOOTPRINT_MULTIPLIER;
+    let maximum_edge = local_step * std::f64::consts::SQRT_2 * MAX_MESH_EDGE_FOOTPRINT_MULTIPLIER;
     let edges = [
         (a.position - b.position).norm(),
         (b.position - c.position).norm(),
@@ -479,7 +528,11 @@ fn accepted_triangle(
         a: a.point_index,
         b: b.point_index,
         c: c.point_index,
-        confidence: a.confidence.min(b.confidence).min(c.confidence).clamp(0.0, 1.0),
+        confidence: a
+            .confidence
+            .min(b.confidence)
+            .min(c.confidence)
+            .clamp(0.0, 1.0),
     })
 }
 

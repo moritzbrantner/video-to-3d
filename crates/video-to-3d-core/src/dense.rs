@@ -1,3 +1,4 @@
+use crate::ReconstructionControl;
 use crate::{multi_view::RegisteredCamera, EvidencePointAttributes, FrameInput, Point3};
 use nalgebra::Vector3;
 use serde::Serialize;
@@ -10,7 +11,7 @@ const MIN_REFERENCE_PATCH_POINTS: usize = 3;
 const MAX_SOURCE_VIEWS_PER_REFERENCE: usize = 4;
 const DENSE_GRID_BORDER: usize = 3;
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseWorkingSetEstimate {
     pub frame_bytes: usize,
     pub retry_frame_bytes: usize,
@@ -52,13 +53,13 @@ mod legacy {
     include!("dense_legacy.rs");
 }
 
-#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct DenseGridSite {
     pub x: u32,
     pub y: u32,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseReferenceAttemptStats {
     pub reference_frame: usize,
     pub attempted: bool,
@@ -78,7 +79,7 @@ pub struct DenseReferenceAttemptStats {
     pub surface_completion_rejected_footprint: usize,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseReferencePatchStats {
     pub reference_frame: usize,
     pub source_frames: Vec<usize>,
@@ -95,7 +96,7 @@ pub struct DenseReferencePatchStats {
     pub search_max_depth: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, serde::Deserialize)]
 pub struct DenseStats {
     pub attempted: bool,
     pub skip_reason: Option<String>,
@@ -165,7 +166,15 @@ pub(super) fn estimate_depth_points(
     sparse_points: &[Vector3<f64>],
     focal: f64,
 ) -> DenseAnalysis {
-    estimate_depth_points_limited(frames, cameras, sparse_points, focal, MAX_REFERENCE_VIEWS).0
+    estimate_depth_points_limited(
+        frames,
+        cameras,
+        sparse_points,
+        focal,
+        MAX_REFERENCE_VIEWS,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+    .0
 }
 
 /// Like [`estimate_depth_points`], keeping at most `reference_views` accepted patches. Each
@@ -178,14 +187,16 @@ fn estimate_depth_points_limited(
     sparse_points: &[Vector3<f64>],
     focal: f64,
     reference_views: usize,
+    control: &mut ReconstructionControl<'_>,
 ) -> (DenseAnalysis, bool) {
     let reference_order = reference_candidate_order(frames, cameras, sparse_points, focal);
     if reference_order.is_empty() {
-        let legacy = from_legacy(legacy::estimate_depth_points(
+        let legacy = from_legacy(legacy::estimate_depth_points_with_control(
             frames,
             cameras,
             sparse_points,
             focal,
+            control,
         ));
         return (legacy, false);
     }
@@ -198,15 +209,23 @@ fn estimate_depth_points_limited(
         .take(MAX_REFERENCE_ATTEMPTS)
         .peekable();
     while let Some(camera_index) = candidates.next() {
-        let Some(analysis) =
-            reconstruct_reference_patch(frames, cameras, sparse_points, focal, camera_index)
-        else {
+        if control.is_canceled() {
+            return (DenseAnalysis::default(), false);
+        }
+        let Some(analysis) = reconstruct_reference_patch(
+            frames,
+            cameras,
+            sparse_points,
+            focal,
+            camera_index,
+            control,
+        ) else {
             continue;
         };
 
         let reference_frame = cameras[camera_index].frame_index;
-        let accepted = analysis.stats.attempted
-            && analysis.points.len() >= MIN_REFERENCE_PATCH_POINTS;
+        let accepted =
+            analysis.stats.attempted && analysis.points.len() >= MIN_REFERENCE_PATCH_POINTS;
         attempts.push(reference_attempt_stats(
             reference_frame,
             &analysis.stats,
@@ -225,11 +244,12 @@ fn estimate_depth_points_limited(
     }
 
     if patches.is_empty() {
-        let mut fallback = from_legacy(legacy::estimate_depth_points(
+        let mut fallback = from_legacy(legacy::estimate_depth_points_with_control(
             frames,
             cameras,
             sparse_points,
             focal,
+            control,
         ));
         let fallback_attempts = std::mem::take(&mut fallback.stats.reference_attempts);
         fallback.stats.reference_attempts = merge_fallback_attempts(attempts, fallback_attempts);
@@ -239,6 +259,7 @@ fn estimate_depth_points_limited(
     (combine_patches(patches, attempts), omitted_references)
 }
 
+#[cfg(test)]
 pub(super) fn estimate_depth_points_with_budget(
     frames: &[FrameInput],
     cameras: &[RegisteredCamera],
@@ -247,6 +268,29 @@ pub(super) fn estimate_depth_points_with_budget(
     working_set_budget_bytes: usize,
     max_features: usize,
     descriptor_radius: u32,
+) -> DenseAnalysis {
+    estimate_depth_points_with_budget_and_control(
+        frames,
+        cameras,
+        sparse_points,
+        focal,
+        working_set_budget_bytes,
+        max_features,
+        descriptor_radius,
+        &mut ReconstructionControl::new(&mut || false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn estimate_depth_points_with_budget_and_control(
+    frames: &[FrameInput],
+    cameras: &[RegisteredCamera],
+    sparse_points: &[Vector3<f64>],
+    focal: f64,
+    working_set_budget_bytes: usize,
+    max_features: usize,
+    descriptor_radius: u32,
+    control: &mut ReconstructionControl<'_>,
 ) -> DenseAnalysis {
     let full = estimate_working_set(frames, max_features, descriptor_radius, MAX_REFERENCE_VIEWS);
     // Bounded progress: when the whole input does not fit, keep the most reference views
@@ -274,8 +318,14 @@ pub(super) fn estimate_depth_points_with_budget(
         };
     };
 
-    let (mut analysis, omitted_references) =
-        estimate_depth_points_limited(frames, cameras, sparse_points, focal, reference_views);
+    let (mut analysis, omitted_references) = estimate_depth_points_limited(
+        frames,
+        cameras,
+        sparse_points,
+        focal,
+        reference_views,
+        control,
+    );
     analysis.stats.working_set_estimate = working_set_estimate;
     analysis.stats.working_set_budget_bytes = working_set_budget_bytes;
     analysis.stats.full_working_set_bytes = full.total_bytes;
@@ -327,9 +377,8 @@ fn estimate_working_set(
     let remapped_frame_bytes = frame_bytes;
     // Sparse feature extraction keeps one luminance copy per frame. A dense reference attempt
     // adds one reference plus up to four source luminance buffers at peak.
-    let luminance_bytes = luminance_pixels.saturating_add(
-        largest_frame_pixels.saturating_mul(1 + MAX_SOURCE_VIEWS_PER_REFERENCE),
-    );
+    let luminance_bytes = luminance_pixels
+        .saturating_add(largest_frame_pixels.saturating_mul(1 + MAX_SOURCE_VIEWS_PER_REFERENCE));
     // Feature descriptors, adjacent matches, track membership, and sparse/two-view points remain
     // live while dense reconstruction runs. Bound them from the request options rather than from
     // observed counts so feature-heavy configurations cannot bypass the pre-dense budget gate.
@@ -340,10 +389,7 @@ fn estimate_working_set(
         .saturating_mul(descriptor_side)
         .saturating_mul(size_of::<i16>());
     let feature_count = frames.len().saturating_mul(max_features);
-    let adjacent_match_count = frames
-        .len()
-        .saturating_sub(1)
-        .saturating_mul(max_features);
+    let adjacent_match_count = frames.len().saturating_sub(1).saturating_mul(max_features);
     let observation_count = adjacent_match_count.saturating_mul(2);
     let feature_record_bytes = 3 * size_of::<u32>() + size_of::<Vec<i16>>();
     let sparse_pipeline_bytes = feature_count
@@ -351,14 +397,10 @@ fn estimate_working_set(
         // FeatureMatch plus adjacent match-vector capacity.
         .saturating_add(adjacent_match_count.saturating_mul(3 * size_of::<usize>()))
         // FeatureTrack vector headers and their observation storage.
-        .saturating_add(
-            adjacent_match_count.saturating_mul(size_of::<Vec<(usize, usize)>>()),
-        )
+        .saturating_add(adjacent_match_count.saturating_mul(size_of::<Vec<(usize, usize)>>()))
         .saturating_add(observation_count.saturating_mul(2 * size_of::<usize>()))
         // Observation -> track membership hash entries, including control/capacity overhead.
-        .saturating_add(
-            observation_count.saturating_mul(hash_entry_bytes(3 * size_of::<usize>())),
-        )
+        .saturating_add(observation_count.saturating_mul(hash_entry_bytes(3 * size_of::<usize>())))
         // Sparse display points, two-view triangulated points, and registration correspondence
         // buffers can overlap; charge a full conservative record for each possible match.
         .saturating_add(adjacent_match_count.saturating_mul(
@@ -385,10 +427,7 @@ fn estimate_working_set(
     // allowance so this remains conservative on both native and wasm32 layouts.
     let mesh_builder_bytes = max_grid_samples
         .saturating_mul(btree_entry_bytes(
-            2 * size_of::<i32>()
-                + size_of::<usize>()
-                + 6 * size_of::<f64>()
-                + size_of::<f32>(),
+            2 * size_of::<i32>() + size_of::<usize>() + 6 * size_of::<f64>() + size_of::<f32>(),
         ))
         .saturating_add(
             max_grid_samples
@@ -398,9 +437,7 @@ fn estimate_working_set(
         .saturating_add(
             max_mesh_triangles.saturating_mul(btree_entry_bytes(3 * size_of::<usize>())),
         )
-        .saturating_add(
-            max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>()),
-        );
+        .saturating_add(max_mesh_triangles.saturating_mul(size_of::<crate::mesh::MeshTriangle>()));
     // Surface fusion retains per-vertex normal/scale/incident evidence, spatial hash buckets,
     // mutual-nearest state, proposed moves, and topology-validation arrays at the same time as
     // the accepted dense points and mesh. Charge every major container at full conservative
@@ -423,10 +460,8 @@ fn estimate_working_set(
         // At most one proposed FusionMove for every two vertices; charging one per vertex is safe.
         + 2 * size_of::<usize>()
         + size_of::<Vector3<f64>>();
-    let per_triangle_fusion_bytes = 6 * size_of::<usize>()
-        + 3 * size_of::<f64>()
-        + size_of::<bool>()
-        + size_of::<usize>();
+    let per_triangle_fusion_bytes =
+        6 * size_of::<usize>() + 3 * size_of::<f64>() + size_of::<bool>() + size_of::<usize>();
     // The connected-surface merge runs after fusion has released its state,
     // so the larger of the two passes is the peak; charge it.
     let surface_fusion_bytes = max_grid_samples
@@ -455,9 +490,7 @@ fn estimate_working_set(
     // triangle indices and confidence.
     let packed_output_bytes = max_grid_samples
         .saturating_mul(6 * size_of::<f32>() + 3 * size_of::<u8>() + 2 * size_of::<u32>())
-        .saturating_add(
-            max_mesh_triangles.saturating_mul(4 * size_of::<u32>()),
-        );
+        .saturating_add(max_mesh_triangles.saturating_mul(4 * size_of::<u32>()));
     let total_bytes = frame_bytes
         .saturating_add(retry_frame_bytes)
         .saturating_add(remapped_frame_bytes)
@@ -559,6 +592,7 @@ fn reconstruct_reference_patch(
     sparse_points: &[Vector3<f64>],
     focal: f64,
     reference_camera_index: usize,
+    control: &mut ReconstructionControl<'_>,
 ) -> Option<legacy::DenseAnalysis> {
     let reference_camera = cameras.get(reference_camera_index)?;
     let reference_frame = frames.get(reference_camera.frame_index)?;
@@ -593,6 +627,9 @@ fn reconstruct_reference_patch(
     let mut remapped_frames = Vec::with_capacity(camera_order.len());
     let mut remapped_cameras = Vec::with_capacity(camera_order.len());
     for (remapped_index, camera_index) in camera_order.iter().copied().enumerate() {
+        if control.is_canceled() {
+            return None;
+        }
         let camera = cameras.get(camera_index)?;
         remapped_frames.push(frames.get(camera.frame_index)?.clone());
         let mut remapped_camera = camera.clone();
@@ -600,11 +637,12 @@ fn reconstruct_reference_patch(
         remapped_cameras.push(remapped_camera);
     }
 
-    let mut analysis = legacy::estimate_depth_points(
+    let mut analysis = legacy::estimate_depth_points_with_control(
         &remapped_frames,
         &remapped_cameras,
         &visible_sparse,
         focal,
+        control,
     );
     analysis.stats.reference_frame = Some(reference_camera.frame_index);
     analysis.stats.source_frames = analysis
@@ -1064,10 +1102,7 @@ mod multi_reference_tests {
                 + result.stats.surface_completion_rejected_fusion
                 + result.stats.surface_completion_rejected_footprint
         );
-        assert_eq!(
-            result.stats.source_frames.len(),
-            result.stats.source_views
-        );
+        assert_eq!(result.stats.source_frames.len(), result.stats.source_views);
         assert!(!result
             .stats
             .source_frames
@@ -1116,7 +1151,10 @@ mod multi_reference_tests {
         let cameras = vec![camera(0, 0.0), camera(1, 0.24), camera(2, -0.22)];
         let sparse = sparse_plane(width, height, focal, depth);
         let full = estimate_depth_points(&frames, &cameras, &sparse, focal);
-        assert!(full.stats.reference_patches.len() >= 2, "the fixture needs several patches");
+        assert!(
+            full.stats.reference_patches.len() >= 2,
+            "the fixture needs several patches"
+        );
         let one_view = estimate_working_set(&frames, 320, 3, 1).total_bytes;
         let all_views = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS).total_bytes;
         assert!(one_view < all_views);
@@ -1213,12 +1251,7 @@ mod multi_reference_tests {
                 .saturating_add(budgeted.stats.working_set_estimate.topology_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.mesh_builder_bytes)
                 .saturating_add(budgeted.stats.working_set_estimate.surface_fusion_bytes)
-                .saturating_add(
-                    budgeted
-                        .stats
-                        .working_set_estimate
-                        .retained_candidate_bytes,
-                )
+                .saturating_add(budgeted.stats.working_set_estimate.retained_candidate_bytes,)
                 .saturating_add(budgeted.stats.working_set_estimate.packed_output_bytes)
         );
         assert_eq!(
@@ -1249,7 +1282,10 @@ mod multi_reference_tests {
 
         assert!(retry.sparse_pipeline_bytes > ordinary.sparse_pipeline_bytes);
         assert!(retry.dense_sample_bytes < ordinary.dense_sample_bytes);
-        assert_eq!(retry.retained_candidate_bytes, ordinary.retained_candidate_bytes);
+        assert_eq!(
+            retry.retained_candidate_bytes,
+            ordinary.retained_candidate_bytes
+        );
         // The allowance covers the full plan's final point/site and mesh buffers.
         assert!(ordinary.retained_candidate_bytes >= ordinary.topology_bytes);
     }
@@ -1351,10 +1387,8 @@ mod multi_reference_tests {
             ..DenseReferenceAttemptStats::default()
         };
 
-        let merged = merge_fallback_attempts(
-            vec![rejected, other_rejected],
-            vec![fallback_accepted],
-        );
+        let merged =
+            merge_fallback_attempts(vec![rejected, other_rejected], vec![fallback_accepted]);
 
         assert_eq!(merged.len(), 2);
         let accepted = merged

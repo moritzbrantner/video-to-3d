@@ -200,8 +200,8 @@ fn invalidation_code(reason: &Invalidation) -> &'static str {
 
 fn build(manifest_path: &std::path::Path, jobs: usize) -> Outcome {
     let (store, mut manifest) = open(manifest_path)?;
-    // Built-in executors exist for texture_bake; every other kind reports an
-    // explicit unsupported outcome.
+    // Imported browser keyframes feed independent classic reconstruction
+    // stages and observed scene assembly; unavailable capabilities stay explicit.
     // Reservations come from the reconciled manifest the build persists.
     let executor = BuiltInExecutor::for_project(store.root(), manifest_path);
     let report = store
