@@ -127,7 +127,7 @@ pub fn export_project_glb(
         );
     }
     let selected = select_assets(&scene, mode)?;
-    let (snapshot, mesh_resources) = adapt_scene(&scene, &payloads, &selected)?;
+    let snapshot = adapt_scene(&scene, &payloads, &selected)?;
     let (glb_bytes, _) =
         three_d_export::export_scene_glb_with_observations(&snapshot).map_err(unsupported)?;
     let mut document: Value = serde_json::from_slice(
@@ -138,6 +138,23 @@ pub fn export_project_glb(
     .map_err(unsupported)?;
     let assets = annotate_nodes(&scene, &selected, &mut document)?;
     annotate_material_identity(&source_document, &mut document)?;
+    // Resource indices belong to the normalized output, not the input snapshot.
+    let mut mesh_resources = BTreeMap::new();
+    for (index, mesh) in document["meshes"]
+        .as_array()
+        .ok_or_else(|| unsupported("shared exporter omitted mesh table"))?
+        .iter()
+        .enumerate()
+    {
+        let id = mesh["name"]
+            .as_str()
+            .ok_or_else(|| unsupported("shared exporter omitted mesh resource identity"))?;
+        if mesh_resources.insert(id.to_owned(), index).is_some() {
+            return Err(unsupported(
+                "shared exporter duplicated mesh resource identity",
+            ));
+        }
+    }
     let destination = declaration.path.resolve(&root);
     let directory = destination
         .parent()
@@ -356,10 +373,12 @@ fn select_assets(
     Ok(selected)
 }
 
+type MaterialResources = (Vec<Material>, Vec<EncodedImage>, Vec<Texture>);
+
 fn canonical_materials(
     scene: &AssembledScene,
     payloads: &BTreeMap<String, Vec<u8>>,
-) -> Result<(Vec<Material>, Vec<EncodedImage>, Vec<Texture>), ExportError> {
+) -> Result<MaterialResources, ExportError> {
     let mut materials = Vec::new();
     let mut images = Vec::new();
     let mut textures = Vec::new();
@@ -410,7 +429,7 @@ fn adapt_scene(
     scene: &AssembledScene,
     payloads: &BTreeMap<String, Vec<u8>>,
     selected: &BTreeMap<String, &'static str>,
-) -> Result<(SceneSnapshot, BTreeMap<String, usize>), ExportError> {
+) -> Result<SceneSnapshot, ExportError> {
     let (mut materials, mut images, mut textures) = canonical_materials(scene, payloads)?;
     let mut samplers = Vec::new();
     let mut groups = Vec::new();
@@ -536,10 +555,7 @@ fn adapt_scene(
             },
         ));
     }
-    Ok((
-        SceneSnapshot::from_asset(asset, nodes).map_err(unsupported)?,
-        mesh_resources,
-    ))
+    SceneSnapshot::from_asset(asset, nodes).map_err(unsupported)
 }
 
 fn remap_material(
@@ -596,6 +612,25 @@ fn supported_source_layout(bytes: &[u8]) -> Result<(), ExportError> {
             "source resource must contain one unambiguous local mesh node",
         ));
     }
+    let default_scene = source.default_scene().or_else(|| {
+        let mut scenes = source.scenes();
+        let first = scenes.next()?;
+        scenes.next().is_none().then_some(first)
+    });
+    let default_scene = default_scene
+        .ok_or_else(|| unsupported("source layout requires an unambiguous default scene"))?;
+    let mut pending = default_scene.nodes().collect::<Vec<_>>();
+    let mut reachable = BTreeSet::new();
+    while let Some(node) = pending.pop() {
+        if reachable.insert(node.index()) {
+            pending.extend(node.children());
+        }
+    }
+    if !reachable.contains(&mesh_nodes[0].index()) {
+        return Err(unsupported(
+            "source mesh is not part of its default scene layout",
+        ));
+    }
     for node in source.nodes() {
         let (translation, rotation, scale) = node.transform().decomposed();
         if translation != [0.0; 3] || rotation != [0.0, 0.0, 0.0, 1.0] || scale != [1.0; 3] {
@@ -640,13 +675,16 @@ fn annotate_nodes(
 }
 
 fn annotate_material_identity(source: &Value, document: &mut Value) -> Result<(), ExportError> {
+    let original_materials = source["materials"]
+        .as_array()
+        .ok_or_else(|| unsupported("canonical material table is absent"))?;
+    if original_materials.is_empty() {
+        return Ok(());
+    }
     let materials = document["materials"]
         .as_array_mut()
         .ok_or_else(|| unsupported("shared exporter omitted material table"))?;
-    for original in source["materials"]
-        .as_array()
-        .ok_or_else(|| unsupported("canonical material table is absent"))?
-    {
+    for original in original_materials {
         let material = materials
             .iter_mut()
             .find(|material| material["name"] == original["id"])

@@ -5,5 +5,7 @@ node_modules/
 target/
 .benchmark-data/
 apps/web/public/wasm/
+apps/web/public/feature-wasm/
+apps/web/public/litert-wasm/
 apps/desktop/src-tauri/gen/
 __pycache__/

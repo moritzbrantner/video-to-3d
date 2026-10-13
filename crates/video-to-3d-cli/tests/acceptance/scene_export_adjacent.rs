@@ -22,7 +22,7 @@ fn rewrite_resource_glb(project: &mut Project, id: &str, edit: impl FnOnce(&mut 
     let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     let suffix = &bytes[20 + json_length..];
     let mut json = serde_json::to_vec(&document).unwrap();
-    while json.len() % 4 != 0 {
+    while !json.len().is_multiple_of(4) {
         json.push(b' ');
     }
     let mut output = Vec::new();
