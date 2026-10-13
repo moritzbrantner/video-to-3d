@@ -11,7 +11,6 @@ This file is the append-only product-intent map for `video-to-3d`: the durable p
 - Entry IDs are stable. Never renumber or reuse an ID. New entries are appended under the narrowest existing parent; if no suitable parent exists, append a new top-level section.
 - Cross-references use Atlas IDs such as `1.3` or `3.2.1`.
 - The Atlas records product intent, not implementation status. A Decision being present does not claim that the capability exists. Detailed specifications and acceptance tests may elaborate Decisions, but must not silently contradict them.
-- **Retrospective binary evidence annotations (2026-10-12):** Indented `- [x]` records an independently referenced **narrow capability** already implemented/tested; `- [ ]` names a missing capability or proof. A checked prerequisite is **not** complete product acceptance; entries without checklists are *not yet audited*. No partial/almost/queued status classes. Treat test paths and `path::symbol` references as source pointers, immutable commits/acceptance as verification, and GitHub issues as temporary handoffs. Current `daq` does not yet parse these nested checkboxes ([coding-tooling #322](https://github.com/moritzbrantner/coding-tooling/issues/322), [#323](https://github.com/moritzbrantner/coding-tooling/issues/323)). One active implementation worker per repository; independent acceptance and production edits are sequential.
 
 Sources seeded into this atlas:
 - `AGENTS.md`
@@ -43,15 +42,12 @@ Sources seeded into this atlas:
 - **1.6 Normal processing is automatic.**  
   Status: adopted 2026-10-10.  
   Normal runs require no human or agent orchestration. Optional review checkpoints may appear before expensive local stages so a user can correct proposed object identities or scene decisions. See 4.4.
-  - [x] The **bounded native geometric fixture pipeline** runs camera, dense, mesh and assembled-environment stages through the existing receipt-backed CLI/store without manual intermediate calls ([merged #174](https://github.com/moritzbrantner/video-to-3d/pull/174), `crates/video-to-3d-core/src/scene_artifacts/native.rs::BuiltInExecutor`, `crates/video-to-3d-cli/tests/native_build.rs`).
-  - [ ] Full three-real-video reconstruction into editable scene objects without agent orchestration remains unverified ([#150](https://github.com/moritzbrantner/video-to-3d/issues/150), [#77](https://github.com/moritzbrantner/video-to-3d/issues/77)).
 
 ## 2. Authority and provenance
 
 - **2.1 Rust owns reusable reconstruction semantics.**  
   Status: repository architecture.  
   Feature detection, matching, camera-path estimation, point generation, evidence validation/fusion, and shared scene data contracts belong in `crates/video-to-3d-core`.
-  - [x] Public `reconstruct_cameras`, `reconstruct_dense`, `reconstruct_mesh` and `compose_reconstruction` exist at `crates/video-to-3d-core/src/reconstruction_stages.rs::{reconstruct_cameras,reconstruct_dense,reconstruct_mesh,compose_reconstruction}`; versioned replay/parity tests are in `crates/video-to-3d-core/tests/reconstruction_stages.rs` ([merged #173](https://github.com/moritzbrantner/video-to-3d/pull/173)).
 
 - **2.2 Reconstruction backends are evidence providers, not geometry authorities.**  
   Status: repository architecture.  
@@ -78,9 +74,6 @@ Sources seeded into this atlas:
 - **3.1 The initial release gate uses three real videos.**  
   Status: adopted 2026-10-10.  
   The first product exit requires three distinct, licensed, pinned real videos: one controlled room and two ordinary handheld recordings. All three must pass. A synthetic fixture supplements this gate but cannot replace it. See 1.4 and 3.5.
-  - [x] Two approved handheld inputs (H1/H3) have source attribution, hashes and browser-consumable fixture preparation; exact manifest/candidate review is protected by `tools/check_real_video_manifest.py` and `tools/tests/test_approved_inventory_immutability.py` ([merged #177](https://github.com/moritzbrantner/video-to-3d/pull/177)).
-  - [ ] The approved controlled-room TUM RGB video is not yet established as a reproducibly prepared real-video input fixture; source selection in Atlas 3.8 is a **decision**, not implemented footage-processing or independently passing reconstruction ([#74](https://github.com/moritzbrantner/video-to-3d/issues/74)).
-  - [ ] An independent whole-scene acceptance run across all three real video sources and actual Blender outputs is still required ([#74](https://github.com/moritzbrantner/video-to-3d/issues/74), [#76](https://github.com/moritzbrantner/video-to-3d/issues/76), [#77](https://github.com/moritzbrantner/video-to-3d/issues/77)).
 
   - **3.1.1 Controlled-room fixture.**  
     The controlled room retains the requirement for at least three recognizable, independently selectable scene objects.
@@ -95,8 +88,6 @@ Sources seeded into this atlas:
 - **3.3 Blender import/edit is part of product acceptance.**  
   Status: adopted 2026-10-10.  
   Acceptance is not satisfied by GLB generation alone. A pinned headless Blender test imports production output, verifies hierarchy/materials/transforms, and proves that an object can be moved independently without altering the environment. See 1.3.
-  - [x] A reusable strict headless Blender **acceptance harness** is implemented in `tools/blender/scene_import_acceptance.py` and `tools/blender/self_test.sh`, with synthetic truth/negative controls ([merged #168](https://github.com/moritzbrantner/video-to-3d/pull/168)).
-  - [ ] Portable canonical-scene GLB exporter remains in unfinished draft [PR #175](https://github.com/moritzbrantner/video-to-3d/pull/175); its synthetic acceptance does not establish independent editable objects from all three real videos ([#84](https://github.com/moritzbrantner/video-to-3d/issues/84), [#151](https://github.com/moritzbrantner/video-to-3d/issues/151)).
 
 - **3.4 Acceptance must expose uncertainty and provenance.**  
   Status: adopted 2026-10-10.  
@@ -105,14 +96,10 @@ Sources seeded into this atlas:
 - **3.5 Synthetic exact-truth fixtures are verification oracles, not release substitutes.**  
   Status: adopted 2026-10-10.  
   Deterministic synthetic fixtures with exact cameras, geometry, segmentation, and transforms validate algorithmic stages and tolerances. They complement, but never replace, the three-real-video release gate in 3.1.
-  - [x] Deterministic synthetic room exact-truth fixture generator exists at `crates/video-to-3d-core/examples/synthetic_room_fixture.rs`, with Blender truth generation `tools/blender/build_truth_scene.py` ([merged #166](https://github.com/moritzbrantner/video-to-3d/pull/166)).
-  - [ ] Passing a synthetic scene alone does not close the three-video, separately editable object release gate ([#77](https://github.com/moritzbrantner/video-to-3d/issues/77)).
 
 - **3.6 Product acceptance is end-to-end.**  
   Status: adopted 2026-10-10.  
   The aggregate gate is green only when the complete local video → scene → Blender workflow passes for all three pinned real clips. Unit tests, one curated clip, successful camera estimation, or a visually pleasing flat mesh do not close the product gate.
-  - [x] Bounded reconstruction stages, native synthetic smoke, fixture provenance and Blender self-test are independently available ([PR #173](https://github.com/moritzbrantner/video-to-3d/pull/173), [#174](https://github.com/moritzbrantner/video-to-3d/pull/174), [#168](https://github.com/moritzbrantner/video-to-3d/pull/168)).
-  - [ ] **Actual product exit is still unverified:** real three-clip processing, object separation, canonical portable Blender export and independent edit validation ([#76](https://github.com/moritzbrantner/video-to-3d/issues/76), [#77](https://github.com/moritzbrantner/video-to-3d/issues/77)).
 
 
 - **3.7** [question] **Controlled-room source for the initial three-video gate.**  
