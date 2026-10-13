@@ -38,4 +38,3 @@ This dated audit records existing narrow implementation claims and missing verif
 - [x] Bounded reconstruction stages, native synthetic smoke, fixture provenance and Blender self-test are independently available ([PR #173](https://github.com/moritzbrantner/video-to-3d/pull/173), [#174](https://github.com/moritzbrantner/video-to-3d/pull/174), [#168](https://github.com/moritzbrantner/video-to-3d/pull/168)).
 
 - [ ] **Actual product exit is still unverified:** real three-clip processing, object separation, canonical portable Blender export and independent edit validation ([#76](https://github.com/moritzbrantner/video-to-3d/issues/76), [#77](https://github.com/moritzbrantner/video-to-3d/issues/77)).
-
