@@ -1,6 +1,8 @@
 # Roadmap
 
-> Product-level roadmap: [Video clip → whole scene](docs/video-to-world-roadmap.md)
+> Implementation sequencing for the reconstruction engine. The [Decision Atlas](docs/DECISION-ATLAS.md) owns product intent (for example `2.1`–`2.3`, `4.1`), and [hybrid scene-to-Blender acceptance](docs/specs/hybrid-room-to-blender-acceptance.md) owns the product exit gate (`3.1`, `3.6`).
+>
+> Product-level sequencing: [Video clip → whole scene](docs/video-to-world-roadmap.md)
 >
 > The slice roadmap below tracks reconstruction-engine progress. The linked product roadmap extends it through deterministic orchestration, scene understanding, generative completion, editable-object extraction, registration, physics/navigation, hybrid splat/mesh viewing, export, and end-to-end acceptance.
 

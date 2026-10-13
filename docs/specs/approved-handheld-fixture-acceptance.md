@@ -2,7 +2,7 @@
 
 Independent author/context: video_172_acceptance. Protected baseline2f47f3c;
 shared conventions sourceRevision46d8793bb3034326561f876dcc67dbaa5aa1e432.
-Authority: Decision Atlas3.1.2,3.2–3.6,4.3,6.1–6.2; owner approval in
+Authority: [Decision Atlas](../DECISION-ATLAS.md) IDs `3.1.2`, `3.2`–`3.6`, `4.3`, `6.1`–`6.2`; owner approval in
 [issue74](https://github.com/moritzbrantner/video-to-3d/issues/74#issuecomment-6113239395).
 This contract prepares real input fixtures; it does not claim implementation,
 recognizable reconstructed output, Blender acceptance or the #77 three-video gate.

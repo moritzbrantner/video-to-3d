@@ -1,6 +1,6 @@
 # Reconstruction providers
 
-`video-to-3d` treats reconstruction backends as evidence providers rather than as geometry authorities.
+The authoritative product and architecture boundaries are [Decision Atlas](DECISION-ATLAS.md) IDs `2.1`, `2.2`, `2.3`, `2.4`, and `2.6`. This document describes their technical evidence interface, current integration and implementation steps; it does not establish independent product decisions.
 
 The stable architectural direction is:
 
