@@ -1,39 +1,25 @@
-# Video clip → whole scene product roadmap
+# Video clip → whole scene implementation roadmap
 
-## Owner-approved initial product contract — 2026-10-10
+This document owns **implementation sequencing and progress**, not product intent or the release gate. Read the [Decision Atlas](DECISION-ATLAS.md) for owner-approved behavior and stable IDs, and the [hybrid scene-to-Blender acceptance specification](specs/hybrid-room-to-blender-acceptance.md) for detailed, independently verified requirements. The [2026-10-10 historical selections](specs/whole-scene-product-decisions.md) are provenance only. Milestone checklists below are planning/verification tasks, not substitute acceptance criteria.
 
-The [ten product decisions](specs/whole-scene-product-decisions.md) are authoritative for initial-release behavior. They establish **local-only hybrid reconstruction**, editable major architecture and objects, observation-only versus AI-completed views, mesh/splat switching where both exist, video-validated uncertainty, automatic processing with optional checkpoints, adaptive CPU/GPU execution, and a shared browser/desktop interface.
+The owner-selected hybrid approach (historical option B) is covered by Atlas `2.1`–`2.3`, `1.5` and `5.2`. Initial local-only scope is `4.1` and `4.3`; object editability and modes are `1.1`–`1.3`. The product gate remains `3.1`–`3.6`. Do not infer new choices from speculative later milestones.
 
-**Initial release is not complete until one controlled room video and two ordinary handheld videos all produce independently verifiable, recognizable Blender-editable scenes.** The controlled case alone is not sufficient. Fixture expectations and tolerances are independently authored before optimization. The full contract is [hybrid scenes-to-Blender acceptance](specs/hybrid-room-to-blender-acceptance.md).
+## Current critical path — scene-to-Blender
 
-**Cloud execution and all uploads are deferred.** Any cloud references below describe potential later milestones/schema capabilities, not permission or a requirement for the first release. No operation in this release may silently escalate off-device, even with derived imagery. Advanced dynamics, granular part-level edits, and optional cloud workflows remain future decisions. Do not alter accepted Rust geometry/provenance authority or browser-owned decoding and sampling.
+Use existing issues in dependency-first order rather than numeric milestone order. This is a work plan; it does not assert the product gate is complete.
 
-## Immediate product priority — hybrid room-to-Blender vertical slice (owner decision 2026-10-10)
+1. Pin and independently verify synthetic and real-video fixture evidence and the Blender harness (Atlas `3.1`, `3.5`; issues #74, #75, #76, #77, #151).
+2. Complete the resumable local CLI/scene runner around browser-prepared frames, keeping browser decode/sampling ownership (Atlas `1.6`, `4.3`; issue #150).
+3. Add native evidence interchange and a measured learned provider only where observed reconstruction fails (Atlas `2.2`, `2.6`; issues #78, #79).
+4. Track object identity and masks, produce independently editable geometry, and validate placements against retained video views (Atlas `1.1`, `1.5`, `3.2`, `5.2`; issues #60–#63, #68–#71).
+5. Integrate preview and Blender export/import for the complete hierarchy (Atlas `1.3`, `3.3`; issues #84, #151).
+6. Re-run the [three-video release acceptance](specs/hybrid-room-to-blender-acceptance.md) and select the earliest failing dependency. Report code merged, demonstrated functional capability and passing product acceptance separately (Atlas `6.1`–`6.3`).
 
-**Chosen architecture: B — hybrid scene reconstruction.** The observed Rust reconstruction defines accepted camera geometry and evidence. Learned reconstruction strengthens weak observed regions. Semantic identification and tracked masks separate scene objects. Existing asset-tooling generators supply explicit, labeled candidate completions where video evidence is insufficient. All geometry participating in shared fusion crosses the existing evidence validation boundary; scene placement is checked against registered views. No generative output silently becomes observed geometry.
+For each new issue, consult current pinned acceptance evidence or run the applicable acceptance slice. Prefer the first actionable failing dependency; do not promote an intermediate synthetic smoke or web preview into the three-clip product gate. Leave post-v1 cloud and optional advanced features off the initial critical path (Atlas `7.1`, `7.2`), without deferring existing security, correctness or provenance defects.
 
-**First product release gate:** [Hybrid scenes-to-Blender acceptance contract](specs/hybrid-room-to-blender-acceptance.md). **Three pinned real videos** (one guided room, two ordinary handheld clips) must each build without an agent choosing steps into coherent environments and independently editable Blender objects, with source-based transforms/materials, provenance, uncertainty, preview and headless Blender import/transform tests. The controlled room must contain at least three distinct editable objects; the handheld fixtures have their own independent inventories. This is **not yet delivered**; intermediate reconstructor successes do not count as product completion.
+## Proposed pipeline stage order
 
-**Execute existing issues in dependency-first order (not numeric milestone order):**
-1. Establish the synthetic scene oracle, three licensed real-video canaries (**one controlled room, two ordinary handheld**), and independent E2E/Blender import checks **before** declaring the initial release successful.
-2. Make the current CLI/scene runner execute the smallest full pipeline from the browser-produced sampled frames (or a prepared manifest of them with fixed sampling); the browser keeps sole ownership of video decoding and frame sampling (AGENTS.md), so there is no second native intake path. Preserve cancellation, receipts and user privacy.
-3. Native evidence interchange and first learned multi-view provider **only where measured reconstruction gates fail**; do not delay the vertical slice for a full research provider matrix.
-4. Semantic inventory, cross-frame identity tracking, consistent masks, multi-view object references and first independent object asset through existing asset-tooling.
-5. Place and validate objects in the observed world; compose environment and object hierarchy; enable hybrid preview and Blender/DCC handoff.
-6. Run acceptance on all three pinned clips; prioritize the **first failing critical-path stage**, fix it, and repeat. Report product progress as end-to-end gates passed rather than merged PR count or isolated mesh metrics.
-
-**Deferred unless a critical-path gate demonstrates a need:** general splat optimization, extensive scene expansion, multi-video fusion, audio, advanced dynamic scenes and mesh micro-optimizations. Existing security/correctness review findings remain mandatory to resolve; deferral applies to new feature priority, not defect concealment.
-
-**Authority:** This roadmap is the product intent; the linked acceptance spec is the measurable exit gate. Independently authored acceptance expectations should not be weakened by the implementation agent to make a build pass. Add material design decisions to repository-owned specifications before implementation.
-
----
-
-
-## Product target
-
-The project succeeds when a user can provide a short video clip and receive a usable 3D scene without an agent deciding which step to run next.
-
-The default path must be a deterministic, resumable program:
+This sketch sequences planned work; it is not a separate definition of product success.
 
 ~~~text
 video clip
@@ -55,41 +41,6 @@ physics/navigation/material/light preparation
 interactive preview + export
 ~~~
 
-Claude, Codex, ChatGPT, or a human may author a project spec, choose an optional provider, or inspect failures. They are not the workflow engine.
-
-This roadmap intentionally goes beyond the current sparse/dense reconstruction roadmap. The existing Rust geometry pipeline remains the reconstruction authority. External models are providers of evidence or explicitly labeled generative completion.
-
-## Definition of "whole scene"
-
-A successful run produces a versioned project manifest containing:
-
-- accepted cameras and reconstruction diagnostics;
-- observed sparse/dense geometry;
-- a navigable visual environment, preferably both a high-fidelity representation and a coarse mesh representation;
-- individually editable foreground/dynamic objects where they can be isolated;
-- explicit provenance for observed, learned, revalidated, and generative geometry;
-- object transforms in the shared scene coordinate system;
-- materials/textures sufficient for useful realtime inspection;
-- collider/navigation proxies where derivable;
-- optional estimated lights/environment lighting;
-- optional ambient and object-specific audio;
-- content-addressed source/intermediate/output identities;
-- exportable scene bundles suitable for Three.js first, with GLB/USD-style downstream interoperability where practical.
-
-The product does **not** promise that every input contains enough evidence for faithful geometric reconstruction. It does promise deterministic behavior: use the strongest accepted evidence available, escalate through configured providers, preserve provenance, and either produce the best supported scene or explain exactly which acceptance gate prevented it.
-
-## Operating principles
-
-1. **No agent orchestration.** A program owns the state machine, retries, cache reuse, provider selection policy, and resumability.
-2. **Observed geometry remains authoritative.** Generative completion can fill unseen regions but cannot silently rewrite observed evidence.
-3. **Provider-neutral boundaries.** World models, learned reconstruction models, image editors, segmentation models, image-to-3D systems, and audio systems are replaceable adapters.
-4. **Idempotent convergence.** Re-running the same declared project reconciles existing verified outputs instead of repeating expensive work.
-5. **Explicit escalation.** Cheap deterministic paths run first; learned local providers are used when declared quality gates justify them. Paid/cloud providers are deferred beyond the initial release.
-6. **One coordinate system.** Every camera, mesh, splat, generated object, collider, and annotation is registered into one scene frame before assembly.
-7. **Quality is tested on scenes, not screenshots.** Each milestone adds objective acceptance evidence and a human-inspectable preview.
-8. **All execution and data stay on-device for the initial release.** Browser decoding and sampling remain authoritative across both the web and desktop shell; no cloud inference or uploads of original or derived video artifacts are permitted. Cloud plans are deferred.
-9. **Shared evidence validation gates provider geometry.** Learned and generated surfaces cross the versioned `ReconstructionEvidenceView` boundary before participating in shared validation/fusion, with their original provenance retained.
-
 ---
 
 # Milestone 0 — Make the capability a product contract
@@ -98,7 +49,7 @@ The product does **not** promise that every input contains enough evidence for f
 
 Define a stable project document that records input media, requested quality mode, provider policy, scene outputs, provenance classes, operation identities, and export targets.
 
-Acceptance:
+Stage verification tasks:
 - one manifest completely describes a run without ambient shell state;
 - paths are portable and project-relative;
 - secret/API credentials are referenced by capability name, never persisted in the manifest;
@@ -124,7 +75,7 @@ At minimum distinguish:
 - audio;
 - provenance and confidence.
 
-Acceptance:
+Stage verification tasks:
 - an asset can be visual-only, collision-only, or both;
 - splat and mesh representations can coexist;
 - generative objects cannot be mistaken for observed surfaces.
@@ -139,7 +90,7 @@ Add explicit modes rather than hidden heuristic bundles:
 - **standard** — learned escalation + scene decomposition + usable completion;
 - **production** — stronger **local** provider escalation, higher-quality meshes/textures, stronger validation/export.
 
-Acceptance:
+Stage verification tasks:
 - changing quality mode changes declared operations, not hidden behavior;
 - diagnostics explain each escalation decision.
 
@@ -173,7 +124,7 @@ Every expensive operation records:
 - deterministic observations;
 - reproducibility classification.
 
-Acceptance:
+Stage verification tasks:
 - repeated builds reuse verified outputs;
 - changed inputs invalidate only downstream work;
 - interrupted builds resume from the last verified boundary.
@@ -301,7 +252,7 @@ Integrate one strong feed-forward multi-view provider through the common evidenc
 
 Preferred research surface: MapAnything so multiple model families can later be compared behind one adapter.
 
-Acceptance:
+Stage verification tasks:
 - model output never bypasses Rust validation;
 - provider-specific coordinates are normalized explicitly;
 - camera/intrinsic confidence is retained.
@@ -370,7 +321,7 @@ Estimate whether each tracked region is:
 
 Create temporally stable masks for selected editable objects.
 
-Acceptance:
+Stage verification tasks:
 - masks can be reprojected/compared across registered cameras;
 - inconsistent masks are surfaced instead of silently accepted.
 
@@ -692,6 +643,8 @@ An exported project can be reopened and one object/provider result can be replac
 
 ## 14.1 Scene acceptance corpus
 
+Expand beyond the independently specified initial three-real-video gate (Atlas `3.1`, `3.5`, `3.6`; [acceptance specification](specs/hybrid-room-to-blender-acceptance.md)). These are possible later corpus additions, not release substitutes.
+
 Maintain representative clips, not just one demo:
 
 1. textured tabletop object orbit;
@@ -750,6 +703,8 @@ The project must remain resumable.
 
 ## 14.6 End-to-end acceptance command
 
+The command below is a planned *per-fixture* entry point; aggregate three-real-video and Blender acceptance is governed by the [acceptance specification](specs/hybrid-room-to-blender-acceptance.md) (Atlas `3.6`).
+
 Target:
 
 ~~~text
@@ -785,7 +740,7 @@ Before execution, estimate which paid operations may run and their configured ma
 
 ## 15.4 Privacy classification
 
-**Initial release rejects all cloud requests and uploads, including derived frames.** For any future approved cloud profile, original video must remain local; any explicitly permitted derived-data transfer would require separate owner consent and receipts. Current local-only policy forbids all such transfers.
+The governing policy is in Atlas `4.1`, `4.3` and `7.1`. Work on any future cloud profile or upload consent requires a later owner decision; this milestone is not present-day permission.
 
 ## 15.5 Provider substitution tests
 
@@ -858,7 +813,7 @@ M13 export
 M14 whole-scene acceptance
 ~~~
 
-For the first demo, use a short clip of a scene with:
+For an **early exploratory demo only**, use a short clip of a scene with:
 - a mostly static room/environment;
 - 2–5 clearly separable foreground objects;
 - visible camera translation;
@@ -872,7 +827,7 @@ The output should visibly contain:
 - one-click provenance/debug view;
 - a portable scene bundle.
 
-Once this path works, increase scene difficulty systematically rather than adding more orchestration.
+This single-clip demo does **not** meet the release gate. The [independent acceptance specification](specs/hybrid-room-to-blender-acceptance.md) and Atlas `3.1`, `3.6` control the three-video exit. Once the exploratory path works, increase scene difficulty systematically rather than adding more orchestration.
 
 ---
 
@@ -895,13 +850,12 @@ Once this path works, increase scene difficulty systematically rather than addin
 13. 7.1 object references
 14. 7.2 provider-neutral object generation
 15. 7.3 local provider path
-16. 7.4 cloud provider path — **deferred, not on first-release critical path**
-17. 8.1–8.4 object placement/validation
-18. 11.1–11.3 hybrid viewer/provenance
-19. 13.1 web scene bundle
-20. 14.1–14.3 acceptance corpus/metrics
+16. 8.1–8.4 object placement/validation
+17. 11.1–11.3 hybrid viewer/provenance
+18. 13.1 web scene bundle
+19. 14.1–14.3 acceptance corpus/metrics
 
-Exit criterion: a representative short video reliably produces a complete inspectable scene through one command with no agent deciding the next operation.
+P0 exit verification is governed by the [independent three-video/Blender acceptance specification](specs/hybrid-room-to-blender-acceptance.md) (Atlas `3.1`, `3.6`), not a single representative demo.
 
 ## P1 — make results good and useful
 
@@ -959,16 +913,6 @@ Do not create a new generic workflow/orchestration repository for this roadmap. 
 
 ---
 
-# Capability acceptance statement
+# Release acceptance handoff
 
-The roadmap is complete when **"video clip → whole scene" is an automated tested capability rather than a lucky demo**:
-
-- one command starts or resumes the build;
-- no language model is required to sequence tasks;
-- a useful scene can combine observed reconstruction, learned evidence, and generative completion without losing provenance;
-- foreground objects can become independently editable assets;
-- the static world remains navigable even when direct reconstruction is incomplete;
-- every expensive provider call is recorded and resumable;
-- failures are localized and retryable;
-- the result exports into a normal realtime/DCC workflow;
-- a maintained scene corpus continuously proves the capability across progressively harder inputs.
+The [hybrid scene-to-Blender acceptance specification](specs/hybrid-room-to-blender-acceptance.md) defines the verifiable release criteria (Atlas `3.1`, `3.3`, `3.5`, `3.6`). This roadmap orders prerequisite implementation and future enhancements; neither this milestone list nor an attractive single-clip demonstration substitutes for the independently authored full product gate.

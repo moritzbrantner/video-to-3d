@@ -1,6 +1,6 @@
 # Product acceptance: first local hybrid scenes-to-Blender release (v2)
 
-Status: **owner-defined target; not yet implemented or passed**. Hybrid approach selected 2026-10-10; ten follow-up decisions recorded in [whole-scene product decisions](whole-scene-product-decisions.md). Independently authored fixture expectations and tolerances remain required.
+Status: **owner-defined target; not yet implemented or passed**. The [Decision Atlas](../DECISION-ATLAS.md) owns product intent (notably `1.1`–`1.6`, `2.1`–`2.3`, `3.1`–`3.6`, `4.1`–`4.5`); the [2026-10-10 session index](whole-scene-product-decisions.md) retains the historical option selections only. This specification owns detailed acceptance requirements, including independently authored fixture expectations and tolerances.
 
 ## User-visible goal
 Given **three fixed, licensed videos**—one controlled short room video with camera translation and at least three recognizable objects, plus **two ordinary handheld recordings** with imperfect motion—the same documented `video-to-3d build <project>` workflow must produce recognizable environments and independently editable Blender objects for **all three**. No human or agent selects intermediate operations. A successful controlled clip is a milestone, not the release gate.
@@ -32,14 +32,6 @@ Given **three fixed, licensed videos**—one controlled short room video with ca
 - **Automation/checkpoints**: Fully automatic by default; optional checkpoints allow a user to review detected objects and decisions before expensive local processing. Normal runs do not require human/agent intervention.
 - **Adaptive hardware**: Detect CPU/GPU availability, choose a supported local variant, provide a CPU-only smoke path and report supported quality/resource limits. A CPU-only fallback is not claimed to reach GPU-quality benchmarks without evidence. No hidden cloud fallback.
 
-## Priority and dependency policy
-**P0 / critical path:** independently authored **three-real-clip** fixture suite plus synthetic oracle; runnable local pipeline; first feasible local learned provider and hardware fallback; semantic inventory → cross-frame tracks → masks → object reference packages → object reconstruction/generation → video-grounded placement validation → separate architecture/object hierarchy → observation-only/completed modes → shared web/desktop viewer → Blender export/import → **three-clip** E2E acceptance command. Prefer the smallest **vertical slice** that produces the whole artifact, with honest quality limitations.
+## Implementation sequencing
 
-**P1 / quality upgrades:** learned matching escalation, hybrid depth refinement, stronger static world completion, improved seam/coverage on fixture failures, material/lighting polish, production-grade export.
-
-**P2 / optional until P0 is green:** audio, scene expansion, cross-video fusion, dynamic effects, general splat optimization, broad mesh micro-optimization unrelated to a failing P0 gate, **any cloud providers or upload paths**, and user-configurable granularity beyond the default major-element decomposition.
-
-Do not postpone correctness, safety, provenance or bounded-resource defects in existing PRs. Resolve those on their own merits, but do not treat closing such tasks as crossing the product acceptance gate.
-
-## Work-loop selection
-Before selecting a new issue, run the whole-scene acceptance on the current pinned controlled/handheld fixture subset (or use its latest pinned results); identify the **earliest failing dependency** for the three-clip product gate. Prioritize an open issue unblocking that failure. Require the PR to show a changed end-to-end artifact or describe why a prerequisite is necessary. Track separate statuses for code merged, fixture passing and real video passing. The web GitHub Pages demo is a local preview, **not** proof that the native hybrid/Blender pipeline passes.
+Execution priorities and work-loop issue selection belong to the [whole-scene roadmap](../video-to-world-roadmap.md) (Atlas `6.1`, `6.2`, `6.3`). They do not modify any of the required artifacts or acceptance tests above. The independent fixture and three-real-video release contract remains authoritative even when a roadmap milestone or unit/synthetic smoke test passes.
