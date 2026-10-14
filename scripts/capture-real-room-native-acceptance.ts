@@ -10,7 +10,7 @@ function argument(name: string): string {
   assert(index >= 0 && value, `required ${name}`);
   return value;
 }
-const { expected, original, receiptBytes, carrierPath, carrier } = verifyCaptureInput(
+const { expected, original, receiptBytes, carrier } = verifyCaptureInput(
   argument("--original"), argument("--prepared-root"),
 );
 const output = resolve(argument("--output-root"));
@@ -22,7 +22,7 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
   switch (new URL(request.url).pathname) {
     case "/": return new Response("<!doctype html><title>Independent real-room input capture</title>", { headers: { "content-type": "text/html" } });
     case "/video.js": return new Response(module, { headers: { "content-type": "text/javascript" } });
-    case "/carrier": return new Response(Bun.file(carrierPath));
+    case "/carrier": return new Response(carrier, { headers: { "content-type": "video/webm" } });
     default: return new Response("not found", { status: 404 });
   }
 } });
