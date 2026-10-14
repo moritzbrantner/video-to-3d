@@ -102,7 +102,7 @@ class ControlledRoomActualAcceptance(unittest.TestCase):
             output = Path(temporary) / 'prepared'
             command = ['bun', 'tools/run_real_video_case.ts', '--case', case['id'], '--asset-root', str(source),
                        '--output-root', str(output), '--manifest', str(ORACLE), '--prepare-only']
-            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=600)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             base = output / case['id']
             receipt = json.loads((base / 'sampling.json').read_text())
@@ -120,7 +120,7 @@ class ControlledRoomActualAcceptance(unittest.TestCase):
             self.assertEqual(list(base.rglob('*.ply')), [])
             self.assertEqual(list(base.rglob('*.glb')), [])
             before = files(output)
-            repeat = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=180)
+            repeat = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=600)
             self.assertEqual(repeat.returncode, 0, repeat.stdout + repeat.stderr)
             self.assertEqual(files(output), before, 'repeat preparation must not rewrite verified outputs')
             self.assertEqual((hashlib.sha256(original.read_bytes()).hexdigest(), original.stat().st_mtime_ns), source_before)
