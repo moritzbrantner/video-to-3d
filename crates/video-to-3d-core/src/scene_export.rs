@@ -675,7 +675,11 @@ fn annotate_nodes(
 }
 
 fn annotate_material_identity(source: &Value, document: &mut Value) -> Result<(), ExportError> {
-    let original_materials = source["materials"]
+    let Some(original_materials) = source.get("materials") else {
+        // The validated canonical model defaults an omitted table to empty.
+        return Ok(());
+    };
+    let original_materials = original_materials
         .as_array()
         .ok_or_else(|| unsupported("canonical material table is absent"))?;
     if original_materials.is_empty() {
@@ -706,13 +710,15 @@ fn annotate_material_identity(source: &Value, document: &mut Value) -> Result<()
     Ok(())
 }
 
-fn folded(path: &Path) -> String {
-    path.to_string_lossy().to_ascii_lowercase()
+fn folded(path: &Path) -> PathBuf {
+    path.components()
+        .map(|component| component.as_os_str().to_ascii_lowercase())
+        .collect()
 }
 fn aliases(a: &Path, b: &Path) -> bool {
     let a = folded(a);
     let b = folded(b);
-    a == b || a.starts_with(&(b.clone() + "/")) || b.starts_with(&(a + "/"))
+    a.starts_with(&b) || b.starts_with(&a)
 }
 fn temporary_path(path: &Path) -> PathBuf {
     let mut temporary = path.as_os_str().to_owned();
@@ -729,6 +735,24 @@ fn preflight_destinations(
     copies: &[(PathBuf, &[u8])],
 ) -> Result<(), ExportError> {
     let mut protected = vec![manifest_path.canonicalize()?, root.join(STATE_DIRECTORY)];
+    let directory = destination
+        .parent()
+        .ok_or_else(|| ExportError::Invalid("GLB destination has no directory".into()))?;
+    for path in manifest
+        .artifacts
+        .iter()
+        .map(|artifact| &artifact.path)
+        .chain(scene.resources.iter().map(|resource| &resource.path))
+    {
+        let path = path.resolve(root);
+        if let Some(parent) = path.parent().filter(|parent| *parent != root) {
+            if aliases(directory, parent) {
+                return Err(ExportError::Invalid(
+                    "export directory aliases protected resource or artifact subtree".into(),
+                ));
+            }
+        }
+    }
     for path in manifest
         .inputs
         .iter()
@@ -746,6 +770,14 @@ fn preflight_destinations(
         if path != destination {
             protected.push(path);
         }
+    }
+    if protected
+        .iter()
+        .any(|source| folded(source).starts_with(folded(directory)))
+    {
+        return Err(ExportError::Invalid(
+            "export directory contains protected project source or metadata".into(),
+        ));
     }
     let outputs = std::iter::once(destination.to_path_buf())
         .chain(std::iter::once(metadata.to_path_buf()))
