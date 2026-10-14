@@ -269,5 +269,48 @@ bun scripts/test-handheld-browser-carrier-acceptance.ts --prepared-root /path/to
 
 The browser witness consumes the actual derived carrier through production
 `sampleVideoWithInfo`; it proves decoding and sampling, not offline pixel parity
-or scene quality. Real-input native execution (#179), Blender editability and the
+or scene quality. Native execution is exercised separately below. Blender editability and the
 three-video product exit (#77) remain separate acceptance gates.
+
+### Real controlled-room native execution
+
+The executable #179 contract retains actual browser-decoded RGBA, imports it
+through the existing project-aware keyframe writer and receipt store, then runs
+`video-to-3d build` from an unrelated working directory. It introduces no native
+video decoder. Prepare the approved carrier above, then capture a fresh local
+browser input:
+
+```sh
+bun scripts/capture-real-room-native-acceptance.ts --original /path/to/originals/long-office-rgb.avi --prepared-root /path/to/prepared --output-root /fresh/browser-input --automation-module /absolute/path/to/playwright/index.mjs
+```
+
+Keep the printed `witness_hash` outside the capture directory. It binds the
+original/carrier identities, browser version, sampling metadata and all 18 raw
+RGBA frame hashes. Pixel identities describe that captured browser run; a future
+capture may differ and must receive its own witness hash. Offline PPMs and
+screenshots cannot substitute for browser pixels.
+
+Run the explicit external-input tier with that hash and the unchanged original:
+
+```sh
+VIDEO_TO_3D_REAL_ROOM_INPUT=/fresh/browser-input VIDEO_TO_3D_REAL_ROOM_WITNESS_HASH=sha256:CAPTURE_HASH VIDEO_TO_3D_REAL_ROOM_SOURCE=/path/to/originals/long-office-rgb.avi VIDEO_TO_3D_REAL_ROOM_REPORT=/path/to/native-result.json cargo test --release --locked -p video-to-3d-cli --test real_room_native -- --ignored
+```
+
+The three tests exercise actual native execution, receipt/hash integrity,
+unchanged replay, cancellation after sparse execution and resumption, plus
+transfer and imported-pixel corruption rejection. Temporary projects are removed
+on completion; the optional report retains actual stage documents and CLI
+cold/replay/resume/inspection results. Without explicit external inputs, the
+ordinary test suite reports these tests ignored. Local source and frame bytes
+stay outside Git and are never uploaded.
+
+The independently captured Chromium 156.0.8078.4 input at production baseline
+`6cf3e4e` completes the native stages, but its quality is **nonpassing**:
+2 registered cameras, 599 mesh points, 232 triangles and zero independently
+editable native assets. The scene is an arbitrary-scale observed environment;
+it does not satisfy the controlled fixture's minimum three recognizable editable
+objects. CLI completion and deterministic replay establish execution capability,
+not recognition, Blender editability, physical accuracy or the three-video
+product exit. See [the independent native contract](../docs/specs/real-room-native-acceptance.md)
+for the pinned capture identity and recorded evidence. No reconstruction tuning
+or quality threshold change accompanies this execution evidence.
