@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { digest, verifyCaptureInput } from "./real-room-capture-input";
+import identity from "../tools/tests/fixtures/approved-real-room-capture-identity.json";
 
 const original = process.env.VIDEO_TO_3D_REAL_ROOM_SOURCE;
 const prepared = process.env.VIDEO_TO_3D_REAL_ROOM_PREPARED;
@@ -54,3 +55,52 @@ for (const rewriteReceipt of [false, true]) {
     }
   });
 }
+
+realInput("carrier HTTP bytes remain pinned after the verified path is replaced", () => {
+  const root = mkdtempSync(join(tmpdir(), "real-room-carrier-race-"));
+  try {
+    const base = join(root, "approved-controlled-room-tum");
+    mkdirSync(base);
+    const carrier = join(base, "derived.webm");
+    writeFileSync(carrier, readFileSync(join(prepared!, "approved-controlled-room-tum/derived.webm")));
+    writeFileSync(join(base, "sampling.json"), readFileSync(join(prepared!, "approved-controlled-room-tum/sampling.json")));
+    const report = join(root, "served-bytes.json");
+    const automation = join(root, "network-only-probe.mjs");
+    // This is an actual HTTP byte-source test, deliberately stopped before any
+    // browser evaluation. The separate real Chromium tier owns pixel evidence.
+    writeFileSync(automation, `
+      import {readFileSync,writeFileSync} from "node:fs";
+      import {createHash} from "node:crypto";
+      const hash = bytes => "sha256:" + createHash("sha256").update(bytes).digest("hex");
+      export const chromium = { launch: async () => ({
+        newPage: async () => ({ goto: async url => {
+          const bytes = readFileSync(${JSON.stringify(carrier)});
+          bytes[0] ^= 1;
+          writeFileSync(${JSON.stringify(carrier)}, bytes);
+          const response = await fetch(new URL("/carrier", url));
+          const served = new Uint8Array(await response.arrayBuffer());
+          writeFileSync(${JSON.stringify(report)}, JSON.stringify({status:response.status,onDiskHash:hash(bytes),servedHash:hash(served)}));
+          throw new Error("network-only carrier probe complete");
+        }}),
+        close: async () => {},
+      })};
+    `);
+    const output = join(root, "must-not-be-captured");
+    const result = Bun.spawnSync([process.execPath,
+      "scripts/capture-real-room-native-acceptance.ts", "--original", original!,
+      "--prepared-root", root, "--output-root", output,
+      "--automation-module", automation],
+      { cwd: fileURLToPath(new URL("..", import.meta.url)) });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("network-only carrier probe complete");
+    const actual: unknown = JSON.parse(readFileSync(report, "utf8"));
+    expect(actual).toMatchObject({
+      status: 200,
+      servedHash: `sha256:${identity.carrier.sha256}`,
+      onDiskHash: expect.not.stringContaining(identity.carrier.sha256),
+    });
+    expect(existsSync(output)).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

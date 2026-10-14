@@ -165,3 +165,18 @@ this run's generated WASM, rather than previous build outputs.
 
 Shared convention sourceRevision:
 `5ad0db36974c8b0e5f9812c90ee34a4f227852c3`.
+
+The review regression for the carrier's verification-to-serving race uses the
+actual local HTTP server: after input verification, a controlled automation seam
+replaces only a fresh copied carrier path and fetches `/carrier`. Served bytes
+must retain the independently pinned hash even though the copied on-disk bytes
+changed. The probe deliberately stops before browser evaluation or frame output;
+it proves byte-source binding, not browser decoding. Separate actual Chromium
+capture and native contracts remain mandatory.
+
+At production `efef16f`, the three existing input checks pass and the new race
+check genuinely fails: both the changed file and served response have hash
+`6605a36871c17d444133c22dcf28f9663db16b6258ca7a09416d4008ebdf79e1`,
+instead of the approved carrier hash. Log
+`/tmp/video190-carrier-race-baseline-efef16f.log`. The approved original/prepared
+files remain untouched; temporary copies and the owned server are cleaned.
