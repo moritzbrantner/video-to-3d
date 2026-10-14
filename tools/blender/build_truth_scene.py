@@ -17,6 +17,8 @@ deliberately broken handoffs the acceptance check must reject:
 - `architecture-parented`: the last object is parented to the floor (world
   placement kept), so moving the floor moves the object;
 - `shared-data`: an extra, unidentified object reuses the last object's mesh data.
+- `grouped`: a valid empty parent group preserves all world placement, for the
+  fixture-owned optional hierarchy contract.
 
 This script only produces reference inputs for the acceptance harness
 (`scene_import_acceptance.py`); it is not the product exporter.
@@ -56,7 +58,7 @@ def arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--variant", choices=["truth", "joined", "missing-object", "parented", "architecture-parented", "shared-data"], default="truth")
+    parser.add_argument("--variant", choices=["truth", "joined", "missing-object", "parented", "architecture-parented", "shared-data", "grouped"], default="truth")
     return parser.parse_args(argv)
 
 
@@ -91,6 +93,17 @@ def main():
         obj["video_to_3d_label"] = node["label"]
         bpy.context.scene.collection.objects.link(obj)
         objects.append((node, obj))
+    if args.variant == "grouped":
+        group = bpy.data.objects.new("room-group", None)
+        group["video_to_3d_id"] = "room-group"
+        group.location = (0.25, -0.75, 0.5)
+        group.rotation_euler.z = 0.4
+        bpy.context.scene.collection.objects.link(group)
+        bpy.context.view_layer.update()
+        for _, obj in objects:
+            world = obj.matrix_world.copy()
+            obj.parent = group
+            obj.matrix_world = world
     movable = [obj for node, obj in objects if node["kind"] == "object"]
     if args.variant == "parented":
         parent, child = movable[1], movable[2]
@@ -120,4 +133,5 @@ def main():
     bpy.ops.export_scene.gltf(filepath=str(Path(args.out).resolve()), export_format="GLB", export_extras=True)
 
 
-main()
+if __name__ == "__main__":
+    main()
