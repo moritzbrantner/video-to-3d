@@ -40,6 +40,16 @@ fn rewrite_resource_glb(project: &mut Project, id: &str, edit: impl FnOnce(&mut 
 #[test]
 #[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
 fn valid_materialless_canonical_scene_exports_without_inventing_materials() {
+    assert_materialless_scene_export(false);
+}
+
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn omitted_default_material_table_exports_without_inventing_materials() {
+    assert_materialless_scene_export(true);
+}
+
+fn assert_materialless_scene_export(omit_table: bool) {
     let mut project = Project::new();
     project.scene["materials"] = json!([]);
     for asset in project.scene["assets"].as_array_mut().unwrap() {
@@ -68,6 +78,9 @@ fn valid_materialless_canonical_scene_exports_without_inventing_materials() {
             }
         });
     }
+    if omit_table {
+        project.scene.as_object_mut().unwrap().remove("materials");
+    }
     AssembledScene::from_json(&project.scene.to_string())
         .expect("public canonical model admits materialless visuals");
     rebuild_adjacent_scene(&project);
@@ -75,6 +88,40 @@ fn valid_materialless_canonical_scene_exports_without_inventing_materials() {
     assert!(document
         .get("materials")
         .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
+}
+
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn export_directory_cannot_alias_protected_project_subtrees() {
+    // ProjectPath deliberately uses portable '/' syntax. Its public resolver
+    // creates native components, so this same CLI contract covers Windows '\\'
+    // filesystem paths when executed there; it does not pass invalid manifest paths.
+    for path in [
+        "resources/export/scene.glb",
+        "artifacts/export/scene.glb",
+        "scene.glb",
+    ] {
+        let project = Project::new();
+        let manifest_path = project.root.join("project.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["exports"][0]["path"] = json!(path);
+        fs::write(&manifest_path, manifest.to_string()).unwrap();
+        ProjectStore::open(&manifest_path).expect("valid portable manifest path");
+        let before = snapshot(&project.root);
+        let result = project.export(&[]);
+        assert!(!result.status.success(), "protected destination accepted: {path}");
+        let reason = String::from_utf8_lossy(&result.stderr).to_lowercase();
+        assert!(
+            reason.contains("export")
+                && (reason.contains("overlap")
+                    || reason.contains("protected")
+                    || reason.contains("contain")
+                    || reason.contains("alias")),
+            "useful protected-path rejection for {path}: {reason}"
+        );
+        assert_eq!(snapshot(&project.root), before, "rejection preserves project bytes: {path}");
+    }
 }
 
 #[test]
