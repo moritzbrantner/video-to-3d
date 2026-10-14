@@ -180,8 +180,9 @@ International Airport*) are the owner-approved CC BY 3.0 inputs. Their original
 Commons description/download URLs, attribution, license, SHA256 and byte lengths
 are pinned in `real-video-corpus.json`. This attributed licensed pair is the
 explicit redistribution exception; other corpus assets retain their restrictions.
-Do not substitute the unapproved controlled-room candidate or retune the fixed
-sample inventories against reconstruction output.
+Do not substitute approved source identities or retune the fixed sample
+inventories against reconstruction output. The controlled-room source is
+specified separately below.
 
 Put the unchanged originals at `h1.webm` and `h3.ogv` within an explicit local asset
 root, then prepare without dispatching reconstruction:
@@ -234,3 +235,39 @@ source decoding or output writes. The runner checks selected approved identities
 through the same Python authority before choosing its preparation or legacy path;
 omitting the required preparation record cannot enable legacy replacement. Other
 corpus cases retain their existing rules.
+
+### Approved controlled-room fixture
+
+`approved-controlled-room-tum` pins the whole original RGB movie from TUM RGB-D
+`freiburg3_long_office_household`, approved by Decision Atlas 3.8. The original
+`long-office-rgb.avi` is 26,026,292 bytes, SHA-256
+`3200d7a76f5b3307e33863d4b38dbad414527ce14084f4c1f6303a0f69eb794c`.
+It is attributed to the TUM Computer Vision Group and J. Sturm, N. Engelhard,
+F. Endres, W. Burgard and D. Cremers under CC BY 4.0. Retain the citation
+*A Benchmark for the Evaluation of RGB-D SLAM Systems*, IROS 2012, and the
+official source/license links recorded in the corpus manifest.
+
+```sh
+bun tools/run_real_video_case.ts --case approved-controlled-room-tum --asset-root /path/to/originals --output-root /path/to/prepared --prepare-only
+```
+
+This uses the same preparation/receipt authority and lossless VP9 WebM carrier
+recipe as H1/H3. Its interval covers the full 86.166667-second original, with
+18 fixed browser-plan requests at 360×270. The independently observed inventory
+includes the globe/support, yellow die, purple office chair and plush bear;
+it does not establish reconstructed identities or unseen geometry. Preparation
+records actual source frame ordinals, PTS, hashes, derived-carrier identity and
+FFmpeg boundary. Offline reference pixels are not claimed equivalent to browser
+canvas pixels. Depth and trajectory data are not reconstruction inputs.
+
+Run the independent source/receipt acceptance and actual browser witness:
+
+```sh
+VIDEO_CONTROLLED_ASSET_ROOT=/path/to/originals python3 -m unittest discover -s tools/tests -p test_approved_controlled_room_acceptance.py
+bun scripts/test-handheld-browser-carrier-acceptance.ts --prepared-root /path/to/prepared --expectations tools/tests/fixtures/approved-controlled-room-expectations.json --automation-module /absolute/path/to/playwright/index.mjs --report /path/to/browser-report.json
+```
+
+The browser witness consumes the actual derived carrier through production
+`sampleVideoWithInfo`; it proves decoding and sampling, not offline pixel parity
+or scene quality. Real-input native execution (#179), Blender editability and the
+three-video product exit (#77) remain separate acceptance gates.
