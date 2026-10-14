@@ -725,6 +725,35 @@ fn temporary_path(path: &Path) -> PathBuf {
     temporary.push(".tmp");
     PathBuf::from(temporary)
 }
+fn physical_export_path(path: &Path) -> Result<PathBuf, ExportError> {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(_) => {
+                // A missing leaf may still sit beneath an existing symlink.
+                // Resolve that ancestor before restoring the missing suffix.
+                let mut physical = existing.canonicalize().map_err(|error| {
+                    ExportError::Invalid(format!("cannot resolve protected export path: {error}"))
+                })?;
+                for component in suffix.into_iter().rev() {
+                    physical.push(component);
+                }
+                return Ok(physical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing.file_name().ok_or_else(|| {
+                    ExportError::Invalid("cannot resolve protected export ancestor".into())
+                })?;
+                suffix.push(name.to_owned());
+                existing = existing.parent().ok_or_else(|| {
+                    ExportError::Invalid("cannot resolve protected export ancestor".into())
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 fn preflight_destinations(
     root: &Path,
     manifest: &SceneProjectManifest,
@@ -777,16 +806,19 @@ fn preflight_destinations(
     for export in &manifest.exports {
         let path = export.path.resolve(root);
         if path != destination {
-            if copies
-                .iter()
-                .filter_map(|(copy, _)| copy.parent())
-                .any(|resources| aliases(&path, resources))
-            {
-                return Err(ExportError::Invalid(
-                    "export resources subtree aliases another declared export".into(),
-                ));
+            let physical = physical_export_path(&path)?;
+            for path in [path, physical] {
+                if copies
+                    .iter()
+                    .filter_map(|(copy, _)| copy.parent())
+                    .any(|resources| aliases(&path, resources))
+                {
+                    return Err(ExportError::Invalid(
+                        "export resources subtree aliases another declared export".into(),
+                    ));
+                }
+                protected.push(path);
             }
-            protected.push(path);
         }
     }
     let outputs = std::iter::once(destination.to_path_buf())
