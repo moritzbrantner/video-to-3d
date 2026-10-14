@@ -172,6 +172,70 @@ fn concrete_export_subtrees_cannot_overlap_another_declared_export() {
     }
 }
 
+#[cfg(unix)]
+fn assert_sibling_physical_alias_rejected(target: &str, directory: bool, missing_child: bool) {
+    let project = Project::new();
+    let exports = project.root.join("exports");
+    fs::create_dir_all(&exports).unwrap();
+    if directory {
+        fs::create_dir_all(exports.join(target)).unwrap();
+        fs::write(exports.join(target).join("owned-web.txt"), b"other export bytes").unwrap();
+    } else {
+        fs::write(exports.join(target), b"other export bytes").unwrap();
+    }
+    std::os::unix::fs::symlink(target, exports.join("web")).unwrap();
+    let web = if missing_child { "exports/web/future" } else { "exports/web" };
+    let manifest_path = project.root.join("project.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["exports"].as_array_mut().unwrap().push(json!({
+        "id":"web", "format":"web_bundle", "path":web, "includes":["assembled_scene"]
+    }));
+    fs::write(&manifest_path, manifest.to_string()).unwrap();
+    ProjectStore::open(&manifest_path).expect("valid sibling declaration with a physical alias");
+    let before = snapshot(&project.root);
+    let result = project.export(&[]);
+    assert!(
+        !result.status.success(),
+        "physical sibling alias accepted: {web} -> {target}"
+    );
+    let reason = String::from_utf8_lossy(&result.stderr).to_lowercase();
+    assert!(
+        reason.contains("export")
+            && ["overlap", "protected", "contain", "alias", "symlink"]
+                .iter().any(|word| reason.contains(word)),
+        "useful physical-alias rejection: {reason}"
+    );
+    assert_eq!(snapshot(&project.root), before, "rejection preserves every project byte");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn sibling_resource_symlink_alias_is_rejected_before_writing() {
+    assert_sibling_physical_alias_rejected("scene.glb.resources", true, false);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn sibling_glb_symlink_alias_is_rejected_before_writing() {
+    assert_sibling_physical_alias_rejected("scene.glb", false, false);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn sibling_sidecar_symlink_alias_is_rejected_before_writing() {
+    assert_sibling_physical_alias_rejected("scene.scene.json", false, false);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn sibling_missing_child_beneath_symlink_is_rejected_before_writing() {
+    assert_sibling_physical_alias_rejected("scene.glb.resources", true, true);
+}
+
 #[test]
 #[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
 fn default_empty_source_scene_cannot_silently_export_alternate_scene_geometry() {

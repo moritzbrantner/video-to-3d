@@ -69,3 +69,31 @@ test-name filters returned 1 pass, 1 genuine failure, 0 ignored, 15 filtered out
 Root acceptance author stops after committing these tests; a separate worker
 repairs production. All 17 cases, portable Blender and applicable full gates
 remain required after repair. No three-real-video success is inferred.
+
+## Independent physical sibling-alias regression handoff
+
+Review finding 4276217101 exposes a remaining ownership violation at baseline
+`5204c9065ca13f4c7e01eb9b21c7224e3544b584`. A separate acceptance context
+adds four actual public-CLI cases before the production repair: a sibling web
+declaration physically aliases the GLB file, sidecar file, resource-copy
+directory, or a missing child beneath an existing symlink into that directory.
+All manifests validate through ProjectStore. Existing targets carry independent
+web-owned bytes. Export must reject usefully before changing any project byte;
+ordinary isolated siblings must continue passing the earlier positive contract.
+
+These four cases use native Unix symlinks and are explicitly `cfg(unix)`.
+Windows symlink execution remains unrun, not inferred from Linux. The complete
+explicit Unix acceptance tier now has 21 cases. The fixtures remain synthetic
+canonical scenes with real GLB resources; no reconstruction journey is claimed.
+
+Baseline command uses the unchanged prepared fixture and disposable release
+target: `cargo test --release --locked -p video-to-3d-cli --test scene_export --
+--ignored sibling_resource_symlink_alias sibling_glb_symlink_alias
+sibling_sidecar_symlink_alias sibling_missing_child_beneath_symlink`.
+Result: **0 passed, 4 genuinely failed, 0 ignored, 17 filtered out**. Each actual
+CLI wrongly succeeds; useful rejection and byte-preservation assertions remain
+unrun at baseline. Log: `/tmp/video84-physical-alias-baseline.log`.
+Shared convention sourceRevision remains
+`5ad0db36974c8b0e5f9812c90ee34a4f227852c3`. `cargo fmt --all` and
+`git diff --check` pass. The acceptance author stops after the test-only commit;
+the distinct production worker must run all 21 cases and applicable full gates.
