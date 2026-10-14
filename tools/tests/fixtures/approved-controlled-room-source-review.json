@@ -1,0 +1,117 @@
+{
+  "case_id": "approved-controlled-room-tum",
+  "source_sha256": "3200d7a76f5b3307e33863d4b38dbad414527ce14084f4c1f6303a0f69eb794c",
+  "boundary": "offline original RGB nearest-PTS references; no browser pixel equivalence or reconstruction truth",
+  "samples": [
+    {
+      "sample": 0,
+      "selected_source_ordinal": 129,
+      "selected_source_pts": 4.3,
+      "ppm_sha256": "cd79edeaa183d25b4e096311ac4a5932343a501c7c9e13adefae5cb39d8550ea"
+    },
+    {
+      "sample": 1,
+      "selected_source_ordinal": 266,
+      "selected_source_pts": 8.866667,
+      "ppm_sha256": "22ff2848a9bc9a832e25833c35f98ab33a38c999c823997b52760a7e2be84f96"
+    },
+    {
+      "sample": 2,
+      "selected_source_ordinal": 403,
+      "selected_source_pts": 13.433333,
+      "ppm_sha256": "e29cc27d126535be5631f9fa2f7b40f1fd021e0f1a27aef5dd99596bc6bc7675"
+    },
+    {
+      "sample": 3,
+      "selected_source_ordinal": 540,
+      "selected_source_pts": 18.0,
+      "ppm_sha256": "da39e29e62cf81a6fee933f3c3208b5f8afce5871e98c3cb9f12c79ec32703d7"
+    },
+    {
+      "sample": 4,
+      "selected_source_ordinal": 677,
+      "selected_source_pts": 22.566667,
+      "ppm_sha256": "964c89eb009cd4849e3806f9326a0bb16e2e9106fd165108079aa19edd6191e9"
+    },
+    {
+      "sample": 5,
+      "selected_source_ordinal": 814,
+      "selected_source_pts": 27.133333,
+      "ppm_sha256": "079f84bdd254a01d8a780526a9bd14ecff2e6de9d68d1ffe535f7276d19077d2"
+    },
+    {
+      "sample": 6,
+      "selected_source_ordinal": 950,
+      "selected_source_pts": 31.666667,
+      "ppm_sha256": "0b0d1ea68b6c0eccec16424a42e2535027a502fcaa6b3e1ca812f22e1ded499c"
+    },
+    {
+      "sample": 7,
+      "selected_source_ordinal": 1087,
+      "selected_source_pts": 36.233333,
+      "ppm_sha256": "07d61c757c54638c1d3a5b99e0b66fa3e3b86886b066153b6d3db1d68b5e4f08"
+    },
+    {
+      "sample": 8,
+      "selected_source_ordinal": 1224,
+      "selected_source_pts": 40.8,
+      "ppm_sha256": "0a9ff80c7cdb933cba39ea100eb18189ea532460580ab1397017a0a9fe425643"
+    },
+    {
+      "sample": 9,
+      "selected_source_ordinal": 1361,
+      "selected_source_pts": 45.366667,
+      "ppm_sha256": "73d2469f055ec37cda6a6dce1e699d1072846e717c4ebff9c9b9c46d3cc0d873"
+    },
+    {
+      "sample": 10,
+      "selected_source_ordinal": 1498,
+      "selected_source_pts": 49.933333,
+      "ppm_sha256": "1634ea5a4ad460270a65207e36d57a56a5024e3b4ebb618c8aa22c8e54e3eb72"
+    },
+    {
+      "sample": 11,
+      "selected_source_ordinal": 1635,
+      "selected_source_pts": 54.5,
+      "ppm_sha256": "867c5b136a16cc1526d327dbde6c78f0a1691d7b6a6ecab8cacf9f71e7533e52"
+    },
+    {
+      "sample": 12,
+      "selected_source_ordinal": 1771,
+      "selected_source_pts": 59.033333,
+      "ppm_sha256": "d7cee44b64281b7538f98ec06cc8c6805070fadb9c67499504babe08177c3960"
+    },
+    {
+      "sample": 13,
+      "selected_source_ordinal": 1908,
+      "selected_source_pts": 63.6,
+      "ppm_sha256": "3c570a29eac5f3cef012246b8e98fa2641e07387323608a4a1d58edafce8f9d8"
+    },
+    {
+      "sample": 14,
+      "selected_source_ordinal": 2045,
+      "selected_source_pts": 68.166667,
+      "ppm_sha256": "e14af7cd6c0f992c1085006d6ac69e33f692793749bd63ae9676c6d1de2f8572"
+    },
+    {
+      "sample": 15,
+      "selected_source_ordinal": 2182,
+      "selected_source_pts": 72.733333,
+      "ppm_sha256": "1251a3cdfb4448a45e0ed720e317edaf90ae889d612de195fa0879210cc464a3"
+    },
+    {
+      "sample": 16,
+      "selected_source_ordinal": 2319,
+      "selected_source_pts": 77.3,
+      "ppm_sha256": "2ea214d7626248bdc37d18c6edf1c6b0c1a1346a5a6fec958b009a108b40ae91"
+    },
+    {
+      "sample": 17,
+      "selected_source_ordinal": 2456,
+      "selected_source_pts": 81.866667,
+      "ppm_sha256": "4280197e416c67f1f620543b268884bf928ba9cc5ac3aaf2429ec559f8c7362d"
+    }
+  ],
+  "offline_decoder_version": "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers",
+  "offline_scale": "360x270; bilinear; nearest original PTS; earlier PTS/ordinal ties"
+}

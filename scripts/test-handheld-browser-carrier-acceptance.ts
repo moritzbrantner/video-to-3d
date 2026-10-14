@@ -14,7 +14,10 @@ const prepared = resolve(argument("--prepared-root"));
 // Reuse the already installed actual Chromium automation; no application decoder dependency.
 const automationModule = argument("--automation-module");
 const { chromium } = await import(automationModule);
-const expectations = JSON.parse(readFileSync(new URL("../tools/tests/fixtures/approved-handheld-expectations.json", import.meta.url), "utf8"));
+const expectationsPath = process.argv.includes("--expectations")
+  ? argument("--expectations")
+  : new URL("../tools/tests/fixtures/approved-handheld-expectations.json", import.meta.url);
+const expectations = JSON.parse(readFileSync(expectationsPath, "utf8"));
 const bundle = await Bun.build({ entrypoints: [resolve("apps/web/src/video.ts")], target: "browser" });
 assert(bundle.success, "existing browser sampling module failed to bundle");
 const videoModule = await bundle.outputs[0]!.text();
@@ -94,4 +97,4 @@ const reportIndex = process.argv.indexOf("--report");
 if (reportIndex >= 0) {
   writeFileSync(argument("--report"), serialized + "\n");
 }
-assert(!failed, "approved derived carriers must both decode through actual sampleVideoWithInfo");
+assert(!failed, "approved derived carriers must decode through actual sampleVideoWithInfo");

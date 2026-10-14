@@ -16,11 +16,24 @@ from urllib.parse import urlparse
 SCHEMA_VERSION = "video-to-3d/real-video-corpus/v1"
 VALID_TIERS = {"quantitative", "field-canary"}
 VALID_ASSET_MODES = {"provider", "manual"}
-APPROVED_HANDHELD = {
-    "approved-handheld-h1": "9d08559f3c18725848d0b53849dbc528c6ec803d4bc617cdafb2c16bdaf3304e",
-    "approved-handheld-h3": "7885f38454d5ecd9bfc7f1e0a74d5522d8e2d1deea1d65338fbcd07871267fe4",
-}
 HANDHELD_APPROVAL = "https://github.com/moritzbrantner/video-to-3d/issues/74#issuecomment-6113239395"
+APPROVED_SOURCES = {
+    "approved-handheld-h1": {
+        "sha256": "9d08559f3c18725848d0b53849dbc528c6ec803d4bc617cdafb2c16bdaf3304e",
+        "owner_approval_url": HANDHELD_APPROVAL,
+        "license_url": "https://creativecommons.org/licenses/by/3.0/",
+    },
+    "approved-handheld-h3": {
+        "sha256": "7885f38454d5ecd9bfc7f1e0a74d5522d8e2d1deea1d65338fbcd07871267fe4",
+        "owner_approval_url": HANDHELD_APPROVAL,
+        "license_url": "https://creativecommons.org/licenses/by/3.0/",
+    },
+    "approved-controlled-room-tum": {
+        "sha256": "3200d7a76f5b3307e33863d4b38dbad414527ce14084f4c1f6303a0f69eb794c",
+        "owner_approval_url": "https://github.com/moritzbrantner/video-to-3d/issues/74#issuecomment-6117629409",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    },
+}
 QUANTITATIVE_SCORING = "camera-aligned-uncropped-nearest-neighbor"
 
 
@@ -82,7 +95,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
         return errors
 
     approved_cases: dict[str, dict[str, Any]] = {}
-    if any(isinstance(case, dict) and (isinstance(case.get("id"), str) and case["id"] in APPROVED_HANDHELD or isinstance(case.get("preparation"), dict)) for case in cases):
+    if any(isinstance(case, dict) and (isinstance(case.get("id"), str) and case["id"] in APPROVED_SOURCES or isinstance(case.get("preparation"), dict)) for case in cases):
         try:
             approved_cases = _approved_cases()
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -118,7 +131,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.asset.expected_file must be a safe relative path")
         if not _https_url(asset.get("source_url")):
             errors.append(f"{prefix}.asset.source_url must be https")
-        approved = isinstance(case_id, str) and case_id in APPROVED_HANDHELD or isinstance(case.get("preparation"), dict)
+        approved = isinstance(case_id, str) and case_id in APPROVED_SOURCES or isinstance(case.get("preparation"), dict)
         if asset.get("redistribute") is not False and not (approved and asset.get("redistribute") is True):
             errors.append(f"{prefix}.asset.redistribute must be false unless explicitly approved and licensed")
         if approved:
@@ -190,11 +203,11 @@ def _approved_cases() -> dict[str, dict[str, Any]]:
     canonical = load_manifest(path)
     approved: dict[str, dict[str, Any]] = {}
     for case in canonical["cases"]:
-        if case.get("id") in APPROVED_HANDHELD:
-            if case["asset"]["sha256"] != APPROVED_HANDHELD[case["id"]] or not isinstance(case.get("preparation"), dict):
+        if case.get("id") in APPROVED_SOURCES:
+            if case["asset"]["sha256"] != APPROVED_SOURCES[case["id"]]["sha256"] or not isinstance(case.get("preparation"), dict):
                 raise ValueError("canonical approved source/preparation mismatch")
             approved[case["id"]] = case
-    if set(approved) != set(APPROVED_HANDHELD):
+    if set(approved) != set(APPROVED_SOURCES):
         raise ValueError("canonical approved preparations missing")
     return approved
 
@@ -216,7 +229,7 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
         errors.append(f"{prefix}: no approved preparation for this case")
     else:
         canonical_asset = canonical["asset"]
-        for field in ("creator", "title", "source_url", "download_url", "license_url",
+        for field in ("creator", "title", "citation", "source_url", "download_url", "license_url",
                       "owner_approval_url", "sha256", "byte_length", "expected_file",
                       "mode", "redistribute"):
             if asset.get(field) != canonical_asset.get(field):
@@ -228,8 +241,9 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
                 errors.append(f"{prefix}: {field} differs from the approved fixed preparation")
     if not isinstance(preparation, dict):
         return errors + [f"{prefix}: approved preparation must be an object"]
-    if case.get("id") not in APPROVED_HANDHELD or asset.get("sha256") != APPROVED_HANDHELD.get(case.get("id")) or asset.get("owner_approval_url") != HANDHELD_APPROVAL:
-        errors.append(f"{prefix}: source is not the owner-approved handheld pair")
+    source_policy = APPROVED_SOURCES.get(case.get("id"))
+    if source_policy is None or any(asset.get(field) != source_policy[field] for field in ("sha256", "owner_approval_url")):
+        errors.append(f"{prefix}: source is not an owner-approved preparation")
     for field in ("creator", "title", "license_url", "owner_approval_url", "download_url"):
         if not _nonempty_string(asset.get(field)) or (field.endswith("url") and not _https_url(asset[field])):
             errors.append(f"{prefix}.asset.{field} is required")
@@ -238,8 +252,8 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
         errors.append(f"{prefix}.asset.sha256 must be a SHA256 digest")
     if not isinstance(asset.get("byte_length"), int) or isinstance(asset["byte_length"], bool) or asset["byte_length"] <= 0:
         errors.append(f"{prefix}.asset.byte_length must be positive")
-    if asset.get("mode") != "manual" or asset.get("license_url") != "https://creativecommons.org/licenses/by/3.0/":
-        errors.append(f"{prefix}: approved preparation requires the declared manual CC BY3.0 source")
+    if asset.get("mode") != "manual" or source_policy is None or asset.get("license_url") != source_policy["license_url"]:
+        errors.append(f"{prefix}: approved preparation requires its declared manual licensed source")
     for field in ("decoder_boundary", "trim", "plan", "inventory"):
         if not isinstance(preparation.get(field), dict):
             errors.append(f"{prefix}: {field} must be an object")
@@ -317,7 +331,7 @@ def _original(case: dict[str, Any], asset_root: Path) -> Path:
     return original
 
 
-# Both approved inputs use this browser-consumable deterministic carrier policy.
+# Approved inputs share this browser-consumable deterministic carrier policy.
 # Keep recipe identity in reference-cache keys when its implementation changes.
 _DERIVATION_RECIPE = "lossless-vp9-webm-v1"
 
@@ -471,7 +485,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 def validate_selected_case_approval(manifest: dict[str, Any], case_id: str) -> list[str]:
     """Guard pinned identities without changing the generic runner contract."""
-    if case_id not in APPROVED_HANDHELD:
+    if case_id not in APPROVED_SOURCES:
         return []
     approved = _approved_cases()
     cases = manifest.get("cases")
