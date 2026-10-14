@@ -765,12 +765,6 @@ fn preflight_destinations(
             protected.push(actual);
         }
     }
-    for export in &manifest.exports {
-        let path = export.path.resolve(root);
-        if path != destination {
-            protected.push(path);
-        }
-    }
     if protected
         .iter()
         .any(|source| folded(source).starts_with(folded(directory)))
@@ -778,6 +772,22 @@ fn preflight_destinations(
         return Err(ExportError::Invalid(
             "export directory contains protected project source or metadata".into(),
         ));
+    }
+    // Other exports own their concrete output subtrees, not a shared parent.
+    for export in &manifest.exports {
+        let path = export.path.resolve(root);
+        if path != destination {
+            if copies
+                .iter()
+                .filter_map(|(copy, _)| copy.parent())
+                .any(|resources| aliases(&path, resources))
+            {
+                return Err(ExportError::Invalid(
+                    "export resources subtree aliases another declared export".into(),
+                ));
+            }
+            protected.push(path);
+        }
     }
     let outputs = std::iter::once(destination.to_path_buf())
         .chain(std::iter::once(metadata.to_path_buf()))
