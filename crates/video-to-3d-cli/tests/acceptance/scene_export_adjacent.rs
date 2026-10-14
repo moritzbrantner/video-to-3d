@@ -126,6 +126,54 @@ fn export_directory_cannot_alias_protected_project_subtrees() {
 
 #[test]
 #[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn isolated_sibling_exports_share_a_parent_without_overwriting_other_output() {
+    let project = Project::new();
+    let manifest_path = project.root.join("project.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["exports"].as_array_mut().unwrap().push(json!({
+        "id":"web", "format":"web_bundle", "path":"exports/web", "includes":["assembled_scene"]
+    }));
+    fs::write(&manifest_path, manifest.to_string()).unwrap();
+    ProjectStore::open(&manifest_path).expect("valid sibling export declaration");
+    fs::create_dir_all(project.root.join("exports/web")).unwrap();
+    fs::write(project.root.join("exports/web/sentinel.txt"), b"other export bytes").unwrap();
+    let other_before = snapshot(&project.root.join("exports/web"));
+    let source_before = project.source_snapshot();
+    let document = project.export_ok(&[]);
+    identified(&document, "crate");
+    assert_eq!(snapshot(&project.root.join("exports/web")), other_before);
+    assert_eq!(project.source_snapshot(), source_before);
+    receipt_consumer::verify_bundle(&project.root.join("exports"), &sidecar_document(&project.root))
+        .expect("actual sibling-compatible portable export");
+}
+
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
+fn concrete_export_subtrees_cannot_overlap_another_declared_export() {
+    for (glb, web) in [
+        ("exports/web/nested/scene.glb", "exports/web"),
+        ("exports/scene.glb", "exports/scene.glb.resources/web"),
+    ] {
+        let project = Project::new();
+        let manifest_path = project.root.join("project.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["exports"][0]["path"] = json!(glb);
+        manifest["exports"].as_array_mut().unwrap().push(json!({
+            "id":"web", "format":"web_bundle", "path":web, "includes":["assembled_scene"]
+        }));
+        fs::write(&manifest_path, manifest.to_string()).unwrap();
+        ProjectStore::open(&manifest_path).expect("valid portable overlapping declaration");
+        let before = snapshot(&project.root);
+        let result = project.export(&[]);
+        assert!(!result.status.success(), "overlapping exports accepted: {glb}, {web}");
+        assert_eq!(snapshot(&project.root), before, "rejection preserves project bytes");
+    }
+}
+
+#[test]
+#[ignore = "explicit #84 acceptance: VIDEO_TO_3D_EXPORT_FIXTURE required"]
 fn default_empty_source_scene_cannot_silently_export_alternate_scene_geometry() {
     let mut project = Project::new();
     rewrite_resource_glb(&mut project, "crate-mesh", |doc| {

@@ -46,3 +46,26 @@ conventions sourceRevision: `5ad0db36974c8b0e5f9812c90ee34a4f227852c3`.
 All fifteen explicit contracts plus portable Blender and the repository completion
 gate remain required at the repaired head; these regression results do not prove
 the three-real-video user journey.
+
+## Independent sibling-export regression handoff
+
+Before the next repair, a separate acceptance context tests baseline
+`1d2ef15217b256b8d6912737c4c9d748ce5e832c` through the same actual public CLI.
+Valid GLB `exports/scene.glb` and web `exports/web` targets may share their parent
+while concrete outputs remain isolated. The success case requires a real GLB,
+stable asset identity, valid portable receipt, unchanged sources and unchanged
+pre-existing sibling web bytes. Baseline: genuine RED, CLI rejects the containing
+`exports` directory. Late success assertions remain unrun at baseline.
+
+A separate negative case retains protection when GLB output is nested under
+the declared web subtree, or web output overlaps the portable resource subtree.
+Both valid manifests are accepted by ProjectStore; actual CLI rejects them and
+preserves every project byte. Baseline: GREEN. This supplements rather than
+weakens resource/artifact/manifest directory protection. Windows execution
+remains unrun. These two additions bring the explicit mandatory tier to 17.
+
+Disposable release invocation with the existing prepared fixture and the two
+test-name filters returned 1 pass, 1 genuine failure, 0 ignored, 15 filtered out.
+Root acceptance author stops after committing these tests; a separate worker
+repairs production. All 17 cases, portable Blender and applicable full gates
+remain required after repair. No three-real-video success is inferred.
