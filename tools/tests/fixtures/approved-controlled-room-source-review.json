@@ -111,5 +111,7 @@
       "selected_source_pts": 81.866667,
       "ppm_sha256": "4280197e416c67f1f620543b268884bf928ba9cc5ac3aaf2429ec559f8c7362d"
     }
-  ]
+  ],
+  "offline_decoder_version": "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers",
+  "offline_scale": "360x270; bilinear; nearest original PTS; earlier PTS/ordinal ties"
 }
