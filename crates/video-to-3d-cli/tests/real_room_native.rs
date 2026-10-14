@@ -8,15 +8,20 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use video_to_3d_core::scene_artifacts::{
-    write_project_keyframes_artifact, BuiltInExecutor, SampledFrame,
+    write_project_keyframes_artifact, BuiltInExecutor, SampledFrame, SurfaceMeshArtifact,
 };
 use video_to_3d_core::scene_model::{AssembledScene, AssetRole};
-use video_to_3d_core::scene_project::{ContentHash, OperationKind, ProjectPath};
-use video_to_3d_core::scene_runner::{
-    AttemptOutcome, CancellationToken, OperationExecutor, OperationRequest, ProducedArtifact,
-    RunOptions,
+use video_to_3d_core::scene_project::{
+    ContentHash, OperationKind, ProjectPath, SceneProjectError, SceneProjectManifest,
 };
-use video_to_3d_core::scene_store::{hash_file, ProjectStore, Reproducibility, VerifyMode};
+use video_to_3d_core::scene_runner::{
+    AttemptOutcome, CancellationToken, OperationExecutor, OperationRequest, OperationState,
+    ProducedArtifact, RunOptions,
+};
+use video_to_3d_core::scene_store::{
+    hash_file, BuildReport, ProjectStore, Reproducibility, VerifyMode,
+};
+use video_to_3d_core::CameraStageArtifact;
 
 fn expected() -> Value {
     serde_json::from_str::<Value>(include_str!(
@@ -41,12 +46,24 @@ fn capture(root: &Path, witness: &str) -> Result<(Value, Vec<Vec<u8>>), String> 
     }
     let document: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let wanted = expected();
+    let identity: Value = serde_json::from_str(include_str!(
+        "../../../tools/tests/fixtures/approved-real-room-capture-identity.json"
+    ))
+    .unwrap();
     if document["schema_version"] != 1
         || document["case_id"] != wanted["id"]
         || document["original"]["content_hash"]
             != format!("sha256:{}", wanted["asset"]["sha256"].as_str().unwrap())
         || document["original"]["byte_length"] != wanted["asset"]["byte_length"]
         || document["approved_plan"] != wanted["preparation"]["plan"]
+        || document["carrier"]["content_hash"]
+            != format!("sha256:{}", identity["carrier"]["sha256"].as_str().unwrap())
+        || document["carrier"]["byte_length"] != identity["carrier"]["byte_length"]
+        || document["sampling_receipt_hash"]
+            != format!(
+                "sha256:{}",
+                identity["sampling_receipt"]["sha256"].as_str().unwrap()
+            )
         || document["browser_offline_pixel_equivalence"] != false
         || document["browser_version"]
             .as_str()
@@ -226,15 +243,193 @@ fn artifact_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
         })
         .collect()
 }
-struct CancelAfterSparse(BuiltInExecutor);
-impl OperationExecutor for CancelAfterSparse {
+struct CancelAfterSparse<E>(E);
+impl<E: OperationExecutor> OperationExecutor for CancelAfterSparse<E> {
+    fn prepare_wave(&self, manifest: &SceneProjectManifest) -> Result<(), SceneProjectError> {
+        self.0.prepare_wave(manifest)
+    }
     fn execute(&self, operation: &OperationRequest, cancel: &CancellationToken) -> AttemptOutcome {
         let outcome = self.0.execute(operation, cancel);
-        if operation.operation.kind == OperationKind::SparseReconstruction {
+        if operation.operation.kind == OperationKind::SparseReconstruction
+            && matches!(&outcome, AttemptOutcome::Succeeded(_))
+        {
             cancel.cancel();
         }
         outcome
     }
+}
+
+fn sparse_boundary(report: &BuildReport, store: &ProjectStore) -> Result<(), String> {
+    if !matches!(
+        report.run.states.get("sparse"),
+        Some(OperationState::Succeeded { .. })
+    ) {
+        return Err("cancellation/resume requires a successful sparse attempt".into());
+    }
+    let receipt = store
+        .read_receipt("sparse")
+        .map_err(|error| error.to_string())?
+        .ok_or("successful sparse attempt has no receipt")?;
+    let actual = hash_file(&receipt.output.path.resolve(store.root()))
+        .ok_or("sparse receipt artifact is unavailable")?;
+    if actual != (receipt.output.content_hash, receipt.output.byte_length) {
+        return Err("sparse receipt does not match its retained artifact".into());
+    }
+    Ok(())
+}
+
+fn outcomes(result: &Value) -> Value {
+    Value::Object(
+        result["operations"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, operation)| {
+                let state = operation["state"].as_str().unwrap();
+                (
+                    id.clone(),
+                    json!(if ["reused", "succeeded"].contains(&state) {
+                        "complete"
+                    } else {
+                        state
+                    }),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn quality_metrics(artifacts: &[(String, Vec<u8>)], exit_code: i32) -> Value {
+    let find = |id: &str| {
+        artifacts
+            .iter()
+            .find(|(operation, _)| operation == id)
+            .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
+    };
+    let mut editable_assets = None;
+    let (registered_cameras, camera_source) = if let Some(document) = find("assemble") {
+        let scene = AssembledScene::from_json(document).unwrap();
+        scene.validate().unwrap();
+        editable_assets = Some(
+            scene
+                .assets
+                .iter()
+                .filter(|asset| asset.role == AssetRole::EditableObject)
+                .count(),
+        );
+        (Some(scene.cameras.len()), Some("assemble"))
+    } else if let Some(document) = find("mesh") {
+        let mesh = SurfaceMeshArtifact::from_json(document).unwrap();
+        (Some(mesh.cameras.len()), Some("mesh"))
+    } else if let Some(document) = find("sparse") {
+        CameraStageArtifact::from_json(document).unwrap();
+        let stage: Value = serde_json::from_str(document).unwrap();
+        (
+            Some(stage["sparse"]["final_cameras"].as_array().unwrap().len()),
+            Some("sparse"),
+        )
+    } else {
+        (None, None)
+    };
+    let minimum = expected()["preparation"]["inventory"]["minimum_recognizable_editable_objects"]
+        .as_u64()
+        .unwrap();
+    json!({
+        "registered_cameras": registered_cameras,
+        "registered_cameras_source": camera_source,
+        "native_editable_assets": editable_assets,
+        "native_editable_assets_source": editable_assets.map(|_| "assemble"),
+        "required_minimum_recognizable_editable_objects": minimum,
+        "status": if exit_code != 0 || editable_assets.is_none_or(|count| (count as u64) < minimum) {"nonpassing"} else {"independent_recognition_and_blender_unverified"},
+        "limitation": "null metrics are unavailable; native roles do not establish recognizability or independent Blender editability"
+    })
+}
+
+// Controlled failure of one stage tests acceptance classification, never product quality.
+struct FailStage {
+    delegate: BuiltInExecutor,
+    kind: OperationKind,
+}
+impl OperationExecutor for FailStage {
+    fn prepare_wave(&self, manifest: &SceneProjectManifest) -> Result<(), SceneProjectError> {
+        self.delegate.prepare_wave(manifest)
+    }
+    fn execute(&self, operation: &OperationRequest, cancel: &CancellationToken) -> AttemptOutcome {
+        if operation.operation.kind == self.kind {
+            AttemptOutcome::Failed("controlled acceptance failure".into())
+        } else {
+            self.delegate.execute(operation, cancel)
+        }
+    }
+}
+
+fn reject_false_cancellation_and_unavailable_quality(
+    document: &Value,
+    pixels: &[Vec<u8>],
+) -> Vec<Value> {
+    let mut controls = Vec::new();
+    for kind in [
+        OperationKind::SparseReconstruction,
+        OperationKind::DenseReconstruction,
+        OperationKind::SceneAssembly,
+    ] {
+        let project = project(document, pixels);
+        let (store, mut manifest) = ProjectStore::open(&project.0.join("project.json")).unwrap();
+        let cancel = CancellationToken::new();
+        let executor = FailStage {
+            delegate: BuiltInExecutor::for_project(&project.0, project.0.join("project.json")),
+            kind,
+        };
+        let report = if kind == OperationKind::SparseReconstruction {
+            store
+                .build(
+                    &mut manifest,
+                    &CancelAfterSparse(executor),
+                    RunOptions::default(),
+                    &cancel,
+                )
+                .unwrap()
+        } else {
+            store
+                .build(&mut manifest, &executor, RunOptions::default(), &cancel)
+                .unwrap()
+        };
+        assert!(
+            !cancel.is_canceled(),
+            "a failed sparse stage must not manufacture cancellation"
+        );
+        assert!(!report.run.is_complete());
+        let (code, result) = cli(&project.0, "build");
+        assert_ne!(code, 0);
+        assert_eq!(result["complete"], false);
+        let metrics = quality_metrics(&artifact_bytes(&project.0), code);
+        assert_eq!(metrics["status"], "nonpassing");
+        assert!(metrics["native_editable_assets"].is_null());
+        if kind == OperationKind::SparseReconstruction {
+            assert!(sparse_boundary(&report, &store).is_err());
+            assert!(store.read_receipt("sparse").unwrap().is_none());
+            assert!(metrics["registered_cameras"].is_null());
+        } else {
+            sparse_boundary(&report, &store).unwrap();
+            assert_eq!(
+                metrics["registered_cameras_source"],
+                if kind == OperationKind::DenseReconstruction {
+                    "sparse"
+                } else {
+                    "mesh"
+                }
+            );
+            assert!(metrics["registered_cameras"].as_u64().is_some());
+        }
+        controls.push(json!({
+            "injected_failure_stage": format!("{kind:?}"),
+            "exit_code": code, "complete": result["complete"],
+            "canceled": cancel.is_canceled(),
+            "sparse_success_and_receipt_verified": sparse_boundary(&report, &store).is_ok(),
+            "quality": metrics
+        }));
+    }
+    controls
 }
 
 #[test]
@@ -249,6 +444,10 @@ fn approved_room_browser_pixels_reach_actual_cli_and_verified_receipt_reuse() {
     );
     assert_eq!(first["complete"], code == 0);
     assert_eq!(first["operations"]["ingest"]["state"], "reused");
+    assert_eq!(
+        first["operations"]["sparse"]["state"], "succeeded",
+        "post-success cancellation acceptance requires actual cold sparse success: {first}"
+    );
     assert!(
         first["executed"]
             .as_array()
@@ -282,8 +481,12 @@ fn approved_room_browser_pixels_reach_actual_cli_and_verified_receipt_reuse() {
             (receipt.output.content_hash, receipt.output.byte_length)
         );
     }
+    assert!(store.read_receipt("sparse").unwrap().is_some());
     let before = artifact_bytes(&cold.0);
-    let (_, replay) = cli(&cold.0, "build");
+    let (replay_code, replay) = cli(&cold.0, "build");
+    assert_eq!(replay_code, code);
+    assert_eq!(replay["complete"], first["complete"]);
+    assert_eq!(outcomes(&replay), outcomes(&first));
     assert_eq!(replay["executed"], json!([]));
     for (id, _) in &before {
         assert_eq!(replay["operations"][id]["state"], "reused");
@@ -295,19 +498,9 @@ fn approved_room_browser_pixels_reach_actual_cli_and_verified_receipt_reuse() {
         .filter(|(id, _)| id != "ingest")
         .map(|(id, bytes)| (id, serde_json::from_slice::<Value>(bytes).unwrap()))
         .collect();
-    let mut editable_assets = 0;
-    let mut registered_cameras = 0;
-    if code == 0 {
-        let scene = before.iter().find(|(id, _)| id == "assemble").unwrap();
-        let scene = AssembledScene::from_json(std::str::from_utf8(&scene.1).unwrap()).unwrap();
-        scene.validate().unwrap();
-        editable_assets = scene
-            .assets
-            .iter()
-            .filter(|asset| asset.role == AssetRole::EditableObject)
-            .count();
-        registered_cameras = scene.cameras.len();
-    }
+    let quality = quality_metrics(&before, code);
+    let classification_controls =
+        reject_false_cancellation_and_unavailable_quality(&document, &pixels);
     let interrupted = project(&document, &pixels);
     let (interrupted_store, mut interrupted_manifest) =
         ProjectStore::open(&interrupted.0.join("project.json")).unwrap();
@@ -323,6 +516,8 @@ fn approved_room_browser_pixels_reach_actual_cli_and_verified_receipt_reuse() {
             &cancel,
         )
         .unwrap();
+    sparse_boundary(&report, &interrupted_store).unwrap();
+    let sparse_before_resume = artifact_bytes(&interrupted.0);
     assert!(
         cancel.is_canceled(),
         "actual sparse boundary must be reached"
@@ -333,23 +528,34 @@ fn approved_room_browser_pixels_reach_actual_cli_and_verified_receipt_reuse() {
     }
     let (resumed_code, resumed) = cli(&interrupted.0, "build");
     assert_eq!(resumed_code, code);
+    assert_eq!(resumed["complete"], first["complete"]);
+    assert_eq!(outcomes(&resumed), outcomes(&first));
+    assert_eq!(resumed["operations"]["sparse"]["state"], "reused");
+    assert!(
+        resumed["executed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("dense")),
+        "resumption must actually continue downstream work: {resumed}"
+    );
+    let resumed_artifacts = artifact_bytes(&interrupted.0);
+    for (id, bytes) in &sparse_before_resume {
+        assert_eq!(
+            resumed_artifacts
+                .iter()
+                .find(|(operation, _)| operation == id)
+                .unwrap()
+                .1,
+            *bytes
+        );
+    }
     assert_eq!(
-        artifact_bytes(&interrupted.0),
-        before,
+        resumed_artifacts, before,
         "resume must preserve actual cold artifacts"
     );
     if let Some(path) = std::env::var_os("VIDEO_TO_3D_REAL_ROOM_REPORT") {
-        let minimum = expected()["preparation"]["inventory"]
-            ["minimum_recognizable_editable_objects"]
-            .as_u64()
-            .unwrap();
-        let quality = json!({
-            "registered_cameras":registered_cameras,"native_editable_assets":editable_assets,
-            "required_minimum_recognizable_editable_objects":minimum,
-            "status":if code != 0 || (editable_assets as u64) < minimum {"nonpassing"} else {"independent_recognition_and_blender_unverified"},
-            "limitation":"native roles do not establish recognizability or independent Blender editability"
-        });
-        fs::write(path, serde_json::to_vec_pretty(&json!({"input":document,"cold_exit_code":code,"cold":first,"replay":replay,"inspect":inspect,"stages":stages,"resumed":resumed,"quality":quality,"three_video_acceptance":"unrun","blender_acceptance":"unrun"})).unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec_pretty(&json!({"input":document,"cold_exit_code":code,"cold":first,"replay":replay,"inspect":inspect,"stages":stages,"resumed_exit_code":resumed_code,"resumed":resumed,
+            "cancellation_resume":{"sparse_success_and_receipt_verified":true,"downstream_outcome":if code == 0 {"complete"} else {"nonpassing"}},"quality":quality,"acceptance_failure_controls":classification_controls,"three_video_acceptance":"unrun","blender_acceptance":"unrun"})).unwrap()).unwrap();
     }
 }
 

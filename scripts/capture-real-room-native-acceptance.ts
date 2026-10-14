@@ -1,8 +1,8 @@
 /** Independent #179 input author: actual browser pixels, never offline PPM substitutes. */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { digest, verifyCaptureInput } from "./real-room-capture-input";
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -10,25 +10,9 @@ function argument(name: string): string {
   assert(index >= 0 && value, `required ${name}`);
   return value;
 }
-const digest = (bytes: Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-const expected = JSON.parse(readFileSync(new URL("../tools/tests/fixtures/approved-controlled-room-expectations.json", import.meta.url), "utf8")).cases[0];
-const original = readFileSync(argument("--original"));
-assert.equal(digest(original), `sha256:${expected.asset.sha256}`);
-assert.equal(original.length, expected.asset.byte_length);
-const base = resolve(argument("--prepared-root"), expected.id);
-const receiptBytes = readFileSync(resolve(base, "sampling.json"));
-const receipt = JSON.parse(receiptBytes.toString("utf8"));
-assert.equal(receipt.case_id, expected.id);
-assert.equal(receipt.original.sha256, expected.asset.sha256);
-assert.equal(receipt.original.byte_length, original.length);
-assert.deepEqual(receipt.plan, expected.preparation.plan);
-assert.deepEqual(receipt.derived.trim, expected.preparation.trim);
-assert.equal(receipt.derived.source_sha256, expected.asset.sha256);
-const carrierPath = resolve(base, receipt.derived.path);
-assert(carrierPath.startsWith(base + sep));
-const carrier = readFileSync(carrierPath);
-assert.equal(digest(carrier), `sha256:${receipt.derived.sha256}`);
-assert.equal(carrier.length, receipt.derived.byte_length);
+const { expected, original, receiptBytes, carrierPath, carrier } = verifyCaptureInput(
+  argument("--original"), argument("--prepared-root"),
+);
 const output = resolve(argument("--output-root"));
 assert(!existsSync(output), "capture destination must be fresh");
 const bundle = await Bun.build({ entrypoints: [resolve("apps/web/src/video.ts")], target: "browser" });
