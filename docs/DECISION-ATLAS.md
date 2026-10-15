@@ -44,6 +44,9 @@ Sources seeded into this atlas:
   Answers 3.7.
   Use the original RGB movie from TUM RGB-D `freiburg3_long_office_household` as the controlled-room member of the three-real-video initial release gate. Preserve its CC BY 4.0 attribution and pinned content identity. The fixture must satisfy 3.1.1 through independently authored observable acceptance expectations; TUM depth and trajectory data are not production reconstruction inputs. Selecting the source does not itself satisfy the end-to-end product gate in 3.6.
 
+- [ ] **3.9** [question] Handheld-recording sources for the initial three-video gate.
+  Which two distinct, licensed ordinary handheld recordings become the handheld members of the gate in 3.1, and do they come from a public dataset (as 3.8 did for the controlled room) or from the owner's own recordings? Each needs a pinned identity, a license compatible with committing or reproducibly fetching it, imperfect handheld camera motion per 1.4, and independently authored inventories per 3.1.2. Until this is answered, the corpus (#74) and the three-video exit (#77, #151) cannot be completed.
+
 ## 2. Reconstruct the scene
 
 - [x] **1.5** Generated content requires video-grounded validation.
@@ -176,3 +179,6 @@ Sources seeded into this atlas:
 
 - [ ] **8.5** [question] Post-v1 cloud policy.
   Unresolved and intentionally deferred by 7.1. Any later cloud/derived-frame upload policy remains subject to 4.3: source video must not leave the device.
+
+- [ ] **8.6** [question] First local object segmentation and tracking provider.
+  Which concrete local-only model/provider family (checkpoint, license, resource needs on the target 8 GB GPU and on CPU-only machines per 4.6) first proposes object masks and cross-frame tracks for the semantic inventory and editable objects in 1.x/5.x? The 2026-10-15 TUM investigation on #60 found that no current pipeline stage or owner repository supplies validated masks: Media Intelligence's service contracts do not provide them, Asset Tooling accepts only pre-cutout masks, and `map-anything` supplies no semantics. Analogous to 8.1. The answer gates #60–#63 and the first editable object in the real-room run.
