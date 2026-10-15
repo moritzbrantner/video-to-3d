@@ -91,6 +91,9 @@ before running `tools/run_colmap_golden.sh`. One pinned PyCOLMAP runs every stag
 because approximate matching varies even with a fixed seed and one thread. CI compares
 match and verified-geometry tables between independent quality and runtime runs, alongside
 the existing camera, point, reprojection, and pose gates. This reference dependency is development-only.
+See [reconstruction provider adoption](docs/reconstruction-providers.md#adoption-and-integration-evidence)
+for the separate status of the built-in Rust path, COLMAP reference execution, sparse
+COLMAP import consumers, and possible future in-product providers.
 
 ## GitHub Pages demo
 
