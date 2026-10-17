@@ -460,6 +460,7 @@ fn cycles_are_rejected() {
             inputs: vec![OperationInput::Operation("b".into())],
             provider: None,
             max_attempts: 1,
+            vocabulary: None,
         },
         OperationDeclaration {
             id: "b".into(),
@@ -467,6 +468,7 @@ fn cycles_are_rejected() {
             inputs: vec![OperationInput::Operation("a".into())],
             provider: None,
             max_attempts: 1,
+            vocabulary: None,
         },
     ];
     match topological_order(&operations) {
@@ -644,6 +646,7 @@ fn built_in_operations_carry_an_implementation_revision() {
         providers: Vec::new(),
         max_attempts: 1,
         inputs: Vec::new(),
+        vocabulary: None,
     };
     let encoded = serde_json::to_vec(&identity).unwrap();
     let bumped = OperationIdentityInput {

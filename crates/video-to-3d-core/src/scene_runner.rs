@@ -649,9 +649,13 @@ fn execute_operation(
             executor.execute(&request, cancel)
         }))
         .unwrap_or_else(|_| AttemptOutcome::Failed("executor panicked".into()));
-        if matches!(outcome, AttemptOutcome::Unsupported(_)) {
-            // Release the provisional reservation: nothing was performed.
-            // A failure to persist the release only over-counts, which is safe.
+        if matches!(
+            outcome,
+            AttemptOutcome::Unsupported(_) | AttemptOutcome::Canceled
+        ) {
+            // Release the provisional reservation: nothing was performed, or
+            // the user stopped it; a resumed build may try again. A failure
+            // to persist the release only over-counts, which is safe.
             let _ =
                 lock().reserve_attempt(&base.operation.id, &base.identity, base.attempt + charged);
         } else {

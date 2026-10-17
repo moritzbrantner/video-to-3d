@@ -84,6 +84,10 @@ pub enum OperationKind {
     TextureBake,
     SplatOptimization,
     SceneAssembly,
+    /// Semantic inventory evidence over the browser keyframes (#60): labeled
+    /// boxes, masks and tracks from a local segmentation provider. Evidence
+    /// only; no geometry or camera producer consumes it.
+    SemanticInventory,
 }
 
 /// Whether an operation runs the built-in Rust pipeline or a declared provider.
@@ -96,7 +100,7 @@ pub enum OperationExecution {
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 10] = [
+    pub const ALL: [OperationKind; 11] = [
         Self::IngestVideo,
         Self::SparseReconstruction,
         Self::DenseReconstruction,
@@ -107,6 +111,7 @@ impl OperationKind {
         Self::TextureBake,
         Self::SplatOptimization,
         Self::SceneAssembly,
+        Self::SemanticInventory,
     ];
 
     /// Lowest quality mode in which this operation may be declared.
@@ -120,7 +125,8 @@ impl OperationKind {
             Self::LearnedReconstruction
             | Self::SceneDecomposition
             | Self::GenerativeCompletion
-            | Self::TextureBake => QualityMode::Standard,
+            | Self::TextureBake
+            | Self::SemanticInventory => QualityMode::Standard,
             Self::SplatOptimization => QualityMode::Production,
         }
     }
@@ -130,7 +136,8 @@ impl OperationKind {
             Self::LearnedReconstruction
             | Self::SceneDecomposition
             | Self::GenerativeCompletion
-            | Self::SplatOptimization => OperationExecution::Provider,
+            | Self::SplatOptimization
+            | Self::SemanticInventory => OperationExecution::Provider,
             _ => OperationExecution::BuiltIn,
         }
     }
@@ -148,6 +155,7 @@ impl OperationKind {
             Self::TextureBake => ArtifactKind::SurfaceTextures,
             Self::SplatOptimization => ArtifactKind::SplatField,
             Self::SceneAssembly => ArtifactKind::AssembledScene,
+            Self::SemanticInventory => ArtifactKind::SemanticInventory,
         }
     }
 
@@ -169,6 +177,7 @@ impl OperationKind {
                 SceneDecomposition,
             ],
             TextureBake => &[IngestVideo, SurfaceMesh],
+            SemanticInventory => &[IngestVideo, SparseReconstruction],
             SplatOptimization => &[IngestVideo, SparseReconstruction, DenseReconstruction],
             SceneAssembly => &[
                 SparseReconstruction,
@@ -211,6 +220,7 @@ impl OperationKind {
             Self::TextureBake => "texture_bake",
             Self::SplatOptimization => "splat_optimization",
             Self::SceneAssembly => "scene_assembly",
+            Self::SemanticInventory => "semantic_inventory",
         }
     }
 }
@@ -230,6 +240,7 @@ pub enum ArtifactKind {
     SurfaceTextures,
     SplatField,
     AssembledScene,
+    SemanticInventory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -468,6 +479,11 @@ pub struct OperationDeclaration {
     /// First attempt plus bounded retries.
     #[serde(default = "default_attempts")]
     pub max_attempts: u32,
+    /// Per-project prompt vocabulary of a `semantic_inventory` operation,
+    /// verbatim and in order; `None` uses the default room vocabulary. Part
+    /// of that operation's identity only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocabulary: Option<Vec<String>>,
 }
 
 fn default_attempts() -> u32 {
@@ -544,6 +560,10 @@ struct OperationIdentityInput {
     providers: Vec<ProviderDeclaration>,
     max_attempts: u32,
     inputs: Vec<String>,
+    /// Semantic vocabulary override; omitted otherwise, so other identities
+    /// are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vocabulary: Option<Vec<String>>,
 }
 
 impl SceneProjectManifest {
@@ -863,7 +883,9 @@ impl SceneProjectManifest {
                 ProviderLocation::Local => {}
             }
         }
-        if seen.len() != providers.len() {
+        // An empty fallback order declares no fallbacks: each operation uses only
+        // its own provider. A non-empty order ranks every provider.
+        if !policy.fallback_order.is_empty() && seen.len() != providers.len() {
             return invalid("fallback order must list every declared provider exactly once");
         }
 
@@ -970,6 +992,33 @@ impl SceneProjectManifest {
                     operation.id
                 ));
             }
+        }
+        if kind == OperationKind::SemanticInventory {
+            let keyframes = upstream_kinds
+                .iter()
+                .filter(|output| **output == ArtifactKind::Keyframes)
+                .count();
+            if keyframes != 1 {
+                return invalid(format!(
+                    "operation `{}` (semantic_inventory) must consume exactly one ingest_video operation",
+                    operation.id
+                ));
+            }
+        }
+        match (&operation.vocabulary, kind) {
+            (Some(terms), OperationKind::SemanticInventory) => {
+                if let Err(error) = crate::semantic_inventory::validate_terms(terms) {
+                    return invalid(format!("operation `{}`: {error}", operation.id));
+                }
+            }
+            (Some(_), _) => {
+                return invalid(format!(
+                    "operation `{}` ({}) cannot declare a vocabulary; only semantic_inventory can",
+                    operation.id,
+                    kind.name()
+                ))
+            }
+            (None, _) => {}
         }
         if kind == OperationKind::IngestVideo && operation.inputs.len() != 1 {
             return invalid(format!(
@@ -1186,6 +1235,7 @@ impl SceneProjectManifest {
                 providers,
                 max_attempts: operation.max_attempts,
                 inputs,
+                vocabulary: operation.vocabulary.clone(),
             };
             let bytes = serde_json::to_vec(&identity_input)
                 .map_err(|error| SceneProjectError::Malformed(error.to_string()))?;

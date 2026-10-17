@@ -306,6 +306,7 @@ fn reconciled_stale_artifacts_release_their_output_reservations() {
             ],
             provider: None,
             max_attempts: 1,
+            vocabulary: None,
         });
     manifest
         .operations
@@ -371,6 +372,7 @@ fn a_stale_file_at_the_bake_directory_is_removed_when_released() {
             ],
             provider: None,
             max_attempts: 1,
+            vocabulary: None,
         });
     manifest
         .operations
@@ -445,6 +447,7 @@ fn stale_artifacts_whose_sidecars_obstruct_a_bake_are_released() {
             ],
             provider: None,
             max_attempts: 1,
+            vocabulary: None,
         });
     // Changing the declaration makes ingest stale.
     manifest
@@ -475,6 +478,7 @@ fn bake_declaration() -> crate::scene_project::OperationDeclaration {
         ],
         provider: None,
         max_attempts: 1,
+        vocabulary: None,
     }
 }
 

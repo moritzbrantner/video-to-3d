@@ -17,7 +17,7 @@ impl BuiltInExecutor {
         }
     }
 
-    fn input<'a>(
+    pub(super) fn input<'a>(
         &self,
         request: &'a OperationRequest,
         kind: ArtifactKind,
@@ -35,7 +35,7 @@ impl BuiltInExecutor {
         Ok(record)
     }
 
-    fn document(
+    pub(super) fn document(
         &self,
         record: &crate::scene_project::ArtifactRecord,
         cancel: &CancellationToken,
