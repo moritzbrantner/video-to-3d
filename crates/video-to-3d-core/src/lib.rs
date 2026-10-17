@@ -41,10 +41,11 @@ pub use learned_depth::{
     RelativeDepthFrame, RelativeDepthFrameDiagnostics,
 };
 pub use reconstruction_evidence::{
-    classic_reference_patch_regions, EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin,
-    EvidencePointAttributes, EvidenceRange, EvidenceScale, ReconstructionEvidenceSummary,
-    ReconstructionEvidenceView, ReconstructionProviderClass, ReconstructionProviderDescriptor,
-    SurfaceEvidenceRegion, TriangleSourceCorners, DerivedVertexSource, RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+    classic_reference_patch_regions, DerivedVertexSource, EvidenceCamera, EvidenceCameraAuthority,
+    EvidenceOrigin, EvidencePointAttributes, EvidenceRange, EvidenceScale,
+    ReconstructionEvidenceSummary, ReconstructionEvidenceView, ReconstructionProviderClass,
+    ReconstructionProviderDescriptor, SurfaceEvidenceRegion, TriangleSourceCorners,
+    RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 pub use reconstruction_stages::{
     compose_reconstruction, reconstruct_cameras, reconstruct_cameras_with_cancel,

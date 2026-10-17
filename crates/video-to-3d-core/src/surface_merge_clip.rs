@@ -9,9 +9,9 @@
 //! boundary, fail-closed:
 //!
 //! - **Only observed, same-surface ownership is subtracted.** In the owner
-//!   camera's image the triangle loses exactly the owner triangles that
-//!   ownership counted: linked components at the same depth after removing the
-//!   pair's relative depth scale. Owner triangles at another depth (separate
+//!   camera's image the triangle loses the owner triangles of linked
+//!   components at the same depth after removing the pair's relative depth
+//!   scale, within the tighter [`MAX_CLIP_DEPTH_DISAGREEMENT`]. Owner triangles at another depth (separate
 //!   surfaces, occluders) are never subtracted, and nothing is added outside
 //!   the triangle's own projection, so a gap no triangle observed stays open.
 //! - **Derived vertices carry lineage.** Where the triangle's boundary crosses
@@ -38,8 +38,7 @@
 //! most [`MAX_CLIP_NODES`] arrangement nodes.
 
 use super::{
-    cross2, inverse_depth, polygon_area, Footprint, PostingTally,
-    MAX_RELATIVE_DEPTH_DISAGREEMENT,
+    cross2, inverse_depth, polygon_area, Footprint, PostingTally, MAX_RELATIVE_DEPTH_DISAGREEMENT,
 };
 use crate::{DerivedVertexSource, EvidenceOrigin, MeshTriangle, Point3};
 use nalgebra::{Vector2, Vector3};
@@ -49,6 +48,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub(super) const MAX_CLIP_OWNER_TRIANGLES: usize = 48;
 /// Most arrangement nodes one clip may build.
 pub(super) const MAX_CLIP_NODES: usize = 160;
+/// Largest depth disagreement, as a share of the owner's depth after removing
+/// the pair's relative depth scale, at which an owner triangle is subtracted
+/// from a clipped triangle. Tighter than ownership's
+/// [`MAX_RELATIVE_DEPTH_DISAGREEMENT`]: a clip zippers the remainder onto the
+/// owner's boundary, so the depth step between the two sides becomes part of
+/// the surface. On the `overlapping-references` fixture wider bounds join
+/// layers whose zipper triangles leave the true surface (unsupported share
+/// above 0.1 at 0.0175 and beyond), narrower ones leave more overlap seams
+/// unconnected; overlaps beyond this bound keep the triangle whole.
+pub(super) const MAX_CLIP_DEPTH_DISAGREEMENT: f64 = 0.014;
+const _: () = assert!(MAX_CLIP_DEPTH_DISAGREEMENT <= MAX_RELATIVE_DEPTH_DISAGREEMENT);
 /// Relative image-space tolerance (of the clipped triangle's longest edge)
 /// for coincidence and point-on-segment decisions: above the single-precision
 /// noise of the stored points, far below any accepted triangle.
@@ -280,6 +290,7 @@ pub(super) type Pieces = Vec<[usize; 3]>;
 /// Clip one job's triangle. On success the derived vertices and edge records
 /// are committed to `state` and the remainder's triangles returned in the
 /// triangle's own orientation; on failure `state` is unchanged.
+#[allow(clippy::needless_range_loop)] // index-addressed arrangement segments
 pub(super) fn clip_overlap(
     inputs: &ClipInputs<'_>,
     state: &mut ClipState,
@@ -308,7 +319,7 @@ pub(super) fn clip_overlap(
                     ) {
                         (Some(own), Some(owner)) => {
                             let (own, owner) = (1.0 / own, job.scale / owner);
-                            (own - owner).abs() <= MAX_RELATIVE_DEPTH_DISAGREEMENT * owner
+                            (own - owner).abs() <= MAX_CLIP_DEPTH_DISAGREEMENT * owner
                         }
                         _ => false,
                     }
@@ -341,8 +352,13 @@ pub(super) fn clip_overlap(
     );
     let flipped = signed < 0.0;
     let order: [usize; 3] = if flipped { [0, 2, 1] } else { [0, 1, 2] };
-    let subject: [(Vector2<f64>, f64, usize); 3] =
-        order.map(|corner| (candidate[corner].0, candidate[corner].1, subject_ids[corner]));
+    let subject: [(Vector2<f64>, f64, usize); 3] = order.map(|corner| {
+        (
+            candidate[corner].0,
+            candidate[corner].1,
+            subject_ids[corner],
+        )
+    });
     let extent = (0..3)
         .map(|edge| (subject[(edge + 1) % 3].0 - subject[edge].0).norm())
         .fold(0.0, f64::max);
@@ -370,7 +386,9 @@ pub(super) fn clip_overlap(
             }
             let node = subject
                 .iter()
-                .position(|(corner_position, _, _)| (*corner_position - position).norm() <= tolerance)
+                .position(|(corner_position, _, _)| {
+                    (*corner_position - position).norm() <= tolerance
+                })
                 .unwrap_or_else(|| {
                     nodes.push(Node {
                         position,
@@ -583,7 +601,8 @@ pub(super) fn clip_overlap(
                     break;
                 }
             }
-            let polygon: Vec<Vector2<f64>> = face.iter().map(|&node| nodes[node].position).collect();
+            let polygon: Vec<Vector2<f64>> =
+                face.iter().map(|&node| nodes[node].position).collect();
             let area = signed_area(&polygon);
             if area > 0.0 {
                 faces.push(face);
@@ -672,9 +691,12 @@ pub(super) fn clip_overlap(
                         }
                     });
                     let (pa, pb) = (inputs.points[a], inputs.points[b]);
-                    let lerp = |x: f32, y: f32| (f64::from(x) * (1.0 - s) + f64::from(y) * s) as f32;
+                    let lerp =
+                        |x: f32, y: f32| (f64::from(x) * (1.0 - s) + f64::from(y) * s) as f32;
                     let lerp8 = |x: u8, y: u8| {
-                        (f64::from(x) * (1.0 - s) + f64::from(y) * s).round().clamp(0.0, 255.0) as u8
+                        (f64::from(x) * (1.0 - s) + f64::from(y) * s)
+                            .round()
+                            .clamp(0.0, 255.0) as u8
                     };
                     let point = Point3 {
                         x: lerp(pa.x, pb.x),
@@ -746,6 +768,7 @@ fn signed_area(polygon: &[Vector2<f64>]) -> f64 {
 /// Split every triangle at the vertices recorded inside its edges, so no
 /// vertex lies inside another triangle's edge. A split triangle keeps its slot
 /// for its first piece and appends the rest; returns the split slots.
+#[allow(clippy::needless_range_loop)] // slots are rewritten in place
 pub(super) fn conform_edges(
     state: &ClipState,
     triangles: &mut Vec<MeshTriangle>,
@@ -775,7 +798,11 @@ pub(super) fn conform_edges(
         let triangle = triangles[slot];
         let corners = [triangle.a, triangle.b, triangle.c];
         let mut boundary: Vec<(usize, Vector2<f64>)> = Vec::new();
-        let frame = [Vector2::new(0.0, 0.0), Vector2::new(1.0, 0.0), Vector2::new(0.0, 1.0)];
+        let frame = [
+            Vector2::new(0.0, 0.0),
+            Vector2::new(1.0, 0.0),
+            Vector2::new(0.0, 1.0),
+        ];
         let mut inserted = false;
         for edge in 0..3 {
             let (u, v) = (corners[edge], corners[(edge + 1) % 3]);

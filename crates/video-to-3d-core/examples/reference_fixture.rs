@@ -1404,6 +1404,6 @@ mod tests {
         assert!(first
             .depth
             .iter()
-            .all(|&depth| depth >= 5.55 - 1e-3 && depth <= 6.0 + 1e-3));
+            .all(|&depth| (5.55 - 1e-3..=6.0 + 1e-3).contains(&depth)));
     }
 }

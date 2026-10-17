@@ -268,7 +268,9 @@ impl<'a> ReconstructionEvidenceView<'a> {
 
     /// Points with observed provenance: every point before the derived ones.
     pub fn observed_point_count(&self) -> usize {
-        self.points.len().saturating_sub(self.derived_vertices.len())
+        self.points
+            .len()
+            .saturating_sub(self.derived_vertices.len())
     }
 
     /// Attach borrowed per-point attributes, validating them against the shared points.
@@ -909,7 +911,11 @@ fn validate_derived_vertices(
                 "reconstruction evidence derived vertex {index} has a degenerate source triangle"
             ));
         }
-        if record.source_corners.iter().any(|&corner| corner >= observed) {
+        if record
+            .source_corners
+            .iter()
+            .any(|&corner| corner >= observed)
+        {
             return Err(format!(
                 "reconstruction evidence derived vertex {index} source corner is not an observed point"
             ));

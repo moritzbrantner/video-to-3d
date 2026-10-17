@@ -613,7 +613,10 @@ pub(crate) fn bake_incremental<'p>(
                 .get(point)
                 .map(|site| [f64::from(site.x), f64::from(site.y)])
         } else {
-            derived_pixels.get(point - observed_count).copied().flatten()
+            derived_pixels
+                .get(point - observed_count)
+                .copied()
+                .flatten()
         }
     };
 
@@ -755,9 +758,8 @@ pub(crate) fn bake_incremental<'p>(
                 if ordinal % 1024 == 0 {
                     check_canceled()?;
                 }
-                corner_pixels.push(
-                    corners.map(|point| pixel_of(point).expect("classified with a pixel")),
-                );
+                corner_pixels
+                    .push(corners.map(|point| pixel_of(point).expect("classified with a pixel")));
             }
             let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
 

@@ -43,9 +43,9 @@
 //! lower support-group index.
 
 use crate::{MeshTriangle, Point3};
+use clip::{ClipInputs, ClipJob, ClipState};
 use nalgebra::{Matrix3, Vector2, Vector3};
 use std::collections::{BTreeSet, HashMap};
-use clip::{ClipInputs, ClipJob, ClipState};
 use stitch::{stitch_trimmed_seams, ImageRemoval, SeamInputs};
 
 #[path = "surface_merge_stitch.rs"]
@@ -201,7 +201,7 @@ pub(super) struct MergeStats {
 impl MergeStats {
     pub fn diagnostic(&self, support_groups: usize) -> String {
         format!(
-            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area; {} seam stitch triangle(s) over existing vertices closed the gaps trimmed seams left, only where the removed triangles observed the surface at the owner's depth; and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} linked patch pair(s) had too few anchored overlap samples to calibrate their relative depth scale and were compared uncalibrated. {} candidate lookup(s) hit the posting bound of {} owner triangles (at most {} processed by one lookup) and {} triangle(s) exhausted the clipping budget of {} fragments; both were retained unjudged. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). Only fusion-accepted pairs were merged; no vertex was created or moved, and gaps no patch observed stay open.",
+            "Overlapping reference patches: {} fused seam pair(s) became shared vertices ({} shared vertices, {} cross-reference triangles) and {} kept separate vertices because their endpoints carry different evidence origins; {} duplicated overlap triangle(s) were dropped in favour of the patch already meshing that surface, {} of them seam triangles owned only in part, trimming {:.2}% of the accepted mesh area; {} seam stitch triangle(s) over existing vertices closed the gaps trimmed seams left, only where the removed triangles observed the surface at the owner's depth; and {} partially overlapping triangle(s) were retained to preserve supported geometry. {} linked patch pair(s) had too few anchored overlap samples to calibrate their relative depth scale and were compared uncalibrated. {} candidate lookup(s) hit the posting bound of {} owner triangles (at most {} processed by one lookup) and {} triangle(s) exhausted the clipping budget of {} fragments; both were retained unjudged. {} of {} camera-support group(s) carry triangles, forming {} connected patch component(s). {} partially owned overlap triangle(s) were clipped against their owner at the same depth into {} remainder triangle(s), deriving {} vertex(es) on owner edges with source-triangle and barycentric lineage (derived geometry, not new observations) and splitting {} triangle(s) at them so no vertex lies inside another edge; {} could not be clipped verifiably and were kept whole. Only fusion-accepted pairs were merged; no observed vertex was created or moved, and gaps no patch observed stay open.",
             self.fused_pairs,
             self.shared_vertices,
             self.cross_reference_triangles,
@@ -220,6 +220,11 @@ impl MergeStats {
             self.meshed_patches,
             support_groups,
             self.patch_components,
+            self.clipped_overlap_triangles,
+            self.clip_pieces,
+            self.derived_vertices,
+            self.conformed_triangles,
+            self.unclipped_overlap_triangles,
         )
     }
 }

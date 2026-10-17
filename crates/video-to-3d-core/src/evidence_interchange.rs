@@ -32,9 +32,9 @@
 //! exactly after the last buffer.
 
 use crate::{
-    EvidenceCamera, EvidencePointAttributes, EvidenceScale, MeshTriangle, Point3,
-    ReconstructionEvidenceView, ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
-    DerivedVertexSource, TriangleSourceCorners,
+    DerivedVertexSource, EvidenceCamera, EvidencePointAttributes, EvidenceScale, MeshTriangle,
+    Point3, ReconstructionEvidenceView, ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
+    TriangleSourceCorners,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};

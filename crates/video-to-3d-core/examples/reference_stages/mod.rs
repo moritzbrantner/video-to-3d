@@ -345,8 +345,7 @@ fn observed_reference_of_point(evidence: &ReconstructionEvidenceView<'_>) -> Vec
     // A derived (clipped) vertex lies on its source triangle, so it is judged
     // through that triangle's reference; it adds no observation.
     for derived in evidence.derived_vertices {
-        if let Some(slot) = reference.get(derived.point_index).copied() {
-            let _ = slot;
+        if derived.point_index < reference.len() {
             reference[derived.point_index] = reference[derived.source_corners[0]];
         }
     }
