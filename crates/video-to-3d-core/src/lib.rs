@@ -17,6 +17,7 @@ pub mod object_identity;
 pub mod object_masks;
 pub mod object_placement;
 pub mod object_references;
+pub mod placement_validation;
 pub mod scene_artifacts;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod scene_export;

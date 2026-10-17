@@ -20,18 +20,26 @@
 //!   classifies it as in contact, floating or sunken, or reports that no
 //!   contact evidence exists.
 //!
+//! - **Validation (#70).** Every placement is projected back into the
+//!   object's registered source views and checked against the original masks
+//!   and accepted geometry ([`crate::placement_validation`]); contradicted or
+//!   single-view placements are marked for review.
+//!
 //! Nothing here changes cameras, the reconstructed geometry or the candidate
 //! meshes: a placement is a transform plus its evidence.
 
 use crate::object_generation::ObjectGenerationArtifact;
 use crate::object_identity::{front_points, FrameCamera, ObjectCategory, ObjectIdentityArtifact};
 use crate::object_references::ObjectReferencesArtifact;
+use crate::placement_validation::{
+    validate_placement, PlacedMesh, PlacementValidation, PlacementVerdict,
+};
 use crate::scene_project::ContentHash;
 use crate::semantic_inventory::SemanticInventoryArtifact;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const OBJECT_PLACEMENT_SCHEMA_VERSION: u32 = 1;
+pub const OBJECT_PLACEMENT_SCHEMA_VERSION: u32 = 2;
 /// Floor points needed to take the scene up direction from a fitted floor.
 pub const MIN_FLOOR_POINTS: usize = 20;
 /// Points needed to fit a support plane.
@@ -120,6 +128,8 @@ pub struct ObjectPlacement {
     /// Distance from the placed bottom to the support, along up (scene units).
     pub contact_gap: Option<f64>,
     pub reason: String,
+    /// Multi-view check against the original observations.
+    pub validation: PlacementValidation,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -196,7 +206,12 @@ impl ObjectPlacementArtifact {
                 .chain(&placement.translation)
                 .chain(std::iter::once(&placement.scale))
                 .all(|value| value.is_finite());
-            if !finite || placement.scale <= 0.0 || placement.reason.trim().is_empty() {
+            if !finite
+                || placement.scale <= 0.0
+                || placement.reason.trim().is_empty()
+                || placement.validation.needs_review
+                    != (placement.validation.verdict != PlacementVerdict::Accepted)
+            {
                 return Err(format!(
                     "object placement of {} is not a valid transform",
                     placement.object
@@ -285,6 +300,22 @@ pub struct MeshBounds {
     pub max: [f64; 3],
 }
 
+impl MeshBounds {
+    pub fn of(vertices: &[[f64; 3]]) -> Option<Self> {
+        let first = *vertices.first()?;
+        Some(vertices.iter().fold(
+            Self {
+                min: first,
+                max: first,
+            },
+            |bounds, vertex| Self {
+                min: [0, 1, 2].map(|axis| bounds.min[axis].min(vertex[axis])),
+                max: [0, 1, 2].map(|axis| bounds.max[axis].max(vertex[axis])),
+            },
+        ))
+    }
+}
+
 /// Place every generated candidate in the scene.
 #[allow(clippy::too_many_arguments)]
 pub fn place_objects(
@@ -293,7 +324,7 @@ pub fn place_objects(
     references: &ObjectReferencesArtifact,
     generation: &ObjectGenerationArtifact,
     generation_hash: ContentHash,
-    mesh_bounds: &BTreeMap<String, MeshBounds>,
+    mesh_vertices: &BTreeMap<String, Vec<[f64; 3]>>,
     cameras: &[FrameCamera],
     points: &[[f64; 3]],
 ) -> ObjectPlacementArtifact {
@@ -428,8 +459,9 @@ pub fn place_objects(
         if categories.get(request.object.as_str()) == Some(&ObjectCategory::Structure) {
             continue;
         }
+        let vertices = mesh_vertices.get(&request.request_id);
         let (Some(bounds), Some(package), Some(camera)) = (
-            mesh_bounds.get(&request.request_id),
+            vertices.and_then(|vertices| MeshBounds::of(vertices)),
             packages.get(request.object.as_str()),
             cameras_by_frame.get(&request.frame_index),
         ) else {
@@ -439,10 +471,10 @@ pub fn place_objects(
             ));
             continue;
         };
-        let placement = match place_one(
+        let mut placement = match place_one(
             request,
             &package.observed_points,
-            *bounds,
+            bounds,
             camera,
             up,
             &artifact.supports,
@@ -453,6 +485,33 @@ pub fn place_objects(
                 continue;
             }
         };
+        let views: Vec<_> = identities
+            .objects
+            .iter()
+            .find(|object| object.id == request.object)
+            .map(|object| {
+                object
+                    .observations
+                    .iter()
+                    .filter_map(|id| {
+                        let observation = *observations.get(id.as_str())?;
+                        let camera = *cameras_by_frame.get(&observation.frame_index)?;
+                        Some((observation, camera))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        placement.validation = validate_placement(
+            &PlacedMesh {
+                rotation: placement.rotation,
+                scale: placement.scale,
+                translation: placement.translation,
+                vertices: vertices.map(Vec::as_slice).unwrap_or_default(),
+                reference_frame: placement.reference_frame,
+            },
+            &views,
+            points,
+        );
         let height = placement.scale * (bounds.max[2] - bounds.min[2]);
         if let Some(prior) = size_prior(&request.label) {
             if height > 0.0 {
@@ -628,6 +687,12 @@ pub(crate) fn place_one(
                 request.frame_index,
                 observed.len()
             ),
+            validation: PlacementValidation {
+                verdict: PlacementVerdict::Approximate,
+                needs_review: true,
+                views: Vec::new(),
+                reason: "not validated against other views".into(),
+            },
         })
 }
 
