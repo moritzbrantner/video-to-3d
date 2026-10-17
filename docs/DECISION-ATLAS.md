@@ -142,3 +142,9 @@ Sources seeded into this atlas:
       - [ ] In-process ONNX inference in Rust (#216)
       - [ ] In-browser WebGPU / ONNX Runtime Web inference (#214)
 
+  - **8.9** Local clean-plate provider.
+    - **8.9.1** [decision] Owner answer on #64 (2026-10-17): clean plates (object removal) use **LaMa (big-lama)**, Apache-2.0, run locally under 4.1.1, in a GPU or CPU sidecar. video-to-3d builds this now as a Rust operation plus a local sidecar. Its contract is shaped so that asset-tooling#182 can wrap it later without changing consumers. Clean plates are generated or edited appearance, never observed evidence. Original frames stay immutable and remain the validation source (5.2, 2.3).
+  - **8.10** Local object-generation provider.
+    - **8.10.1** [decision] Owner answer on #68 (2026-10-17): the first local object-mesh generator is **TripoSR** (MIT licence, fits the 8 GB GPU). It is fed by the multi-view object reference packages. Generated meshes are candidate evidence only, validated against retained video evidence (1.5.1). The cloud adapter asset-tooling#181 waits on 8.5.1.
+  - **8.11** Generated-world integration waits on the cloud policy.
+    - **8.11.1** [decision] Owner answer (2026-10-17): generated-world integration (#65–#67, Marble via asset-tooling#183–#185) is deferred until the post-v1 cloud policy in 8.5.1 is settled. Initial-release processing stays local (4.1.1).
