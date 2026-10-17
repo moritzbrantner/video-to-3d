@@ -366,3 +366,137 @@ fn run_sidecar(
         .map(SidecarRun::Response)
         .map_err(|error| format!("semantic sidecar response is unreadable: {error}"))
 }
+
+impl BuiltInExecutor {
+    /// Built-in object identities (#61): semantic evidence localized with the
+    /// accepted cameras and surface, read-only.
+    pub(super) fn object_identity(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+    ) -> AttemptOutcome {
+        if cancel.is_canceled() {
+            return AttemptOutcome::Canceled;
+        }
+        let directory = format!("artifacts/native/{}", request.operation.id);
+        match self.collision(&request.operation.id, &directory) {
+            Ok(Some(path)) => {
+                return AttemptOutcome::Unsupported(format!(
+                    "object identity output would overwrite declared path {}",
+                    path.as_str()
+                ))
+            }
+            Err(message) => return AttemptOutcome::Failed(message),
+            Ok(None) => {}
+        }
+        match self.run_object_identity(request, cancel, &directory) {
+            Ok(produced) => AttemptOutcome::Succeeded(produced),
+            Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
+            Err(message) => AttemptOutcome::Failed(message),
+        }
+    }
+
+    fn run_object_identity(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+        directory: &str,
+    ) -> Result<ProducedArtifact, String> {
+        let semantic_record = self.input(request, ArtifactKind::SemanticInventory)?;
+        let inventory =
+            SemanticInventoryArtifact::from_json(&self.document(semantic_record, cancel)?)?;
+        let cameras = crate::CameraStageArtifact::from_json_with_cancel(
+            &self.document(
+                self.input(request, ArtifactKind::SparseReconstruction)?,
+                cancel,
+            )?,
+            || cancel.is_canceled(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mesh = SurfaceMeshArtifact::from_json_with_cancel(
+            &self.document(self.input(request, ArtifactKind::SurfaceMesh)?, cancel)?,
+            || {
+                if cancel.is_canceled() {
+                    Err("object identity mesh read canceled".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        let sparse = &cameras.sparse;
+        let principal = [
+            f64::from(sparse.image_width) / 2.0,
+            f64::from(sparse.image_height) / 2.0,
+        ];
+        let frame_cameras: Vec<crate::object_identity::FrameCamera> = mesh
+            .cameras
+            .iter()
+            .map(|camera| crate::object_identity::FrameCamera {
+                frame_index: camera.frame_index,
+                rotation: camera.rotation.map(f64::from),
+                translation: camera.translation.map(f64::from),
+                focal_pixels: f64::from(sparse.focal_length_pixels),
+                principal_point: principal,
+            })
+            .collect();
+        let points: Vec<[f64; 3]> = mesh
+            .points
+            .iter()
+            .map(|point| [f64::from(point.x), f64::from(point.y), f64::from(point.z)])
+            .collect();
+        if cancel.is_canceled() {
+            return Err("object identity canceled".into());
+        }
+        let artifact = crate::object_identity::identify_objects(
+            &inventory,
+            semantic_record.content_hash.clone(),
+            &frame_cameras,
+            &points,
+        );
+        artifact.validate()?;
+        let output =
+            ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
+        let document = artifact.to_json();
+        write_atomically(&output.resolve(&self.root), document.as_bytes())?;
+        let mut produced = ProducedArtifact::new(
+            output,
+            ContentHash::of_bytes(document.as_bytes()),
+            Reproducibility::Deterministic,
+        );
+        let count = |motion: crate::object_identity::MotionClass| {
+            artifact
+                .objects
+                .iter()
+                .filter(|object| object.motion == motion)
+                .count()
+                .to_string()
+        };
+        use crate::object_identity::MotionClass;
+        produced
+            .observations
+            .insert("objects".into(), artifact.objects.len().to_string());
+        produced.observations.insert(
+            "static_structure".into(),
+            count(MotionClass::StaticStructure),
+        );
+        produced.observations.insert(
+            "movable_stationary".into(),
+            count(MotionClass::MovableStationary),
+        );
+        produced
+            .observations
+            .insert("moving".into(), count(MotionClass::Moving));
+        produced
+            .observations
+            .insert("motion_unknown".into(), count(MotionClass::Unknown));
+        produced
+            .observations
+            .insert("ambiguities".into(), artifact.ambiguities.len().to_string());
+        if let Some(reason) = &artifact.unavailable_reason {
+            produced
+                .observations
+                .insert("identity_reason".into(), reason.clone());
+        }
+        Ok(produced)
+    }
+}
