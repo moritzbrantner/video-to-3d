@@ -71,6 +71,13 @@ Sources seeded into this atlas:
 - [x] **2.5** WASM is an adapter boundary.
   `crates/video-to-3d-wasm` adapts shared logic; it does not duplicate reconstruction semantics from 2.1.
 
+- [x] **8.8** Segmentation runtime path, measurement device, model acquisition and first slice.
+  **Supersedes 8.7 in part** (owner answers on #60, 2026-10-17). These parts of 8.7 are replaced: its runtime choice, "RTX 3060 8 GB" as the only measurement card, and "any installation/cache acquisition must be explicit and integrity-verified". The rest of 8.7 stays in force: Grounding DINO + SAM 2.1, local-only inference, fallible evidence, the versioned provider-neutral handoff, Rust geometry authority, and the yellow-die first proof.
+  **Runtime path:** the first slice may run the models in a pinned Python/PyTorch sidecar that a native provider operation invokes, if that is what it takes. The intended direction is in-process ONNX inference in Rust (#216), and then in-browser inference on locally decoded frames via WebGPU or ONNX Runtime Web (#214). The provider boundary and the versioned semantic-evidence artifact must stay independent of the runtime, so the runtime can be swapped without changing consumers. Browser inference adds to 4.3 and does not replace it: the browser keeps owning decoding and sampling, and frames never leave the device.
+  **Measurement device:** the RTX 3060 Ti 8 GB on the development machine is an accepted 3060-class 8 GB device for the GPU gate. Record the exact card with every measurement.
+  **Model acquisition:** fetch weights automatically on first need into a local cache, idempotently (if they are already present, do nothing). There is no separate manual step and nothing is committed. A pinned version and URL is enough identity; no further verification ceremony. Choose the checkpoints that fit the 8 GB gate, starting small.
+  **First slice:** native only. A `SemanticInventory` provider operation in the CLI/store runs on the 18 TUM frames. It emits versioned box/mask/track evidence. On CPU-only machines it reports segmentation as unavailable, honestly (4.6). The default room vocabulary (architecture and objects, per #60) can be overridden per project, and the vocabulary used is recorded with the evidence. The UI follows in #215. Experimental phase: prefer the cleanest design without compatibility shims.
+
 - [x] **2.6** Native providers must reuse shared validation/fusion semantics.
   Tauri/native workers may execute heavyweight local providers, but their evidence enters through the same authority boundary from 2.2 rather than creating a second native reconstruction authority.
 
