@@ -5,6 +5,7 @@
 //! [`reconstruct_dense`] → [`reconstruct_mesh`], joined by [`compose_reconstruction`]);
 //! both give the same [`ReconstructionResult`].
 
+pub mod clean_plate;
 pub mod coarse_collision;
 pub mod colmap;
 pub mod evidence_interchange;
