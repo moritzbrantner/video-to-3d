@@ -430,7 +430,7 @@ pub fn benchmark_packed_geometry_result(
         .collect();
     let payload = GeometryBenchmarkPackedPayload {
         dense_points: pack_dense_points(&points),
-        mesh_triangles: pack_mesh_triangles(&triangles, &[], points.len())?,
+        mesh_triangles: pack_mesh_triangles(&triangles, &[], &[], points.len())?,
     };
     let serializer = browser_serializer();
     payload.serialize(&serializer).map_err(|error| {
