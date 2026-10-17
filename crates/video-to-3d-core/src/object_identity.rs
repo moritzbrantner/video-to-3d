@@ -244,7 +244,7 @@ fn mask_contains(mask: &SemanticMask, column: u32, row: u32) -> bool {
     false
 }
 
-fn inside(observation: &SemanticObservation, pixel: [f64; 2]) -> bool {
+pub(crate) fn inside(observation: &SemanticObservation, pixel: [f64; 2]) -> bool {
     let [x0, y0, x1, y1] = observation.bbox;
     let [x, y] = pixel;
     if !(x >= x0 && x < x1 && y >= y0 && y < y1) {
@@ -257,34 +257,58 @@ fn inside(observation: &SemanticObservation, pixel: [f64; 2]) -> bool {
 }
 
 /// Localize an observation with the accepted points that project inside it.
+/// Pixel of a world point in `camera`, when in front of it.
+pub(crate) fn project(camera: &FrameCamera, point: [f64; 3]) -> Option<([f64; 2], f64)> {
+    let local = camera.camera_point(point);
+    (local[2] > 1.0e-9 && local.iter().all(|value| value.is_finite())).then(|| {
+        (
+            [
+                camera.focal_pixels * local[0] / local[2] + camera.principal_point[0],
+                camera.focal_pixels * local[1] / local[2] + camera.principal_point[1],
+            ],
+            local[2],
+        )
+    })
+}
+
+/// The accepted points inside an observation that are nearest the camera
+/// (the front depth band), with their camera depths; empty below
+/// [`MIN_LOCALIZING_POINTS`].
+pub(crate) fn front_points(
+    observation: &SemanticObservation,
+    camera: &FrameCamera,
+    points: &[[f64; 3]],
+) -> Vec<(f64, [f64; 3])> {
+    let hits: Vec<(f64, [f64; 3])> = points
+        .iter()
+        .filter_map(|point| {
+            let (pixel, depth) = project(camera, *point)?;
+            inside(observation, pixel).then_some((depth, *point))
+        })
+        .collect();
+    let nearest = hits
+        .iter()
+        .map(|(depth, _)| *depth)
+        .fold(f64::INFINITY, f64::min);
+    let front: Vec<(f64, [f64; 3])> = hits
+        .into_iter()
+        .filter(|(depth, _)| *depth <= nearest * (1.0 + FRONT_DEPTH_BAND))
+        .collect();
+    if front.len() < MIN_LOCALIZING_POINTS {
+        Vec::new()
+    } else {
+        front
+    }
+}
+
+/// Localize an observation with the accepted points that project inside it.
 fn locate(
     observation: &SemanticObservation,
     camera: &FrameCamera,
     points: &[[f64; 3]],
 ) -> Option<ObjectLocation> {
-    let mut hits: Vec<(f64, [f64; 3])> = Vec::new();
-    for point in points {
-        let local = camera.camera_point(*point);
-        if !(local[2] > 1.0e-9 && local.iter().all(|value| value.is_finite())) {
-            continue;
-        }
-        let pixel = [
-            camera.focal_pixels * local[0] / local[2] + camera.principal_point[0],
-            camera.focal_pixels * local[1] / local[2] + camera.principal_point[1],
-        ];
-        if inside(observation, pixel) {
-            hits.push((local[2], *point));
-        }
-    }
-    let nearest = hits
-        .iter()
-        .map(|(depth, _)| *depth)
-        .fold(f64::INFINITY, f64::min);
-    let front: Vec<&(f64, [f64; 3])> = hits
-        .iter()
-        .filter(|(depth, _)| *depth <= nearest * (1.0 + FRONT_DEPTH_BAND))
-        .collect();
-    if front.len() < MIN_LOCALIZING_POINTS {
+    let front = front_points(observation, camera, points);
+    if front.is_empty() {
         return None;
     }
     let count = front.len() as f64;

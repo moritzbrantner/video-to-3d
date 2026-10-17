@@ -1973,6 +1973,9 @@ impl OperationExecutor for BuiltInExecutor {
         if kind == OperationKind::ObjectIdentity && request.provider.is_none() {
             return self.object_identity(request, cancel);
         }
+        if kind == OperationKind::ObjectMasks && request.provider.is_none() {
+            return self.object_masks(request, cancel);
+        }
         if request.provider.is_none() {
             if let Some(outcome) = self.native_stage(request, cancel) {
                 return outcome;

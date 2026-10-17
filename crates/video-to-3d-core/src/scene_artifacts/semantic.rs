@@ -405,45 +405,7 @@ impl BuiltInExecutor {
         let semantic_record = self.input(request, ArtifactKind::SemanticInventory)?;
         let inventory =
             SemanticInventoryArtifact::from_json(&self.document(semantic_record, cancel)?)?;
-        let cameras = crate::CameraStageArtifact::from_json_with_cancel(
-            &self.document(
-                self.input(request, ArtifactKind::SparseReconstruction)?,
-                cancel,
-            )?,
-            || cancel.is_canceled(),
-        )
-        .map_err(|error| error.to_string())?;
-        let mesh = SurfaceMeshArtifact::from_json_with_cancel(
-            &self.document(self.input(request, ArtifactKind::SurfaceMesh)?, cancel)?,
-            || {
-                if cancel.is_canceled() {
-                    Err("object identity mesh read canceled".into())
-                } else {
-                    Ok(())
-                }
-            },
-        )?;
-        let sparse = &cameras.sparse;
-        let principal = [
-            f64::from(sparse.image_width) / 2.0,
-            f64::from(sparse.image_height) / 2.0,
-        ];
-        let frame_cameras: Vec<crate::object_identity::FrameCamera> = mesh
-            .cameras
-            .iter()
-            .map(|camera| crate::object_identity::FrameCamera {
-                frame_index: camera.frame_index,
-                rotation: camera.rotation.map(f64::from),
-                translation: camera.translation.map(f64::from),
-                focal_pixels: f64::from(sparse.focal_length_pixels),
-                principal_point: principal,
-            })
-            .collect();
-        let points: Vec<[f64; 3]> = mesh
-            .points
-            .iter()
-            .map(|point| [f64::from(point.x), f64::from(point.y), f64::from(point.z)])
-            .collect();
+        let (frame_cameras, points) = self.registered_geometry(request, cancel)?;
         if cancel.is_canceled() {
             return Err("object identity canceled".into());
         }
@@ -498,5 +460,136 @@ impl BuiltInExecutor {
                 .insert("identity_reason".into(), reason.clone());
         }
         Ok(produced)
+    }
+}
+
+impl BuiltInExecutor {
+    /// Registered pinhole cameras and accepted surface points, read-only.
+    fn registered_geometry(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<crate::object_identity::FrameCamera>, Vec<[f64; 3]>), String> {
+        let cameras = crate::CameraStageArtifact::from_json_with_cancel(
+            &self.document(
+                self.input(request, ArtifactKind::SparseReconstruction)?,
+                cancel,
+            )?,
+            || cancel.is_canceled(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mesh = SurfaceMeshArtifact::from_json_with_cancel(
+            &self.document(self.input(request, ArtifactKind::SurfaceMesh)?, cancel)?,
+            || {
+                if cancel.is_canceled() {
+                    Err("object geometry read canceled".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        let sparse = &cameras.sparse;
+        let principal = [
+            f64::from(sparse.image_width) / 2.0,
+            f64::from(sparse.image_height) / 2.0,
+        ];
+        let frame_cameras = mesh
+            .cameras
+            .iter()
+            .map(|camera| crate::object_identity::FrameCamera {
+                frame_index: camera.frame_index,
+                rotation: camera.rotation.map(f64::from),
+                translation: camera.translation.map(f64::from),
+                focal_pixels: f64::from(sparse.focal_length_pixels),
+                principal_point: principal,
+            })
+            .collect();
+        let points = mesh
+            .points
+            .iter()
+            .map(|point| [f64::from(point.x), f64::from(point.y), f64::from(point.z)])
+            .collect();
+        Ok((frame_cameras, points))
+    }
+
+    /// Built-in cross-view mask consistency (#62), read-only.
+    pub(super) fn object_masks(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+    ) -> AttemptOutcome {
+        if cancel.is_canceled() {
+            return AttemptOutcome::Canceled;
+        }
+        let directory = format!("artifacts/native/{}", request.operation.id);
+        match self.collision(&request.operation.id, &directory) {
+            Ok(Some(path)) => {
+                return AttemptOutcome::Unsupported(format!(
+                    "object masks output would overwrite declared path {}",
+                    path.as_str()
+                ))
+            }
+            Err(message) => return AttemptOutcome::Failed(message),
+            Ok(None) => {}
+        }
+        let result = (|| -> Result<ProducedArtifact, String> {
+            let semantic_record = self.input(request, ArtifactKind::SemanticInventory)?;
+            let inventory =
+                SemanticInventoryArtifact::from_json(&self.document(semantic_record, cancel)?)?;
+            let identity_record = self.input(request, ArtifactKind::ObjectIdentity)?;
+            let identities = crate::object_identity::ObjectIdentityArtifact::from_json(
+                &self.document(identity_record, cancel)?,
+            )?;
+            if identities.semantic_inventory != semantic_record.content_hash {
+                return Err(
+                    "object identities were derived from another semantic inventory".into(),
+                );
+            }
+            let (cameras, points) = self.registered_geometry(request, cancel)?;
+            if cancel.is_canceled() {
+                return Err("object masks canceled".into());
+            }
+            let artifact = crate::object_masks::check_object_masks(
+                &inventory,
+                semantic_record.content_hash.clone(),
+                &identities,
+                identity_record.content_hash.clone(),
+                &cameras,
+                &points,
+            );
+            artifact.validate()?;
+            let output = ProjectPath::new(format!("{directory}/artifact.json"))
+                .map_err(|e| e.to_string())?;
+            let document = artifact.to_json();
+            write_atomically(&output.resolve(&self.root), document.as_bytes())?;
+            let mut produced = ProducedArtifact::new(
+                output,
+                ContentHash::of_bytes(document.as_bytes()),
+                Reproducibility::Deterministic,
+            );
+            use crate::object_masks::MaskConsistency;
+            for (key, class) in [
+                ("consistent_masks", MaskConsistency::Consistent),
+                ("inconsistent_masks", MaskConsistency::Inconsistent),
+                ("unverified_masks", MaskConsistency::Unverified),
+                ("missing_masks", MaskConsistency::MissingMask),
+            ] {
+                produced.observations.insert(
+                    key.into(),
+                    artifact
+                        .masks
+                        .iter()
+                        .filter(|mask| mask.consistency == class)
+                        .count()
+                        .to_string(),
+                );
+            }
+            Ok(produced)
+        })();
+        match result {
+            Ok(produced) => AttemptOutcome::Succeeded(produced),
+            Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
+            Err(message) => AttemptOutcome::Failed(message),
+        }
     }
 }

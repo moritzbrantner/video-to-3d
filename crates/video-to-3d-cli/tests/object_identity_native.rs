@@ -101,9 +101,11 @@ fn project(response: &Value) -> PathBuf {
             {"id": "semantic", "kind": "semantic_inventory", "provider": "local-grounded-sam2",
              "vocabulary": ["toy", "wall"], "inputs": [{"operation": "ingest"}]},
             {"id": "objects", "kind": "object_identity",
-             "inputs": [{"operation": "semantic"}, {"operation": "sparse"}, {"operation": "mesh"}]}
+             "inputs": [{"operation": "semantic"}, {"operation": "sparse"}, {"operation": "mesh"}]},
+            {"id": "masks", "kind": "object_masks",
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "sparse"}, {"operation": "mesh"}]}
         ],
-        "requested_outputs": ["object_identity"]
+        "requested_outputs": ["object_identity", "object_masks"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     store
@@ -173,6 +175,15 @@ fn object_identity_runs_over_semantic_evidence_without_touching_geometry() {
     assert_eq!(toy.observations, ["obs-0", "obs-1"]);
     assert_eq!(toy.source_tracks, ["track-0"]);
     assert!(!toy.motion_reason.is_empty());
+    // Box-only test evidence: every mask is reported missing, never elevated.
+    assert_eq!(
+        result["operations"]["masks"]["state"], "succeeded",
+        "{result}"
+    );
+    assert_eq!(
+        result["operations"]["masks"]["observations"]["missing_masks"],
+        "3"
+    );
     let rebuilt = build(&root);
     assert_eq!(
         rebuilt["operations"]["objects"]["state"], "reused",
