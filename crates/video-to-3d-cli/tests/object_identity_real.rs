@@ -19,6 +19,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use video_to_3d_core::object_identity::ObjectIdentityArtifact;
 use video_to_3d_core::object_masks::ObjectMasksArtifact;
+use video_to_3d_core::object_references::ObjectReferencesArtifact;
 use video_to_3d_core::scene_artifacts::{
     write_project_keyframes_artifact, KeyframesArtifact, SampledFrame,
 };
@@ -180,9 +181,11 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
             {"id": "objects", "kind": "object_identity",
              "inputs": [{"operation": "semantic"}, {"operation": "sparse"}, {"operation": "mesh"}]},
             {"id": "masks", "kind": "object_masks",
-             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "sparse"}, {"operation": "mesh"}]}
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "sparse"}, {"operation": "mesh"}]},
+            {"id": "references", "kind": "object_references",
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "masks"}, {"operation": "sparse"}, {"operation": "mesh"}]}
         ],
-        "requested_outputs": ["assembled_scene", "object_identity", "object_masks"]
+        "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     let report = store
@@ -303,6 +306,11 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
         .iter()
         .filter(|mask| mask.object == best.id)
         .collect();
+    let references = ObjectReferencesArtifact::from_json(&read(&root.0, "references")).unwrap();
+    let die_package = references
+        .packages
+        .iter()
+        .find(|package| package.object == best.id);
     report(
         "objects",
         json!({
@@ -318,6 +326,15 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
             "die_masks": die_masks.iter().map(|mask| json!({
                 "frame": mask.frame_index, "consistency": mask.consistency,
                 "support": mask.support, "quality": mask.quality, "reason": mask.reason})).collect::<Vec<_>>(),
+            "die_package": die_package.map(|package| json!({
+                "primary": package.primary.frame_index,
+                "additional": package.additional.iter().map(|view| view.frame_index).collect::<Vec<_>>(),
+                "rejected": package.rejected.iter().map(|view| json!({"frame": view.frame_index, "reason": view.reason})).collect::<Vec<_>>(),
+                "observed_points": package.observed_points.len(),
+                "extent": package.extent,
+            })),
+            "packages": references.packages.len(),
+            "unpackaged": references.unpackaged.len(),
         }),
     );
     assert_eq!(
