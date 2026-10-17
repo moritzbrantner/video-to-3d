@@ -29,6 +29,8 @@ jobs:
           tool: wasm-bindgen
           version: "0.2.129"
       - run: bun run typecheck
+      - name: Build-script target acceptance (#192)
+        run: bun test scripts/build-wasm.acceptance.test.ts
       - run: bun run test:learned-provider-contract
       - run: bun run test:texture-projection
       - run: cargo fmt --check

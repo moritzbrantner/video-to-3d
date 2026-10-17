@@ -7,7 +7,7 @@
   "cases": [
     {
       "id": "tanks-temples-ignatius",
-      "title": "Tanks and Temples — Ignatius",
+      "title": "Tanks and Temples \u2014 Ignatius",
       "tier": "quantitative",
       "asset": {
         "mode": "provider",
@@ -45,7 +45,7 @@
     },
     {
       "id": "tanks-temples-church",
-      "title": "Tanks and Temples — Church",
+      "title": "Tanks and Temples \u2014 Church",
       "tier": "quantitative",
       "asset": {
         "mode": "provider",
@@ -121,6 +121,511 @@
       },
       "automation": {
         "scheduled": false
+      }
+    },
+    {
+      "id": "approved-handheld-h1",
+      "title": "Porto Santo Maria hotel room tour in Funchal, Madeira",
+      "tier": "field-canary",
+      "asset": {
+        "mode": "manual",
+        "redistribute": true,
+        "license_url": "https://creativecommons.org/licenses/by/3.0/",
+        "owner_approval_url": "https://github.com/moritzbrantner/video-to-3d/issues/74#issuecomment-6113239395",
+        "expected_file": "h1.webm",
+        "source_url": "https://commons.wikimedia.org/wiki/File:Porto_Santo_Maria_hotel_room_tour_in_Funchal,_Madeira.webm",
+        "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/5e/Porto_Santo_Maria_hotel_room_tour_in_Funchal%2C_Madeira.webm",
+        "sha256": "9d08559f3c18725848d0b53849dbc528c6ec803d4bc617cdafb2c16bdaf3304e",
+        "byte_length": 11770437,
+        "creator": "Andrew Mason",
+        "title": "Porto Santo Maria hotel room tour in Funchal, Madeira"
+      },
+      "evaluation": {
+        "mode": "observational",
+        "gate": "manual-field-canary"
+      },
+      "automation": {
+        "scheduled": false
+      },
+      "preparation": {
+        "original_duration_seconds": 128.821,
+        "trim": {
+          "start_seconds": 60,
+          "end_seconds": 86
+        },
+        "decoder_boundary": {
+          "kind": "offline-ffmpeg",
+          "browser_pixel_equivalence": false,
+          "sampling_authority": "browser-plan-only"
+        },
+        "plan": {
+          "framesPerSecond": 1.25,
+          "maxFrames": 18,
+          "sampleCount": 18,
+          "analysisWidth": 360,
+          "analysisHeight": 270,
+          "times": [
+            1.3,
+            2.676470588235294,
+            4.052941176470588,
+            5.4294117647058835,
+            6.805882352941177,
+            8.18235294117647,
+            9.558823529411764,
+            10.935294117647059,
+            12.311764705882352,
+            13.688235294117648,
+            15.064705882352943,
+            16.44117647058824,
+            17.817647058823532,
+            19.194117647058828,
+            20.57058823529412,
+            21.94705882352941,
+            23.323529411764707,
+            24.700000000000003
+          ]
+        },
+        "inventory": {
+          "objects": [
+            {
+              "id": "bed",
+              "visible_samples": [
+                3,
+                4,
+                5,
+                6,
+                7
+              ],
+              "coverage": "repeated",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            },
+            {
+              "id": "desk",
+              "visible_samples": [
+                1,
+                2,
+                13
+              ],
+              "coverage": "repeated",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            },
+            {
+              "id": "desk-chair",
+              "visible_samples": [
+                1
+              ],
+              "coverage": "limited",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            },
+            {
+              "id": "armchair",
+              "visible_samples": [
+                2,
+                3,
+                7,
+                8,
+                13,
+                14,
+                15
+              ],
+              "coverage": "repeated",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            },
+            {
+              "id": "sofa",
+              "visible_samples": [
+                16,
+                17
+              ],
+              "coverage": "limited",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            },
+            {
+              "id": "coffee-table",
+              "visible_samples": [
+                17
+              ],
+              "coverage": "limited",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            }
+          ],
+          "architecture": [
+            {
+              "id": "floor",
+              "visible_samples": [
+                1,
+                2,
+                3,
+                4,
+                7,
+                8,
+                13,
+                14,
+                15,
+                17
+              ]
+            },
+            {
+              "id": "interior-wall",
+              "visible_samples": [
+                3,
+                4,
+                6,
+                7,
+                16,
+                17
+              ]
+            },
+            {
+              "id": "balcony-opening",
+              "visible_samples": [
+                3,
+                8,
+                13,
+                14,
+                15
+              ]
+            }
+          ],
+          "excluded_dynamic": [
+            "people",
+            "luggage",
+            "reflections"
+          ],
+          "metric_truth": false
+        }
+      }
+    },
+    {
+      "id": "approved-handheld-h3",
+      "title": "Waiting room of Noi Bai International Airport",
+      "tier": "field-canary",
+      "asset": {
+        "mode": "manual",
+        "redistribute": true,
+        "license_url": "https://creativecommons.org/licenses/by/3.0/",
+        "owner_approval_url": "https://github.com/moritzbrantner/video-to-3d/issues/74#issuecomment-6113239395",
+        "expected_file": "h3.ogv",
+        "source_url": "https://commons.wikimedia.org/wiki/File:Waiting_room_of_Noi_Bai_International_Airport.ogv",
+        "download_url": "https://upload.wikimedia.org/wikipedia/commons/e/e6/Waiting_room_of_Noi_Bai_International_Airport.ogv",
+        "sha256": "7885f38454d5ecd9bfc7f1e0a74d5522d8e2d1deea1d65338fbcd07871267fe4",
+        "byte_length": 14334086,
+        "creator": "Obakeneko",
+        "title": "Waiting room of Noi Bai International Airport"
+      },
+      "evaluation": {
+        "mode": "observational",
+        "gate": "manual-field-canary"
+      },
+      "automation": {
+        "scheduled": false
+      },
+      "preparation": {
+        "original_duration_seconds": 25.3,
+        "trim": {
+          "start_seconds": 0,
+          "end_seconds": 25.3
+        },
+        "decoder_boundary": {
+          "kind": "offline-ffmpeg",
+          "browser_pixel_equivalence": false,
+          "sampling_authority": "browser-plan-only"
+        },
+        "plan": {
+          "framesPerSecond": 1.25,
+          "maxFrames": 18,
+          "sampleCount": 18,
+          "analysisWidth": 360,
+          "analysisHeight": 270,
+          "times": [
+            1.2650000000000001,
+            2.6044117647058824,
+            3.9438235294117647,
+            5.283235294117648,
+            6.62264705882353,
+            7.962058823529412,
+            9.301470588235295,
+            10.640882352941176,
+            11.980294117647059,
+            13.319705882352942,
+            14.659117647058824,
+            15.998529411764709,
+            17.33794117647059,
+            18.677352941176476,
+            20.016764705882355,
+            21.356176470588235,
+            22.695588235294117,
+            24.035000000000004
+          ]
+        },
+        "inventory": {
+          "objects": [
+            {
+              "id": "waiting-seat-bank",
+              "visible_samples": [
+                0,
+                1,
+                2,
+                16,
+                17
+              ],
+              "coverage": "repeated",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            },
+            {
+              "id": "queue-barrier",
+              "visible_samples": [
+                10,
+                11,
+                12,
+                16
+              ],
+              "coverage": "repeated",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            },
+            {
+              "id": "shop-display",
+              "visible_samples": [
+                10,
+                11
+              ],
+              "coverage": "limited",
+              "uncertainty": "partial views; hidden geometry is not observed evidence"
+            }
+          ],
+          "architecture": [
+            {
+              "id": "hall-floor",
+              "visible_samples": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17
+              ]
+            },
+            {
+              "id": "shop-front",
+              "visible_samples": [
+                9,
+                10,
+                11,
+                12
+              ]
+            },
+            {
+              "id": "structural-column",
+              "visible_samples": [
+                9,
+                10,
+                11,
+                12
+              ]
+            },
+            {
+              "id": "gate-window-opening",
+              "visible_samples": [
+                11,
+                12,
+                13,
+                14
+              ]
+            }
+          ],
+          "excluded_dynamic": [
+            "people",
+            "luggage",
+            "reflections"
+          ],
+          "metric_truth": false
+        }
+      }
+    },
+    {
+      "id": "approved-controlled-room-tum",
+      "title": "TUM RGB-D freiburg3_long_office_household RGB movie",
+      "tier": "field-canary",
+      "asset": {
+        "mode": "manual",
+        "redistribute": true,
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+        "owner_approval_url": "https://github.com/moritzbrantner/video-to-3d/issues/74#issuecomment-6117629409",
+        "expected_file": "long-office-rgb.avi",
+        "source_url": "https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download#freiburg3_long_office_household",
+        "download_url": "https://cvg.cit.tum.de/rgbd/dataset/freiburg3/rgbd_dataset_freiburg3_long_office_household-rgb.avi",
+        "sha256": "3200d7a76f5b3307e33863d4b38dbad414527ce14084f4c1f6303a0f69eb794c",
+        "byte_length": 26026292,
+        "creator": "TUM Computer Vision Group; J. Sturm, N. Engelhard, F. Endres, W. Burgard and D. Cremers",
+        "title": "TUM RGB-D freiburg3_long_office_household RGB movie",
+        "citation": "J. Sturm, N. Engelhard, F. Endres, W. Burgard and D. Cremers. A Benchmark for the Evaluation of RGB-D SLAM Systems. IROS 2012."
+      },
+      "evaluation": {
+        "mode": "observational",
+        "gate": "manual-field-canary"
+      },
+      "automation": {
+        "scheduled": false
+      },
+      "preparation": {
+        "original_duration_seconds": 86.166667,
+        "trim": {
+          "start_seconds": 0,
+          "end_seconds": 86.166667
+        },
+        "decoder_boundary": {
+          "kind": "offline-ffmpeg",
+          "browser_pixel_equivalence": false,
+          "sampling_authority": "browser-plan-only"
+        },
+        "plan": {
+          "framesPerSecond": 1.25,
+          "maxFrames": 18,
+          "sampleCount": 18,
+          "analysisWidth": 360,
+          "analysisHeight": 270,
+          "times": [
+            4.308333350000001,
+            8.870098073529412,
+            13.431862797058825,
+            17.993627520588237,
+            22.555392244117648,
+            27.11715696764706,
+            31.678921691176473,
+            36.240686414705884,
+            40.80245113823529,
+            45.36421586176471,
+            49.92598058529413,
+            54.48774530882354,
+            59.049510032352956,
+            63.61127475588237,
+            68.17303947941177,
+            72.73480420294118,
+            77.2965689264706,
+            81.85833365
+          ]
+        },
+        "inventory": {
+          "metric_truth": false,
+          "minimum_recognizable_editable_objects": 3,
+          "objects": [
+            {
+              "id": "blue-globe-and-support",
+              "visible_samples": [
+                0,
+                1,
+                2,
+                16,
+                17
+              ],
+              "coverage": "repeated",
+              "uncertainty": "Globe and support form one identity; cut-off upper views and partially hidden support do not establish full backside geometry."
+            },
+            {
+              "id": "yellow-die",
+              "visible_samples": [
+                0,
+                1,
+                2,
+                15,
+                16,
+                17
+              ],
+              "coverage": "repeated",
+              "uncertainty": "Several visible faces identify one die; unseen underside and occlusion are not observed geometry."
+            },
+            {
+              "id": "purple-office-chair",
+              "visible_samples": [
+                0,
+                16,
+                17
+              ],
+              "coverage": "repeated",
+              "uncertainty": "Back, seat and rolling base belong to one chair, separate from desks; partial rear/side views and hidden seat remain uncertain."
+            },
+            {
+              "id": "yellow-shirt-plush-bear",
+              "visible_samples": [
+                7,
+                8,
+                9
+              ],
+              "coverage": "repeated",
+              "uncertainty": "Bear is separate from its supporting wooden chair; visible front/side/back do not prove hidden contact geometry."
+            }
+          ],
+          "architecture": [
+            {
+              "id": "office-desks",
+              "visible_samples": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17
+              ],
+              "uncertainty": "Several connected desk surfaces; no exact dimensions or complete hidden undersides."
+            },
+            {
+              "id": "freestanding-desk-partitions",
+              "visible_samples": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                10,
+                11,
+                12,
+                14,
+                15,
+                16,
+                17
+              ],
+              "uncertainty": "Desk divider panels, not permanent room walls; unsupported unseen regions remain uncertain."
+            },
+            {
+              "id": "floor",
+              "visible_samples": [
+                0,
+                2,
+                3,
+                8,
+                11,
+                12,
+                13,
+                16,
+                17
+              ],
+              "uncertainty": "Visible floor regions only; metric scale and full-room geometry are unknown."
+            }
+          ]
+        }
       }
     }
   ]

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "case_id": "approved-controlled-room-tum",
+  "original": {
+    "sha256": "3200d7a76f5b3307e33863d4b38dbad414527ce14084f4c1f6303a0f69eb794c",
+    "byte_length": 26026292
+  },
+  "carrier": {
+    "path": "derived.webm",
+    "sha256": "3fd48dee1f59cf3b472b2f5d6a6a25bc846441a964cd682be975618d4e2ef50c",
+    "byte_length": 212474024
+  },
+  "sampling_receipt": {
+    "sha256": "f680f6d426e03e879de79b222d3cc0dd5af79b8dcd10e005f04b448ca8de21c0",
+    "byte_length": 7136
+  }
+}

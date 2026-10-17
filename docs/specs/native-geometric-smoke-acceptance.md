@@ -2,7 +2,8 @@
 
 Authority: issue #150 and its owner decision B (2026-10-11), the public staged
 contract in #172, `AGENTS.md`, and
-[the whole-scene product decisions](whole-scene-product-decisions.md).
+[Decision Atlas](../DECISION-ATLAS.md) IDs `2.1`–`2.3`, `3.1`, `3.5`, `3.6`, and `4.3`.
+The [hybrid release acceptance](hybrid-room-to-blender-acceptance.md) is a separate, broader contract.
 Baseline: `3553210` (PR #173 merged). This acceptance was established in a separate
 context before native executor implementation.
 

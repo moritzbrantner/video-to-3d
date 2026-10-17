@@ -171,3 +171,146 @@ Field canaries are observational evidence, not merge gates. Their published thir
 - Quantitative real-video cases remain evidence-only until repeated runs establish repository-owned envelopes for registration, camera error, geometry accuracy/completeness, and dense coverage.
 - Real-image and real-video datasets should be pinned to an immutable or checksum-verified source before becoming required gates.
 - Larger public datasets belong in slower scheduled/manual lanes unless their cost is small enough to justify every pull request.
+
+## Approved handheld input preparation
+
+`approved-handheld-h1` (Andrew Mason, *Porto Santo Maria hotel room tour in
+Funchal, Madeira*) and `approved-handheld-h3` (Obakeneko, *Waiting room of Noi Bai
+International Airport*) are the owner-approved CC BY 3.0 inputs. Their original
+Commons description/download URLs, attribution, license, SHA256 and byte lengths
+are pinned in `real-video-corpus.json`. This attributed licensed pair is the
+explicit redistribution exception; other corpus assets retain their restrictions.
+Do not substitute approved source identities or retune the fixed sample
+inventories against reconstruction output. The controlled-room source is
+specified separately below.
+
+Put the unchanged originals at `h1.webm` and `h3.ogv` within an explicit local asset
+root, then prepare without dispatching reconstruction:
+
+```sh
+bun tools/run_real_video_case.ts --case approved-handheld-h1 --asset-root /path/to/originals --output-root /path/to/prepared --prepare-only
+bun tools/run_real_video_case.ts --case approved-handheld-h3 --asset-root /path/to/originals --output-root /path/to/prepared --prepare-only
+```
+
+H1 produces a deterministic lossless VP9 WebM carrier for the authorized indoor
+interval `[60,86)`; H3 produces the same lossless VP9 WebM format for its whole
+authorized recording. The original Ogg/Theora source remains retained and hashed. The source
+files remain unchanged. Eighteen P6 RGB frames are selected from decoded original
+best-effort PTS within the half-open authorized interval, nearest each fixed
+request with earlier PTS/ordinal ties, scaled bilinearly to360×270. The sampling
+requests come from the existing browser plan helper. This is **offline FFmpeg
+preparation**, not verified HTMLVideoElement/canvas pixel equivalence or a new
+runtime decoder. Actual Chromium consumption through the existing browser sampler is checked
+separately for both carriers; source-to-canvas pixel equivalence remains unverified.
+Obsolete whole-original OGV prepared receipts fail source-derived carrier
+verification and are not silently reused or overwritten.
+
+`sampling.json` records actual original identity, derived hash/length/trim,
+FFmpeg version and decoder boundary, requested relative/source times, selected
+original ordinal/PTS, and frame paths/hashes. The existing Python checker verifies
+contained real paths (including symlink targets), original integrity, actual
+deterministic derived bytes, source-selected ordinals and decoded pixel payloads.
+Self-consistent substituted frame hashes or in-range wrong PTS do not pass.
+Reapplying valid preparation is a verified no-op; existing invalid outputs fail
+closed instead of overwriting them. Generated carriers/frames stay outside Git.
+
+Run actual-source acceptance with both explicit roots:
+
+```sh
+VIDEO_HANDHELD_ASSET_ROOT=/path/to/originals VIDEO_HANDHELD_PREPARED_ROOT=/path/to/prepared python3 -m unittest discover -s tools/tests -p 'test_approved_handheld_acceptance.py'
+```
+
+Without `--prepare-only`, the runner retains its normal existing Rust
+`real_video_fixture` dispatch after preparation. Existing provider/canary behavior
+and decoding are preserved. Prepared fixtures do not establish recognized object
+meshes, physical scale, Blender independent editing, or the three-video product
+exit; those gates remain open under #77.
+
+For the approved case IDs, custom manifests cannot redefine the pinned source
+attribution, licensing, original file identity, trim, original duration or fixed
+18-frame plan. Approval comparisons use this
+repository’s production corpus, never caller metadata or the working directory.
+The CLI and direct preparation/receipt entrypoints reject differences before
+source decoding or output writes. The runner checks selected approved identities
+through the same Python authority before choosing its preparation or legacy path;
+omitting the required preparation record cannot enable legacy replacement. Other
+corpus cases retain their existing rules.
+
+### Approved controlled-room fixture
+
+`approved-controlled-room-tum` pins the whole original RGB movie from TUM RGB-D
+`freiburg3_long_office_household`, approved by Decision Atlas 3.8. The original
+`long-office-rgb.avi` is 26,026,292 bytes, SHA-256
+`3200d7a76f5b3307e33863d4b38dbad414527ce14084f4c1f6303a0f69eb794c`.
+It is attributed to the TUM Computer Vision Group and J. Sturm, N. Engelhard,
+F. Endres, W. Burgard and D. Cremers under CC BY 4.0. Retain the citation
+*A Benchmark for the Evaluation of RGB-D SLAM Systems*, IROS 2012, and the
+official source/license links recorded in the corpus manifest.
+
+```sh
+bun tools/run_real_video_case.ts --case approved-controlled-room-tum --asset-root /path/to/originals --output-root /path/to/prepared --prepare-only
+```
+
+This uses the same preparation/receipt authority and lossless VP9 WebM carrier
+recipe as H1/H3. Its interval covers the full 86.166667-second original, with
+18 fixed browser-plan requests at 360×270. The independently observed inventory
+includes the globe/support, yellow die, purple office chair and plush bear;
+it does not establish reconstructed identities or unseen geometry. Preparation
+records actual source frame ordinals, PTS, hashes, derived-carrier identity and
+FFmpeg boundary. Offline reference pixels are not claimed equivalent to browser
+canvas pixels. Depth and trajectory data are not reconstruction inputs.
+
+Run the independent source/receipt acceptance and actual browser witness:
+
+```sh
+VIDEO_CONTROLLED_ASSET_ROOT=/path/to/originals python3 -m unittest discover -s tools/tests -p test_approved_controlled_room_acceptance.py
+bun scripts/test-handheld-browser-carrier-acceptance.ts --prepared-root /path/to/prepared --expectations tools/tests/fixtures/approved-controlled-room-expectations.json --automation-module /absolute/path/to/playwright/index.mjs --report /path/to/browser-report.json
+```
+
+The browser witness consumes the actual derived carrier through production
+`sampleVideoWithInfo`; it proves decoding and sampling, not offline pixel parity
+or scene quality. Native execution is exercised separately below. Blender editability and the
+three-video product exit (#77) remain separate acceptance gates.
+
+### Real controlled-room native execution
+
+The executable #179 contract retains actual browser-decoded RGBA, imports it
+through the existing project-aware keyframe writer and receipt store, then runs
+`video-to-3d build` from an unrelated working directory. It introduces no native
+video decoder. Prepare the approved carrier above, then capture a fresh local
+browser input:
+
+```sh
+bun scripts/capture-real-room-native-acceptance.ts --original /path/to/originals/long-office-rgb.avi --prepared-root /path/to/prepared --output-root /fresh/browser-input --automation-module /absolute/path/to/playwright/index.mjs
+```
+
+Keep the printed `witness_hash` outside the capture directory. It binds the
+original/carrier identities, browser version, sampling metadata and all 18 raw
+RGBA frame hashes. Pixel identities describe that captured browser run; a future
+capture may differ and must receive its own witness hash. Offline PPMs and
+screenshots cannot substitute for browser pixels.
+
+Run the explicit external-input tier with that hash and the unchanged original:
+
+```sh
+VIDEO_TO_3D_REAL_ROOM_INPUT=/fresh/browser-input VIDEO_TO_3D_REAL_ROOM_WITNESS_HASH=sha256:CAPTURE_HASH VIDEO_TO_3D_REAL_ROOM_SOURCE=/path/to/originals/long-office-rgb.avi VIDEO_TO_3D_REAL_ROOM_REPORT=/path/to/native-result.json cargo test --release --locked -p video-to-3d-cli --test real_room_native -- --ignored
+```
+
+The three tests exercise actual native execution, receipt/hash integrity,
+unchanged replay, cancellation after sparse execution and resumption, plus
+transfer and imported-pixel corruption rejection. Temporary projects are removed
+on completion; the optional report retains actual stage documents and CLI
+cold/replay/resume/inspection results. Without explicit external inputs, the
+ordinary test suite reports these tests ignored. Local source and frame bytes
+stay outside Git and are never uploaded.
+
+The independently captured Chromium 156.0.8078.4 input at production baseline
+`6cf3e4e` completes the native stages, but its quality is **nonpassing**:
+2 registered cameras, 599 mesh points, 232 triangles and zero independently
+editable native assets. The scene is an arbitrary-scale observed environment;
+it does not satisfy the controlled fixture's minimum three recognizable editable
+objects. CLI completion and deterministic replay establish execution capability,
+not recognition, Blender editability, physical accuracy or the three-video
+product exit. See [the independent native contract](../docs/specs/real-room-native-acceptance.md)
+for the pinned capture identity and recorded evidence. No reconstruction tuning
+or quality threshold change accompanies this execution evidence.

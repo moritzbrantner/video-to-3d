@@ -12,6 +12,8 @@ pub mod feature_analysis;
 pub mod geometry_confidence;
 pub mod input_readiness;
 pub mod scene_artifacts;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod scene_export;
 pub mod scene_model;
 pub mod scene_project;
 pub mod scene_runner;

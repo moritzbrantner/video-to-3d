@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use video_to_3d_core::scene_artifacts::BuiltInExecutor;
+use video_to_3d_core::scene_export::{export_project_glb, ExportError, SceneMode};
 use video_to_3d_core::scene_model::AssembledScene;
 use video_to_3d_core::scene_project::{
     ArtifactKind, ExportFormat, OperationExecution, SceneProjectError, SceneProjectManifest,
@@ -41,7 +42,7 @@ const USAGE: &str = "usage:
   video-to-3d build <project.json> [--jobs <n>]
   video-to-3d status <project.json>
   video-to-3d inspect <project.json>
-  video-to-3d export <project.json> --target web
+  video-to-3d export <project.json> --target web|glb [--scene-mode completed|observed]
 
 exit codes: 0 success, 1 internal error, 2 invalid project, 3 unsupported capability,
             4 operation/provider failure, 5 incomplete build, 64 usage error";
@@ -99,15 +100,31 @@ fn dispatch(args: &[String]) -> Outcome {
         }
         "status" if options.is_empty() => status(&manifest),
         "inspect" if options.is_empty() => inspect(&manifest),
-        "export" => match options {
-            [flag, target] if flag == "--target" && target == "web" => {
-                export(&manifest, ExportFormat::WebBundle)
+        "export" => {
+            let mut target = None;
+            let mut scene_mode = None;
+            for pair in options.chunks(2) {
+                let [flag, value] = pair else {
+                    return usage("export options require flag/value pairs");
+                };
+                match flag.as_str() {
+                    "--target" if target.is_none() => target = Some(value.as_str()),
+                    "--scene-mode" if scene_mode.is_none() => {
+                        scene_mode = Some(match value.as_str() {
+                            "completed" => SceneMode::Completed,
+                            "observed" => SceneMode::Observed,
+                            _ => return usage("--scene-mode expects completed or observed"),
+                        });
+                    }
+                    _ => return usage("unknown or repeated export option"),
+                }
             }
-            [flag, target] if flag == "--target" => {
-                usage(&format!("unknown export target `{target}`"))
+            match target {
+                Some("web") if scene_mode.is_none() => export(&manifest, ExportFormat::WebBundle),
+                Some("glb") => export_glb(&manifest, scene_mode.unwrap_or(SceneMode::Completed)),
+                _ => usage("export requires --target web or --target glb"),
             }
-            _ => usage("export requires --target web"),
-        },
+        }
         "status" | "inspect" => usage(&format!("{command} takes no options")),
         _ => usage(&format!("unknown command `{command}`")),
     }
@@ -481,5 +498,42 @@ fn export(manifest_path: &std::path::Path, format: ExportFormat) -> Outcome {
             declared.join(", ")
         ),
         Exit::Unsupported,
+    ))
+}
+
+fn export_glb(manifest_path: &std::path::Path, mode: SceneMode) -> Outcome {
+    let (store, status) = compute_status(manifest_path)?;
+    if !status.complete {
+        return Err((
+            "the build is incomplete; run `video-to-3d build` first".into(),
+            Exit::Incomplete,
+        ));
+    }
+    let artifacts = status
+        .verified
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == ArtifactKind::AssembledScene)
+        .collect::<Vec<_>>();
+    let [artifact] = artifacts.as_slice() else {
+        return Err((
+            "GLB export requires exactly one current assembled_scene artifact".into(),
+            Exit::Incomplete,
+        ));
+    };
+    let receipt = export_project_glb(&store, &status.verified, manifest_path, artifact, mode)
+        .map_err(|error| {
+            let exit = match &error {
+                ExportError::Incomplete(_) => Exit::Incomplete,
+                ExportError::Unsupported(_) => Exit::Unsupported,
+                ExportError::Invalid(_) => Exit::InvalidProject,
+                ExportError::Io(_) => Exit::Internal,
+            };
+            (error.to_string(), exit)
+        })?;
+    Ok((
+        json!({"command":"export", "project_id":status.manifest.project_id,
+        "export_receipt":receipt}),
+        Exit::Success,
     ))
 }

@@ -43,6 +43,27 @@ for variant in truth joined missing-object parented architecture-parented shared
   esac
 done
 
+# Optional fixture-owned hierarchy accepts legitimate grouping while strict
+# defaults above continue to reject accidental coupled object parenting.
+python3 - "$out" <<'PY'
+import json
+import sys
+from pathlib import Path
+out = Path(sys.argv[1])
+expected = json.loads((out / "expected.json").read_text())
+expected["expected_parent_ids"] = {node: "room-group" for node in expected["architecture"] + expected["objects"]}
+(out / "expected-grouped.json").write_text(json.dumps(expected))
+expected["expected_parent_ids"]["floor"] = None
+(out / "expected-wrong-parent.json").write_text(json.dumps(expected))
+PY
+run_blender "$repo/tools/blender/build_truth_scene.py" -- --fixture "$out/fixture" --out "$out/grouped.glb" --variant grouped
+run_blender "$repo/tools/blender/scene_import_acceptance.py" -- --glb "$out/grouped.glb" --expected "$out/expected-grouped.json" --report "$out/report-grouped.json"
+set +e
+run_blender "$repo/tools/blender/scene_import_acceptance.py" -- --glb "$out/grouped.glb" --expected "$out/expected-wrong-parent.json" --report "$out/report-wrong-parent.json"
+wrong_parent_status=$?
+set -e
+[ "$wrong_parent_status" -ne 0 ] || { echo "wrong hierarchy was accepted" >&2; exit 1; }
+
 python3 - "$out" <<'PY'
 import json
 import sys
@@ -53,6 +74,8 @@ def failed(variant):
     report = json.loads((out / f"report-{variant}.json").read_text())
     return {check["check"] for check in report["checks"] if not check["passed"]}
 
+assert json.loads((out / "report-grouped.json").read_text())["passed"]
+assert failed("wrong-parent") == {"floor:parent"}, failed("wrong-parent")
 truth = json.loads((out / "report-truth.json").read_text())
 assert truth["passed"] and (out / "render-truth.png").stat().st_size > 0
 assert {f"edit_isolation:{name}" for name in ("cabinet", "crate", "stool", "ball", "floor", "door")} <= {

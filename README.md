@@ -2,6 +2,8 @@
 
 A privacy-first Rust/Tauri + WebAssembly experiment for reconstructing a 3D scene from ordinary video.
 
+**Documentation authority:** The [Decision Atlas](docs/DECISION-ATLAS.md) owns product intent (stable IDs); [acceptance specifications](docs/specs/hybrid-room-to-blender-acceptance.md) own observable release requirements; [whole-scene](docs/video-to-world-roadmap.md) and [engine](ROADMAP.md) roadmaps own implementation sequencing. The implementation status below is not evidence that the Atlas's product gate (IDs `3.1`, `3.6`) has passed.
+
 The current implementation has an integrated **Slice 3 sparse-SfM pipeline** and an advancing **Slice 4 dense-reconstruction foundation**. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, links the actually triangulated landmarks from the strongest calibrated seed pair into other selected keyframes, and can register additional cameras with bounded deterministic robust PnP when their 3D↔2D evidence passes inlier and reprojection gates. A bounded set of selected non-adjacent keyframe pairs is also screened with mutual descriptor matches. Strong direct evidence back to the calibrated seed can recover an otherwise unregistered selected keyframe or propose a bounded correction for an already registered camera whose pose has drifted. Revisit corrections are retained only when the existing rollback-safe bundle-adjustment acceptance also holds. Once an additional view is accepted, non-seed tracks observed by registered cameras can be triangulated into new sparse landmarks when they pass positive-depth, multi-view support, reprojection, and triangulation-angle gates. After the final accepted sparse geometry is established, Rust can run a conservative coarse plane-sweep depth pass over textured reference-frame samples. A primary depth hypothesis is retained only after the existing photometric and ambiguity gates and a reciprocal source-view depth check derived from that source camera's own visible sparse-landmark envelope. Reciprocal source depths are converted back to world-space observations, spatial outliers are rejected, and the surviving multi-view observations are fused into one dense scene point. Accepted fused points can then be connected into a bounded reference-grid triangle surface only when neighboring samples pass explicit depth-continuity, 3D edge-length, and non-degenerate-area gates. Dense points and mesh topology remain separate from the sparse map. If evidence is weak, neither dense points nor surface triangles are invented. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
 
 ## Current slice
@@ -89,6 +91,9 @@ before running `tools/run_colmap_golden.sh`. One pinned PyCOLMAP runs every stag
 because approximate matching varies even with a fixed seed and one thread. CI compares
 match and verified-geometry tables between independent quality and runtime runs, alongside
 the existing camera, point, reprojection, and pose gates. This reference dependency is development-only.
+See [reconstruction provider adoption](docs/reconstruction-providers.md#adoption-and-integration-evidence)
+for the separate status of the built-in Rust path, COLMAP reference execution, sparse
+COLMAP import consumers, and possible future in-product providers.
 
 ## GitHub Pages demo
 
