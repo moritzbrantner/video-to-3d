@@ -966,6 +966,12 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
             *slot = reference;
         }
     }
+    // A derived (clipped) vertex belongs to the patch of its source triangle.
+    for derived in &reconstruction.mesh_derived_vertices {
+        if derived.point_index < patch_of_point.len() {
+            patch_of_point[derived.point_index] = patch_of_point[derived.source_corners[0]];
+        }
+    }
     let triangles = || {
         reconstruction
             .mesh_triangles

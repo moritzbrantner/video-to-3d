@@ -231,11 +231,16 @@ impl BuiltInExecutor {
                 )
                 .map_err(|e| e.to_string())?;
                 let cameras = self.dense_cameras(record, &dense.cameras_hash, cancel)?;
-                let (dense, mesh) =
+                let (mut dense, mesh) =
                     crate::reconstruct_mesh_owned_with_cancel(&cameras, dense, || {
                         cancel.is_canceled()
                     })
                     .map_err(|e| e.to_string())?;
+                // Derived (clipped) vertices follow the observed dense points.
+                dense
+                    .dense
+                    .points
+                    .extend_from_slice(&mesh.mesh.derived_points);
                 let final_cameras: Vec<_> = cameras
                     .sparse
                     .final_cameras
@@ -252,6 +257,7 @@ impl BuiltInExecutor {
                         point_attributes: &dense.dense.point_attributes,
                         triangles: &mesh.mesh.triangles,
                         triangle_sources: &mesh.mesh.triangle_sources,
+                        derived_vertices: &mesh.mesh.derived_vertices,
                     },
                     || {
                         if cancel.is_canceled() {
@@ -275,6 +281,7 @@ impl BuiltInExecutor {
                     triangles: mesh.mesh.triangles,
                     point_attributes: Some(dense.dense.point_attributes),
                     triangle_sources: mesh.mesh.triangle_sources,
+                    derived_vertices: mesh.mesh.derived_vertices,
                     grid_sites: dense.dense.grid_sites,
                 };
                 artifact.to_json_with_cancel(|| {

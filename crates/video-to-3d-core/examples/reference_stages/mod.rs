@@ -265,8 +265,8 @@ impl<'a> Aligned<'a> {
         let references = observed_reference_of_point(evidence);
         let camera = |frame: usize| cameras.iter().find(|camera| camera.frame == frame);
         let mut depths: BTreeMap<usize, Vec<(f64, f64)>> = BTreeMap::new();
-        if sites.len() == evidence.points.len() {
-            for (index, reference) in references.iter().enumerate() {
+        if sites.len() == evidence.observed_point_count() {
+            for (index, reference) in references.iter().enumerate().take(sites.len()) {
                 let Some((frame, camera)) =
                     reference.and_then(|frame| Some((frame, camera(frame)?)))
                 else {
@@ -340,6 +340,14 @@ fn observed_reference_of_point(evidence: &ReconstructionEvidenceView<'_>) -> Vec
             for slot in &mut reference[region.points.start.min(end)..end] {
                 *slot = Some(frame);
             }
+        }
+    }
+    // A derived (clipped) vertex lies on its source triangle, so it is judged
+    // through that triangle's reference; it adds no observation.
+    for derived in evidence.derived_vertices {
+        if let Some(slot) = reference.get(derived.point_index).copied() {
+            let _ = slot;
+            reference[derived.point_index] = reference[derived.source_corners[0]];
         }
     }
     reference

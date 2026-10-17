@@ -260,6 +260,12 @@ pub(crate) struct SurfaceMesh {
     /// The dense points surface fusion moved, by index into the dense artifact's points;
     /// every other dense point is used as the dense stage left it.
     pub(crate) consolidated_points: Vec<ConsolidatedPoint>,
+    /// Points the merge derived where it clipped overlap seams, appended after the
+    /// dense artifact's points, with their lineage (one record per point).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) derived_points: Vec<Point3>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) derived_vertices: Vec<crate::DerivedVertexSource>,
     /// The mesh diagnostic, refreshed after the connected-surface merge.
     pub(crate) mesh_warning: Option<String>,
     /// Fusion and merge diagnostics, which follow every other warning.
@@ -810,7 +816,7 @@ fn registered_cameras(cameras: &[StageCamera]) -> Vec<RegisteredCamera> {
 fn build_surface(
     sparse: &SparseReconstruction,
     dense: DenseFields<'_>,
-    points: &mut [Point3],
+    points: &mut Vec<Point3>,
 ) -> Result<SurfaceMesh, String> {
     build_surface_with_control(
         sparse,
@@ -823,7 +829,7 @@ fn build_surface(
 fn build_surface_with_control(
     sparse: &SparseReconstruction,
     dense: DenseFields<'_>,
-    points: &mut [Point3],
+    points: &mut Vec<Point3>,
     control: &mut ReconstructionControl<'_>,
 ) -> Result<SurfaceMesh, String> {
     let final_cameras = registered_cameras(&sparse.final_cameras);
@@ -843,6 +849,8 @@ fn build_surface_with_control(
         triangles: analysis.triangles,
         triangle_sources: Vec::new(),
         consolidated_points: Vec::new(),
+        derived_points: Vec::new(),
+        derived_vertices: Vec::new(),
         mesh_warning: None,
         consolidation_warnings: Vec::new(),
     };
@@ -860,11 +868,15 @@ fn build_surface_with_control(
             points,
             triangles: &mut surface.triangles,
             triangle_sources: &mut surface.triangle_sources,
+            derived_vertices: &mut surface.derived_vertices,
             mesh: &mut surface.stats,
             warnings: &mut warnings,
         },
         control,
     )?;
+    // The mesh owns its derived points; the dense buffer keeps only observed ones.
+    let observed = points.len() - surface.derived_vertices.len();
+    surface.derived_points = points.split_off(observed);
     surface.consolidated_points = moved_indices
         .into_iter()
         .map(|index| ConsolidatedPoint {
@@ -911,6 +923,8 @@ fn into_result(
         triangles: mesh_triangles,
         triangle_sources: mesh_triangle_sources,
         consolidated_points: _,
+        derived_points,
+        derived_vertices: mesh_derived_vertices,
         mesh_warning,
         consolidation_warnings,
     } = surface;
@@ -920,15 +934,18 @@ fn into_result(
     warnings.extend(mesh_warning);
     warnings.extend(warnings_after_mesh);
     warnings.extend(consolidation_warnings);
+    let mut dense_points = dense.points;
+    dense_points.extend(derived_points);
     ReconstructionResult {
         cameras,
         points,
-        dense_points: dense.points,
+        dense_points,
         dense_grid_sites: dense.grid_sites,
         dense_point_attributes: dense.point_attributes,
         dense: dense.stats,
         mesh_triangles,
         mesh_triangle_sources,
+        mesh_derived_vertices,
         mesh,
         pairs,
         calibrated_pair,

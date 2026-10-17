@@ -18,8 +18,13 @@
 //! | h          | JSON header: provider, scale, cameras, regions, buffer counts    |
 //! | 19 · n     | points: x, y, z, confidence (f32); r, g, b (u8)                  |
 //! | 16 · t     | triangles: a, b, c (u32); confidence (f32)                       |
-//! | 8 · n      | per-point attributes (f32 pair), only when the header says so    |
+//! | 8 · o      | per-observed-point attributes (f32 pair), when the header says so |
 //! | 16 · s     | triangle sources: triangle, a, b, c (u32), sorted by triangle    |
+//! | 44 · d     | derived vertices: point, source triangle, a, b, c (u32);         |
+//! |            | barycentric weights (3 × f64), in point order                    |
+//!
+//! `o = n − d` observed points precede the `d` derived ones; the derived-vertex
+//! count is omitted from the header (and the section is empty) without them.
 //!
 //! Geometry buffers are written straight from the borrowed slices and read into
 //! one owned buffer each. Every declared count is checked against the caller's
@@ -29,7 +34,7 @@
 use crate::{
     EvidenceCamera, EvidencePointAttributes, EvidenceScale, MeshTriangle, Point3,
     ReconstructionEvidenceView, ReconstructionProviderDescriptor, SurfaceEvidenceRegion,
-    TriangleSourceCorners,
+    DerivedVertexSource, TriangleSourceCorners,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -42,6 +47,7 @@ const POINT_BYTES: usize = 19;
 const TRIANGLE_BYTES: usize = 16;
 const ATTRIBUTE_BYTES: usize = 8;
 const SOURCE_BYTES: usize = 16;
+const DERIVED_BYTES: usize = 44;
 /// Points or triangles decoded per read, so a large buffer is streamed through a
 /// bounded scratch block instead of a second full-size byte copy.
 const CHUNK_ITEMS: usize = 4096;
@@ -82,6 +88,8 @@ pub struct OwnedReconstructionEvidence {
     pub point_attributes: Option<Vec<EvidencePointAttributes>>,
     /// Sparse pre-canonicalization corners of merged triangles (empty when none).
     pub triangle_sources: Vec<TriangleSourceCorners>,
+    /// Lineage of the derived points at the end of `points` (empty when none).
+    pub derived_vertices: Vec<DerivedVertexSource>,
 }
 
 impl OwnedReconstructionEvidence {
@@ -96,18 +104,20 @@ impl OwnedReconstructionEvidence {
             triangles: view.triangles.to_vec(),
             point_attributes: view.point_attributes.map(<[_]>::to_vec),
             triangle_sources: view.triangle_sources.map(<[_]>::to_vec).unwrap_or_default(),
+            derived_vertices: view.derived_vertices.to_vec(),
         }
     }
 
     /// Borrowed view over the owned buffers, validated by the shared rules.
     pub fn view(&self) -> Result<ReconstructionEvidenceView<'_>, String> {
-        let view = ReconstructionEvidenceView::new(
+        let view = ReconstructionEvidenceView::new_with_derived_vertices(
             self.provider.clone(),
             self.scale,
             self.cameras.clone(),
             self.regions.clone(),
             &self.points,
             &self.triangles,
+            &self.derived_vertices,
         )?;
         let view = match &self.point_attributes {
             Some(attributes) => view.with_point_attributes(attributes)?,
@@ -129,6 +139,8 @@ struct Header {
     triangles: usize,
     point_attributes: bool,
     triangle_sources: usize,
+    #[serde(default)]
+    derived_vertices: usize,
 }
 
 /// Header fields borrowed for encoding, so cameras and regions are not cloned.
@@ -143,6 +155,12 @@ struct HeaderRef<'a> {
     triangles: usize,
     point_attributes: bool,
     triangle_sources: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    derived_vertices: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// Lengths of the header's collections, counted without materializing them, so
@@ -202,6 +220,7 @@ pub fn encode_evidence(
         triangles: view.triangles.len(),
         point_attributes: view.point_attributes.is_some(),
         triangle_sources: view.triangle_sources.map_or(0, <[_]>::len),
+        derived_vertices: view.derived_vertices.len(),
     })
     .map_err(|error| format!("evidence interchange header: {error}"))?;
     let header_length = u32::try_from(header.len())
@@ -264,7 +283,29 @@ pub fn encode_evidence(
         }
         out.write_all(&block).map_err(io_error)?;
     }
+    for chunk in view.derived_vertices.chunks(CHUNK_ITEMS) {
+        block.clear();
+        for derived in chunk {
+            for value in [derived.point_index, derived.source_triangle]
+                .into_iter()
+                .chain(derived.source_corners)
+            {
+                let value = u32::try_from(value).map_err(|_| {
+                    "evidence interchange derived vertex exceeds the u32 range".to_owned()
+                })?;
+                block.extend_from_slice(&value.to_le_bytes());
+            }
+            for weight in derived.barycentric {
+                block.extend_from_slice(&weight.to_le_bytes());
+            }
+        }
+        out.write_all(&block).map_err(io_error)?;
+    }
     out.flush().map_err(io_error)
+}
+
+fn f64_at(bytes: &[u8], offset: usize) -> f64 {
+    f64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("eight bytes"))
 }
 
 /// Read exactly `buffer.len()` bytes; a short read is a truncated stream.
@@ -359,6 +400,8 @@ pub fn decode_evidence(
         header.triangle_sources,
         header.triangles,
     )?;
+    // Derived points are among the declared points.
+    bounded("derived vertices", header.derived_vertices, header.points)?;
 
     let points = read_records(input, header.points, POINT_BYTES, "point buffer", |bytes| {
         Point3 {
@@ -386,7 +429,7 @@ pub fn decode_evidence(
     let point_attributes = if header.point_attributes {
         Some(read_records(
             input,
-            header.points,
+            header.points - header.derived_vertices,
             ATTRIBUTE_BYTES,
             "attribute buffer",
             |bytes| EvidencePointAttributes {
@@ -405,6 +448,18 @@ pub fn decode_evidence(
         |bytes| TriangleSourceCorners {
             triangle: u32_at(bytes, 0) as usize,
             corners: [1, 2, 3].map(|slot| u32_at(bytes, slot * 4) as usize),
+        },
+    )?;
+    let derived_vertices = read_records(
+        input,
+        header.derived_vertices,
+        DERIVED_BYTES,
+        "derived vertex buffer",
+        |bytes| DerivedVertexSource {
+            point_index: u32_at(bytes, 0) as usize,
+            source_triangle: u32_at(bytes, 4) as usize,
+            source_corners: [2, 3, 4].map(|slot| u32_at(bytes, slot * 4) as usize),
+            barycentric: [0, 1, 2].map(|slot| f64_at(bytes, 20 + slot * 8)),
         },
     )?;
     let mut probe = [0_u8; 1];
@@ -430,6 +485,7 @@ pub fn decode_evidence(
         triangles,
         point_attributes,
         triangle_sources,
+        derived_vertices,
     };
     let view = evidence.view()?;
     if view.schema_version != header.schema_version {

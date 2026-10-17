@@ -66,9 +66,12 @@ pub(crate) struct SurfaceSupport<'a> {
 /// What surface consolidation changes in place: the dense points fusion may move, the
 /// mesh it merges, and the diagnostics it rewrites or appends.
 pub(crate) struct SurfaceTarget<'a> {
-    pub points: &'a mut [Point3],
+    /// Observed dense points; the merge appends derived (clipped) vertices.
+    pub points: &'a mut Vec<Point3>,
     pub triangles: &'a mut Vec<MeshTriangle>,
     pub triangle_sources: &'a mut Vec<crate::TriangleSourceCorners>,
+    /// Lineage of the points the merge appended, in point order.
+    pub derived_vertices: &'a mut Vec<crate::DerivedVertexSource>,
     pub mesh: &'a mut crate::MeshStats,
     pub warnings: &'a mut Vec<String>,
 }
@@ -91,6 +94,7 @@ pub(super) fn consolidate_surface_evidence(
             points: &mut reconstruction.dense_points,
             triangles: &mut reconstruction.mesh_triangles,
             triangle_sources: &mut reconstruction.mesh_triangle_sources,
+            derived_vertices: &mut reconstruction.mesh_derived_vertices,
             mesh: &mut reconstruction.mesh,
             warnings: &mut reconstruction.warnings,
         },
@@ -130,6 +134,7 @@ pub(crate) fn consolidate_surface_recording_with_control(
         points,
         triangles,
         triangle_sources,
+        derived_vertices,
         mesh,
         warnings,
     } = target;
@@ -147,6 +152,7 @@ pub(crate) fn consolidate_surface_recording_with_control(
             point_attributes: support.point_attributes,
             triangles,
             triangle_sources,
+            derived_vertices: &[],
         };
         let evidence =
             ReconstructionEvidenceView::from_classic_parts_with_cancel(&parts, || control.check())?;
@@ -196,16 +202,20 @@ pub(crate) fn consolidate_surface_recording_with_control(
     };
     warnings.push(diagnostic);
 
-    let mut merge = crate::surface_merge::merge_fused_patches_with_control(
-        points,
-        triangles,
+    let merged = crate::surface_merge::merge_fused_patches_owned_with_control(
+        std::mem::take(points),
+        std::mem::take(triangles),
         &membership,
         &pairs,
         &reference_cameras,
         &point_origins,
         control,
-    );
+    )?;
     control.check()?;
+    *points = merged.points;
+    *triangles = merged.triangles;
+    *derived_vertices = merged.derived_vertices;
+    let mut merge = merged.stats;
     *triangle_sources = std::mem::take(&mut merge.triangle_sources);
     refresh_mesh_after_merge(
         mesh,
