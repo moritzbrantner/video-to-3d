@@ -19,5 +19,5 @@ three-d-core = { git = "https://github.com/moritzbrantner/3d-lab", rev = "7ce0c7
 three-d-assets = { git = "https://github.com/moritzbrantner/3d-lab", rev = "7ce0c74306466edcc8e046f9773f6107c57111e3" }
 three-d-animation = { git = "https://github.com/moritzbrantner/3d-lab", rev = "7ce0c74306466edcc8e046f9773f6107c57111e3" }
 three-d-formats = { git = "https://github.com/moritzbrantner/3d-lab", rev = "7ce0c74306466edcc8e046f9773f6107c57111e3" }
-three-d-scene = { git = "https://github.com/moritzbrantner/3d-lab", rev = "7ce0c74306466edcc8e046f9773f6107c57111e3" }
+three-d-scene = { git = "https://github.com/moritzbrantner/3d-lab", rev = "231d8fe1a4766753b3f6f2eb03c113b6a0cd206f" }
 three-d-export = { git = "https://github.com/moritzbrantner/3d-lab", rev = "7ce0c74306466edcc8e046f9773f6107c57111e3" }

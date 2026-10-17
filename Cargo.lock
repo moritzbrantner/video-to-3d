@@ -3575,9 +3575,26 @@ dependencies = [
 [[package]]
 name = "three-d-animation"
 version = "0.1.0"
+source = "git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f#231d8fe1a4766753b3f6f2eb03c113b6a0cd206f"
+dependencies = [
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f)",
+]
+
+[[package]]
+name = "three-d-animation"
+version = "0.1.0"
 source = "git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3#7ce0c74306466edcc8e046f9773f6107c57111e3"
 dependencies = [
- "three-d-core",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+]
+
+[[package]]
+name = "three-d-assets"
+version = "0.1.0"
+source = "git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f#231d8fe1a4766753b3f6f2eb03c113b6a0cd206f"
+dependencies = [
+ "three-d-animation 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f)",
 ]
 
 [[package]]
@@ -3585,9 +3602,14 @@ name = "three-d-assets"
 version = "0.1.0"
 source = "git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3#7ce0c74306466edcc8e046f9773f6107c57111e3"
 dependencies = [
- "three-d-animation",
- "three-d-core",
+ "three-d-animation 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
 ]
+
+[[package]]
+name = "three-d-core"
+version = "0.1.0"
+source = "git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f#231d8fe1a4766753b3f6f2eb03c113b6a0cd206f"
 
 [[package]]
 name = "three-d-core"
@@ -3600,9 +3622,9 @@ version = "0.1.0"
 source = "git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3#7ce0c74306466edcc8e046f9773f6107c57111e3"
 dependencies = [
  "serde_json",
- "three-d-assets",
- "three-d-core",
- "three-d-scene",
+ "three-d-assets 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-scene 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
 ]
 
 [[package]]
@@ -3612,9 +3634,9 @@ source = "git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e04
 dependencies = [
  "base64 0.23.1",
  "gltf",
- "three-d-animation",
- "three-d-assets",
- "three-d-core",
+ "three-d-animation 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-assets 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
  "three-d-rigged-assets",
  "tobj",
 ]
@@ -3624,8 +3646,18 @@ name = "three-d-rigged-assets"
 version = "0.1.0"
 source = "git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3#7ce0c74306466edcc8e046f9773f6107c57111e3"
 dependencies = [
- "three-d-animation",
- "three-d-core",
+ "three-d-animation 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+]
+
+[[package]]
+name = "three-d-scene"
+version = "0.1.0"
+source = "git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f#231d8fe1a4766753b3f6f2eb03c113b6a0cd206f"
+dependencies = [
+ "three-d-animation 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f)",
+ "three-d-assets 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f)",
 ]
 
 [[package]]
@@ -3633,9 +3665,9 @@ name = "three-d-scene"
 version = "0.1.0"
 source = "git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3#7ce0c74306466edcc8e046f9773f6107c57111e3"
 dependencies = [
- "three-d-animation",
- "three-d-assets",
- "three-d-core",
+ "three-d-animation 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-assets 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
 ]
 
 [[package]]
@@ -4013,12 +4045,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "three-d-animation",
- "three-d-assets",
- "three-d-core",
+ "three-d-animation 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-assets 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
+ "three-d-core 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=7ce0c74306466edcc8e046f9773f6107c57111e3)",
  "three-d-export",
  "three-d-formats",
- "three-d-scene",
+ "three-d-scene 0.1.0 (git+https://github.com/moritzbrantner/3d-lab?rev=231d8fe1a4766753b3f6f2eb03c113b6a0cd206f)",
 ]
 
 [[package]]
