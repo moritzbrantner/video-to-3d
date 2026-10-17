@@ -103,9 +103,11 @@ fn project(response: &Value) -> PathBuf {
             {"id": "objects", "kind": "object_identity",
              "inputs": [{"operation": "semantic"}, {"operation": "sparse"}, {"operation": "mesh"}]},
             {"id": "masks", "kind": "object_masks",
-             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "sparse"}, {"operation": "mesh"}]}
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "sparse"}, {"operation": "mesh"}]},
+            {"id": "references", "kind": "object_references",
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "masks"}, {"operation": "sparse"}, {"operation": "mesh"}]}
         ],
-        "requested_outputs": ["object_identity", "object_masks"]
+        "requested_outputs": ["object_identity", "object_masks", "object_references"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     store
@@ -183,6 +185,15 @@ fn object_identity_runs_over_semantic_evidence_without_touching_geometry() {
     assert_eq!(
         result["operations"]["masks"]["observations"]["missing_masks"],
         "3"
+    );
+    // Box-only evidence packages nothing, and says why for the movable toy.
+    assert_eq!(
+        result["operations"]["references"]["state"], "succeeded",
+        "{result}"
+    );
+    assert_eq!(
+        result["operations"]["references"]["observations"]["unpackaged"],
+        "1"
     );
     let rebuilt = build(&root);
     assert_eq!(

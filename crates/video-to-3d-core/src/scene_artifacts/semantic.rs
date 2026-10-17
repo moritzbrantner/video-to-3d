@@ -470,6 +470,24 @@ impl BuiltInExecutor {
         request: &OperationRequest,
         cancel: &CancellationToken,
     ) -> Result<(Vec<crate::object_identity::FrameCamera>, Vec<[f64; 3]>), String> {
+        let (cameras, points, _) = self.registered_geometry_with_scale(request, cancel)?;
+        Ok((cameras, points))
+    }
+
+    /// [`Self::registered_geometry`] plus the scene's evidence scale.
+    #[allow(clippy::type_complexity)]
+    fn registered_geometry_with_scale(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+    ) -> Result<
+        (
+            Vec<crate::object_identity::FrameCamera>,
+            Vec<[f64; 3]>,
+            crate::EvidenceScale,
+        ),
+        String,
+    > {
         let cameras = crate::CameraStageArtifact::from_json_with_cancel(
             &self.document(
                 self.input(request, ArtifactKind::SparseReconstruction)?,
@@ -509,7 +527,7 @@ impl BuiltInExecutor {
             .iter()
             .map(|point| [f64::from(point.x), f64::from(point.y), f64::from(point.z)])
             .collect();
-        Ok((frame_cameras, points))
+        Ok((frame_cameras, points, mesh.scale))
     }
 
     /// Built-in cross-view mask consistency (#62), read-only.
@@ -584,6 +602,88 @@ impl BuiltInExecutor {
                         .to_string(),
                 );
             }
+            Ok(produced)
+        })();
+        match result {
+            Ok(produced) => AttemptOutcome::Succeeded(produced),
+            Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
+            Err(message) => AttemptOutcome::Failed(message),
+        }
+    }
+}
+
+impl BuiltInExecutor {
+    /// Built-in multi-view object reference packages (#63), read-only.
+    pub(super) fn object_references(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+    ) -> AttemptOutcome {
+        if cancel.is_canceled() {
+            return AttemptOutcome::Canceled;
+        }
+        let directory = format!("artifacts/native/{}", request.operation.id);
+        match self.collision(&request.operation.id, &directory) {
+            Ok(Some(path)) => {
+                return AttemptOutcome::Unsupported(format!(
+                    "object references output would overwrite declared path {}",
+                    path.as_str()
+                ))
+            }
+            Err(message) => return AttemptOutcome::Failed(message),
+            Ok(None) => {}
+        }
+        let result = (|| -> Result<ProducedArtifact, String> {
+            let semantic_record = self.input(request, ArtifactKind::SemanticInventory)?;
+            let inventory =
+                SemanticInventoryArtifact::from_json(&self.document(semantic_record, cancel)?)?;
+            let identity_record = self.input(request, ArtifactKind::ObjectIdentity)?;
+            let identities = crate::object_identity::ObjectIdentityArtifact::from_json(
+                &self.document(identity_record, cancel)?,
+            )?;
+            let masks_record = self.input(request, ArtifactKind::ObjectMasks)?;
+            let masks = crate::object_masks::ObjectMasksArtifact::from_json(
+                &self.document(masks_record, cancel)?,
+            )?;
+            if identities.semantic_inventory != semantic_record.content_hash
+                || masks.semantic_inventory != semantic_record.content_hash
+                || masks.object_identity != identity_record.content_hash
+            {
+                return Err(
+                    "object references inputs come from different semantic evidence".into(),
+                );
+            }
+            let (cameras, points, scale) = self.registered_geometry_with_scale(request, cancel)?;
+            if cancel.is_canceled() {
+                return Err("object references canceled".into());
+            }
+            let artifact = crate::object_references::package_object_references(
+                &inventory,
+                semantic_record.content_hash.clone(),
+                &identities,
+                identity_record.content_hash.clone(),
+                &masks,
+                masks_record.content_hash.clone(),
+                &cameras,
+                &points,
+                scale,
+            );
+            artifact.validate()?;
+            let output = ProjectPath::new(format!("{directory}/artifact.json"))
+                .map_err(|e| e.to_string())?;
+            let document = artifact.to_json();
+            write_atomically(&output.resolve(&self.root), document.as_bytes())?;
+            let mut produced = ProducedArtifact::new(
+                output,
+                ContentHash::of_bytes(document.as_bytes()),
+                Reproducibility::Deterministic,
+            );
+            produced
+                .observations
+                .insert("packages".into(), artifact.packages.len().to_string());
+            produced
+                .observations
+                .insert("unpackaged".into(), artifact.unpackaged.len().to_string());
             Ok(produced)
         })();
         match result {
