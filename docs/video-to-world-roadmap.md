@@ -10,12 +10,12 @@ Use existing issues in dependency-first order rather than numeric milestone orde
 
 1. Pin and independently verify synthetic and real-video fixture evidence and the Blender harness (Atlas `3.1`, `3.5`; issues #74, #75, #76, #77, #151).
 2. Complete the resumable local CLI/scene runner around browser-prepared frames, keeping browser decode/sampling ownership (Atlas `1.6`, `4.3`; issue #150).
-3. Add native evidence interchange and a measured learned provider only where observed reconstruction fails (Atlas `2.2`, `2.6`; issues #78, #79).
+3. Reuse the native evidence boundary (#78), adopt pinned COLMAP sparse-first in the native path (#204) and compare dense output before adopting it. Keep Rust browser/fallback and use learned evidence only where classical reconstruction is weak (#79, #81; Atlas `2.7`, `2.8`).
 4. Track object identity and masks, produce independently editable geometry, and validate placements against retained video views (Atlas `1.1`, `1.5`, `3.2`, `5.2`; issues #60–#63, #68–#71).
-5. Integrate preview and Blender export/import for the complete hierarchy (Atlas `1.3`, `3.3`; issues #84, #151).
+5. Show validated intermediate scene outputs (#71), keep Standard as the UI default, and integrate immutable partial Blender snapshots (#234) plus the complete independent Blender gate (#151). Reopen interrupted native work automatically using the existing runner (#235).
 6. Re-run the [three-video release acceptance](specs/hybrid-room-to-blender-acceptance.md) and select the earliest failing dependency. Report code merged, demonstrated functional capability and passing product acceptance separately (Atlas `6.1`–`6.3`).
 
-For each new issue, consult current pinned acceptance evidence or run the applicable acceptance slice. Prefer the first actionable failing dependency; do not promote an intermediate synthetic smoke or web preview into the three-clip product gate. Leave post-v1 cloud and optional advanced features off the initial critical path (Atlas `7.1`, `7.2`), without deferring existing security, correctness or provenance defects.
+For each new issue, consult current pinned acceptance evidence or run the applicable acceptance slice. Prefer the first actionable failing dependency; do not promote an intermediate synthetic smoke, partial Blender export or web preview into the three-clip product gate. Keep generated-world work #65–#67 deferred until post-v1 cloud policy 8.5.1 (Atlas `8.11`), without deferring existing security, correctness or provenance defects.
 
 ## Proposed pipeline stage order
 
@@ -87,10 +87,11 @@ Status: schema v1 is implemented in `crates/video-to-3d-core/src/scene_model.rs`
 Add explicit modes rather than hidden heuristic bundles:
 
 - **preview** — fast local reconstruction and coarse outputs;
-- **standard** — learned escalation + scene decomposition + usable completion;
+- **standard** (**default**) — scene decomposition, editable objects and learned escalation only where accepted reconstruction is weak;
 - **production** — stronger **local** provider escalation, higher-quality meshes/textures, stronger validation/export.
 
 Stage verification tasks:
+- new user-facing scene projects select Standard unless explicitly changed;
 - changing quality mode changes declared operations, not hidden behavior;
 - diagnostics explain each escalation decision.
 
@@ -250,7 +251,7 @@ Complete the owned form of `ReconstructionEvidenceView` for native/Tauri worker 
 
 Integrate one strong feed-forward multi-view provider through the common evidence contract.
 
-Preferred research surface: MapAnything so multiple model families can later be compared behind one adapter.
+Provider order (Atlas 2.7–2.8): native COLMAP sparse-first, then compare its dense output with Rust; only escalate to approved local MapAnything for weak/missing validated geometry on supported hardware. Preserve Rust browser/native fallback and the shared evidence admission gate. MapAnything remains the first measured learned candidate, not an unconditional stage.
 
 Stage verification tasks:
 - model output never bypasses Rust validation;
@@ -360,9 +361,7 @@ Requirements:
 
 ## 6.3 World-model provider adapter
 
-Add a provider-neutral **local** world-generation operation with explicit conditioning capabilities. Video conditioning and all other operations run on-device for the first release. **Later only**, if the owner explicitly enables a future cloud mode, providers may process separately authorized derived artifacts; source video is never sent to a provider.
-
-**Deferred future research only:** an optional cloud adapter might target a suitable world model under a separately approved privacy policy. It is not part of the initial product or acceptance gate.
+**Deferred** by Atlas 8.11.1: world-model operation/import/registration/representation work (#65–#67, asset-tooling#183–#185) is not an initial-release implementation dependency. Revisit only after post-v1 cloud policy 8.5.1 is answered. Source video must never leave the device, and no provider/cloud permission may be inferred from a schema field. Later operations still use provider-neutral contracts and Rust-owned evidence validation.
 
 ## 6.4 World-model import
 
@@ -623,11 +622,11 @@ Export a portable bundle containing:
 
 ## 13.2 GLB-oriented export
 
-Export mesh-compatible scene content through existing production GLB normalization.
+Export mesh-compatible scene content through existing production GLB normalization. Add verified partial Blender exports as separate immutable revisions (#234); label incomplete/unavailable portions and preserve existing exports even when reconstruction continues.
 
 ## 13.3 DCC handoff
 
-Provide a Blender-friendly import package retaining scene coordinates and provenance sidecars.
+Provide a Blender-friendly import package retaining scene coordinates and provenance sidecars. Initial release has independent snapshot imports, not automatic Blender synchronization; the full three-video editable-scene gate remains #151/#77.
 
 ## 13.4 Game-engine handoff
 
