@@ -120,6 +120,8 @@ impl CoarseCollider {
             .collect();
         ranges.sort_unstable_by_key(|range| range.0);
         let observed_point = |point: usize| {
+            // A derived point inherits its source corner's provenance.
+            let point = evidence.provenance_point(point);
             let after = ranges.partition_point(|range| range.0 <= point);
             after > 0 && {
                 let (_, end, observed) = ranges[after - 1];

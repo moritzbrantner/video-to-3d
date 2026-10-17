@@ -767,14 +767,17 @@ fn signed_area(polygon: &[Vector2<f64>]) -> f64 {
 
 /// Split every triangle at the vertices recorded inside its edges, so no
 /// vertex lies inside another triangle's edge. A split triangle keeps its slot
-/// for its first piece and appends the rest; returns the split slots.
+/// for its first piece and appends the rest; returns the split slots and the
+/// number of triangles that needed a split but could not be split (left with
+/// a T-junction: the caller must not publish such a result). `None` when
+/// canceled.
 #[allow(clippy::needless_range_loop)] // slots are rewritten in place
 pub(super) fn conform_edges(
     state: &ClipState,
     triangles: &mut Vec<MeshTriangle>,
     position: &dyn Fn(usize) -> Vector3<f64>,
     control: &mut crate::ReconstructionControl<'_>,
-) -> Option<Vec<usize>> {
+) -> Option<(Vec<usize>, usize)> {
     let parameter_on = |edge: EdgeKey, vertex: usize| -> Option<f64> {
         if vertex == edge.0 {
             Some(0.0)
@@ -791,6 +794,7 @@ pub(super) fn conform_edges(
     };
     let mut split = Vec::new();
     let mut appended = Vec::new();
+    let mut failures = 0;
     for slot in 0..triangles.len() {
         if slot % 256 == 0 && control.is_canceled() {
             return None;
@@ -848,14 +852,16 @@ pub(super) fn conform_edges(
         }
         let polygon: Vec<Vector2<f64>> = boundary.iter().map(|(_, at)| *at).collect();
         let Some(ears) = ear_clip(&polygon, 1.0e-12) else {
+            failures += 1;
             continue;
         };
-        // Reject a split whose pieces would be degenerate in space.
+        // A split whose pieces would be degenerate in space is a failure too.
         let degenerate = ears.iter().any(|ear| {
             let [a, b, c] = ear.map(|corner| position(boundary[corner].0));
             (b - a).cross(&(c - a)).norm() <= f64::EPSILON
         });
         if degenerate {
+            failures += 1;
             continue;
         }
         let mut pieces = ears.into_iter().map(|ear| MeshTriangle {
@@ -869,5 +875,5 @@ pub(super) fn conform_edges(
         split.push(slot);
     }
     triangles.extend(appended);
-    Some(split)
+    Some((split, failures))
 }

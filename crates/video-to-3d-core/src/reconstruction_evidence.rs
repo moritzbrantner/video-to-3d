@@ -266,6 +266,29 @@ impl<'a> ReconstructionEvidenceView<'a> {
         Ok(self)
     }
 
+    /// The observed point whose provenance `point` carries: itself when observed; for a
+    /// derived point, the source corner with the largest barycentric weight (all weighted
+    /// corners share one evidence origin). Consumers that resolve provenance through the
+    /// regions use it so derived geometry inherits, but never adds, observation support.
+    pub fn provenance_point(&self, point: usize) -> usize {
+        let observed = self.observed_point_count();
+        match point
+            .checked_sub(observed)
+            .and_then(|slot| self.derived_vertices.get(slot))
+        {
+            Some(derived) => {
+                let mut best = 0;
+                for corner in 1..3 {
+                    if derived.barycentric[corner] > derived.barycentric[best] {
+                        best = corner;
+                    }
+                }
+                derived.source_corners[best]
+            }
+            None => point,
+        }
+    }
+
     /// Points with observed provenance: every point before the derived ones.
     pub fn observed_point_count(&self) -> usize {
         self.points
@@ -958,6 +981,23 @@ fn validate_derived_vertices(
         if distance > DERIVED_POSITION_TOLERANCE * magnitude {
             return Err(format!(
                 "reconstruction evidence derived vertex {index} is not at its barycentric source position"
+            ));
+        }
+        // A source triangle was triangulated in one reference patch: its corners share
+        // one reference camera (and support), so its lineage cannot point across patches.
+        let reference_of = |point: usize| {
+            regions
+                .iter()
+                .find(|region| {
+                    point >= region.points.start
+                        && point - region.points.start < region.points.count
+                })
+                .map(|region| (region.reference_frame, &region.source_frames))
+        };
+        let support = reference_of(a);
+        if support.is_none() || reference_of(b) != support || reference_of(c) != support {
+            return Err(format!(
+                "reconstruction evidence derived vertex {index} source corners are not one reference patch's triangle"
             ));
         }
         let mut origin = None;

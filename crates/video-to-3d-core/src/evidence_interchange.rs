@@ -39,7 +39,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
+/// Format of streams without derived vertices (the original layout).
 pub const EVIDENCE_INTERCHANGE_FORMAT_VERSION: u32 = 1;
+/// Format of streams that carry derived (clipped) vertices (#137): version 1 plus the
+/// derived-vertex header count and section. Streams without derived vertices stay
+/// version 1 and byte-identical, so existing readers keep reading them; an older reader
+/// rejects a version 2 stream instead of misreading it.
+pub const EVIDENCE_INTERCHANGE_DERIVED_FORMAT_VERSION: u32 = 2;
 /// 8-byte magic at the start of every encoded stream.
 pub const EVIDENCE_INTERCHANGE_MAGIC: [u8; 8] = *b"V3DEVID\0";
 
@@ -227,8 +233,12 @@ pub fn encode_evidence(
         .map_err(|_| "evidence interchange header exceeds the u32 length limit".to_owned())?;
     out.write_all(&EVIDENCE_INTERCHANGE_MAGIC)
         .map_err(io_error)?;
-    out.write_all(&EVIDENCE_INTERCHANGE_FORMAT_VERSION.to_le_bytes())
-        .map_err(io_error)?;
+    let version = if view.derived_vertices.is_empty() {
+        EVIDENCE_INTERCHANGE_FORMAT_VERSION
+    } else {
+        EVIDENCE_INTERCHANGE_DERIVED_FORMAT_VERSION
+    };
+    out.write_all(&version.to_le_bytes()).map_err(io_error)?;
     out.write_all(&header_length.to_le_bytes())
         .map_err(io_error)?;
     out.write_all(&header).map_err(io_error)?;
@@ -375,9 +385,11 @@ pub fn decode_evidence(
         return Err("evidence interchange stream does not start with the expected magic".into());
     }
     let version = u32_at(&prefix, 8);
-    if version != EVIDENCE_INTERCHANGE_FORMAT_VERSION {
+    if version != EVIDENCE_INTERCHANGE_FORMAT_VERSION
+        && version != EVIDENCE_INTERCHANGE_DERIVED_FORMAT_VERSION
+    {
         return Err(format!(
-            "unsupported evidence interchange format version {version}; this build reads version {EVIDENCE_INTERCHANGE_FORMAT_VERSION}"
+            "unsupported evidence interchange format version {version}; this build reads versions {EVIDENCE_INTERCHANGE_FORMAT_VERSION} and {EVIDENCE_INTERCHANGE_DERIVED_FORMAT_VERSION}"
         ));
     }
     let header_length = u32_at(&prefix, 12) as usize;
@@ -400,7 +412,16 @@ pub fn decode_evidence(
         header.triangle_sources,
         header.triangles,
     )?;
-    // Derived points are among the declared points.
+    // Derived points are among the declared points, and only version 2 has them.
+    if version == EVIDENCE_INTERCHANGE_FORMAT_VERSION && header.derived_vertices != 0 {
+        return Err("evidence interchange format version 1 cannot carry derived vertices".into());
+    }
+    if version == EVIDENCE_INTERCHANGE_DERIVED_FORMAT_VERSION && header.derived_vertices == 0 {
+        return Err(
+            "evidence interchange format version 2 declares no derived vertices; write version 1"
+                .into(),
+        );
+    }
     bounded("derived vertices", header.derived_vertices, header.points)?;
 
     let points = read_records(input, header.points, POINT_BYTES, "point buffer", |bytes| {

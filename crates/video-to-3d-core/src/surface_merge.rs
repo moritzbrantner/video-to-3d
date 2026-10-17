@@ -193,6 +193,9 @@ pub(super) struct MergeStats {
     pub unclipped_overlap_triangles: usize,
     /// Triangles split at vertices the clips placed inside their edges.
     pub conformed_triangles: usize,
+    /// Triangles that needed such a split but could not be split; an owned
+    /// merge with any is rejected rather than published with T-junctions.
+    pub conformance_failures: usize,
     /// Retained triangles that canonicalization re-indexed, with the corners they were
     /// triangulated over, sorted by their index in the merged triangle buffer.
     pub triangle_sources: Vec<crate::TriangleSourceCorners>,
@@ -327,6 +330,12 @@ pub(crate) fn merge_fused_patches_owned_with_control(
         true,
     );
     control.check()?;
+    if stats.conformance_failures > 0 {
+        return Err(format!(
+            "surface merge could not split {} triangle(s) at clipped seam vertices; the merge is rejected rather than published with T-junctions",
+            stats.conformance_failures
+        ));
+    }
     points.reserve(derived.len());
     let mut derived_vertices = Vec::with_capacity(derived.len());
     for entry in derived {
@@ -962,6 +971,7 @@ fn merge_impl(
     }
     // Zipper: split every edge a clip placed a vertex inside.
     let mut conformed_triangles = 0;
+    let mut conformance_failures = 0;
     if clip_state.has_records() {
         let derived_position = |vertex: usize| {
             if vertex < points.len() {
@@ -971,10 +981,12 @@ fn merge_impl(
                 Vector3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z))
             }
         };
-        let Some(split) = clip::conform_edges(&clip_state, triangles, &derived_position, control)
+        let Some((split, failures)) =
+            clip::conform_edges(&clip_state, triangles, &derived_position, control)
         else {
             return Default::default();
         };
+        conformance_failures = failures;
         conformed_triangles = split.len();
         let split: BTreeSet<usize> = split.into_iter().collect();
         triangle_sources.retain(|source| !split.contains(&source.triangle));
@@ -1029,6 +1041,7 @@ fn merge_impl(
         derived_vertices: clip_state.derived.len(),
         unclipped_overlap_triangles: clip_failures,
         conformed_triangles,
+        conformance_failures,
         fused_pairs,
         shared_vertices,
         cross_reference_triangles,
