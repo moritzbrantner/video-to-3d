@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use video_to_3d_core::clean_plate::CleanPlateArtifact;
+use video_to_3d_core::object_generation::ObjectGenerationArtifact;
 use video_to_3d_core::object_identity::ObjectIdentityArtifact;
 use video_to_3d_core::object_masks::ObjectMasksArtifact;
 use video_to_3d_core::object_references::ObjectReferencesArtifact;
@@ -170,7 +171,8 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
         "provider_policy": {"execution": "local_only", "providers": [{
             "id": "local-grounded-sam2", "location": "local",
             "capabilities": ["semantic_inventory"], "revision": "real-acceptance"
-        }, {"id": "local-lama", "location": "local", "capabilities": ["clean_plate"], "revision": "real-acceptance"}]},
+        }, {"id": "local-lama", "location": "local", "capabilities": ["clean_plate"], "revision": "real-acceptance"},
+        {"id": "local-triposr", "location": "local", "capabilities": ["object_generation"], "revision": "real-acceptance"}]},
         "operations": [
             {"id": "ingest", "kind": "ingest_video", "inputs": [{"media": "clip"}]},
             {"id": "sparse", "kind": "sparse_reconstruction", "inputs": [{"operation": "ingest"}]},
@@ -186,9 +188,11 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
             {"id": "references", "kind": "object_references",
              "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "masks"}, {"operation": "sparse"}, {"operation": "mesh"}]},
             {"id": "plates", "kind": "clean_plate", "provider": "local-lama",
+             "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]},
+            {"id": "generated", "kind": "object_generation", "provider": "local-triposr",
              "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]}
         ],
-        "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references", "clean_plates"]
+        "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references", "clean_plates", "generated_objects"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     let report = store
@@ -405,5 +409,31 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
         json!({"frame": die_frame, "edit_id": plate.request.edit_id, "objects": plate.request.objects,
                "inside_changed_pixels": inside_changed, "plates": plates.plates.len(),
                "provider": plates.provider, "output": output.path.as_str()}),
+    );
+    // #68: TripoSR generates a candidate mesh for the die from its primary view.
+    assert_eq!(
+        result["operations"]["generated"]["state"], "succeeded",
+        "{stderr}"
+    );
+    let generated = ObjectGenerationArtifact::from_json(&read(&root.0, "generated")).unwrap();
+    let die = generated
+        .objects
+        .iter()
+        .find(|object| object.request.object == best.id)
+        .expect("a generation request for the die");
+    let mesh = die
+        .output
+        .as_ref()
+        .unwrap_or_else(|| panic!("die generation failed: {:?}", die.failure));
+    let glb = fs::read(mesh.path.resolve(&root.0)).unwrap();
+    assert_eq!(&glb[..4], b"glTF");
+    assert!(mesh.triangles > 0);
+    report(
+        "object_generation",
+        json!({"request_id": die.request.request_id, "frame": die.request.frame_index,
+               "vertices": mesh.vertices, "triangles": mesh.triangles, "glb_bytes": glb.len(),
+               "generated": generated.objects.iter().filter(|o| o.output.is_some()).count(),
+               "failed": generated.objects.iter().filter(|o| o.output.is_none()).count(),
+               "provider": generated.provider}),
     );
 }

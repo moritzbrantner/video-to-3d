@@ -99,6 +99,9 @@ pub enum OperationKind {
     /// objects removed by a local inpainting provider (#64). Generated
     /// appearance; never camera evidence.
     CleanPlate,
+    /// Generated candidate meshes of packaged objects from a local
+    /// image-to-3D provider (#68). Candidate evidence; never scene authority.
+    ObjectGeneration,
 }
 
 /// Whether an operation runs the built-in Rust pipeline or a declared provider.
@@ -111,7 +114,7 @@ pub enum OperationExecution {
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 15] = [
+    pub const ALL: [OperationKind; 16] = [
         Self::IngestVideo,
         Self::SparseReconstruction,
         Self::DenseReconstruction,
@@ -127,6 +130,7 @@ impl OperationKind {
         Self::ObjectMasks,
         Self::ObjectReferences,
         Self::CleanPlate,
+        Self::ObjectGeneration,
     ];
 
     /// Lowest quality mode in which this operation may be declared.
@@ -145,7 +149,8 @@ impl OperationKind {
             | Self::ObjectIdentity
             | Self::ObjectMasks
             | Self::ObjectReferences
-            | Self::CleanPlate => QualityMode::Standard,
+            | Self::CleanPlate
+            | Self::ObjectGeneration => QualityMode::Standard,
             Self::SplatOptimization => QualityMode::Production,
         }
     }
@@ -157,7 +162,8 @@ impl OperationKind {
             | Self::GenerativeCompletion
             | Self::SplatOptimization
             | Self::SemanticInventory
-            | Self::CleanPlate => OperationExecution::Provider,
+            | Self::CleanPlate
+            | Self::ObjectGeneration => OperationExecution::Provider,
             _ => OperationExecution::BuiltIn,
         }
     }
@@ -180,6 +186,7 @@ impl OperationKind {
             Self::ObjectMasks => ArtifactKind::ObjectMasks,
             Self::ObjectReferences => ArtifactKind::ObjectReferences,
             Self::CleanPlate => ArtifactKind::CleanPlates,
+            Self::ObjectGeneration => ArtifactKind::GeneratedObjects,
         }
     }
 
@@ -217,6 +224,7 @@ impl OperationKind {
                 SurfaceMesh,
             ],
             CleanPlate => &[IngestVideo, SemanticInventory, ObjectReferences],
+            ObjectGeneration => &[IngestVideo, SemanticInventory, ObjectReferences],
             SplatOptimization => &[IngestVideo, SparseReconstruction, DenseReconstruction],
             SceneAssembly => &[
                 SparseReconstruction,
@@ -264,6 +272,7 @@ impl OperationKind {
             Self::ObjectMasks => "object_masks",
             Self::ObjectReferences => "object_references",
             Self::CleanPlate => "clean_plate",
+            Self::ObjectGeneration => "object_generation",
         }
     }
 }
@@ -288,6 +297,7 @@ pub enum ArtifactKind {
     ObjectMasks,
     ObjectReferences,
     CleanPlates,
+    GeneratedObjects,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1117,7 +1127,7 @@ impl SceneProjectManifest {
                 ));
             }
         }
-        if kind == OperationKind::CleanPlate {
+        if kind == OperationKind::CleanPlate || kind == OperationKind::ObjectGeneration {
             let count = |wanted: ArtifactKind| {
                 upstream_kinds
                     .iter()
@@ -1134,8 +1144,9 @@ impl SceneProjectManifest {
                 .any(|kind| count(*kind) != 1)
             {
                 return invalid(format!(
-                    "operation `{}` (clean_plate) must consume exactly one ingest_video, semantic_inventory and object_references operation",
-                    operation.id
+                    "operation `{}` ({}) must consume exactly one ingest_video, semantic_inventory and object_references operation",
+                    operation.id,
+                    kind.name()
                 ));
             }
         }

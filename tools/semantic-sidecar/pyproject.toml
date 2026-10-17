@@ -9,6 +9,12 @@ dependencies = [
   "transformers==4.57.3",
   "numpy>=2.1,<3",
   "pillow>=11,<13",
+  # TripoSR (object generation, Atlas 8.10), fetched at a pinned commit on first need.
+  "omegaconf==2.3.0",
+  "einops==0.8.1",
+  "trimesh==4.8.3",
+  "scikit-image==0.25.2",
+  "imageio==2.37.0",
 ]
 
 [tool.uv]

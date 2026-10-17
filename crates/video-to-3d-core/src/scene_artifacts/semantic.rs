@@ -991,3 +991,310 @@ impl BuiltInExecutor {
         Ok(Some(produced))
     }
 }
+
+/// Protocol of the local object-generation (image-to-3D) sidecar.
+pub const GENERATION_PROTOCOL: &str = "video-to-3d-object-generation-sidecar/1";
+/// Environment variable naming the object-generation sidecar executable.
+pub const GENERATION_ENVIRONMENT: &str = "VIDEO_TO_3D_OBJECT_GENERATION_SIDECAR";
+/// The object-generation sidecar looked up on the `PATH` by default; the
+/// repository ships it as `tools/semantic-sidecar/video-to-3d-object-generation-sidecar`.
+pub const DEFAULT_GENERATION_SIDECAR: &str = "video-to-3d-object-generation-sidecar";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationResult {
+    request_id: String,
+    status: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    vertices: Option<u64>,
+    #[serde(default)]
+    triangles: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationResponse {
+    protocol: String,
+    status: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    models: Vec<SemanticModel>,
+    #[serde(default)]
+    runtime: Option<SemanticRuntime>,
+    #[serde(default)]
+    results: Vec<GenerationResult>,
+}
+
+impl BuiltInExecutor {
+    /// Run object generation with this sidecar program instead of the
+    /// environment variable or the default.
+    pub fn with_object_generation_sidecar(mut self, program: impl Into<PathBuf>) -> Self {
+        self.generation_sidecar = Some(program.into());
+        self
+    }
+
+    /// Generated candidate meshes (#68) from a local image-to-3D sidecar.
+    pub(super) fn object_generation(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+    ) -> AttemptOutcome {
+        if cancel.is_canceled() {
+            return AttemptOutcome::Canceled;
+        }
+        let directory = format!("artifacts/native/{}", request.operation.id);
+        match self.collision(&request.operation.id, &directory) {
+            Ok(Some(path)) => {
+                return AttemptOutcome::Unsupported(format!(
+                    "object generation output would overwrite declared path {}",
+                    path.as_str()
+                ))
+            }
+            Err(message) => return AttemptOutcome::Failed(message),
+            Ok(None) => {}
+        }
+        match self.run_object_generation(request, cancel, &directory) {
+            Ok(Some(produced)) => AttemptOutcome::Succeeded(produced),
+            Ok(None) => AttemptOutcome::Canceled,
+            Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
+            Err(message) => AttemptOutcome::Failed(message),
+        }
+    }
+
+    fn run_object_generation(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+        directory: &str,
+    ) -> Result<Option<ProducedArtifact>, String> {
+        use crate::object_generation::{
+            plan_generation, GeneratedClassification, GeneratedMesh, GeneratedObject,
+            GenerationProvider, GenerationStatus, ObjectGenerationArtifact,
+            OBJECT_GENERATION_SCHEMA_VERSION,
+        };
+        let provider = request
+            .provider
+            .as_ref()
+            .ok_or("object generation needs its declared provider")?;
+        let revision = provider.revision.clone().unwrap_or_default();
+        let keyframes = KeyframesArtifact::from_json_with_cancel(
+            &self.document(self.input(request, ArtifactKind::Keyframes)?, cancel)?,
+            || {
+                if cancel.is_canceled() {
+                    Err("object generation keyframes read canceled".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        let inventory = SemanticInventoryArtifact::from_json(&self.document(
+            self.input(request, ArtifactKind::SemanticInventory)?,
+            cancel,
+        )?)?;
+        inventory.validate_against_keyframes(&keyframes)?;
+        let references_record = self.input(request, ArtifactKind::ObjectReferences)?;
+        let references = crate::object_references::ObjectReferencesArtifact::from_json(
+            &self.document(references_record, cancel)?,
+        )?;
+        let plans = plan_generation(&inventory, &references, (&provider.id, &revision));
+        let mut artifact = ObjectGenerationArtifact {
+            schema_version: OBJECT_GENERATION_SCHEMA_VERSION,
+            status: GenerationStatus::Available,
+            unavailable_reason: None,
+            provider: GenerationProvider {
+                id: provider.id.clone(),
+                revision: revision.clone(),
+                models: Vec::new(),
+                runtime: None,
+            },
+            object_references: references_record.content_hash.clone(),
+            objects: Vec::new(),
+        };
+        let exchange = Exchange::new(&request.operation.id)?;
+        let mut available = true;
+        if !plans.is_empty() {
+            let mut entries = Vec::new();
+            for plan in &plans {
+                let keyframe = keyframes
+                    .frames
+                    .iter()
+                    .find(|frame| frame.frame_index == plan.frame_index)
+                    .ok_or("generation frame is not a keyframe")?;
+                let source = fs::canonicalize(keyframe.pixels.resolve(&self.root))
+                    .map_err(|error| error.to_string())?;
+                entries.push(serde_json::json!({
+                    "request_id": plan.request_id,
+                    "label": plan.label,
+                    "width": plan.width,
+                    "height": plan.height,
+                    "rgba_path": source,
+                    "crop": plan.crop,
+                    "mask_counts": plan.mask.counts,
+                    "output_path": exchange.0.join(format!("{}.glb", plan.request_id)),
+                }));
+            }
+            let request_path = exchange.0.join("request.json");
+            let response_path = exchange.0.join("response.json");
+            fs::write(
+                &request_path,
+                serde_json::json!({
+                    "protocol": GENERATION_PROTOCOL,
+                    "provider": {"id": provider.id, "revision": revision},
+                    "requests": entries,
+                })
+                .to_string(),
+            )
+            .map_err(|error| error.to_string())?;
+            let program = self
+                .generation_sidecar
+                .clone()
+                .or_else(|| std::env::var_os(GENERATION_ENVIRONMENT).map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_GENERATION_SIDECAR));
+            let results: BTreeMap<String, GenerationResult> = match run_sidecar(
+                &program,
+                &request_path,
+                &response_path,
+                &exchange.0,
+                cancel,
+            )? {
+                SidecarRun::Canceled => return Ok(None),
+                SidecarRun::NotStarted(reason) => {
+                    available = false;
+                    artifact.unavailable_reason = Some(reason.replace(
+                        "semantic segmentation is unavailable",
+                        "object generation is unavailable",
+                    ));
+                    BTreeMap::new()
+                }
+                SidecarRun::Response(bytes) => {
+                    let response: GenerationResponse = serde_json::from_slice(&bytes)
+                        .map_err(|error| format!("object generation sidecar response: {error}"))?;
+                    if response.protocol != GENERATION_PROTOCOL {
+                        return Err(format!(
+                                "object generation sidecar speaks `{}`, expected `{GENERATION_PROTOCOL}`",
+                                response.protocol
+                            ));
+                    }
+                    match response.status.as_str() {
+                        "available" => {
+                            artifact.provider.models = response.models;
+                            artifact.provider.runtime = response.runtime;
+                            response
+                                .results
+                                .into_iter()
+                                .map(|result| (result.request_id.clone(), result))
+                                .collect()
+                        }
+                        "unavailable" => {
+                            available = false;
+                            artifact.unavailable_reason = Some(
+                                response
+                                    .reason
+                                    .filter(|reason| !reason.trim().is_empty())
+                                    .unwrap_or_else(|| "object generation is unavailable".into()),
+                            );
+                            BTreeMap::new()
+                        }
+                        other => return Err(format!("object generation sidecar status `{other}`")),
+                    }
+                }
+            };
+            for plan in plans {
+                if cancel.is_canceled() {
+                    return Ok(None);
+                }
+                let (output, failure) = if !available {
+                    (None, Some("object generation was unavailable".into()))
+                } else {
+                    match results.get(&plan.request_id) {
+                        Some(result) if result.status == "ok" => {
+                            let produced = exchange.0.join(format!("{}.glb", plan.request_id));
+                            let bytes = fs::read(&produced).map_err(|error| {
+                                format!("generated mesh {} is unreadable: {error}", plan.request_id)
+                            })?;
+                            if bytes.len() < 12 || &bytes[..4] != b"glTF" {
+                                (None, Some("the sidecar wrote no binary glTF".to_owned()))
+                            } else if result.triangles.unwrap_or(0) == 0 {
+                                (None, Some("the generated mesh is empty".to_owned()))
+                            } else {
+                                let path = ProjectPath::new(format!(
+                                    "{directory}/objects/{}.glb",
+                                    plan.request_id
+                                ))
+                                .map_err(|e| e.to_string())?;
+                                write_atomically(&path.resolve(&self.root), &bytes)?;
+                                (
+                                    Some(GeneratedMesh {
+                                        path,
+                                        content_hash: ContentHash::of_bytes(&bytes),
+                                        vertices: result.vertices.unwrap_or(0),
+                                        triangles: result.triangles.unwrap_or(0),
+                                    }),
+                                    None,
+                                )
+                            }
+                        }
+                        Some(result) => (
+                            None,
+                            Some(
+                                result
+                                    .reason
+                                    .clone()
+                                    .filter(|reason| !reason.trim().is_empty())
+                                    .unwrap_or_else(|| "generation failed".into()),
+                            ),
+                        ),
+                        None => (
+                            None,
+                            Some("the sidecar returned no result for this object".into()),
+                        ),
+                    }
+                };
+                artifact.objects.push(GeneratedObject {
+                    request: plan,
+                    classification: GeneratedClassification::GenerativeCandidate,
+                    output,
+                    failure,
+                });
+            }
+        }
+        if !available {
+            artifact.status = GenerationStatus::Unavailable;
+        }
+        artifact.validate()?;
+        let output =
+            ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
+        let document = artifact.to_json();
+        write_atomically(&output.resolve(&self.root), document.as_bytes())?;
+        let mut produced = ProducedArtifact::new(
+            output,
+            ContentHash::of_bytes(document.as_bytes()),
+            if available {
+                Reproducibility::NonDeterministic
+            } else {
+                Reproducibility::Provisional
+            },
+        );
+        let succeeded = artifact
+            .objects
+            .iter()
+            .filter(|object| object.output.is_some())
+            .count();
+        produced
+            .observations
+            .insert("generated_objects".into(), succeeded.to_string());
+        produced.observations.insert(
+            "failed_generations".into(),
+            (artifact.objects.len() - succeeded).to_string(),
+        );
+        if let Some(reason) = &artifact.unavailable_reason {
+            produced
+                .observations
+                .insert("generation_reason".into(), reason.clone());
+        }
+        Ok(Some(produced))
+    }
+}

@@ -75,6 +75,8 @@ pub enum SemanticModelRole {
     Segmenter,
     /// Image inpainting (clean plates, #64).
     Inpainter,
+    /// Image-to-3D object generation (#68).
+    Generator,
 }
 
 /// A pinned model identity: id, version and where it comes from.
