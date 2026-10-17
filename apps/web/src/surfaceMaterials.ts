@@ -144,6 +144,9 @@ export function buildSurfaceMaterialRequest(
     triangle_confidence_f32_le: littleEndianBytes(source.mesh_triangles.confidence),
     // Rust-owned canonicalization record; the core validates it against the triangles.
     triangle_sources_u32_le: littleEndianBytes(source.mesh_triangles.sources ?? new Uint32Array(0)),
+    // Rust-owned derived-vertex lineage; the core validates it against the points.
+    derived_u32_le: littleEndianBytes(source.mesh_triangles.derived ?? new Uint32Array(0)),
+    derived_barycentric_f64_le: source.mesh_triangles.derived_barycentric_bytes ?? new Uint8Array(0),
     reference_patches: source.dense.reference_patches.map((patch) => ({
       reference_frame: patch.reference_frame,
       source_frames: patch.source_frames,

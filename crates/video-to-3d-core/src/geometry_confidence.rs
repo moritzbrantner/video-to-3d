@@ -223,6 +223,10 @@ pub struct GeometryConfidenceField {
     /// `(start, index into regions)`, sorted by start; regions partition points.
     #[serde(skip)]
     starts: Vec<(usize, usize)>,
+    /// Provenance point of each derived (clipped) point after the observed ones (see
+    /// [`ReconstructionEvidenceView::provenance_point`]); empty without derived geometry.
+    #[serde(skip)]
+    derived_sources: Vec<usize>,
 }
 
 impl GeometryConfidenceField {
@@ -239,8 +243,11 @@ impl GeometryConfidenceField {
             .map(|(index, region)| (region.points.start, index))
             .collect();
         starts.sort_unstable();
-        let region_of =
-            |point: usize| locate(&starts, point, |region| evidence.regions[region].points);
+        let region_of = |point: usize| {
+            locate(&starts, evidence.provenance_point(point), |region| {
+                evidence.regions[region].points
+            })
+        };
         let agreement_source = if evidence.point_attributes.is_some() {
             AgreementSource::PointAttributes
         } else {
@@ -380,6 +387,9 @@ impl GeometryConfidenceField {
             point_count: evidence.points.len(),
             regions,
             starts,
+            derived_sources: (evidence.observed_point_count()..evidence.points.len())
+                .map(|point| evidence.provenance_point(point))
+                .collect(),
         }
     }
 
@@ -397,6 +407,12 @@ impl GeometryConfidenceField {
 
     /// The region that owns an accepted point.
     pub fn region_of_point(&self, point: usize) -> Option<&RegionConfidence> {
+        // A derived point inherits its source corner's region.
+        let observed = self.point_count - self.derived_sources.len();
+        let point = point
+            .checked_sub(observed)
+            .and_then(|slot| self.derived_sources.get(slot).copied())
+            .unwrap_or(point);
         let region = locate(&self.starts, point, |region| self.regions[region].points)?;
         Some(&self.regions[region])
     }

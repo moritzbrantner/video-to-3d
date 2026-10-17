@@ -197,14 +197,39 @@
         "seed": "default",
         "registration": "default",
         "dense": "default",
-        "mesh": "default",
+        "mesh": {
+          "median_surface_error_m": {
+            "max": 0.03
+          },
+          "unsupported_triangle_share": {
+            "max": 0.1
+          },
+          "surface_coverage": {
+            "min": 0.3
+          },
+          "cross_reference_triangles": {
+            "min": 1
+          },
+          "shared_vertices": {
+            "min": 1
+          },
+          "duplicated_coverage_share": {
+            "max": 0.1
+          },
+          "reference_patch_components": {
+            "equals": 1
+          },
+          "mesh_components": {
+            "max": 80
+          }
+        },
         "texture": "default"
       },
       "baseline": {
         "recorded": "2026-10-10",
         "first_failing_stage": null,
         "expected_failures": [],
-        "notes": "Every stage passes. Overlap ownership is decided in the higher-priority reference camera's image, only between original mesh components joined (transitively) by fusion-accepted seam pairs, with a 3.5 % relative depth bound after removing the patch pair's depth scale (anchored at the fusion-accepted seam vertices between that patch pair); where an owner camera judged a triangle, the looser 3D test does not overrule it. Duplicated coverage 0.095 (max 0.1), unsupported share 0.098, surface coverage 0.390, 135 cross-reference triangles (seam pairs across evidence origins link patches but keep separate vertices), one patch-graph component. Seam triangles at least 80 % owned are trimmed (0.6 % of the accepted mesh area on the triangles' planes, reported in the merge diagnostic); the trimmed seams are not re-stitched (#137), so the reported mesh has more connected components (141) than before the trim (40)."
+        "notes": "Every stage passes. Overlap ownership is decided in the higher-priority reference camera's image, only between original mesh components joined (transitively) by fusion-accepted seam pairs, with a 3.5 % relative depth bound after removing the patch pair's depth scale (anchored at the fusion-accepted seam vertices between that patch pair); where an owner camera judged a triangle, the looser 3D test does not overrule it. Duplicated coverage 0.095 (max 0.1), unsupported share 0.098, surface coverage 0.390, 135 cross-reference triangles (seam pairs across evidence origins link patches but keep separate vertices), one patch-graph component. Seam triangles at least 80 % owned are trimmed (0.6 % of the accepted mesh area on the triangles' planes, reported in the merge diagnostic); the mesh stage additionally gates mesh_components ≤ 80 (truth is 1). Trimmed seams are re-stitched and retained overlap seams are clipped with derived, lineage-carrying vertices (#137). The ≤ 80 bound is temporary per the owner decision of 2026-10-17 (#137), which accepted the current clipping result in place of the earlier ≤ 40 gate (no more connected components than before the trim); restoring ≤ 40 is tracked in #213."
       }
     }
   ]

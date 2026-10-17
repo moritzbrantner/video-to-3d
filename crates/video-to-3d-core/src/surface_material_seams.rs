@@ -226,7 +226,8 @@ impl<'a> CameraView<'a> {
     ) -> Option<bool> {
         let frame = self.camera.frame_index;
         let mut residuals = Vec::new();
-        for (index, owner) in ownership.iter().enumerate() {
+        // Only observed points have grid sites; derived points follow them.
+        for (index, owner) in ownership.iter().enumerate().take(grid_sites.len()) {
             if !matches!(owner, Ownership::Observed { reference, .. } if *reference == frame) {
                 continue;
             }

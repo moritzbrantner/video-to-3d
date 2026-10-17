@@ -681,3 +681,6 @@ fn actual_opaque_revision_one_receipt_is_rebuilt_before_downstream_dispatch() {
     }
     assert!(CameraStageArtifact::from_json(&project.document("sparse")).is_ok());
 }
+
+#[path = "acceptance/overlap_lineage_store.rs"]
+mod overlap_lineage_acceptance;

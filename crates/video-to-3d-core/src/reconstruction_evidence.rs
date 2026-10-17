@@ -1,6 +1,6 @@
 use crate::{MeshTriangle, Point3, ReconstructionResult};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Version 2 adds the optional per-point [`EvidencePointAttributes`].
 pub const RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION: u32 = 2;
@@ -129,6 +129,29 @@ pub struct TriangleSourceCorners {
     pub corners: [usize; 3],
 }
 
+/// Geometric lineage of a vertex derived by clipping overlapping surface patches (#137).
+///
+/// A derived vertex is not an independent observation: it lies on an immutable source
+/// triangle of the observed mesh, at world-space barycentric `barycentric` of the
+/// pre-clip corners `source_corners` (observed points, in the source triangle's corner
+/// order). `source_triangle` identifies that triangle in the pre-clip mesh; the clip may
+/// have split or removed it, so the corners are recorded rather than a second copy of
+/// the original mesh. Derived points follow every observed point, outside every
+/// provenance region, and keep their parents' evidence origin, provider, scale and
+/// camera support; deriving them never adds observation or support counts.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DerivedVertexSource {
+    /// Index of the derived point in the shared point buffer.
+    pub point_index: usize,
+    /// Index of the immutable source triangle in the pre-clip mesh.
+    pub source_triangle: usize,
+    /// Observed point indices of the source triangle's corners, in corner order.
+    pub source_corners: [usize; 3],
+    /// World-space barycentric weights over `source_corners`, summing to one.
+    pub barycentric: [f64; 3],
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceEvidenceRegion {
     pub origin: EvidenceOrigin,
@@ -151,6 +174,9 @@ pub struct ReconstructionEvidenceSummary {
     pub point_attributes: bool,
     /// Triangles that keep their pre-canonicalization corners (see [`TriangleSourceCorners`]).
     pub triangle_sources: usize,
+    /// Points derived by clipping overlap seams (see [`DerivedVertexSource`]); counted in
+    /// `total_points` but in no observation count.
+    pub derived_vertices: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +194,11 @@ pub struct ReconstructionEvidenceView<'a> {
     /// Optional sparse pre-canonicalization corners of merged triangles; `None` (or an
     /// empty slice) means every triangle's support is given by its current corners.
     pub triangle_sources: Option<&'a [TriangleSourceCorners]>,
+    /// Lineage of the derived points at the end of `points`, one record per derived
+    /// point in point order (see [`DerivedVertexSource`]); empty without derived
+    /// geometry. Provenance regions and point attributes cover only the observed
+    /// points before them.
+    pub derived_vertices: &'a [DerivedVertexSource],
 }
 
 impl<'a> ReconstructionEvidenceView<'a> {
@@ -189,9 +220,80 @@ impl<'a> ReconstructionEvidenceView<'a> {
             triangles,
             point_attributes: None,
             triangle_sources: None,
+            derived_vertices: &[],
         };
         evidence.validate()?;
         Ok(evidence)
+    }
+
+    /// [`Self::new`] over points that end in derived (clipped) vertices with the given
+    /// lineage records.
+    pub fn new_with_derived_vertices(
+        provider: ReconstructionProviderDescriptor,
+        scale: EvidenceScale,
+        cameras: Vec<EvidenceCamera>,
+        regions: Vec<SurfaceEvidenceRegion>,
+        points: &'a [Point3],
+        triangles: &'a [MeshTriangle],
+        derived_vertices: &'a [DerivedVertexSource],
+    ) -> Result<Self, String> {
+        let evidence = Self {
+            schema_version: RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
+            provider,
+            scale,
+            cameras,
+            regions,
+            points,
+            triangles,
+            point_attributes: None,
+            triangle_sources: None,
+            derived_vertices,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    /// Attach borrowed derived-vertex lineage, validating it against the shared points.
+    pub fn with_derived_vertices(
+        mut self,
+        derived_vertices: &'a [DerivedVertexSource],
+    ) -> Result<Self, String> {
+        if derived_vertices.is_empty() {
+            return Ok(self);
+        }
+        self.derived_vertices = derived_vertices;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// The observed point whose provenance `point` carries: itself when observed; for a
+    /// derived point, the source corner with the largest barycentric weight (all weighted
+    /// corners share one evidence origin). Consumers that resolve provenance through the
+    /// regions use it so derived geometry inherits, but never adds, observation support.
+    pub fn provenance_point(&self, point: usize) -> usize {
+        let observed = self.observed_point_count();
+        match point
+            .checked_sub(observed)
+            .and_then(|slot| self.derived_vertices.get(slot))
+        {
+            Some(derived) => {
+                let mut best = 0;
+                for corner in 1..3 {
+                    if derived.barycentric[corner] > derived.barycentric[best] {
+                        best = corner;
+                    }
+                }
+                derived.source_corners[best]
+            }
+            None => point,
+        }
+    }
+
+    /// Points with observed provenance: every point before the derived ones.
+    pub fn observed_point_count(&self) -> usize {
+        self.points
+            .len()
+            .saturating_sub(self.derived_vertices.len())
     }
 
     /// Attach borrowed per-point attributes, validating them against the shared points.
@@ -227,13 +329,14 @@ impl<'a> ReconstructionEvidenceView<'a> {
     pub(crate) fn from_classic_parts(parts: &ClassicEvidenceParts<'a>) -> Result<Self, String> {
         let cameras = classic_camera_evidence(parts)?;
         let regions = classic_reference_patch_regions(parts.reference_patches);
-        Self::new(
+        Self::new_with_derived_vertices(
             ReconstructionProviderDescriptor::classic(),
             EvidenceScale::ArbitraryMonocular,
             cameras,
             regions,
             parts.points,
             parts.triangles,
+            parts.derived_vertices,
         )?
         .with_point_attributes(parts.point_attributes)?
         .with_triangle_sources(parts.triangle_sources)
@@ -256,6 +359,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
             point_attributes: Some(parts.point_attributes),
             triangle_sources: (!parts.triangle_sources.is_empty())
                 .then_some(parts.triangle_sources),
+            derived_vertices: parts.derived_vertices,
         };
         evidence.validate_with_cancel(poll)?;
         Ok(evidence)
@@ -284,11 +388,27 @@ impl<'a> ReconstructionEvidenceView<'a> {
 
         validate_cameras(&self.provider, &self.cameras, &mut poll)?;
         validate_points(self.points, &mut poll)?;
+        if self.derived_vertices.len() > self.points.len() {
+            return Err(format!(
+                "reconstruction evidence has {} derived-vertex records for {} points",
+                self.derived_vertices.len(),
+                self.points.len()
+            ));
+        }
+        let observed = self.observed_point_count();
         validate_provider_origins(&self.provider, &self.regions, &mut poll)?;
-        validate_regions(&self.regions, self.points.len(), &self.cameras, &mut poll)?;
+        validate_regions(&self.regions, observed, &self.cameras, &mut poll)?;
         validate_triangles(self.triangles, self.points.len(), &mut poll)?;
+        if !self.derived_vertices.is_empty() {
+            validate_derived_vertices(
+                self.derived_vertices,
+                self.points,
+                &self.regions,
+                &mut poll,
+            )?;
+        }
         if let Some(attributes) = self.point_attributes {
-            validate_point_attributes(&self.provider, attributes, self.points.len(), &mut poll)?;
+            validate_point_attributes(&self.provider, attributes, observed, &mut poll)?;
         }
         if let Some(sources) = self.triangle_sources {
             validate_triangle_sources(
@@ -311,6 +431,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
             triangles: self.triangles.len(),
             point_attributes: self.point_attributes.is_some(),
             triangle_sources: self.triangle_sources.map_or(0, <[_]>::len),
+            derived_vertices: self.derived_vertices.len(),
             ..ReconstructionEvidenceSummary::default()
         };
         for region in &self.regions {
@@ -339,7 +460,7 @@ impl<'a> ReconstructionEvidenceView<'a> {
         } else {
             "carries no per-point reciprocal or depth-margin attributes"
         };
-        let sources = if summary.triangle_sources > 0 {
+        let mut sources = if summary.triangle_sources > 0 {
             format!(
                 " {} merged triangle(s) keep their pre-canonicalization reference corners.",
                 summary.triangle_sources
@@ -347,6 +468,12 @@ impl<'a> ReconstructionEvidenceView<'a> {
         } else {
             String::new()
         };
+        if summary.derived_vertices > 0 {
+            sources.push_str(&format!(
+                " {} point(s) were derived on observed source triangles where overlap seams were clipped; they carry source-triangle and barycentric lineage and are not counted as observations.",
+                summary.derived_vertices
+            ));
+        }
         format!(
             "Provider-neutral reconstruction evidence v{} validated for {}: {} accepted cameras, {} provenance regions, {} shared dense points ({} geometric, {} revalidated completion, {} learned, {} generative completion), and {} accepted triangles; it {attributes}.{sources} The evidence view borrows the existing geometry buffers instead of materializing a second point cloud or mesh.",
             self.schema_version,
@@ -375,6 +502,7 @@ pub(crate) struct ClassicEvidenceParts<'a> {
     pub point_attributes: &'a [EvidencePointAttributes],
     pub triangles: &'a [MeshTriangle],
     pub triangle_sources: &'a [TriangleSourceCorners],
+    pub derived_vertices: &'a [DerivedVertexSource],
 }
 
 impl<'a> ClassicEvidenceParts<'a> {
@@ -388,6 +516,7 @@ impl<'a> ClassicEvidenceParts<'a> {
             point_attributes: &reconstruction.dense_point_attributes,
             triangles: &reconstruction.mesh_triangles,
             triangle_sources: &reconstruction.mesh_triangle_sources,
+            derived_vertices: &reconstruction.mesh_derived_vertices,
         }
     }
 }
@@ -757,6 +886,136 @@ fn validate_regions(
         ));
     }
 
+    Ok(())
+}
+
+/// Largest distance, relative to the larger of one and the point's magnitude, between a
+/// derived point and the world-space barycentric combination of its source corners
+/// (single-precision storage of the point).
+const DERIVED_POSITION_TOLERANCE: f64 = 1.0e-5;
+/// Barycentric slack for weights on the source triangle's boundary.
+const DERIVED_BARYCENTRIC_TOLERANCE: f64 = 1.0e-6;
+
+/// Derived-vertex lineage must describe exactly the trailing points, in order, each on
+/// an immutable source triangle of observed points (no derived parent, so no cycle), with
+/// finite in-triangle weights summing to one that reconstruct its position, and with
+/// one evidence origin over the corners it depends on. One source triangle has one set
+/// of corners. A record that disagrees with the shared geometry is a contract violation.
+fn validate_derived_vertices(
+    records: &[DerivedVertexSource],
+    points: &[Point3],
+    regions: &[SurfaceEvidenceRegion],
+    poll: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let observed = points.len() - records.len();
+    let origin_of = |point: usize| {
+        regions
+            .iter()
+            .find(|region| {
+                point >= region.points.start && point - region.points.start < region.points.count
+            })
+            .map(|region| region.origin)
+    };
+    let mut corners_of: HashMap<usize, [usize; 3]> = HashMap::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        if index % 1024 == 0 {
+            poll()?;
+        }
+        if record.point_index != observed + index {
+            return Err(format!(
+                "reconstruction evidence derived vertex {index} names point {} instead of trailing point {}",
+                record.point_index,
+                observed + index
+            ));
+        }
+        let [a, b, c] = record.source_corners;
+        if a == b || b == c || c == a {
+            return Err(format!(
+                "reconstruction evidence derived vertex {index} has a degenerate source triangle"
+            ));
+        }
+        if record
+            .source_corners
+            .iter()
+            .any(|&corner| corner >= observed)
+        {
+            return Err(format!(
+                "reconstruction evidence derived vertex {index} source corner is not an observed point"
+            ));
+        }
+        if let Some(previous) = corners_of.insert(record.source_triangle, record.source_corners) {
+            if previous != record.source_corners {
+                return Err(format!(
+                    "reconstruction evidence derived vertex {index} disagrees on the corners of source triangle {}",
+                    record.source_triangle
+                ));
+            }
+        }
+        let weights = record.barycentric;
+        if weights.iter().any(|weight| {
+            !weight.is_finite()
+                || *weight < -DERIVED_BARYCENTRIC_TOLERANCE
+                || *weight > 1.0 + DERIVED_BARYCENTRIC_TOLERANCE
+        }) || (weights.iter().sum::<f64>() - 1.0).abs() > DERIVED_BARYCENTRIC_TOLERANCE
+        {
+            return Err(format!(
+                "reconstruction evidence derived vertex {index} has barycentric weights outside its source triangle"
+            ));
+        }
+        let mut expected = [0.0f64; 3];
+        for (corner, weight) in record.source_corners.iter().zip(weights) {
+            let p = &points[*corner];
+            for (axis, value) in [p.x, p.y, p.z].into_iter().enumerate() {
+                expected[axis] += f64::from(value) * weight;
+            }
+        }
+        let p = &points[record.point_index];
+        let actual = [f64::from(p.x), f64::from(p.y), f64::from(p.z)];
+        let magnitude = actual.iter().fold(1.0f64, |m, v| m.max(v.abs()));
+        let distance = expected
+            .iter()
+            .zip(actual)
+            .map(|(e, a)| (e - a) * (e - a))
+            .sum::<f64>()
+            .sqrt();
+        if distance > DERIVED_POSITION_TOLERANCE * magnitude {
+            return Err(format!(
+                "reconstruction evidence derived vertex {index} is not at its barycentric source position"
+            ));
+        }
+        // A source triangle was triangulated in one reference patch: its corners share
+        // one reference camera (and support), so its lineage cannot point across patches.
+        let reference_of = |point: usize| {
+            regions
+                .iter()
+                .find(|region| {
+                    point >= region.points.start
+                        && point - region.points.start < region.points.count
+                })
+                .map(|region| (region.reference_frame, &region.source_frames))
+        };
+        let support = reference_of(a);
+        if support.is_none() || reference_of(b) != support || reference_of(c) != support {
+            return Err(format!(
+                "reconstruction evidence derived vertex {index} source corners are not one reference patch's triangle"
+            ));
+        }
+        let mut origin = None;
+        for (corner, weight) in record.source_corners.iter().zip(weights) {
+            if weight <= DERIVED_BARYCENTRIC_TOLERANCE {
+                continue;
+            }
+            let corner_origin = origin_of(*corner);
+            if origin.is_some_and(|origin| Some(origin) != corner_origin) {
+                return Err(format!(
+                    "reconstruction evidence derived vertex {index} depends on corners of different evidence origins"
+                ));
+            }
+            origin = Some(corner_origin.ok_or_else(|| {
+                format!("reconstruction evidence derived vertex {index} source corner has no provenance")
+            })?);
+        }
+    }
     Ok(())
 }
 

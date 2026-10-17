@@ -534,8 +534,13 @@ pub struct SurfaceMeshArtifact {
     /// triangle was re-indexed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triangle_sources: Vec<TriangleSourceCorners>,
-    /// `grid_sites[i]` is the pixel of dense point `i` in its own reference
-    /// image; parallel to `points`.
+    /// Lineage of the derived (clipped) points at the end of `points`; empty
+    /// without derived geometry (see [`crate::DerivedVertexSource`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived_vertices: Vec<crate::DerivedVertexSource>,
+    /// `grid_sites[i]` is the pixel of observed dense point `i` in its own
+    /// reference image; parallel to the observed points. Derived points have
+    /// no site of their own: consumers resolve them through their lineage.
     pub grid_sites: Vec<DenseGridSite>,
 }
 
@@ -547,11 +552,11 @@ impl SurfaceMeshArtifact {
         grid_sites: &[DenseGridSite],
     ) -> Result<Self, String> {
         // Cheap invariant first, before any buffer is copied.
-        if grid_sites.len() != evidence.points.len() {
+        if grid_sites.len() != evidence.observed_point_count() {
             return Err(format!(
                 "surface mesh artifact has {} grid sites for {} points",
                 grid_sites.len(),
-                evidence.points.len()
+                evidence.observed_point_count()
             ));
         }
         evidence.validate()?;
@@ -568,6 +573,7 @@ impl SurfaceMeshArtifact {
                 .triangle_sources
                 .map(<[_]>::to_vec)
                 .unwrap_or_default(),
+            derived_vertices: evidence.derived_vertices.to_vec(),
             grid_sites: grid_sites.to_vec(),
         };
         artifact.validate()?;
@@ -599,12 +605,13 @@ impl SurfaceMeshArtifact {
     }
 
     fn validate_with_cancel(&self, poll: impl FnMut() -> Result<(), String>) -> Result<(), String> {
-        self.evidence_view().validate_with_cancel(poll)?;
-        if self.grid_sites.len() != self.points.len() {
+        let view = self.evidence_view();
+        view.validate_with_cancel(poll)?;
+        if self.grid_sites.len() != view.observed_point_count() {
             return Err(format!(
                 "surface mesh artifact has {} grid sites for {} points",
                 self.grid_sites.len(),
-                self.points.len()
+                view.observed_point_count()
             ));
         }
         Ok(())
@@ -631,6 +638,7 @@ impl SurfaceMeshArtifact {
             point_attributes: self.point_attributes.as_deref(),
             triangle_sources: (!self.triangle_sources.is_empty())
                 .then_some(self.triangle_sources.as_slice()),
+            derived_vertices: &self.derived_vertices,
         }
     }
 

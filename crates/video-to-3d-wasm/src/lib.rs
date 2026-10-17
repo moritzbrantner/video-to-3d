@@ -14,11 +14,12 @@ use video_to_3d_core::textured_glb::encode_textured_glb_with_collider;
 use video_to_3d_core::{
     classic_reference_patch_regions, evaluate_relative_depth, reconstruct_browser,
     BootstrapDiagnosis, CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite,
-    DenseReferencePatchStats, DenseStats, EvidenceCamera, EvidencePointAttributes, EvidenceScale,
-    FrameInput, LearnedDepthCamera, MeshStats, MeshTriangle, MultiViewStats, PairStats, Point3,
-    ReconstructionEvidenceView, ReconstructionOptions, ReconstructionProviderDescriptor,
-    ReconstructionRequest, RegisteredViewStats, RelativeDepthFrame, RevisitStats,
-    SeedCandidateStats, TriangleSourceCorners,
+    DenseReferencePatchStats, DenseStats, DerivedVertexSource, EvidenceCamera,
+    EvidencePointAttributes, EvidenceScale, FrameInput, LearnedDepthCamera, MeshStats,
+    MeshTriangle, MultiViewStats, PairStats, Point3, ReconstructionEvidenceView,
+    ReconstructionOptions, ReconstructionProviderDescriptor, ReconstructionRequest,
+    RegisteredViewStats, RelativeDepthFrame, RevisitStats, SeedCandidateStats,
+    TriangleSourceCorners,
 };
 use wasm_bindgen::prelude::*;
 
@@ -101,6 +102,13 @@ struct PackedMeshTriangleBuffer {
     /// Pre-canonicalization corners of merged triangles as `(triangle, a, b, c)`
     /// little-endian `u32` quads, sorted by triangle; empty when none.
     sources_u32_le: ByteBuffer,
+    /// Lineage of the derived (clipped) points that follow the observed dense
+    /// points, as `(point, source_triangle, a, b, c)` little-endian `u32`
+    /// quintuples in point order; empty when none.
+    derived_u32_le: ByteBuffer,
+    /// The derived points' world barycentric weights, three little-endian
+    /// `f64` per record.
+    derived_barycentric_f64_le: ByteBuffer,
     length: usize,
 }
 
@@ -259,6 +267,7 @@ fn pack_dense_point_attributes(
 fn pack_mesh_triangles(
     triangles: &[MeshTriangle],
     sources: &[TriangleSourceCorners],
+    derived: &[DerivedVertexSource],
     point_count: usize,
 ) -> Result<PackedMeshTriangleBuffer, JsValue> {
     let transport = |value: usize| {
@@ -272,6 +281,19 @@ fn pack_mesh_triangles(
     for source in sources {
         for value in [source.triangle].into_iter().chain(source.corners) {
             sources_u32_le.extend_from_slice(&transport(value)?.to_le_bytes());
+        }
+    }
+    let mut derived_u32_le = Vec::with_capacity(derived.len() * 5 * size_of::<u32>());
+    let mut derived_barycentric_f64_le = Vec::with_capacity(derived.len() * 3 * size_of::<f64>());
+    for record in derived {
+        for value in [record.point_index, record.source_triangle]
+            .into_iter()
+            .chain(record.source_corners)
+        {
+            derived_u32_le.extend_from_slice(&transport(value)?.to_le_bytes());
+        }
+        for weight in record.barycentric {
+            derived_barycentric_f64_le.extend_from_slice(&weight.to_le_bytes());
         }
     }
     let mut indices_u32_le = Vec::with_capacity(triangles.len() * 3 * size_of::<u32>());
@@ -296,6 +318,8 @@ fn pack_mesh_triangles(
         indices_u32_le: ByteBuffer(indices_u32_le),
         confidence_f32_le: ByteBuffer(confidence_f32_le),
         sources_u32_le: ByteBuffer(sources_u32_le),
+        derived_u32_le: ByteBuffer(derived_u32_le),
+        derived_barycentric_f64_le: ByteBuffer(derived_barycentric_f64_le),
         length: triangles.len(),
     })
 }
@@ -406,7 +430,7 @@ pub fn benchmark_packed_geometry_result(
         .collect();
     let payload = GeometryBenchmarkPackedPayload {
         dense_points: pack_dense_points(&points),
-        mesh_triangles: pack_mesh_triangles(&triangles, &[], points.len())?,
+        mesh_triangles: pack_mesh_triangles(&triangles, &[], &[], points.len())?,
     };
     let serializer = browser_serializer();
     payload.serialize(&serializer).map_err(|error| {
@@ -516,6 +540,7 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         mesh_triangles: pack_mesh_triangles(
             &reconstruction.mesh_triangles,
             &reconstruction.mesh_triangle_sources,
+            &reconstruction.mesh_derived_vertices,
             reconstruction.dense_points.len(),
         )?,
         mesh: &reconstruction.mesh,
@@ -580,6 +605,14 @@ struct WasmSurfaceMaterialRequest {
     /// means every triangle's support is given by its current corners.
     #[serde(default, deserialize_with = "deserialize_byte_buffer")]
     triangle_sources_u32_le: Vec<u8>,
+    /// Optional derived-vertex lineage, as returned in the reconstruction's
+    /// mesh-triangle buffer: `(point, source_triangle, a, b, c)` `u32`
+    /// quintuples and three `f64` barycentric weights per record. Empty or
+    /// absent means every dense point is observed.
+    #[serde(default, deserialize_with = "deserialize_byte_buffer")]
+    derived_u32_le: Vec<u8>,
+    #[serde(default, deserialize_with = "deserialize_byte_buffer")]
+    derived_barycentric_f64_le: Vec<u8>,
     reference_patches: Vec<WasmReferencePatch>,
     cameras: Vec<EvidenceCamera>,
     reference_images: Vec<WasmReferenceImage>,
@@ -692,13 +725,49 @@ pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
             "invalid surface material request: dense point attribute buffer holds an incomplete pair",
         ));
     }
-    let mut evidence = ReconstructionEvidenceView::new(
+    let derived_values = decode_u32_le(&request.derived_u32_le, "derived vertex buffer")?;
+    if !request
+        .derived_barycentric_f64_le
+        .len()
+        .is_multiple_of(size_of::<f64>())
+    {
+        return Err(JsValue::from_str(
+            "invalid surface material request: derived barycentric buffer byte length is not divisible by eight",
+        ));
+    }
+    let weights: Vec<f64> = request
+        .derived_barycentric_f64_le
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk))
+        .collect();
+    if !derived_values.len().is_multiple_of(5) || derived_values.len() / 5 * 3 != weights.len() {
+        return Err(JsValue::from_str(
+            "invalid surface material request: derived vertex buffers hold incomplete records",
+        ));
+    }
+    let derived = derived_values
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .zip(weights.as_chunks::<3>().0)
+        .map(|(record, weights)| DerivedVertexSource {
+            point_index: record[0] as usize,
+            source_triangle: record[1] as usize,
+            source_corners: [record[2] as usize, record[3] as usize, record[4] as usize],
+            barycentric: *weights,
+        })
+        .collect::<Vec<_>>();
+    // The core validates the lineage against the shared points.
+    let mut evidence = ReconstructionEvidenceView::new_with_derived_vertices(
         ReconstructionProviderDescriptor::classic(),
         EvidenceScale::ArbitraryMonocular,
         request.cameras,
         classic_reference_patch_regions(&patches),
         &points,
         &triangles,
+        &derived,
     )
     .map_err(|error| JsValue::from_str(&error))?;
     if !request.dense_point_attributes_f32_le.is_empty() {

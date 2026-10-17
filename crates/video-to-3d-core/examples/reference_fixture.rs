@@ -966,6 +966,12 @@ fn mesh_topology(result: &BrowserReconstructionResult) -> MeshTopology {
             *slot = reference;
         }
     }
+    // A derived (clipped) vertex belongs to the patch of its source triangle.
+    for derived in &reconstruction.mesh_derived_vertices {
+        if derived.point_index < patch_of_point.len() {
+            patch_of_point[derived.point_index] = patch_of_point[derived.source_corners[0]];
+        }
+    }
     let triangles = || {
         reconstruction
             .mesh_triangles
@@ -1061,6 +1067,16 @@ fn patch_graph_components(
 
 fn format_metric(value: Option<f64>) -> String {
     value.map_or_else(|| "nan".to_owned(), |value| format!("{value:.6}"))
+}
+
+/// Canonical sampled inputs for independent native/store acceptance. This
+/// exposes the existing generator; it adds no reconstruction or scoring path.
+pub fn sampled_request(case: &str) -> ReconstructionRequest {
+    let fixture = generate(Case::parse(case));
+    ReconstructionRequest {
+        frames: fixture.views.into_iter().map(|view| view.frame).collect(),
+        options: browser_options(),
+    }
 }
 
 fn main() {
@@ -1388,6 +1404,6 @@ mod tests {
         assert!(first
             .depth
             .iter()
-            .all(|&depth| depth >= 5.55 - 1e-3 && depth <= 6.0 + 1e-3));
+            .all(|&depth| (5.55 - 1e-3..=6.0 + 1e-3).contains(&depth)));
     }
 }

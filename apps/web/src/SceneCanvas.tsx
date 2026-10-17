@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReconstructionResult } from "./reconstruction";
+import { derivedPointCount, type ReconstructionResult } from "./reconstruction";
 import {
   affineTriangleTransform,
   buildDensePointReferenceFrames,
@@ -140,7 +140,7 @@ export function SceneCanvas({
   );
 
   const textureEligibleTriangles = useMemo(() => {
-    if (denseGridSites.length !== densePoints.length) return 0;
+    if (denseGridSites.length !== densePoints.length - derivedPointCount(meshTriangles)) return 0;
     let accepted = 0;
     for (let triangleIndex = 0; triangleIndex < meshTriangles.length; triangleIndex += 1) {
       const base = triangleIndex * 3;
@@ -338,7 +338,8 @@ export function SceneCanvas({
         densePointReferenceFrames,
       );
       const textureSource =
-        textureReference !== null && denseGridSites.length === densePoints.length
+        textureReference !== null &&
+        denseGridSites.length === densePoints.length - derivedPointCount(meshTriangles)
           ? ([aIndex, bIndex, cIndex].map((index) => ({
               x: denseGridSites.xy[index * 2],
               y: denseGridSites.xy[index * 2 + 1],

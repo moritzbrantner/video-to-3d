@@ -547,8 +547,21 @@ export type MeshTriangleBuffer = {
    * seam triangles keep their original reference; absent or empty when none.
    */
   sources?: Uint32Array;
+  /**
+   * Rust-owned lineage of derived (clipped) points, which follow the observed dense points:
+   * `(point, source_triangle, a, b, c)` quintuples in point order. Derived points have no
+   * grid site or point attributes. Absent or empty when none.
+   */
+  derived?: Uint32Array;
+  /** Little-endian `f64` barycentric weights, three per derived record; forwarded unchanged. */
+  derived_barycentric_bytes?: Uint8Array;
   length: number;
 };
+
+/** Number of derived (clipped) points at the end of the dense point buffer. */
+export function derivedPointCount(mesh: Pick<MeshTriangleBuffer, "derived">): number {
+  return (mesh.derived?.length ?? 0) / 5;
+}
 
 export type EvidenceCamera = {
   frame_index: number;
@@ -680,6 +693,8 @@ type RawMeshTriangleBuffer = {
   indices_u32_le: Uint8Array;
   confidence_f32_le: Uint8Array;
   sources_u32_le?: Uint8Array;
+  derived_u32_le?: Uint8Array;
+  derived_barycentric_f64_le?: Uint8Array;
   length: number;
 };
 
@@ -836,10 +851,34 @@ function normalizeMeshTriangleBuffer(value: unknown): MeshTriangleBuffer {
           byteBuffer(raw.sources_u32_le, "mesh-triangle source buffer"),
           "mesh-triangle source buffer",
         );
-  if (indices.length !== length * 3 || confidence.length !== length || sources.length % 4 !== 0) {
+  const derived =
+    raw.derived_u32_le === undefined
+      ? new Uint32Array(0)
+      : uint32LittleEndian(
+          byteBuffer(raw.derived_u32_le, "mesh derived-vertex buffer"),
+          "mesh derived-vertex buffer",
+        );
+  const derivedBarycentric =
+    raw.derived_barycentric_f64_le === undefined
+      ? new Uint8Array(0)
+      : byteBuffer(raw.derived_barycentric_f64_le, "mesh derived-barycentric buffer");
+  if (
+    indices.length !== length * 3 ||
+    confidence.length !== length ||
+    sources.length % 4 !== 0 ||
+    derived.length % 5 !== 0 ||
+    derivedBarycentric.byteLength !== (derived.length / 5) * 3 * 8
+  ) {
     throw new Error("camera-state contract mismatch: mesh-triangle buffer lengths are inconsistent");
   }
-  return { indices, confidence, sources, length };
+  return {
+    indices,
+    confidence,
+    sources,
+    derived,
+    derived_barycentric_bytes: derivedBarycentric,
+    length,
+  };
 }
 
 export function normalizeWasmReconstruction(value: unknown): ReconstructionResult {
@@ -992,9 +1031,12 @@ export function assertReconstructionContract(
     result.dense_points.values.length !== result.dense_points.length * 4 ||
     result.dense_points.rgb.length !== result.dense_points.length * 3 ||
     result.dense_grid_sites.xy.length !== result.dense_grid_sites.length * 2 ||
-    result.dense_grid_sites.length !== result.dense_points.length ||
+    derivedPointCount(result.mesh_triangles) > result.dense_points.length ||
+    result.dense_grid_sites.length !==
+      result.dense_points.length - derivedPointCount(result.mesh_triangles) ||
     result.dense_point_attributes.values.length !== result.dense_point_attributes.length * 2 ||
-    result.dense_point_attributes.length !== result.dense_points.length ||
+    result.dense_point_attributes.length !==
+      result.dense_points.length - derivedPointCount(result.mesh_triangles) ||
     result.mesh_triangles.indices.length !== result.mesh_triangles.length * 3 ||
     result.mesh_triangles.confidence.length !== result.mesh_triangles.length
   ) {

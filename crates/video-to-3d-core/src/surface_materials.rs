@@ -596,7 +596,29 @@ pub(crate) fn bake_incremental<'p>(
             };
         }
     }
-    let grid_mapped = grid_sites.len() == points.len();
+    let grid_mapped = grid_sites.len() == evidence.observed_point_count();
+    // Derived (clipped) points have no grid site: they keep their source
+    // triangle's reference ownership and resolve their pixel through it.
+    let derived_pixels = if grid_mapped {
+        resolve_derived_pixels(evidence, &mut ownership, grid_sites, &mut check_canceled)?
+    } else {
+        Vec::new()
+    };
+    let observed_count = evidence.observed_point_count();
+    let pixel_of = |point: usize| -> Option<[f64; 2]> {
+        if !grid_mapped {
+            None
+        } else if point < observed_count {
+            grid_sites
+                .get(point)
+                .map(|site| [f64::from(site.x), f64::from(site.y)])
+        } else {
+            derived_pixels
+                .get(point - observed_count)
+                .copied()
+                .flatten()
+        }
+    };
 
     let mut fallback = FallbackSurface::default();
     // reference frame -> (triangle indices with the corners addressing their grid
@@ -623,7 +645,7 @@ pub(crate) fn bake_incremental<'p>(
         // current corners, so geometry is unchanged). Otherwise its current corners
         // decide, which sends genuinely mixed support to the seam rule.
         let original = source.and_then(|corners| {
-            match classify_corners(corners, &ownership, grid_sites, &images) {
+            match classify_corners(corners, &ownership, &pixel_of, &images) {
                 CornerSupport::SameReference { reference, regions } => {
                     Some((corners, reference, regions))
                 }
@@ -635,7 +657,7 @@ pub(crate) fn bake_incremental<'p>(
                 canonicalized_same_reference += 1;
                 Ok((corners, reference, regions))
             }
-            None => match classify_corners(current, &ownership, grid_sites, &images) {
+            None => match classify_corners(current, &ownership, &pixel_of, &images) {
                 CornerSupport::SameReference { reference, regions } => {
                     Ok((current, reference, regions))
                 }
@@ -736,10 +758,8 @@ pub(crate) fn bake_incremental<'p>(
                 if ordinal % 1024 == 0 {
                     check_canceled()?;
                 }
-                corner_pixels.push(corners.map(|point| {
-                    let site = grid_sites[point];
-                    [site.x as f64, site.y as f64]
-                }));
+                corner_pixels
+                    .push(corners.map(|point| pixel_of(point).expect("classified with a pixel")));
             }
             let (texture, corner_uvs) = crop_texture(&image, &corner_pixels, &mut check_canceled)?;
 
@@ -762,9 +782,17 @@ pub(crate) fn bake_incremental<'p>(
                 if ordinal % 1024 == 0 {
                     check_canceled()?;
                 }
-                for site in corners.map(|index| grid_sites[index]) {
-                    key.update(site.x.to_le_bytes());
-                    key.update(site.y.to_le_bytes());
+                for index in *corners {
+                    if let Some(site) = grid_sites.get(index).filter(|_| index < observed_count) {
+                        key.update(site.x.to_le_bytes());
+                        key.update(site.y.to_le_bytes());
+                    } else {
+                        // A derived corner: its resolved continuous pixel.
+                        key.update(b"derived");
+                        for value in pixel_of(index).expect("classified with a pixel") {
+                            key.update(value.to_bits().to_le_bytes());
+                        }
+                    }
                 }
             }
 
@@ -1025,7 +1053,7 @@ enum CornerSupport {
 fn classify_corners(
     corners: [usize; 3],
     ownership: &[Ownership],
-    grid_sites: &[DenseGridSite],
+    pixel_of: &dyn Fn(usize) -> Option<[f64; 2]>,
     images: &BTreeMap<usize, ReferenceShape>,
 ) -> CornerSupport {
     let mut references = [0; 3];
@@ -1046,24 +1074,113 @@ fn classify_corners(
     let Some(image) = images.get(&reference) else {
         return CornerSupport::MissingImage;
     };
-    if grid_sites.len() != ownership.len()
-        || corners.iter().any(|index| {
-            let site = grid_sites[*index];
-            site.x >= image.width || site.y >= image.height
-        })
-    {
-        return CornerSupport::MissingGridSite;
+    let mut pixels = [[0.0; 2]; 3];
+    for (slot, corner) in corners.iter().enumerate() {
+        match pixel_of(*corner) {
+            Some(pixel)
+                if pixel.iter().all(|value| value.is_finite() && *value >= 0.0)
+                    && pixel[0] < f64::from(image.width)
+                    && pixel[1] < f64::from(image.height) =>
+            {
+                pixels[slot] = pixel;
+            }
+            _ => return CornerSupport::MissingGridSite,
+        }
     }
-    let [a, b, c] = corners.map(|index| grid_sites[index]);
-    if footprint_double_area(a, b, c) == 0 {
+    if footprint_double_area(pixels) == 0.0 {
         return CornerSupport::DegenerateFootprint;
     }
     CornerSupport::SameReference { reference, regions }
 }
 
-fn footprint_double_area(a: DenseGridSite, b: DenseGridSite, c: DenseGridSite) -> i64 {
-    let (ax, ay) = (a.x as i64, a.y as i64);
-    (b.x as i64 - ax) * (c.y as i64 - ay) - (b.y as i64 - ay) * (c.x as i64 - ax)
+/// Exact for integer grid sites (as before), continuous for derived corners.
+fn footprint_double_area([a, b, c]: [[f64; 2]; 3]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// Pixel of every derived point in its source triangle's reference image:
+/// the perspective-correct combination of the source corners' grid sites
+/// (world barycentric weights scaled by each corner's reference-camera
+/// depth), so a clipped vertex addresses the same original source
+/// correspondence as the surface it lies on. A derived point whose weighted
+/// corners are not all observed in one reference, or not in front of its
+/// camera, keeps no ownership and no pixel. Sets each resolvable derived
+/// point's ownership to that of its source corners.
+fn resolve_derived_pixels(
+    evidence: &ReconstructionEvidenceView<'_>,
+    ownership: &mut [Ownership],
+    grid_sites: &[DenseGridSite],
+    check_canceled: &mut impl FnMut() -> Result<(), String>,
+) -> Result<Vec<Option<[f64; 2]>>, String> {
+    const WEIGHT_FLOOR: f64 = 1.0e-9;
+    let mut pixels = Vec::with_capacity(evidence.derived_vertices.len());
+    for (ordinal, derived) in evidence.derived_vertices.iter().enumerate() {
+        if ordinal % 1024 == 0 {
+            check_canceled()?;
+        }
+        let mut owner = None;
+        let mut consistent = true;
+        let mut dominant = (f64::NEG_INFINITY, Ownership::Unobserved);
+        for (corner, weight) in derived.source_corners.iter().zip(derived.barycentric) {
+            if weight <= WEIGHT_FLOOR {
+                continue;
+            }
+            match ownership.get(*corner).copied() {
+                Some(Ownership::Observed { reference, region }) => {
+                    if owner.is_some_and(|known| known != reference) {
+                        consistent = false;
+                    }
+                    owner = Some(reference);
+                    if weight > dominant.0 {
+                        dominant = (weight, Ownership::Observed { reference, region });
+                    }
+                }
+                _ => consistent = false,
+            }
+        }
+        let camera = owner.and_then(|reference| {
+            evidence
+                .cameras
+                .iter()
+                .find(|camera| camera.frame_index == reference)
+        });
+        let (true, Some(camera)) = (consistent, camera) else {
+            pixels.push(None);
+            continue;
+        };
+        let rotation = camera.rotation.map(f64::from);
+        let translation = camera.translation.map(f64::from);
+        let mut weighted = 0.0;
+        let mut pixel = [0.0; 2];
+        let mut valid = true;
+        for (corner, weight) in derived.source_corners.iter().zip(derived.barycentric) {
+            let p = &evidence.points[*corner];
+            let world = [f64::from(p.x), f64::from(p.y), f64::from(p.z)];
+            let depth = rotation[6] * world[0]
+                + rotation[7] * world[1]
+                + rotation[8] * world[2]
+                + translation[2];
+            let Some(site) = grid_sites.get(*corner) else {
+                valid = false;
+                break;
+            };
+            if !(depth.is_finite() && depth > 0.0) {
+                valid = false;
+                break;
+            }
+            let lambda = weight * depth;
+            weighted += lambda;
+            pixel[0] += lambda * f64::from(site.x);
+            pixel[1] += lambda * f64::from(site.y);
+        }
+        if !valid || !(weighted.is_finite() && weighted > 0.0) {
+            pixels.push(None);
+            continue;
+        }
+        ownership[derived.point_index] = dominant.1;
+        pixels.push(Some([pixel[0] / weighted, pixel[1] / weighted]));
+    }
+    Ok(pixels)
 }
 
 fn content_hash(hasher: Sha256) -> ContentHash {

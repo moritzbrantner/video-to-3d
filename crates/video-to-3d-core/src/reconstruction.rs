@@ -378,6 +378,11 @@ pub struct ReconstructionResult {
     /// reference support overlap canonicalization re-indexed away (see
     /// [`crate::TriangleSourceCorners`]). Empty unless surface consolidation merged patches.
     pub mesh_triangle_sources: Vec<crate::TriangleSourceCorners>,
+    /// Lineage of the points surface consolidation derived where it clipped overlap
+    /// seams: they follow the observed `dense_points` (and so have no grid site or
+    /// point attributes), one record per derived point (see
+    /// [`crate::DerivedVertexSource`]).
+    pub mesh_derived_vertices: Vec<crate::DerivedVertexSource>,
     pub mesh: MeshStats,
     pub pairs: Vec<PairStats>,
     pub calibrated_pair: Option<CalibratedPairStats>,
