@@ -1219,7 +1219,9 @@ function assertConfidenceContract(result: ReconstructionResult): void {
     }
     next = range.start + range.count;
   }
-  if (next !== result.dense_points.length) {
+  // Regions partition the observed points; derived (clipped) points follow them and
+  // inherit their source corner's region in Rust.
+  if (next !== result.dense_points.length - derivedPointCount(result.mesh_triangles)) {
     throw new Error("confidence contract mismatch: regions do not partition the dense points");
   }
   if (
