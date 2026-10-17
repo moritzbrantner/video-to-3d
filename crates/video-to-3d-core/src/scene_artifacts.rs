@@ -48,7 +48,8 @@ use crate::{
     RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 pub use semantic::{
-    CLEAN_PLATE_ENVIRONMENT, CLEAN_PLATE_PROTOCOL, DEFAULT_CLEAN_PLATE_SIDECAR, DEFAULT_SIDECAR,
+    CLEAN_PLATE_ENVIRONMENT, CLEAN_PLATE_PROTOCOL, DEFAULT_CLEAN_PLATE_SIDECAR,
+    DEFAULT_GENERATION_SIDECAR, DEFAULT_SIDECAR, GENERATION_ENVIRONMENT, GENERATION_PROTOCOL,
     SIDECAR_ENVIRONMENT, SIDECAR_PROTOCOL,
 };
 use serde::de::DeserializeOwned;
@@ -1387,6 +1388,20 @@ pub fn artifact_sidecars(
                 })
             })
             .collect(),
+        ArtifactKind::GeneratedObjects => {
+            crate::object_generation::ObjectGenerationArtifact::from_json(document)?
+                .objects
+                .into_iter()
+                .filter_map(|object| {
+                    object.output.map(|mesh| ArtifactSidecar {
+                        byte_length: None,
+                        png_rgb8: None,
+                        path: mesh.path,
+                        content_hash: mesh.content_hash,
+                    })
+                })
+                .collect()
+        }
         _ => Vec::new(),
     })
 }
@@ -1745,6 +1760,8 @@ pub struct BuiltInExecutor {
     semantic_sidecar: Option<PathBuf>,
     /// Clean-plate sidecar program overriding the environment and default.
     clean_plate_sidecar: Option<PathBuf>,
+    /// Object-generation sidecar program overriding the environment and default.
+    generation_sidecar: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -1804,6 +1821,7 @@ pub(crate) fn recorded_sidecar_paths(
             | ArtifactKind::SurfaceTextures
             | ArtifactKind::AssembledScene
             | ArtifactKind::CleanPlates
+            | ArtifactKind::GeneratedObjects
     ) {
         return Vec::new();
     }
@@ -1830,6 +1848,7 @@ impl BuiltInExecutor {
             reservations,
             semantic_sidecar: None,
             clean_plate_sidecar: None,
+            generation_sidecar: None,
         }
     }
 
@@ -1845,6 +1864,7 @@ impl BuiltInExecutor {
             reservations: Reservations::ManifestFile(manifest_path.into()),
             semantic_sidecar: None,
             clean_plate_sidecar: None,
+            generation_sidecar: None,
         }
     }
 
@@ -1995,6 +2015,9 @@ impl OperationExecutor for BuiltInExecutor {
         }
         if kind == OperationKind::CleanPlate && local {
             return self.clean_plate(request, cancel);
+        }
+        if kind == OperationKind::ObjectGeneration && local {
+            return self.object_generation(request, cancel);
         }
         if kind == OperationKind::ObjectIdentity && request.provider.is_none() {
             return self.object_identity(request, cancel);

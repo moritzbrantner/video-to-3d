@@ -12,6 +12,7 @@ pub mod evidence_interchange;
 pub mod feature_analysis;
 pub mod geometry_confidence;
 pub mod input_readiness;
+pub mod object_generation;
 pub mod object_identity;
 pub mod object_masks;
 pub mod object_references;

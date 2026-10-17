@@ -93,7 +93,8 @@ fn project(response: &Value) -> PathBuf {
                     "content_hash": ContentHash::of_bytes(source).as_str(), "byte_length": source.len()}],
         "provider_policy": {"execution": "local_only", "providers": [{
             "id": "local-grounded-sam2", "location": "local", "capabilities": ["semantic_inventory"], "revision": "r1"},
-            {"id": "local-lama", "location": "local", "capabilities": ["clean_plate"], "revision": "r1"}]},
+            {"id": "local-lama", "location": "local", "capabilities": ["clean_plate"], "revision": "r1"},
+            {"id": "local-triposr", "location": "local", "capabilities": ["object_generation"], "revision": "r1"}]},
         "operations": [
             {"id": "ingest", "kind": "ingest_video", "inputs": [{"media": "clip"}]},
             {"id": "sparse", "kind": "sparse_reconstruction", "inputs": [{"operation": "ingest"}]},
@@ -108,9 +109,11 @@ fn project(response: &Value) -> PathBuf {
             {"id": "references", "kind": "object_references",
              "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "masks"}, {"operation": "sparse"}, {"operation": "mesh"}]},
             {"id": "plates", "kind": "clean_plate", "provider": "local-lama",
+             "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]},
+            {"id": "generated", "kind": "object_generation", "provider": "local-triposr",
              "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]}
         ],
-        "requested_outputs": ["object_identity", "object_masks", "object_references", "clean_plates"]
+        "requested_outputs": ["object_identity", "object_masks", "object_references", "clean_plates", "generated_objects"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     store
@@ -205,6 +208,14 @@ fn object_identity_runs_over_semantic_evidence_without_touching_geometry() {
     );
     assert_eq!(
         result["operations"]["plates"]["observations"]["clean_plates"],
+        "0"
+    );
+    assert_eq!(
+        result["operations"]["generated"]["state"], "succeeded",
+        "{result}"
+    );
+    assert_eq!(
+        result["operations"]["generated"]["observations"]["generated_objects"],
         "0"
     );
     let rebuilt = build(&root);
