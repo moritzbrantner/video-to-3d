@@ -2,5 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "github>moritzbrantner/coding-agent-conventions"
+  ],
+  "packageRules": [
+    {
+      "description": "3d-lab crates share types across one git revision; a partial bump compiles two incompatible copies, so update them as one cohort.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^three-d-/"],
+      "groupName": "3d-lab crates"
+    }
   ]
 }
