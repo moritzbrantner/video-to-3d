@@ -73,6 +73,8 @@ pub struct SemanticProvider {
 pub enum SemanticModelRole {
     Detector,
     Segmenter,
+    /// Image inpainting (clean plates, #64).
+    Inpainter,
 }
 
 /// A pinned model identity: id, version and where it comes from.

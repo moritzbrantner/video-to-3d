@@ -95,6 +95,10 @@ pub enum OperationKind {
     ObjectMasks,
     /// Multi-view reference packages of identified objects (#63).
     ObjectReferences,
+    /// Clean-plate references of representative views with the packaged
+    /// objects removed by a local inpainting provider (#64). Generated
+    /// appearance; never camera evidence.
+    CleanPlate,
 }
 
 /// Whether an operation runs the built-in Rust pipeline or a declared provider.
@@ -107,7 +111,7 @@ pub enum OperationExecution {
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 14] = [
+    pub const ALL: [OperationKind; 15] = [
         Self::IngestVideo,
         Self::SparseReconstruction,
         Self::DenseReconstruction,
@@ -122,6 +126,7 @@ impl OperationKind {
         Self::ObjectIdentity,
         Self::ObjectMasks,
         Self::ObjectReferences,
+        Self::CleanPlate,
     ];
 
     /// Lowest quality mode in which this operation may be declared.
@@ -139,7 +144,8 @@ impl OperationKind {
             | Self::SemanticInventory
             | Self::ObjectIdentity
             | Self::ObjectMasks
-            | Self::ObjectReferences => QualityMode::Standard,
+            | Self::ObjectReferences
+            | Self::CleanPlate => QualityMode::Standard,
             Self::SplatOptimization => QualityMode::Production,
         }
     }
@@ -150,7 +156,8 @@ impl OperationKind {
             | Self::SceneDecomposition
             | Self::GenerativeCompletion
             | Self::SplatOptimization
-            | Self::SemanticInventory => OperationExecution::Provider,
+            | Self::SemanticInventory
+            | Self::CleanPlate => OperationExecution::Provider,
             _ => OperationExecution::BuiltIn,
         }
     }
@@ -172,6 +179,7 @@ impl OperationKind {
             Self::ObjectIdentity => ArtifactKind::ObjectIdentity,
             Self::ObjectMasks => ArtifactKind::ObjectMasks,
             Self::ObjectReferences => ArtifactKind::ObjectReferences,
+            Self::CleanPlate => ArtifactKind::CleanPlates,
         }
     }
 
@@ -208,6 +216,7 @@ impl OperationKind {
                 SparseReconstruction,
                 SurfaceMesh,
             ],
+            CleanPlate => &[IngestVideo, SemanticInventory, ObjectReferences],
             SplatOptimization => &[IngestVideo, SparseReconstruction, DenseReconstruction],
             SceneAssembly => &[
                 SparseReconstruction,
@@ -254,6 +263,7 @@ impl OperationKind {
             Self::ObjectIdentity => "object_identity",
             Self::ObjectMasks => "object_masks",
             Self::ObjectReferences => "object_references",
+            Self::CleanPlate => "clean_plate",
         }
     }
 }
@@ -277,6 +287,7 @@ pub enum ArtifactKind {
     ObjectIdentity,
     ObjectMasks,
     ObjectReferences,
+    CleanPlates,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1102,6 +1113,28 @@ impl SceneProjectManifest {
             {
                 return invalid(format!(
                     "operation `{}` (object_references) must consume exactly one semantic_inventory, object_identity, object_masks, sparse_reconstruction and surface_mesh operation",
+                    operation.id
+                ));
+            }
+        }
+        if kind == OperationKind::CleanPlate {
+            let count = |wanted: ArtifactKind| {
+                upstream_kinds
+                    .iter()
+                    .filter(|output| **output == wanted)
+                    .count()
+            };
+            if operation.inputs.len() != 3
+                || [
+                    ArtifactKind::Keyframes,
+                    ArtifactKind::SemanticInventory,
+                    ArtifactKind::ObjectReferences,
+                ]
+                .iter()
+                .any(|kind| count(*kind) != 1)
+            {
+                return invalid(format!(
+                    "operation `{}` (clean_plate) must consume exactly one ingest_video, semantic_inventory and object_references operation",
                     operation.id
                 ));
             }

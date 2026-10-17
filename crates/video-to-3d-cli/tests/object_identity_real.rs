@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use video_to_3d_core::clean_plate::CleanPlateArtifact;
 use video_to_3d_core::object_identity::ObjectIdentityArtifact;
 use video_to_3d_core::object_masks::ObjectMasksArtifact;
 use video_to_3d_core::object_references::ObjectReferencesArtifact;
@@ -169,7 +170,7 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
         "provider_policy": {"execution": "local_only", "providers": [{
             "id": "local-grounded-sam2", "location": "local",
             "capabilities": ["semantic_inventory"], "revision": "real-acceptance"
-        }]},
+        }, {"id": "local-lama", "location": "local", "capabilities": ["clean_plate"], "revision": "real-acceptance"}]},
         "operations": [
             {"id": "ingest", "kind": "ingest_video", "inputs": [{"media": "clip"}]},
             {"id": "sparse", "kind": "sparse_reconstruction", "inputs": [{"operation": "ingest"}]},
@@ -183,9 +184,11 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
             {"id": "masks", "kind": "object_masks",
              "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "sparse"}, {"operation": "mesh"}]},
             {"id": "references", "kind": "object_references",
-             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "masks"}, {"operation": "sparse"}, {"operation": "mesh"}]}
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "masks"}, {"operation": "sparse"}, {"operation": "mesh"}]},
+            {"id": "plates", "kind": "clean_plate", "provider": "local-lama",
+             "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]}
         ],
-        "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references"]
+        "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references", "clean_plates"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     let report = store
@@ -355,5 +358,52 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
         die_masks.len(),
         best.observations.len(),
         "every die mask is diagnosed"
+    );
+    // #63: the die gets a reference package whose views are its own observations.
+    assert_eq!(
+        result["operations"]["references"]["state"], "succeeded",
+        "{stderr}"
+    );
+    let package = die_package.expect("a yellow-die reference package");
+    for view in std::iter::once(&package.primary).chain(&package.additional) {
+        assert!(best.observations.contains(&view.observation));
+    }
+    // #64: the die's primary view gets a LaMa clean plate; pixels outside the
+    // removal mask are unchanged and the original keyframe stays untouched.
+    assert_eq!(
+        result["operations"]["plates"]["state"], "succeeded",
+        "{stderr}"
+    );
+    let plates = CleanPlateArtifact::from_json(&read(&root.0, "plates")).unwrap();
+    let die_frame = package.primary.frame_index;
+    let plate = plates
+        .plates
+        .iter()
+        .find(|plate| {
+            plate.request.frame_index == die_frame && plate.request.objects.contains(&best.id)
+        })
+        .expect("a clean plate removing the die");
+    let output = plate.output.as_ref().expect("the edit succeeded");
+    let edited = fs::read(output.path.resolve(&root.0)).unwrap();
+    let original = &pixels[die_frame];
+    let mut inside_changed = 0;
+    let mut position = 0usize;
+    for (run_index, run) in plate.request.removal_mask.counts.iter().enumerate() {
+        for pixel in position..position + *run as usize {
+            let same = edited[pixel * 4..pixel * 4 + 4] == original[pixel * 4..pixel * 4 + 4];
+            if run_index % 2 == 0 {
+                assert!(same, "pixel {pixel} outside the mask changed");
+            } else if !same {
+                inside_changed += 1;
+            }
+        }
+        position += *run as usize;
+    }
+    assert!(inside_changed > 0, "the die region was inpainted");
+    report(
+        "clean_plate",
+        json!({"frame": die_frame, "edit_id": plate.request.edit_id, "objects": plate.request.objects,
+               "inside_changed_pixels": inside_changed, "plates": plates.plates.len(),
+               "provider": plates.provider, "output": output.path.as_str()}),
     );
 }

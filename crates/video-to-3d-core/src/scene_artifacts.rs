@@ -47,7 +47,10 @@ use crate::{
     ReconstructionProviderDescriptor, SurfaceEvidenceRegion, TriangleSourceCorners,
     RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
-pub use semantic::{DEFAULT_SIDECAR, SIDECAR_ENVIRONMENT, SIDECAR_PROTOCOL};
+pub use semantic::{
+    CLEAN_PLATE_ENVIRONMENT, CLEAN_PLATE_PROTOCOL, DEFAULT_CLEAN_PLATE_SIDECAR, DEFAULT_SIDECAR,
+    SIDECAR_ENVIRONMENT, SIDECAR_PROTOCOL,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -1370,6 +1373,20 @@ pub fn artifact_sidecars(
                 png_rgb8: None,
             })
             .collect(),
+        ArtifactKind::CleanPlates => crate::clean_plate::CleanPlateArtifact::from_json(document)?
+            .plates
+            .into_iter()
+            .filter_map(|plate| {
+                let request = plate.request;
+                plate.output.map(|output| ArtifactSidecar {
+                    byte_length: rgba_length(request.width, request.height)
+                        .map(|length| length as u64),
+                    png_rgb8: None,
+                    path: output.path,
+                    content_hash: output.content_hash,
+                })
+            })
+            .collect(),
         _ => Vec::new(),
     })
 }
@@ -1726,6 +1743,8 @@ pub struct BuiltInExecutor {
     reservations: Reservations,
     /// Semantic sidecar program overriding the environment and default.
     semantic_sidecar: Option<PathBuf>,
+    /// Clean-plate sidecar program overriding the environment and default.
+    clean_plate_sidecar: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -1781,7 +1800,10 @@ pub(crate) fn recorded_sidecar_paths(
 ) -> Vec<ProjectPath> {
     if !matches!(
         artifact.kind,
-        ArtifactKind::Keyframes | ArtifactKind::SurfaceTextures | ArtifactKind::AssembledScene
+        ArtifactKind::Keyframes
+            | ArtifactKind::SurfaceTextures
+            | ArtifactKind::AssembledScene
+            | ArtifactKind::CleanPlates
     ) {
         return Vec::new();
     }
@@ -1807,6 +1829,7 @@ impl BuiltInExecutor {
             root,
             reservations,
             semantic_sidecar: None,
+            clean_plate_sidecar: None,
         }
     }
 
@@ -1821,6 +1844,7 @@ impl BuiltInExecutor {
             root: project_root.into(),
             reservations: Reservations::ManifestFile(manifest_path.into()),
             semantic_sidecar: None,
+            clean_plate_sidecar: None,
         }
     }
 
@@ -1963,12 +1987,14 @@ impl OperationExecutor for BuiltInExecutor {
         if kind == OperationKind::TextureBake && request.provider.is_none() {
             return self.texture_bake(request, cancel);
         }
-        if kind == OperationKind::SemanticInventory
-            && request.provider.as_ref().is_some_and(|provider| {
-                provider.location == crate::scene_project::ProviderLocation::Local
-            })
-        {
+        let local = request.provider.as_ref().is_some_and(|provider| {
+            provider.location == crate::scene_project::ProviderLocation::Local
+        });
+        if kind == OperationKind::SemanticInventory && local {
             return self.semantic_inventory(request, cancel);
+        }
+        if kind == OperationKind::CleanPlate && local {
+            return self.clean_plate(request, cancel);
         }
         if kind == OperationKind::ObjectIdentity && request.provider.is_none() {
             return self.object_identity(request, cancel);
