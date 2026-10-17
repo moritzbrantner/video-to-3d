@@ -15,6 +15,19 @@ assert.equal(defaults.analysisHeight, 203);
 assert.equal(defaults.times[0], 0.5);
 assert.equal(defaults.times.at(-1), 9.5);
 
+// Long clips without an explicit cap are sampled at least once per second (#230).
+const long = buildVideoSamplingPlan({ duration: 86.166667, videoWidth: 640, videoHeight: 480 });
+assert.equal(long.maxFrames, 87);
+assert.equal(long.sampleCount, 87);
+assert.ok(long.times[1] - long.times[0] <= 1.0);
+const explicit = buildVideoSamplingPlan(
+  { duration: 86.166667, videoWidth: 640, videoHeight: 480 },
+  { maxFrames: 18 },
+);
+assert.equal(explicit.sampleCount, 18, "an explicit cap still wins");
+// A 16 s clip keeps the 18-frame default.
+assert.equal(buildVideoSamplingPlan({ duration: 16, videoWidth: 640, videoHeight: 480 }).sampleCount, 18);
+
 const short = buildVideoSamplingPlan({
   duration: 1,
   videoWidth: 640,

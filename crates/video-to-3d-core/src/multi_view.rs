@@ -143,6 +143,38 @@ pub(super) struct MultiViewAnalysis {
 }
 
 impl MultiViewAnalysis {
+    /// Known 3D positions observed in `frame_index`, as (position, feature index): seed
+    /// landmarks through their tracks and accepted new landmarks through theirs. The
+    /// correspondences an incremental registration solves against (#230).
+    pub(super) fn landmark_correspondences(
+        &self,
+        seed_positions: &[Vector3<f64>],
+        new_landmarks: &[NewLandmark],
+        frame_index: usize,
+    ) -> Vec<(Vector3<f64>, usize)> {
+        let observed = |track_index: usize| {
+            self.tracks.get(track_index).and_then(|track| {
+                track
+                    .observations
+                    .iter()
+                    .find(|observation| observation.frame_index == frame_index)
+                    .map(|observation| observation.feature_index)
+            })
+        };
+        let mut correspondences: Vec<(Vector3<f64>, usize)> = self
+            .seed_tracks
+            .iter()
+            .filter_map(|seed| {
+                let position = *seed_positions.get(seed.point_index)?;
+                observed(seed.track_index).map(|feature| (position, feature))
+            })
+            .collect();
+        correspondences.extend(new_landmarks.iter().filter_map(|landmark| {
+            observed(landmark.track_index).map(|feature| (landmark.position, feature))
+        }));
+        correspondences
+    }
+
     /// Each track's first and last frame. Tracks only extend from frame `i` to `i + 1`, so
     /// a track observes every frame of its span exactly once.
     pub(super) fn track_spans(&self) -> Vec<(usize, usize)> {

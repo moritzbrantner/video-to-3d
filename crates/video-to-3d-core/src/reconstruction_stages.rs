@@ -198,6 +198,8 @@ pub(crate) struct SparseReconstruction {
     /// Optimized seed points and new landmarks that bound the dense depth search.
     pub(crate) dense_sparse_points: Vec<[f64; 3]>,
     pub(crate) track_scope: TrackScope,
+    /// Primary-solve views registered by incremental expansion (#230).
+    pub(crate) expanded_views: usize,
     pub(crate) warnings_before_dense: Vec<String>,
     /// Includes the recovery selection note, which follows every solve diagnostic.
     pub(crate) warnings_after_mesh: Vec<String>,
@@ -915,6 +917,7 @@ fn into_result(
         dense_cameras: _,
         dense_sparse_points: _,
         track_scope: _,
+        expanded_views: _,
         warnings_before_dense,
         warnings_after_mesh,
     } = sparse;

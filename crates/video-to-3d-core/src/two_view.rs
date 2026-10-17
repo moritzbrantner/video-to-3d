@@ -9,6 +9,8 @@ const MIN_INLIER_RATIO: f64 = 0.5;
 const MAX_ROTATION_ONLY_RESIDUAL_PIXELS: f64 = 1.25;
 const MIN_TRIANGULATION_ANGLE_DEGREES: f64 = 0.5;
 const MAX_REPROJECTION_ERROR_PIXELS: f64 = 4.0;
+/// Bound on the deterministic RANSAC of [`essential_inlier_mask`].
+const MAX_MASK_ITERATIONS: usize = 2000;
 
 #[derive(Clone, Debug)]
 pub(super) struct TriangulatedPoint {
@@ -301,6 +303,68 @@ pub(super) fn evaluate_two_view_points(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Which correspondences agree with the best essential matrix (Sampson error within
+/// the two-view threshold), by the same deterministic RANSAC as the two-view gate.
+/// `None` when too few correspondences or no hypothesis exists. Used to verify the
+/// adjacent matches that form tracks for incremental registration (#230); it applies
+/// no acceptance gate of its own.
+pub(super) fn essential_inlier_mask(
+    points: &[PixelCorrespondence],
+    width: u32,
+    height: u32,
+    focal_pixels: f64,
+) -> Option<Vec<bool>> {
+    if points.len() < RANSAC_SAMPLE_SIZE || focal_pixels <= 0.0 {
+        return None;
+    }
+    let center_x = width as f64 * 0.5;
+    let center_y = height as f64 * 0.5;
+    let correspondences: Vec<Correspondence> = points
+        .iter()
+        .map(|point| Correspondence {
+            source_feature_index: point.source_feature_index,
+            descriptor_distance: point.descriptor_distance,
+            x1: Vector3::new(
+                (point.source[0] - center_x) / focal_pixels,
+                (point.source[1] - center_y) / focal_pixels,
+                1.0,
+            ),
+            x2: Vector3::new(
+                (point.target[0] - center_x) / focal_pixels,
+                (point.target[1] - center_y) / focal_pixels,
+                1.0,
+            ),
+        })
+        .collect();
+    let threshold = (SAMPSON_THRESHOLD_PIXELS / focal_pixels).powi(2);
+    let mut best: Option<Vec<bool>> = None;
+    let mut best_count = 0;
+    let mut iteration = 0;
+    let mut iteration_limit = required_ransac_iterations(0.3).min(MAX_MASK_ITERATIONS);
+    while iteration < iteration_limit {
+        let sample = deterministic_sample(correspondences.len(), iteration);
+        iteration += 1;
+        let Some(essential) = estimate_essential(&correspondences, &sample) else {
+            continue;
+        };
+        let mask: Vec<bool> = correspondences
+            .iter()
+            .map(|correspondence| {
+                let error = sampson_error(&essential, correspondence);
+                error.is_finite() && error <= threshold
+            })
+            .collect();
+        let count = mask.iter().filter(|inlier| **inlier).count();
+        if count > best_count {
+            best_count = count;
+            best = Some(mask);
+            let ratio = count as f64 / correspondences.len() as f64;
+            iteration_limit = iteration_limit.min(required_ransac_iterations(ratio).max(iteration));
+        }
+    }
+    best.filter(|_| best_count >= RANSAC_SAMPLE_SIZE)
+}
+
 pub(super) fn evaluate_two_view_points_with_control(
     points: &[PixelCorrespondence],
     width: u32,

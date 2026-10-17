@@ -53,7 +53,8 @@ type VideoRun = {
   reconstruction: ReconstructionResult | null;
   error: string;
   samplingFps: number;
-  frameCap: number;
+  /** `null`: automatic, from the clip length (see `buildVideoSamplingPlan`). */
+  frameCap: number | null;
   mode: LearnedReconstructionMode;
   learnedBenchmark: LearnedBenchmarkSuite | null;
   readiness: ReadinessReport | null;
@@ -73,7 +74,7 @@ type MaterialExportState = {
 const MIN_SAMPLING_FPS = 0.25;
 const MAX_SAMPLING_FPS = 8;
 const MIN_FRAME_CAP = 4;
-const MAX_FRAME_CAP = 60;
+const MAX_FRAME_CAP = 120;
 const RECONSTRUCTION_MODE_QUERY_PARAM = "reconstruction";
 
 const TREVI_DEMO_URL =
@@ -97,8 +98,8 @@ function normalizedSamplingFps(value: number): number {
   return Math.min(MAX_SAMPLING_FPS, Math.max(MIN_SAMPLING_FPS, value));
 }
 
-function normalizedFrameCap(value: number): number {
-  if (!Number.isFinite(value)) return 18;
+function normalizedFrameCap(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
   return Math.min(MAX_FRAME_CAP, Math.max(MIN_FRAME_CAP, Math.floor(value)));
 }
 
@@ -172,7 +173,7 @@ export default function Home() {
   const [batchRunning, setBatchRunning] = useState(false);
   const [demoDownloading, setDemoDownloading] = useState(false);
   const [samplingFps, setSamplingFps] = useState(1.25);
-  const [frameCap, setFrameCap] = useState(18);
+  const [frameCap, setFrameCap] = useState<number | null>(null);
   const [mode, setMode] = useState<LearnedReconstructionMode>("classic");
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
 
@@ -245,7 +246,7 @@ export default function Home() {
         updateRun(run.id, { phase: "sampling", error: "" });
         const { frames: sampled, info } = await sampleVideoWithInfo(file, {
           framesPerSecond: run.samplingFps,
-          maxFrames: run.frameCap,
+          maxFrames: run.frameCap ?? undefined,
         });
         // Readiness is evidence only: it never prevents the reconstruction attempt.
         let readiness: ReadinessReport | null = null;
@@ -521,12 +522,12 @@ export default function Home() {
                 min={MIN_FRAME_CAP}
                 max={MAX_FRAME_CAP}
                 step="1"
-                value={frameCap}
+                value={frameCap ?? ""}
+                placeholder="auto"
                 disabled={batchRunning}
                 onChange={(event) => {
-                  if (Number.isFinite(event.currentTarget.valueAsNumber)) {
-                    setFrameCap(event.currentTarget.valueAsNumber);
-                  }
+                  const value = event.currentTarget.valueAsNumber;
+                  setFrameCap(Number.isFinite(value) ? value : null);
                 }}
               />
             </label>
@@ -730,7 +731,7 @@ export default function Home() {
             </div>
             <p>
               {frames.length} frames · {activeRun?.samplingFps.toFixed(2)} target FPS · cap{" "}
-              {activeRun?.frameCap}
+              {activeRun?.frameCap ?? "auto"}
             </p>
           </div>
           <div className="frame-strip">
