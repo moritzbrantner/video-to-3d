@@ -88,6 +88,9 @@ pub enum OperationKind {
     /// boxes, masks and tracks from a local segmentation provider. Evidence
     /// only; no geometry or camera producer consumes it.
     SemanticInventory,
+    /// Stable scene-object identities and motion classes (#61) over semantic
+    /// evidence, localized read-only with the accepted cameras and surface.
+    ObjectIdentity,
 }
 
 /// Whether an operation runs the built-in Rust pipeline or a declared provider.
@@ -100,7 +103,7 @@ pub enum OperationExecution {
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 11] = [
+    pub const ALL: [OperationKind; 12] = [
         Self::IngestVideo,
         Self::SparseReconstruction,
         Self::DenseReconstruction,
@@ -112,6 +115,7 @@ impl OperationKind {
         Self::SplatOptimization,
         Self::SceneAssembly,
         Self::SemanticInventory,
+        Self::ObjectIdentity,
     ];
 
     /// Lowest quality mode in which this operation may be declared.
@@ -126,7 +130,8 @@ impl OperationKind {
             | Self::SceneDecomposition
             | Self::GenerativeCompletion
             | Self::TextureBake
-            | Self::SemanticInventory => QualityMode::Standard,
+            | Self::SemanticInventory
+            | Self::ObjectIdentity => QualityMode::Standard,
             Self::SplatOptimization => QualityMode::Production,
         }
     }
@@ -156,6 +161,7 @@ impl OperationKind {
             Self::SplatOptimization => ArtifactKind::SplatField,
             Self::SceneAssembly => ArtifactKind::AssembledScene,
             Self::SemanticInventory => ArtifactKind::SemanticInventory,
+            Self::ObjectIdentity => ArtifactKind::ObjectIdentity,
         }
     }
 
@@ -178,6 +184,7 @@ impl OperationKind {
             ],
             TextureBake => &[IngestVideo, SurfaceMesh],
             SemanticInventory => &[IngestVideo, SparseReconstruction],
+            ObjectIdentity => &[SemanticInventory, SparseReconstruction, SurfaceMesh],
             SplatOptimization => &[IngestVideo, SparseReconstruction, DenseReconstruction],
             SceneAssembly => &[
                 SparseReconstruction,
@@ -221,6 +228,7 @@ impl OperationKind {
             Self::SplatOptimization => "splat_optimization",
             Self::SceneAssembly => "scene_assembly",
             Self::SemanticInventory => "semantic_inventory",
+            Self::ObjectIdentity => "object_identity",
         }
     }
 }
@@ -241,6 +249,7 @@ pub enum ArtifactKind {
     SplatField,
     AssembledScene,
     SemanticInventory,
+    ObjectIdentity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1001,6 +1010,24 @@ impl SceneProjectManifest {
             if keyframes != 1 {
                 return invalid(format!(
                     "operation `{}` (semantic_inventory) must consume exactly one ingest_video operation",
+                    operation.id
+                ));
+            }
+        }
+        if kind == OperationKind::ObjectIdentity {
+            let count = |wanted: ArtifactKind| {
+                upstream_kinds
+                    .iter()
+                    .filter(|output| **output == wanted)
+                    .count()
+            };
+            if operation.inputs.len() != 3
+                || count(ArtifactKind::SemanticInventory) != 1
+                || count(ArtifactKind::SparseReconstruction) != 1
+                || count(ArtifactKind::SurfaceMesh) != 1
+            {
+                return invalid(format!(
+                    "operation `{}` (object_identity) must consume exactly one semantic_inventory, sparse_reconstruction and surface_mesh operation",
                     operation.id
                 ));
             }

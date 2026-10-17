@@ -11,6 +11,7 @@ pub mod evidence_interchange;
 pub mod feature_analysis;
 pub mod geometry_confidence;
 pub mod input_readiness;
+pub mod object_identity;
 pub mod scene_artifacts;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod scene_export;
