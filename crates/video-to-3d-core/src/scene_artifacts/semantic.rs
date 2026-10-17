@@ -1299,37 +1299,53 @@ impl BuiltInExecutor {
     }
 }
 
-/// POSITION bounds of the first mesh primitive of a binary glTF.
-fn glb_position_bounds(bytes: &[u8]) -> Result<crate::object_placement::MeshBounds, String> {
+/// POSITION vertices of the first mesh primitive of a binary glTF.
+fn glb_positions(bytes: &[u8]) -> Result<Vec<[f64; 3]>, String> {
     if bytes.len() < 20 || &bytes[..4] != b"glTF" {
         return Err("not a binary glTF".into());
     }
-    let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    let json: serde_json::Value = serde_json::from_slice(
-        bytes
-            .get(20..20 + length)
-            .ok_or("binary glTF JSON chunk is truncated")?,
-    )
-    .map_err(|error| format!("binary glTF JSON chunk: {error}"))?;
+    let chunk = |offset: usize| -> Result<(usize, &[u8]), String> {
+        let length = bytes
+            .get(offset..offset + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+            .ok_or("binary glTF chunk header is truncated")?;
+        let data = bytes
+            .get(offset + 8..offset + 8 + length)
+            .ok_or("binary glTF chunk is truncated")?;
+        Ok((offset + 8 + length, data))
+    };
+    let (next, json) = chunk(12)?;
+    let json: serde_json::Value =
+        serde_json::from_slice(json).map_err(|error| format!("binary glTF JSON chunk: {error}"))?;
+    let (_, binary) = chunk(next)?;
     let accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
         .as_u64()
         .ok_or("binary glTF has no POSITION accessor")?;
     let accessor = &json["accessors"][accessor as usize];
-    let read = |key: &str| -> Result<[f64; 3], String> {
-        let values = accessor[key]
-            .as_array()
-            .filter(|values| values.len() == 3)
-            .ok_or("POSITION accessor has no bounds")?;
-        let mut out = [0.0; 3];
-        for (slot, value) in out.iter_mut().zip(values) {
-            *slot = value.as_f64().ok_or("POSITION bound is not a number")?;
-        }
-        Ok(out)
-    };
-    Ok(crate::object_placement::MeshBounds {
-        min: read("min")?,
-        max: read("max")?,
-    })
+    if accessor["componentType"] != 5126 || accessor["type"] != "VEC3" {
+        return Err("POSITION accessor is not float VEC3".into());
+    }
+    let count = accessor["count"].as_u64().ok_or("POSITION has no count")? as usize;
+    let view = &json["bufferViews"][accessor["bufferView"]
+        .as_u64()
+        .ok_or("POSITION has no buffer view")? as usize];
+    let start = view["byteOffset"].as_u64().unwrap_or(0) as usize
+        + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let stride = view["byteStride"].as_u64().unwrap_or(12) as usize;
+    (0..count)
+        .map(|index| {
+            let at = start + index * stride;
+            let value = |k: usize| -> Result<f64, String> {
+                bytes_f32(binary, at + 4 * k).ok_or_else(|| "POSITION data is truncated".into())
+            };
+            Ok([value(0)?, value(1)?, value(2)?])
+        })
+        .collect()
+}
+
+fn bytes_f32(bytes: &[u8], at: usize) -> Option<f64> {
+    let value = f32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?);
+    value.is_finite().then_some(f64::from(value))
 }
 
 impl BuiltInExecutor {
@@ -1368,7 +1384,7 @@ impl BuiltInExecutor {
             let generation = crate::object_generation::ObjectGenerationArtifact::from_json(
                 &self.document(generation_record, cancel)?,
             )?;
-            let mut bounds = BTreeMap::new();
+            let mut vertices = BTreeMap::new();
             for object in &generation.objects {
                 if let Some(mesh) = &object.output {
                     let bytes = crate::scene_artifacts::read_verified_with_cancel(
@@ -1378,10 +1394,7 @@ impl BuiltInExecutor {
                         None,
                         || cancel.is_canceled(),
                     )?;
-                    bounds.insert(
-                        object.request.request_id.clone(),
-                        glb_position_bounds(&bytes)?,
-                    );
+                    vertices.insert(object.request.request_id.clone(), glb_positions(&bytes)?);
                 }
             }
             let (cameras, points) = self.registered_geometry(request, cancel)?;
@@ -1394,7 +1407,7 @@ impl BuiltInExecutor {
                 &references,
                 &generation,
                 generation_record.content_hash.clone(),
-                &bounds,
+                &vertices,
                 &cameras,
                 &points,
             );
@@ -1433,6 +1446,22 @@ impl BuiltInExecutor {
                         .to_string(),
                 );
             }
+            use crate::placement_validation::PlacementVerdict;
+            for (key, verdict) in [
+                ("placement_accepted", PlacementVerdict::Accepted),
+                ("placement_approximate", PlacementVerdict::Approximate),
+                ("placement_contradicted", PlacementVerdict::Contradicted),
+            ] {
+                produced.observations.insert(
+                    key.into(),
+                    artifact
+                        .placements
+                        .iter()
+                        .filter(|placement| placement.validation.verdict == verdict)
+                        .count()
+                        .to_string(),
+                );
+            }
             produced
                 .observations
                 .insert("up_source".into(), format!("{:?}", artifact.up_source));
@@ -1443,5 +1472,48 @@ impl BuiltInExecutor {
             Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
             Err(message) => AttemptOutcome::Failed(message),
         }
+    }
+}
+
+#[cfg(test)]
+mod glb_tests {
+    use super::glb_positions;
+
+    fn glb(json: &str, binary: &[u8]) -> Vec<u8> {
+        let mut json = json.as_bytes().to_vec();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut out = b"glTF".to_vec();
+        out.extend(2u32.to_le_bytes());
+        out.extend(((12 + 8 + json.len() + 8 + binary.len()) as u32).to_le_bytes());
+        out.extend((json.len() as u32).to_le_bytes());
+        out.extend(b"JSON");
+        out.extend(json);
+        out.extend((binary.len() as u32).to_le_bytes());
+        out.extend(b"BIN\0");
+        out.extend(binary);
+        out
+    }
+
+    #[test]
+    fn positions_follow_offsets_and_strides() {
+        // Two vertices, 16-byte stride, after 8 bytes of other data.
+        let mut binary = vec![0u8; 8];
+        for vertex in [[1.0f32, 2.0, 3.0], [-1.0, 0.5, 4.0]] {
+            for value in vertex {
+                binary.extend(value.to_le_bytes());
+            }
+            binary.extend([0u8; 4]);
+        }
+        let json = r#"{"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+            "accessors":[{"bufferView":0,"componentType":5126,"type":"VEC3","count":2}],
+            "bufferViews":[{"buffer":0,"byteOffset":8,"byteStride":16}]}"#;
+        let positions = glb_positions(&glb(json, &binary)).unwrap();
+        assert_eq!(positions, vec![[1.0, 2.0, 3.0], [-1.0, 0.5, 4.0]]);
+        let truncated = r#"{"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+            "accessors":[{"bufferView":0,"componentType":5126,"type":"VEC3","count":3}],
+            "bufferViews":[{"buffer":0,"byteOffset":8,"byteStride":16}]}"#;
+        assert!(glb_positions(&glb(truncated, &binary)).is_err());
     }
 }

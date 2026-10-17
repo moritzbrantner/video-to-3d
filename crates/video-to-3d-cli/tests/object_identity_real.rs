@@ -23,6 +23,7 @@ use video_to_3d_core::object_identity::ObjectIdentityArtifact;
 use video_to_3d_core::object_masks::ObjectMasksArtifact;
 use video_to_3d_core::object_placement::ObjectPlacementArtifact;
 use video_to_3d_core::object_references::ObjectReferencesArtifact;
+use video_to_3d_core::placement_validation::PlacementVerdict;
 use video_to_3d_core::scene_artifacts::{
     write_project_keyframes_artifact, KeyframesArtifact, SampledFrame,
 };
@@ -470,7 +471,13 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
                "supports": placements.supports.iter().map(|s| json!({"label": s.label, "points": s.points})).collect::<Vec<_>>(),
                "placed": placements.placements.len(), "unplaced": placements.unplaced.len(),
                "die": {"scale": placed.scale, "translation": placed.translation, "contact": placed.contact,
-                       "support": placed.support, "gap": placed.contact_gap, "reason": placed.reason},
+                       "support": placed.support, "gap": placed.contact_gap, "reason": placed.reason,
+                       "validation": {"verdict": placed.validation.verdict, "reason": placed.validation.reason,
+                                      "views": placed.validation.views.len()}},
+               "validation": {
+                   "accepted": placements.placements.iter().filter(|p| p.validation.verdict == PlacementVerdict::Accepted).count(),
+                   "approximate": placements.placements.iter().filter(|p| p.validation.verdict == PlacementVerdict::Approximate).count(),
+                   "contradicted": placements.placements.iter().filter(|p| p.validation.verdict == PlacementVerdict::Contradicted).count()},
                "metric_scale_hint": placements.metric_scale_hint, "hint_labels": placements.metric_hint_labels}),
     );
 }
