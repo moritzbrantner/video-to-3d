@@ -111,9 +111,12 @@ fn project(response: &Value) -> PathBuf {
             {"id": "plates", "kind": "clean_plate", "provider": "local-lama",
              "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]},
             {"id": "generated", "kind": "object_generation", "provider": "local-triposr",
-             "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]}
+             "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]},
+            {"id": "placement", "kind": "object_placement",
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "references"},
+                        {"operation": "generated"}, {"operation": "sparse"}, {"operation": "mesh"}]}
         ],
-        "requested_outputs": ["object_identity", "object_masks", "object_references", "clean_plates", "generated_objects"]
+        "requested_outputs": ["object_identity", "object_masks", "object_references", "clean_plates", "generated_objects", "object_placements"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     store
@@ -216,6 +219,14 @@ fn object_identity_runs_over_semantic_evidence_without_touching_geometry() {
     );
     assert_eq!(
         result["operations"]["generated"]["observations"]["generated_objects"],
+        "0"
+    );
+    assert_eq!(
+        result["operations"]["placement"]["state"], "succeeded",
+        "{result}"
+    );
+    assert_eq!(
+        result["operations"]["placement"]["observations"]["placed_objects"],
         "0"
     );
     let rebuilt = build(&root);

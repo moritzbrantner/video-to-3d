@@ -21,6 +21,7 @@ use video_to_3d_core::clean_plate::CleanPlateArtifact;
 use video_to_3d_core::object_generation::ObjectGenerationArtifact;
 use video_to_3d_core::object_identity::ObjectIdentityArtifact;
 use video_to_3d_core::object_masks::ObjectMasksArtifact;
+use video_to_3d_core::object_placement::ObjectPlacementArtifact;
 use video_to_3d_core::object_references::ObjectReferencesArtifact;
 use video_to_3d_core::scene_artifacts::{
     write_project_keyframes_artifact, KeyframesArtifact, SampledFrame,
@@ -190,9 +191,12 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
             {"id": "plates", "kind": "clean_plate", "provider": "local-lama",
              "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]},
             {"id": "generated", "kind": "object_generation", "provider": "local-triposr",
-             "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]}
+             "inputs": [{"operation": "ingest"}, {"operation": "semantic"}, {"operation": "references"}]},
+            {"id": "placement", "kind": "object_placement",
+             "inputs": [{"operation": "semantic"}, {"operation": "objects"}, {"operation": "references"},
+                        {"operation": "generated"}, {"operation": "sparse"}, {"operation": "mesh"}]}
         ],
-        "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references", "clean_plates", "generated_objects"]
+        "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references", "clean_plates", "generated_objects", "object_placements"]
     }).to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     let report = store
@@ -435,5 +439,31 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
                "generated": generated.objects.iter().filter(|o| o.output.is_some()).count(),
                "failed": generated.objects.iter().filter(|o| o.output.is_none()).count(),
                "provider": generated.provider}),
+    );
+    // #69: the die candidate is placed from observed evidence in the scene gauge.
+    assert_eq!(
+        result["operations"]["placement"]["state"], "succeeded",
+        "{stderr}"
+    );
+    let placements = ObjectPlacementArtifact::from_json(&read(&root.0, "placement")).unwrap();
+    let placed = placements
+        .placements
+        .iter()
+        .find(|placement| placement.object == best.id)
+        .unwrap_or_else(|| {
+            panic!(
+                "die not placed: {:?}",
+                placements.unplaced.iter().find(|u| u.object == best.id)
+            )
+        });
+    assert!(placed.scale > 0.0);
+    report(
+        "object_placement",
+        json!({"up": placements.up, "up_source": placements.up_source,
+               "supports": placements.supports.iter().map(|s| json!({"label": s.label, "points": s.points})).collect::<Vec<_>>(),
+               "placed": placements.placements.len(), "unplaced": placements.unplaced.len(),
+               "die": {"scale": placed.scale, "translation": placed.translation, "contact": placed.contact,
+                       "support": placed.support, "gap": placed.contact_gap, "reason": placed.reason},
+               "metric_scale_hint": placements.metric_scale_hint, "hint_labels": placements.metric_hint_labels}),
     );
 }

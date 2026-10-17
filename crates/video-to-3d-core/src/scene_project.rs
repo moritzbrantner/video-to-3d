@@ -102,6 +102,9 @@ pub enum OperationKind {
     /// Generated candidate meshes of packaged objects from a local
     /// image-to-3D provider (#68). Candidate evidence; never scene authority.
     ObjectGeneration,
+    /// Scene transforms and support contact of generated object candidates
+    /// (#69), from observed evidence; read-only.
+    ObjectPlacement,
 }
 
 /// Whether an operation runs the built-in Rust pipeline or a declared provider.
@@ -114,7 +117,7 @@ pub enum OperationExecution {
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 16] = [
+    pub const ALL: [OperationKind; 17] = [
         Self::IngestVideo,
         Self::SparseReconstruction,
         Self::DenseReconstruction,
@@ -131,6 +134,7 @@ impl OperationKind {
         Self::ObjectReferences,
         Self::CleanPlate,
         Self::ObjectGeneration,
+        Self::ObjectPlacement,
     ];
 
     /// Lowest quality mode in which this operation may be declared.
@@ -150,7 +154,8 @@ impl OperationKind {
             | Self::ObjectMasks
             | Self::ObjectReferences
             | Self::CleanPlate
-            | Self::ObjectGeneration => QualityMode::Standard,
+            | Self::ObjectGeneration
+            | Self::ObjectPlacement => QualityMode::Standard,
             Self::SplatOptimization => QualityMode::Production,
         }
     }
@@ -187,6 +192,7 @@ impl OperationKind {
             Self::ObjectReferences => ArtifactKind::ObjectReferences,
             Self::CleanPlate => ArtifactKind::CleanPlates,
             Self::ObjectGeneration => ArtifactKind::GeneratedObjects,
+            Self::ObjectPlacement => ArtifactKind::ObjectPlacements,
         }
     }
 
@@ -225,6 +231,14 @@ impl OperationKind {
             ],
             CleanPlate => &[IngestVideo, SemanticInventory, ObjectReferences],
             ObjectGeneration => &[IngestVideo, SemanticInventory, ObjectReferences],
+            ObjectPlacement => &[
+                SemanticInventory,
+                ObjectIdentity,
+                ObjectReferences,
+                ObjectGeneration,
+                SparseReconstruction,
+                SurfaceMesh,
+            ],
             SplatOptimization => &[IngestVideo, SparseReconstruction, DenseReconstruction],
             SceneAssembly => &[
                 SparseReconstruction,
@@ -273,6 +287,7 @@ impl OperationKind {
             Self::ObjectReferences => "object_references",
             Self::CleanPlate => "clean_plate",
             Self::ObjectGeneration => "object_generation",
+            Self::ObjectPlacement => "object_placement",
         }
     }
 }
@@ -298,6 +313,7 @@ pub enum ArtifactKind {
     ObjectReferences,
     CleanPlates,
     GeneratedObjects,
+    ObjectPlacements,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1123,6 +1139,31 @@ impl SceneProjectManifest {
             {
                 return invalid(format!(
                     "operation `{}` (object_references) must consume exactly one semantic_inventory, object_identity, object_masks, sparse_reconstruction and surface_mesh operation",
+                    operation.id
+                ));
+            }
+        }
+        if kind == OperationKind::ObjectPlacement {
+            let count = |wanted: ArtifactKind| {
+                upstream_kinds
+                    .iter()
+                    .filter(|output| **output == wanted)
+                    .count()
+            };
+            if operation.inputs.len() != 6
+                || [
+                    ArtifactKind::SemanticInventory,
+                    ArtifactKind::ObjectIdentity,
+                    ArtifactKind::ObjectReferences,
+                    ArtifactKind::GeneratedObjects,
+                    ArtifactKind::SparseReconstruction,
+                    ArtifactKind::SurfaceMesh,
+                ]
+                .iter()
+                .any(|kind| count(*kind) != 1)
+            {
+                return invalid(format!(
+                    "operation `{}` (object_placement) must consume exactly one semantic_inventory, object_identity, object_references, object_generation, sparse_reconstruction and surface_mesh operation",
                     operation.id
                 ));
             }

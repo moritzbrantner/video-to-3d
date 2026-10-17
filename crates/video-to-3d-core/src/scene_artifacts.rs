@@ -2028,6 +2028,9 @@ impl OperationExecutor for BuiltInExecutor {
         if kind == OperationKind::ObjectReferences && request.provider.is_none() {
             return self.object_references(request, cancel);
         }
+        if kind == OperationKind::ObjectPlacement && request.provider.is_none() {
+            return self.object_placement(request, cancel);
+        }
         if request.provider.is_none() {
             if let Some(outcome) = self.native_stage(request, cancel) {
                 return outcome;

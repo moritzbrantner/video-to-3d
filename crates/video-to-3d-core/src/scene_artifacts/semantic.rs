@@ -1298,3 +1298,150 @@ impl BuiltInExecutor {
         Ok(Some(produced))
     }
 }
+
+/// POSITION bounds of the first mesh primitive of a binary glTF.
+fn glb_position_bounds(bytes: &[u8]) -> Result<crate::object_placement::MeshBounds, String> {
+    if bytes.len() < 20 || &bytes[..4] != b"glTF" {
+        return Err("not a binary glTF".into());
+    }
+    let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json: serde_json::Value = serde_json::from_slice(
+        bytes
+            .get(20..20 + length)
+            .ok_or("binary glTF JSON chunk is truncated")?,
+    )
+    .map_err(|error| format!("binary glTF JSON chunk: {error}"))?;
+    let accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+        .as_u64()
+        .ok_or("binary glTF has no POSITION accessor")?;
+    let accessor = &json["accessors"][accessor as usize];
+    let read = |key: &str| -> Result<[f64; 3], String> {
+        let values = accessor[key]
+            .as_array()
+            .filter(|values| values.len() == 3)
+            .ok_or("POSITION accessor has no bounds")?;
+        let mut out = [0.0; 3];
+        for (slot, value) in out.iter_mut().zip(values) {
+            *slot = value.as_f64().ok_or("POSITION bound is not a number")?;
+        }
+        Ok(out)
+    };
+    Ok(crate::object_placement::MeshBounds {
+        min: read("min")?,
+        max: read("max")?,
+    })
+}
+
+impl BuiltInExecutor {
+    /// Built-in scene placement of generated candidates (#69), read-only.
+    pub(super) fn object_placement(
+        &self,
+        request: &OperationRequest,
+        cancel: &CancellationToken,
+    ) -> AttemptOutcome {
+        if cancel.is_canceled() {
+            return AttemptOutcome::Canceled;
+        }
+        let directory = format!("artifacts/native/{}", request.operation.id);
+        match self.collision(&request.operation.id, &directory) {
+            Ok(Some(path)) => {
+                return AttemptOutcome::Unsupported(format!(
+                    "object placement output would overwrite declared path {}",
+                    path.as_str()
+                ))
+            }
+            Err(message) => return AttemptOutcome::Failed(message),
+            Ok(None) => {}
+        }
+        let result = (|| -> Result<ProducedArtifact, String> {
+            let inventory = SemanticInventoryArtifact::from_json(&self.document(
+                self.input(request, ArtifactKind::SemanticInventory)?,
+                cancel,
+            )?)?;
+            let identities = crate::object_identity::ObjectIdentityArtifact::from_json(
+                &self.document(self.input(request, ArtifactKind::ObjectIdentity)?, cancel)?,
+            )?;
+            let references = crate::object_references::ObjectReferencesArtifact::from_json(
+                &self.document(self.input(request, ArtifactKind::ObjectReferences)?, cancel)?,
+            )?;
+            let generation_record = self.input(request, ArtifactKind::GeneratedObjects)?;
+            let generation = crate::object_generation::ObjectGenerationArtifact::from_json(
+                &self.document(generation_record, cancel)?,
+            )?;
+            let mut bounds = BTreeMap::new();
+            for object in &generation.objects {
+                if let Some(mesh) = &object.output {
+                    let bytes = crate::scene_artifacts::read_verified_with_cancel(
+                        &self.root,
+                        &mesh.path,
+                        &mesh.content_hash,
+                        None,
+                        || cancel.is_canceled(),
+                    )?;
+                    bounds.insert(
+                        object.request.request_id.clone(),
+                        glb_position_bounds(&bytes)?,
+                    );
+                }
+            }
+            let (cameras, points) = self.registered_geometry(request, cancel)?;
+            if cancel.is_canceled() {
+                return Err("object placement canceled".into());
+            }
+            let artifact = crate::object_placement::place_objects(
+                &inventory,
+                &identities,
+                &references,
+                &generation,
+                generation_record.content_hash.clone(),
+                &bounds,
+                &cameras,
+                &points,
+            );
+            artifact.validate()?;
+            let output = ProjectPath::new(format!("{directory}/artifact.json"))
+                .map_err(|e| e.to_string())?;
+            let document = artifact.to_json();
+            write_atomically(&output.resolve(&self.root), document.as_bytes())?;
+            let mut produced = ProducedArtifact::new(
+                output,
+                ContentHash::of_bytes(document.as_bytes()),
+                Reproducibility::Deterministic,
+            );
+            use crate::object_placement::ContactState;
+            produced.observations.insert(
+                "placed_objects".into(),
+                artifact.placements.len().to_string(),
+            );
+            produced.observations.insert(
+                "unplaced_objects".into(),
+                artifact.unplaced.len().to_string(),
+            );
+            for (key, state) in [
+                ("in_contact", ContactState::InContact),
+                ("floating", ContactState::Floating),
+                ("sunken", ContactState::Sunken),
+                ("no_contact_evidence", ContactState::NoContactEvidence),
+            ] {
+                produced.observations.insert(
+                    key.into(),
+                    artifact
+                        .placements
+                        .iter()
+                        .filter(|placement| placement.contact == state)
+                        .count()
+                        .to_string(),
+                );
+            }
+            produced
+                .observations
+                .insert("up_source".into(), format!("{:?}", artifact.up_source));
+            Ok(produced)
+        })();
+        match result {
+            Ok(produced) => AttemptOutcome::Succeeded(produced),
+            Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
+            Err(message) => AttemptOutcome::Failed(message),
+        }
+    }
+}
