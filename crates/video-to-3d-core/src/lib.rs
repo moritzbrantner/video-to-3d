@@ -18,6 +18,7 @@ pub mod scene_model;
 pub mod scene_project;
 pub mod scene_runner;
 pub mod scene_store;
+pub mod semantic_inventory;
 pub mod surface_materials;
 pub mod textured_glb;
 

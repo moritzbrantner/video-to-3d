@@ -46,6 +46,11 @@ pub enum Reproducibility {
     SeededStochastic,
     /// May differ between runs (for example remote generative providers).
     NonDeterministic,
+    /// An honest "capability unavailable here" record (for example no local
+    /// GPU for a segmentation provider). It is kept and reported, but the next
+    /// build re-executes the operation instead of reusing it, so the result
+    /// follows the machine's current capability.
+    Provisional,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -726,6 +731,7 @@ impl ProjectStore {
         let _lock = BuildLock::acquire(&self.root)?;
         // Re-read under the lock so a build that finished meanwhile is seen.
         *manifest = SceneProjectManifest::load(&self.manifest_path)?;
+        self.retire_provisional(manifest)?;
         let reconcile = self.reconcile(manifest, VerifyMode::Full)?;
         self.save_manifest(manifest)?;
         let mut persister = Persister {
@@ -735,6 +741,39 @@ impl ProjectStore {
         let run = run_observed(manifest, executor, options, cancel, &mut persister)?;
         self.save_manifest(manifest)?;
         Ok(BuildReport { reconcile, run })
+    }
+}
+
+impl ProjectStore {
+    /// Drop the records (and receipts) of provisional outputs, so this build
+    /// re-executes them; their documents are overwritten by the new attempt.
+    fn retire_provisional(
+        &self,
+        manifest: &mut SceneProjectManifest,
+    ) -> Result<(), SceneProjectError> {
+        let provisional: Vec<String> = manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                matches!(
+                    self.read_receipt(&artifact.produced_by),
+                    Ok(Some(receipt)) if receipt.reproducibility == Reproducibility::Provisional
+                )
+            })
+            .map(|artifact| artifact.produced_by.clone())
+            .collect();
+        for operation in &provisional {
+            let receipt = self.resolve(&OperationReceipt::path_for(operation));
+            fs::remove_file(&receipt).map_err(|error| {
+                SceneProjectError::Invalid(format!(
+                    "cannot retire provisional receipt of `{operation}`: {error}"
+                ))
+            })?;
+        }
+        manifest
+            .artifacts
+            .retain(|artifact| !provisional.contains(&artifact.produced_by));
+        Ok(())
     }
 }
 

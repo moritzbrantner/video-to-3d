@@ -27,6 +27,7 @@
 use crate::scene_model::{Material, ResourceKind, SceneProvenance, SceneResource};
 
 mod native;
+mod semantic;
 use crate::scene_project::{
     ArtifactKind, ContentHash, OperationKind, ProjectPath, SceneProjectManifest,
 };
@@ -46,6 +47,7 @@ use crate::{
     ReconstructionProviderDescriptor, SurfaceEvidenceRegion, TriangleSourceCorners,
     RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
+pub use semantic::{DEFAULT_SIDECAR, SIDECAR_ENVIRONMENT, SIDECAR_PROTOCOL};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -1722,6 +1724,8 @@ pub fn texture_bake_output(operation_id: &str) -> Result<ProjectPath, String> {
 pub struct BuiltInExecutor {
     root: PathBuf,
     reservations: Reservations,
+    /// Semantic sidecar program overriding the environment and default.
+    semantic_sidecar: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -1799,7 +1803,11 @@ impl BuiltInExecutor {
         let reservations = Reservations::Fixed {
             manifest: std::sync::Arc::new(std::sync::RwLock::new(manifest.clone())),
         };
-        Self { root, reservations }
+        Self {
+            root,
+            reservations,
+            semantic_sidecar: None,
+        }
     }
 
     /// Reservations re-read from the project manifest at each execution; use
@@ -1812,6 +1820,7 @@ impl BuiltInExecutor {
         Self {
             root: project_root.into(),
             reservations: Reservations::ManifestFile(manifest_path.into()),
+            semantic_sidecar: None,
         }
     }
 
@@ -1953,6 +1962,13 @@ impl OperationExecutor for BuiltInExecutor {
         let kind = request.operation.kind;
         if kind == OperationKind::TextureBake && request.provider.is_none() {
             return self.texture_bake(request, cancel);
+        }
+        if kind == OperationKind::SemanticInventory
+            && request.provider.as_ref().is_some_and(|provider| {
+                provider.location == crate::scene_project::ProviderLocation::Local
+            })
+        {
+            return self.semantic_inventory(request, cancel);
         }
         if request.provider.is_none() {
             if let Some(outcome) = self.native_stage(request, cancel) {

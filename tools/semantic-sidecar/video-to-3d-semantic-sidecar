@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pinned local semantic sidecar: runs the uv project next to this script.
+# Dependencies and model weights are fetched on first need and cached
+# (idempotent); inference itself is local.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+uv=${UV:-$(command -v uv || true)}
+if [ -z "$uv" ]; then
+  printf '{"protocol":"video-to-3d-semantic-sidecar/1","status":"unavailable","reason":"the semantic sidecar needs `uv` (https://docs.astral.sh/uv/) to provision its pinned Python environment"}' > "$2"
+  exit 0
+fi
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" TQDM_DISABLE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 exec "$uv" run --quiet --project "$here" python -m semantic_sidecar "$@"
