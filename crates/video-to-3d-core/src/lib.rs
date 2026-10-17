@@ -13,6 +13,7 @@ pub mod geometry_confidence;
 pub mod input_readiness;
 pub mod object_identity;
 pub mod object_masks;
+pub mod object_references;
 pub mod scene_artifacts;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod scene_export;

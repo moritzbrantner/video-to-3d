@@ -93,6 +93,8 @@ pub enum OperationKind {
     ObjectIdentity,
     /// Cross-view consistency of every identified object's masks (#62).
     ObjectMasks,
+    /// Multi-view reference packages of identified objects (#63).
+    ObjectReferences,
 }
 
 /// Whether an operation runs the built-in Rust pipeline or a declared provider.
@@ -105,7 +107,7 @@ pub enum OperationExecution {
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 13] = [
+    pub const ALL: [OperationKind; 14] = [
         Self::IngestVideo,
         Self::SparseReconstruction,
         Self::DenseReconstruction,
@@ -119,6 +121,7 @@ impl OperationKind {
         Self::SemanticInventory,
         Self::ObjectIdentity,
         Self::ObjectMasks,
+        Self::ObjectReferences,
     ];
 
     /// Lowest quality mode in which this operation may be declared.
@@ -135,7 +138,8 @@ impl OperationKind {
             | Self::TextureBake
             | Self::SemanticInventory
             | Self::ObjectIdentity
-            | Self::ObjectMasks => QualityMode::Standard,
+            | Self::ObjectMasks
+            | Self::ObjectReferences => QualityMode::Standard,
             Self::SplatOptimization => QualityMode::Production,
         }
     }
@@ -167,6 +171,7 @@ impl OperationKind {
             Self::SemanticInventory => ArtifactKind::SemanticInventory,
             Self::ObjectIdentity => ArtifactKind::ObjectIdentity,
             Self::ObjectMasks => ArtifactKind::ObjectMasks,
+            Self::ObjectReferences => ArtifactKind::ObjectReferences,
         }
     }
 
@@ -193,6 +198,13 @@ impl OperationKind {
             ObjectMasks => &[
                 SemanticInventory,
                 ObjectIdentity,
+                SparseReconstruction,
+                SurfaceMesh,
+            ],
+            ObjectReferences => &[
+                SemanticInventory,
+                ObjectIdentity,
+                ObjectMasks,
                 SparseReconstruction,
                 SurfaceMesh,
             ],
@@ -241,6 +253,7 @@ impl OperationKind {
             Self::SemanticInventory => "semantic_inventory",
             Self::ObjectIdentity => "object_identity",
             Self::ObjectMasks => "object_masks",
+            Self::ObjectReferences => "object_references",
         }
     }
 }
@@ -263,6 +276,7 @@ pub enum ArtifactKind {
     SemanticInventory,
     ObjectIdentity,
     ObjectMasks,
+    ObjectReferences,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1064,6 +1078,30 @@ impl SceneProjectManifest {
             {
                 return invalid(format!(
                     "operation `{}` (object_masks) must consume exactly one semantic_inventory, object_identity, sparse_reconstruction and surface_mesh operation",
+                    operation.id
+                ));
+            }
+        }
+        if kind == OperationKind::ObjectReferences {
+            let count = |wanted: ArtifactKind| {
+                upstream_kinds
+                    .iter()
+                    .filter(|output| **output == wanted)
+                    .count()
+            };
+            if operation.inputs.len() != 5
+                || [
+                    ArtifactKind::SemanticInventory,
+                    ArtifactKind::ObjectIdentity,
+                    ArtifactKind::ObjectMasks,
+                    ArtifactKind::SparseReconstruction,
+                    ArtifactKind::SurfaceMesh,
+                ]
+                .iter()
+                .any(|kind| count(*kind) != 1)
+            {
+                return invalid(format!(
+                    "operation `{}` (object_references) must consume exactly one semantic_inventory, object_identity, object_masks, sparse_reconstruction and surface_mesh operation",
                     operation.id
                 ));
             }
