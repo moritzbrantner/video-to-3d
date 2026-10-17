@@ -1401,8 +1401,31 @@ fn assert_tiles_owner_image(
     left: f64,
     right: f64,
 ) {
-    let projected: Vec<[Vector2<f64>; 3]> =
-        triangles.iter().map(|t| fixture.projected(t)).collect();
+    assert_tiles_owner_image_over(fixture, &fixture.points, triangles, left, right);
+}
+
+/// [`assert_tiles_owner_image`] evaluated over an explicit (e.g. owned merge
+/// output) point buffer, projected into the owner's (patch 0) image.
+fn assert_tiles_owner_image_over(
+    fixture: &SeamFixture,
+    points: &[Point3],
+    triangles: &[MeshTriangle],
+    left: f64,
+    right: f64,
+) {
+    let camera = fixture.cameras[0].expect("owner camera");
+    let projected: Vec<[Vector2<f64>; 3]> = triangles
+        .iter()
+        .map(|t| {
+            [t.a, t.b, t.c].map(|vertex| {
+                let p = points[vertex];
+                camera
+                    .project(Vector3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)))
+                    .expect("in front of the owner camera")
+                    .0
+            })
+        })
+        .collect();
     for (t, corners) in triangles.iter().zip(&projected) {
         assert!(signed_area_2d(corners) > 0.0, "{t:?} is flipped");
     }
@@ -1582,24 +1605,48 @@ fn a_partial_overlap_seam_preserves_the_union_without_double_coverage() {
         .collect();
     fixture.cameras = vec![Some(identity_camera(0.0)), Some(identity_camera(0.4))];
     let original_positions: Vec<_> = fixture.points.iter().map(|p| (p.x, p.y, p.z)).collect();
-    let (triangles, stats) = fixture.merge();
+    // Translated to the owned seam (owner decision 2026-10-17): the merge may
+    // append lineage-carrying derived vertices, so the geometric oracle is
+    // evaluated over the OUTPUT point buffer.
+    let output = merge_fused_patches_owned(
+        fixture.points.clone(),
+        fixture.triangles.clone(),
+        &fixture.membership,
+        &fixture.pairs,
+        &fixture.cameras,
+        &fixture.origins,
+    )
+    .expect("supported linked observed overlap");
+    let stats = &output.stats;
     assert!(
         stats.fused_pairs > 0,
         "requires a real accepted overlap link"
     );
+    assert!(output.points.len() >= original_positions.len());
     assert_eq!(
-        fixture
-            .points
+        output.points[..original_positions.len()]
             .iter()
             .map(|p| (p.x, p.y, p.z))
             .collect::<Vec<_>>(),
         original_positions,
         "the oracle's immutable pre-clip geometry must not be rewritten"
     );
+    assert_eq!(
+        output.derived_vertices.len(),
+        output.points.len() - original_positions.len(),
+        "every appended point carries lineage"
+    );
+    assert!(output
+        .triangles
+        .iter()
+        .all(|t| [t.a, t.b, t.c].iter().all(|&v| v < output.points.len())));
     // This independent positive-area oracle fails the old implementation on
     // actual remaining owner/lower overlap, rather than accepting connectivity.
-    assert_tiles_owner_image(&fixture, &triangles, -1.84, 0.96);
-    assert_eq!(vertex_components(&triangles, fixture.points.len()).0, 1);
+    assert_tiles_owner_image_over(&fixture, &output.points, &output.triangles, -1.84, 0.96);
+    assert_eq!(
+        vertex_components(&output.triangles, output.points.len()).0,
+        1
+    );
 }
 
 #[path = "surface_merge_derived_acceptance_tests.rs"]

@@ -385,6 +385,13 @@ struct PanSurface {
     /// Index into `before.mesh_triangles` of a stitched triangle with
     /// genuinely mixed-reference support, when one was requested.
     stitched: Option<usize>,
+    /// `(after index, before index)` of every triangle consolidation retained
+    /// from the mesh output (possibly re-indexed onto a fused partner).
+    retained: Vec<(usize, usize)>,
+    /// Indices (in `after`) of the triangles consolidation created: seam
+    /// stitches, clip pieces and edge-conforming split pieces, each matched
+    /// by source (see [`match_consolidated_triangles`]).
+    created: Vec<usize>,
 }
 
 /// Reference frame owning each point of `reconstruction` as observed
@@ -516,18 +523,156 @@ fn pan_surface(stitch: bool) -> PanSurface {
     let mut after = before.clone();
     crate::surface_fusion::consolidate_surface_evidence(&mut after)
         .expect("surface consolidation succeeds");
-    assert_eq!(
-        after.dense_points.len(),
-        before.dense_points.len(),
-        "consolidation never creates or removes points"
-    );
+    // Owner amendment 2026-10-17 (#137): consolidation may append derived
+    // vertices where it clips overlap seams, but never removes or reorders
+    // observed points, and every appended point carries lineage.
+    assert_observed_points_kept_and_appended_points_carry_lineage(&before, &after);
+    let (retained, created) = match_consolidated_triangles(&before, &after);
     PanSurface {
         frames,
         focal,
         before,
         after,
         stitched,
+        retained,
+        created,
     }
+}
+
+/// Consolidation never removes or reorders observed points: the observed
+/// prefix of `after` is `before`'s point buffer (only positions surface fusion
+/// moved may differ; colours and grid sites stay with their point), and
+/// every point after it is a derived vertex with one lineage record, in
+/// point order, resolving an immutable source triangle of `before` over
+/// observed corners whose world-space barycentrics reconstruct it.
+fn assert_observed_points_kept_and_appended_points_carry_lineage(
+    before: &crate::ReconstructionResult,
+    after: &crate::ReconstructionResult,
+) {
+    let observed = before.dense_points.len();
+    assert!(before.mesh_derived_vertices.is_empty());
+    assert_eq!(
+        after.dense_points.len() - after.mesh_derived_vertices.len(),
+        observed,
+        "consolidation never removes observed points; every appended point carries lineage"
+    );
+    for (index, (b, a)) in before
+        .dense_points
+        .iter()
+        .zip(&after.dense_points)
+        .enumerate()
+    {
+        assert_eq!(
+            (b.r, b.g, b.b),
+            (a.r, a.g, a.b),
+            "observed point {index} keeps its order and colour"
+        );
+    }
+    assert_eq!(
+        after.dense_grid_sites, before.dense_grid_sites,
+        "grid sites cover only the observed points and none is invented"
+    );
+    let position = |index: usize| {
+        let point = &after.dense_points[index];
+        Vector3::new(point.x as f64, point.y as f64, point.z as f64)
+    };
+    for (ordinal, record) in after.mesh_derived_vertices.iter().enumerate() {
+        assert_eq!(
+            record.point_index,
+            observed + ordinal,
+            "lineage in point order"
+        );
+        let parent = before
+            .mesh_triangles
+            .get(record.source_triangle)
+            .expect("lineage resolves an immutable pre-clip source triangle");
+        assert_eq!(record.source_corners, [parent.a, parent.b, parent.c]);
+        assert!(record
+            .source_corners
+            .iter()
+            .all(|&corner| corner < observed));
+        assert!(record
+            .barycentric
+            .iter()
+            .all(|w| w.is_finite() && *w >= -1.0e-7 && *w <= 1.0 + 1.0e-7));
+        assert!((record.barycentric.iter().sum::<f64>() - 1.0).abs() < 1.0e-7);
+        let expected: Vector3<f64> = record
+            .source_corners
+            .iter()
+            .zip(record.barycentric)
+            .map(|(&corner, weight)| position(corner) * weight)
+            .sum();
+        assert!(
+            (expected - position(record.point_index)).norm() < 1.0e-4,
+            "derived point {} reconstructs from its source corners",
+            record.point_index
+        );
+    }
+}
+
+/// Splits `after`'s triangles into those retained from `before` (in order;
+/// consolidation keeps the triangle order, removes owned duplicates, and
+/// re-indexes a corner only onto a fused partner, which fusion moved to the
+/// same position) and those it created. A created triangle (a seam stitch, a
+/// clip piece or an edge-conforming split piece) must be matched by source:
+/// every corner is an observed input vertex or a derived vertex whose lineage
+/// resolves to observed input vertices (checked by
+/// [`assert_observed_points_kept_and_appended_points_carry_lineage`]).
+fn match_consolidated_triangles(
+    before: &crate::ReconstructionResult,
+    after: &crate::ReconstructionResult,
+) -> (Vec<(usize, usize)>, Vec<usize>) {
+    let points = &after.dense_points;
+    let observed = before.dense_points.len();
+    let same_position = |left: usize, right: usize| {
+        let (l, r) = (&points[left], &points[right]);
+        l.x.to_bits() == r.x.to_bits()
+            && l.y.to_bits() == r.y.to_bits()
+            && l.z.to_bits() == r.z.to_bits()
+    };
+    let derived: std::collections::BTreeMap<usize, &crate::DerivedVertexSource> = after
+        .mesh_derived_vertices
+        .iter()
+        .map(|record| (record.point_index, record))
+        .collect();
+    let mut retained = Vec::new();
+    let mut created = Vec::new();
+    let mut next = 0;
+    for (index, triangle) in after.mesh_triangles.iter().enumerate() {
+        let corners = [triangle.a, triangle.b, triangle.c];
+        let found = corners
+            .iter()
+            .all(|&vertex| vertex < observed)
+            .then(|| {
+                (next..before.mesh_triangles.len()).find(|&source| {
+                    let source = &before.mesh_triangles[source];
+                    let original = [source.a, source.b, source.c];
+                    original.iter().zip(&corners).any(|(b, a)| b == a)
+                        && original
+                            .iter()
+                            .zip(&corners)
+                            .all(|(b, a)| b == a || same_position(*b, *a))
+                })
+            })
+            .flatten();
+        if let Some(source) = found {
+            retained.push((index, source));
+            next = source + 1;
+            continue;
+        }
+        for vertex in corners {
+            assert!(
+                vertex < observed
+                    || derived.get(&vertex).is_some_and(|record| record
+                        .source_corners
+                        .iter()
+                        .all(|&corner| corner < observed)),
+                "created triangle {index} {corners:?} is not matched by source: vertex {vertex} is neither observed nor derived from observed corners"
+            );
+        }
+        created.push(index);
+    }
+    (retained, created)
 }
 
 impl PanSurface {
@@ -584,12 +729,42 @@ impl PanSurface {
         bake
     }
 
-    /// Indices (in `after`) of the seam stitch triangles consolidation
-    /// appended after the retained triangles: the only triangles it creates,
-    /// over existing vertices of two reference patches.
-    fn seam_stitches(&self) -> Vec<usize> {
-        let total = self.after.mesh_triangles.len();
-        (total - self.stitched_seam_triangles()..total).collect()
+    /// Indices (in `after`) of the triangles consolidation created with
+    /// genuinely mixed-reference support: the seam stitches over existing
+    /// vertices of two reference patches, and clip/split pieces whose
+    /// corners span references, a derived corner counting as its source
+    /// triangle's reference. (Before #137 clipping these were exactly the
+    /// stitches appended after the retained triangles.)
+    fn created_mixed(&self) -> Vec<usize> {
+        let owners = observed_reference_by_point(&self.after);
+        let observed = self.before.dense_points.len();
+        let owner = |vertex: usize| {
+            if vertex < observed {
+                return owners[vertex];
+            }
+            let record = self
+                .after
+                .mesh_derived_vertices
+                .iter()
+                .find(|record| record.point_index == vertex)
+                .expect("derived lineage");
+            let sources = record.source_corners.map(|corner| owners[corner]);
+            is_single_reference(sources).then_some(sources[0]).flatten()
+        };
+        let mixed: Vec<usize> = self
+            .created
+            .iter()
+            .copied()
+            .filter(|&index| {
+                let t = &self.after.mesh_triangles[index];
+                is_mixed_reference([t.a, t.b, t.c].map(owner))
+            })
+            .collect();
+        assert!(
+            mixed.len() >= self.stitched_seam_triangles(),
+            "every reported seam stitch is a created mixed-reference triangle"
+        );
+        mixed
     }
 
     /// Seam stitch triangles consolidation appended after the retained
@@ -611,38 +786,11 @@ impl PanSurface {
         warning[start..end].parse().expect("stitch count")
     }
 
-    /// For every retained triangle of `after` (all but the trailing seam
-    /// stitches), the index of the `before` triangle it was retained from.
-    /// Consolidation keeps the triangle order, removes owned duplicates, and
-    /// re-indexes a corner only onto a fused partner, which fusion moved to
-    /// the same position.
-    fn retained_from(&self) -> Vec<usize> {
-        let points = &self.after.dense_points;
-        let same_position = |left: usize, right: usize| {
-            let (l, r) = (&points[left], &points[right]);
-            l.x.to_bits() == r.x.to_bits()
-                && l.y.to_bits() == r.y.to_bits()
-                && l.z.to_bits() == r.z.to_bits()
-        };
-        let retained = self.after.mesh_triangles.len() - self.stitched_seam_triangles();
-        let mut origin = Vec::with_capacity(retained);
-        let mut next = 0;
-        for triangle in &self.after.mesh_triangles[..retained] {
-            let after = [triangle.a, triangle.b, triangle.c];
-            let found = (next..self.before.mesh_triangles.len()).find(|&index| {
-                let source = &self.before.mesh_triangles[index];
-                let before = [source.a, source.b, source.c];
-                before.iter().zip(&after).any(|(b, a)| b == a)
-                    && before
-                        .iter()
-                        .zip(&after)
-                        .all(|(b, a)| b == a || same_position(*b, *a))
-            });
-            let index = found.expect("every consolidated triangle is a retained mesh triangle");
-            origin.push(index);
-            next = index + 1;
-        }
-        origin
+    /// For every retained triangle of `after`, `(after index, before index)`
+    /// of the mesh triangle it was retained from; created triangles are
+    /// matched by source instead (see [`match_consolidated_triangles`]).
+    fn retained_from(&self) -> Vec<(usize, usize)> {
+        self.retained.clone()
     }
 }
 
@@ -707,7 +855,7 @@ fn assert_retained_triangles_keep_their_reference(
     let before_corners = textured_corners(before);
     let after_corners = textured_corners(after);
     let mut born = Vec::new();
-    for (index, source) in surface.retained_from().into_iter().enumerate() {
+    for (index, source) in surface.retained_from() {
         if Some(source) == surface.stitched {
             continue;
         }
@@ -762,10 +910,11 @@ fn canonicalized_seam_triangles_keep_their_original_reference_texture() {
             !born.is_empty(),
             "overlap canonicalization must re-index retained lower-priority seam triangles onto higher-priority vertices"
         );
-        // Only the seam stitches (#137) have genuinely mixed support: they
-        // go to the seam rule (or fail closed to the fallback without
-        // intrinsics); no canonicalization-born triangle does.
-        let stitches = surface.seam_stitches();
+        // Only triangles consolidation created (#137 seam stitches and
+        // clip/split pieces) have genuinely mixed support: they go to the
+        // seam rule (or fail closed to the fallback without intrinsics); no
+        // canonicalization-born (retained) triangle does.
+        let stitches = surface.created_mixed();
         assert_eq!(
             after.fallback.reasons.mixed_reference + after.seam_triangles(),
             stitches.len(),
@@ -801,7 +950,8 @@ fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
     let retained = surface.retained_from();
     let stitched = retained
         .iter()
-        .position(|source| *source == stitched_before)
+        .find(|(_, source)| *source == stitched_before)
+        .map(|(index, _)| *index)
         .expect("consolidation keeps the stitched seam triangle");
     let owners = observed_reference_by_point(&surface.after);
     assert!(
@@ -821,8 +971,9 @@ fn connected_plane_surface_produces_seams_the_single_camera_rule_textures() {
         "the connected surface must contain canonicalization-born cross-reference triangles"
     );
     // ...so the only mixed-reference triangles are the genuinely mixed seam
-    // and the seam stitches (#137), and the single-camera rule textures them.
-    let mut mixed = surface.seam_stitches();
+    // and the created mixed-support triangles (#137 seam stitches and
+    // clip/split pieces), and the single-camera rule textures them.
+    let mut mixed = surface.created_mixed();
     mixed.push(stitched);
     assert_eq!(
         bake.seam_triangles() + bake.fallback.reasons.mixed_reference,

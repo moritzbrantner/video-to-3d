@@ -82,7 +82,7 @@ fn stored_derived_mesh_preserves_lineage_and_independent_observation_counts() {
     );
     assert_eq!(
         serde_json::to_value(restored_evidence.derived_vertices).unwrap(),
-        serde_json::to_value(&records).unwrap()
+        serde_json::to_value(records).unwrap()
     );
     assert_eq!(restored_evidence.summary().geometric_points, 7);
     assert_eq!(restored_evidence.summary().revalidated_completion_points, 1);
@@ -96,7 +96,7 @@ fn stored_derived_mesh_preserves_lineage_and_independent_observation_counts() {
     .unwrap();
     assert_eq!(
         serde_json::to_value(decoded.view().unwrap().derived_vertices).unwrap(),
-        serde_json::to_value(&records).unwrap()
+        serde_json::to_value(records).unwrap()
     );
 }
 
@@ -305,15 +305,18 @@ fn assert_exported_geometry(glb: &[u8], points: &[Point3], triangle_count: usize
         let offset = buffer["byteOffset"].as_u64().unwrap_or(0) as usize
             + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
         let vertices = accessor["count"].as_u64().unwrap() as usize;
-        for raw in bin[offset..offset + vertices * 12].chunks_exact(12) {
+        for raw in bin[offset..offset + vertices * 12].as_chunks::<12>().0 {
             let position: [f32; 3] = std::array::from_fn(|axis| {
                 f32::from_le_bytes(raw[axis * 4..axis * 4 + 4].try_into().unwrap())
             });
+            // The GLB export re-expresses each accepted point as (x, -y, -z)
+            // (glTF's +Y-up/-Z-forward convention; see textured_glb.rs).
+            let exported = |p: &Point3| [p.x, -p.y, -p.z];
             assert!(
-                points.iter().any(|p| position == [p.x, p.y, p.z]),
+                points.iter().any(|p| position == exported(p)),
                 "export invented {position:?}"
             );
-            derived_seen |= position == [points[8].x, points[8].y, points[8].z];
+            derived_seen |= position == exported(&points[8]);
         }
     }
     assert_eq!(count, triangle_count);
