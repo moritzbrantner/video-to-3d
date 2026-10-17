@@ -36,6 +36,13 @@ Local input is `/home/moenarch/.local/share/coding-agent/video179-independent-br
 The original remains the exact 26,026,292-byte file with SHA-256
 `3200d7a76f5b3307e33863d4b38dbad414527ce14084f4c1f6303a0f69eb794c`.
 
+Dense recapture (#230): Chromium `151.0.7922.34`, 87 retained nonempty frames;
+transfer witness
+`sha256:2c80e92e231823469e21eb286a926d1f99d0ea1f520c018ca9a173ae8ea9f354`.
+Local input is `/home/moenarch/.local/share/coding-agent/video230-dense-browser-input`.
+The three native tests pass; the primary solve registers 8 cameras (source
+frames 24–31), against 2 for the 18-frame capture. Quality stays nonpassing.
+
 ## Native execution contract
 
 `crates/video-to-3d-cli/tests/real_room_native.rs` independently validates that

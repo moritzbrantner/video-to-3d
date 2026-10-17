@@ -1,5 +1,5 @@
 //! Real-video object identity and mask consistency (#221, for #61/#62): the
-//! actual semantic sidecar on the approved 18-frame TUM capture (#179), then
+//! actual semantic sidecar on the approved dense 87-frame TUM capture (#179), then
 //! the built-in `object_identity` and `object_masks` operations through the
 //! real CLI. Explicit tier (local CUDA GPU):
 //!
@@ -46,6 +46,9 @@ const VOCABULARY: [&str; 9] = [
     "floor",
 ];
 
+/// The approved dense TUM browser plan (#230).
+const DENSE_SAMPLES: usize = 87;
+
 fn die_samples() -> Vec<u64> {
     let expected: Value = serde_json::from_str(include_str!(
         "../../../tools/tests/fixtures/approved-controlled-room-expectations.json"
@@ -68,7 +71,11 @@ fn die_samples() -> Vec<u64> {
         }
     }
     let samples = find(&expected).expect("independent yellow-die inventory");
-    assert_eq!(samples, vec![0, 1, 2, 15, 16, 17], "inventory unchanged");
+    assert_eq!(
+        samples,
+        (0..=15).chain(72..=86).collect::<Vec<u64>>(),
+        "inventory unchanged"
+    );
     samples
 }
 
@@ -89,7 +96,7 @@ fn capture() -> (Value, Vec<Vec<u8>>) {
     assert_eq!(ContentHash::of_bytes(&bytes).as_str(), witness);
     let document: Value = serde_json::from_slice(&bytes).unwrap();
     let frames = document["frames"].as_array().unwrap();
-    assert_eq!(frames.len(), 18);
+    assert_eq!(frames.len(), DENSE_SAMPLES);
     let pixels = frames
         .iter()
         .enumerate()

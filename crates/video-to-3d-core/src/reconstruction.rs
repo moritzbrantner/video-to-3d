@@ -55,6 +55,10 @@ const REGISTRATION_RECOVERY_MAX_FEATURES: usize = 640;
 const REGISTRATION_RECOVERY_MIN_FEATURE_DISTANCE: u32 = 5;
 const MIN_TRACK_MATCHES: usize = 8;
 const MIN_TRACK_OVERLAP: f32 = 0.18;
+/// Rounds of incremental registration against triangulated landmarks (#230).
+const MAX_EXPANSION_ROUNDS: usize = 64;
+/// Known-landmark correspondences a frame needs before an expansion PnP attempt.
+const MIN_EXPANSION_CORRESPONDENCES: usize = 12;
 const MOTION_GUIDED_COARSE_RATIO_THRESHOLD: f32 = 0.72;
 const MOTION_GUIDED_MIN_SUPPORT: usize = 4;
 const DEFAULT_DENSE_WORKING_SET_BUDGET_BYTES: usize = 256 * 1024 * 1024;
@@ -864,50 +868,78 @@ fn reconstruct_once_with_control(
         .into_iter()
         .map(|segment| (segment, keyframe_selection.promote_segment_frames(segment)))
         .collect();
-    let primary_index = best_seed_index(&seed_candidates, |_| true);
-    let primary_segment = primary_index.map(|index| segment_of_pair(seed_candidates[index].0[0]));
     let clip_segments = &keyframe_selection.stats.segments;
     // A split clip solves every segment that has a usable seed on its own, in its own
-    // arbitrary frame. The segment with the strongest seed fills the primary output.
-    let mut segment_solves: Vec<SegmentSolveStats> = if clip_segments.len() > 1 {
-        clip_segments
-            .iter()
-            .enumerate()
-            .filter(|(segment, _)| Some(*segment) != primary_segment)
-            .map(|(segment, span)| {
-                let seed = best_seed_index(&seed_candidates, |pair_index| {
-                    segment_of_pair(pair_index) == segment
-                })
-                .map(|index| &seed_candidates[index]);
-                let solve = seed
-                    .map(|seed| {
-                        solve_segment(
-                            Some(seed),
-                            &keyframe_selection,
-                            &adjacent_matches,
-                            &features,
-                            &revisit_context,
-                            width,
-                            height,
-                            focal as f64,
-                            true,
-                            control,
-                        )
-                    })
-                    .transpose()?;
-                Ok(segment_solve_stats(
-                    segment,
-                    span,
-                    false,
-                    seed,
-                    solve.as_ref(),
-                    focal,
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?
-    } else {
-        Vec::new()
+    // arbitrary frame. The segment whose solve registers the most cameras fills the
+    // primary output (#230); the strongest seed breaks ties.
+    let segment_seed = |segment: usize| {
+        best_seed_index(&seed_candidates, |pair_index| {
+            segment_of_pair(pair_index) == segment
+        })
     };
+    let mut secondary: Vec<(usize, Option<usize>, Option<SegmentSolve>)> = Vec::new();
+    if clip_segments.len() > 1 {
+        for segment in 0..clip_segments.len() {
+            let seed = segment_seed(segment);
+            let solve = seed
+                .map(|index| {
+                    solve_segment(
+                        Some(&seed_candidates[index]),
+                        &keyframe_selection,
+                        &adjacent_matches,
+                        &features,
+                        &revisit_context,
+                        width,
+                        height,
+                        focal as f64,
+                        true,
+                        control,
+                    )
+                })
+                .transpose()?;
+            secondary.push((segment, seed, solve));
+        }
+    }
+    let strongest = best_seed_index(&seed_candidates, |_| true);
+    let primary_index = if clip_segments.len() > 1 {
+        secondary
+            .iter()
+            .filter_map(|(_, seed, solve)| {
+                Some(((*seed)?, solve.as_ref()?.registered_geometry.len()))
+            })
+            .fold(None::<(usize, usize)>, |best, (seed, registered)| match best {
+                Some((best_seed, best_registered))
+                    if best_registered > registered
+                        || (best_registered == registered
+                            && !seed_candidates[seed]
+                                .1
+                                .is_better_than(&seed_candidates[best_seed].1)) =>
+                {
+                    Some((best_seed, best_registered))
+                }
+                _ => Some((seed, registered)),
+            })
+            .map(|(seed, _)| seed)
+            .or(strongest)
+    } else {
+        strongest
+    };
+    let primary_segment = primary_index.map(|index| segment_of_pair(seed_candidates[index].0[0]));
+    let mut segment_solves: Vec<SegmentSolveStats> = secondary
+        .iter()
+        .filter(|(segment, _, _)| Some(*segment) != primary_segment)
+        .map(|(segment, seed, solve)| {
+            segment_solve_stats(
+                *segment,
+                &clip_segments[*segment],
+                false,
+                seed.map(|index| &seed_candidates[index]),
+                solve.as_ref(),
+                focal,
+            )
+        })
+        .collect();
+    drop(secondary);
     let mut mark_selected = |from: usize, to: usize| {
         if let Some(seed) = seed_evidence
             .iter_mut()
@@ -977,6 +1009,7 @@ fn reconstruct_once_with_control(
         new_landmarks,
         optimized_seed_points,
         optimized_new_landmark_positions,
+        expanded_views,
     } = primary_solve;
     multi_view_analysis.stats.segment_solves = segment_solves;
 
@@ -1276,6 +1309,7 @@ fn reconstruct_once_with_control(
             .map(|point| [point.x, point.y, point.z])
             .collect(),
         track_scope,
+        expanded_views,
         warnings_before_dense,
         warnings_after_mesh: warnings,
     })
@@ -1705,6 +1739,8 @@ struct SegmentSolve {
     new_landmarks: Vec<multi_view::NewLandmark>,
     optimized_seed_points: Vec<nalgebra::Vector3<f64>>,
     optimized_new_landmark_positions: Vec<nalgebra::Vector3<f64>>,
+    /// Views registered by incremental expansion rather than the seed's tracks.
+    expanded_views: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1734,6 +1770,41 @@ fn solve_segment(
                 .collect::<Vec<_>>(),
         )
     });
+    // Tracks extend only through adjacent matches that agree with that pair's
+    // essential geometry, so registration does not inherit descriptor mismatches.
+    let verified_matches: Vec<Vec<FeatureMatch>> = adjacent_matches
+        .iter()
+        .enumerate()
+        .map(|(pair, matches)| {
+            let points: Vec<two_view::PixelCorrespondence> = matches
+                .iter()
+                .filter_map(|feature_match| {
+                    let a = features.get(pair)?.get(feature_match.a)?;
+                    let b = features.get(pair + 1)?.get(feature_match.b)?;
+                    Some(two_view::PixelCorrespondence {
+                        source_feature_index: feature_match.a,
+                        descriptor_distance: feature_match.distance,
+                        source: [a.x as f64, a.y as f64],
+                        target: [b.x as f64, b.y as f64],
+                    })
+                })
+                .collect();
+            match (points.len() == matches.len())
+                .then(|| two_view::essential_inlier_mask(&points, width, height, focal))
+                .flatten()
+            {
+                // A pair whose matches already agree almost entirely keeps them all, so
+                // threshold noise never trims consistent synthetic or slow-motion tracks.
+                Some(mask) if mask.iter().filter(|&&inlier| !inlier).count() * 10 > mask.len() => matches
+                    .iter()
+                    .zip(mask)
+                    .filter_map(|(feature_match, inlier)| inlier.then_some(*feature_match))
+                    .collect(),
+                _ => matches.clone(),
+            }
+        })
+        .collect();
+    let adjacent_matches = verified_matches.as_slice();
     let mut multi_view_analysis = multi_view::analyze(
         keyframe_selection,
         adjacent_matches,
@@ -1900,6 +1971,98 @@ fn solve_segment(
             });
         }
     }
+    let mut expanded_views = 0;
+    // Incremental expansion (#230): frames the seed's tracks cannot reach register
+    // against landmarks triangulated from the cameras registered so far, round by
+    // round, each pose through the same PnP gates. Stops when a round adds nothing.
+    if let Some((seed_frames, estimate)) = seed {
+        let seed_positions: Vec<nalgebra::Vector3<f64>> =
+            estimate.points.iter().map(|point| point.position).collect();
+        let segment_frames = keyframe_selection.segment_keyframes(seed_frames[0]);
+        for _round in 0..MAX_EXPANSION_ROUNDS {
+            control.check()?;
+            let landmarks = multi_view::triangulate_new_landmarks(
+                &multi_view_analysis,
+                &registered_geometry,
+                features,
+                width,
+                height,
+                focal,
+            )
+            .landmarks;
+            let registered: HashSet<usize> = registered_geometry
+                .iter()
+                .map(|camera| camera.frame_index)
+                .collect();
+            let mut added = 0;
+            for &frame_index in &segment_frames {
+                if registered.contains(&frame_index) {
+                    continue;
+                }
+                let correspondences: Vec<pnp::PnpCorrespondence> = multi_view_analysis
+                    .landmark_correspondences(&seed_positions, &landmarks, frame_index)
+                    .into_iter()
+                    .filter_map(|(position, feature_index)| {
+                        let feature = features.get(frame_index)?.get(feature_index)?;
+                        Some(pnp::PnpCorrespondence {
+                            point: position,
+                            x_pixels: feature.x as f64,
+                            y_pixels: feature.y as f64,
+                        })
+                    })
+                    .collect();
+                if correspondences.len() < MIN_EXPANSION_CORRESPONDENCES {
+                    continue;
+                }
+                let Some(pose) = pnp::estimate_pose_with_control(
+                    &correspondences,
+                    width,
+                    height,
+                    focal,
+                    control,
+                ) else {
+                    continue;
+                };
+                registered_geometry.push(multi_view::RegisteredCamera {
+                    frame_index,
+                    rotation: pose.rotation,
+                    translation: pose.translation,
+                });
+                registered_cameras.push(CameraPose {
+                    frame_index,
+                    x: pose.camera_center.x as f32,
+                    y: pose.camera_center.y as f32,
+                    z: pose.camera_center.z as f32,
+                    matched_features: pose.inliers,
+                });
+                registered_views.push(RegisteredViewStats {
+                    frame_index,
+                    correspondences: correspondences.len(),
+                    inliers: pose.inliers,
+                    inlier_ratio: pose.inliers as f32 / correspondences.len() as f32,
+                    median_reprojection_error_pixels: pose.median_reprojection_error_pixels as f32,
+                    rotation: [0, 1, 2]
+                        .iter()
+                        .flat_map(|&row| (0..3).map(move |column| (row, column)))
+                        .map(|(row, column)| pose.rotation[(row, column)] as f32)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .expect("nine rotation entries"),
+                    translation: [
+                        pose.translation.x as f32,
+                        pose.translation.y as f32,
+                        pose.translation.z as f32,
+                    ],
+                    recovered_from_revisit: false,
+                });
+                added += 1;
+                expanded_views += 1;
+            }
+            if added == 0 {
+                break;
+            }
+        }
+    }
     registered_views.sort_by_key(|view| view.frame_index);
     registered_cameras.sort_by_key(|camera| camera.frame_index);
     registered_geometry.sort_by_key(|camera| camera.frame_index);
@@ -2056,6 +2219,7 @@ fn solve_segment(
         new_landmarks,
         optimized_seed_points,
         optimized_new_landmark_positions,
+        expanded_views,
     })
 }
 
@@ -2257,8 +2421,11 @@ fn needs_registration_recovery(
         .iter()
         .any(|pair| pair.matches < MIN_TRACK_MATCHES || pair.overlap_ratio < MIN_TRACK_OVERLAP);
     let missing_seed = result.calibrated_pair.is_none();
+    // Views that only incremental expansion reached still deserve the denser recovery
+    // solve; scoring keeps whichever candidate is stronger.
     let missing_selected_view = result.calibrated_pair.is_some()
-        && result.multi_view.registration_candidates.len() > result.registered_views.len();
+        && (result.multi_view.registration_candidates.len() > result.registered_views.len()
+            || result.expanded_views > 0);
     let tracks_end_early = request.frames.len() >= 4 && result.multi_view.longest_track < 4;
     // A split clip solves its other segments on their own, so a retry can also help them.
     // A one-frame segment has no pair to seed. Views recovered from revisit evidence need

@@ -269,8 +269,10 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
     plan = preparation.get("plan", {})
     count = plan.get("sampleCount")
     times = plan.get("times", [])
-    if count != 18 or not isinstance(times, list) or len(times) != 18 or any(not _finite(t) for t in times):
-        errors.append(f"{prefix}: fixed18-frame plan required")
+    if (not isinstance(count, int) or isinstance(count, bool) or not 4 <= count <= 120
+            or not isinstance(times, list) or len(times) != count or any(not _finite(t) for t in times)):
+        errors.append(f"{prefix}: fixed browser plan of 4-120 samples required")
+        count = 0
     elif all(_finite(v) for v in (start, end)) and (any(not 0 <= t < end-start for t in times) or times != sorted(set(times))):
         errors.append(f"{prefix}: sample requests must be ordered inside trim")
     if plan.get("analysisWidth") != 360 or plan.get("analysisHeight") != 270:
@@ -288,7 +290,7 @@ def _validate_preparation(case: dict[str, Any], prefix: str, approved: dict[str,
                 errors.append(f"{prefix}: inventory item must be an object")
                 continue
             visible = item.get("visible_samples")
-            if not _nonempty_string(item.get("id")) or not isinstance(visible, list) or not visible or any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < 18 for i in visible):
+            if not _nonempty_string(item.get("id")) or not isinstance(visible, list) or not visible or any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < count for i in visible):
                 errors.append(f"{prefix}: invalid inventory visibility")
             if kind == "objects" and (item.get("coverage") not in ("limited", "repeated") or not _nonempty_string(item.get("uncertainty"))):
                 errors.append(f"{prefix}: object coverage uncertainty required")

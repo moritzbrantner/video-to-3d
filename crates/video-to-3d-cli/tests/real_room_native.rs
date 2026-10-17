@@ -23,6 +23,9 @@ use video_to_3d_core::scene_store::{
 };
 use video_to_3d_core::CameraStageArtifact;
 
+/// The approved dense TUM browser plan (#230).
+const DENSE_SAMPLES: usize = 87;
+
 fn expected() -> Value {
     serde_json::from_str::<Value>(include_str!(
         "../../../tools/tests/fixtures/approved-controlled-room-expectations.json"
@@ -74,8 +77,8 @@ fn capture(root: &Path, witness: &str) -> Result<(Value, Vec<Vec<u8>>), String> 
     let frames = document["frames"]
         .as_array()
         .ok_or("missing browser frames")?;
-    if frames.len() != 18 {
-        return Err("expected eighteen browser frames".into());
+    if frames.len() != DENSE_SAMPLES {
+        return Err("expected the approved dense browser frame count".into());
     }
     let mut pixels = Vec::new();
     let mut previous = -1.;
@@ -571,7 +574,7 @@ fn real_browser_transfer_rejects_pixel_corruption_and_self_consistent_manifest_c
         copy.0.join("browser-frames.json"),
     )
     .unwrap();
-    for index in 0..18 {
+    for index in 0..DENSE_SAMPLES {
         let path = format!("frames/{index:03}.rgba");
         fs::copy(original.join(&path), copy.0.join(path)).unwrap();
     }

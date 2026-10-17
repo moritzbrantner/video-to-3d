@@ -13,6 +13,15 @@ use crate::PairStats;
 
 pub(crate) const MIN_KEYFRAME_OVERLAP: f32 = 0.18;
 const MIN_KEYFRAME_MATCHES: usize = 8;
+/// A link with at least this many matches stays continuous even below the overlap
+/// ratio: dense captures with many features keep enough absolute evidence (#230).
+const CONFIDENT_LINK_MATCHES: usize = 48;
+
+/// Whether an adjacent link lacks the evidence to keep a segment continuous.
+pub(crate) fn weak_link(matches: usize, overlap_ratio: f32) -> bool {
+    matches < MIN_KEYFRAME_MATCHES
+        || (overlap_ratio < MIN_KEYFRAME_OVERLAP && matches < CONFIDENT_LINK_MATCHES)
+}
 const KEYFRAME_PARALLAX_BUDGET: f32 = 1.25;
 const MIN_STRONG_PAIR_PARALLAX: f32 = 0.55;
 /// Median feature motion, as a fraction of the frame diagonal, beyond which an
@@ -216,7 +225,7 @@ impl SegmentationContext {
         if !self.usable(from) || !self.usable(to) {
             return None;
         }
-        if matches < MIN_KEYFRAME_MATCHES || overlap_ratio < MIN_KEYFRAME_OVERLAP {
+        if weak_link(matches, overlap_ratio) {
             let (a, b) = (self.luma[from], self.luma[to]);
             let exposure_change = (a - b).abs() / a.max(b).max(1.0);
             return Some(if exposure_change > THRESHOLDS.max_exposure_change {
@@ -351,7 +360,7 @@ fn select_in_segment(
     let mut strongest_pair: Option<(usize, f32)> = None;
 
     for pair in pairs {
-        let weak = pair.matches < MIN_KEYFRAME_MATCHES || pair.overlap_ratio < MIN_KEYFRAME_OVERLAP;
+        let weak = weak_link(pair.matches, pair.overlap_ratio);
         if weak || !usable(pair.from_frame) && !usable(pair.to_frame) {
             accumulated_parallax = 0.0;
             pending = false;
