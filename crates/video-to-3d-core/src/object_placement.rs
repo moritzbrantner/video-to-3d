@@ -354,7 +354,7 @@ pub fn place_objects(
                 "floor" | "ground"
             )
         })
-        .flat_map(|object| object_points(object))
+        .flat_map(&object_points)
         .collect();
     let mut up = if cameras.is_empty() {
         [0.0, 0.0, 1.0]
