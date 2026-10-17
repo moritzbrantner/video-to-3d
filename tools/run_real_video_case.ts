@@ -10,7 +10,7 @@ type CorpusCase = {
   };
   preparation?: {
     trim: {start_seconds: number; end_seconds: number};
-    plan: unknown;
+    plan: {maxFrames: number};
   };
 };
 
@@ -93,7 +93,7 @@ if (benchmarkCase.preparation) {
   const trim = benchmarkCase.preparation.trim;
   const approvedPlan = buildVideoSamplingPlan(
     {duration: trim.end_seconds-trim.start_seconds, videoWidth:640, videoHeight:480},
-    {framesPerSecond:manifest.sampling.frames_per_second,maxFrames:manifest.sampling.max_frames},
+    {framesPerSecond:manifest.sampling.frames_per_second,maxFrames:benchmarkCase.preparation.plan.maxFrames},
   );
   if (JSON.stringify(approvedPlan) !== JSON.stringify(benchmarkCase.preparation.plan)) {
     throw new Error("approved preparation plan differs from existing browser sampling helper");

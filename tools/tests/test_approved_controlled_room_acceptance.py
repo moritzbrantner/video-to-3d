@@ -64,7 +64,7 @@ class ControlledRoomMetadataAcceptance(unittest.TestCase):
             lambda case: case['preparation']['plan']['times'].__setitem__(0, 5),
             lambda case: case['preparation']['decoder_boundary'].update(browser_pixel_equivalence=True),
             lambda case: case['preparation']['inventory'].update(metric_truth=True),
-            lambda case: case['preparation']['inventory']['objects'][0].update(visible_samples=[18]),
+            lambda case: case['preparation']['inventory']['objects'][0].update(visible_samples=[case['preparation']['plan']['sampleCount']]),
         ]
         for mutate in mutations:
             changed = copy.deepcopy(expected)
@@ -86,7 +86,7 @@ class ControlledRoomActualAcceptance(unittest.TestCase):
         decoded = reference.decoded_source_reference(str(original), json.dumps(case))
         fixed = json.loads(REVIEW.read_text())
         self.assertEqual(fixed['source_sha256'], case['asset']['sha256'])
-        self.assertEqual(len(decoded), 18)
+        self.assertEqual(len(decoded), case['preparation']['plan']['sampleCount'])
         for (ordinal, pts, ppm), sample in zip(decoded, fixed['samples']):
             self.assertEqual(ordinal, sample['selected_source_ordinal'])
             self.assertEqual(pts, Decimal(str(sample['selected_source_pts'])))
@@ -111,7 +111,7 @@ class ControlledRoomActualAcceptance(unittest.TestCase):
             self.assertEqual(receipt['derived']['source_sha256'], case['asset']['sha256'])
             self.assertEqual(receipt['derived']['trim'], case['preparation']['trim'])
             self.assertIs(receipt['decoder_boundary']['browser_pixel_equivalence'], False)
-            self.assertEqual(len(receipt['frames']), 18)
+            self.assertEqual(len(receipt['frames']), case['preparation']['plan']['sampleCount'])
             decoded = reference.decoded_source_reference(str(original), json.dumps(case))
             for actual, (ordinal, pts, ppm) in zip(receipt['frames'], decoded):
                 self.assertEqual(actual['selected_source_ordinal'], ordinal)

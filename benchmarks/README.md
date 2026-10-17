@@ -228,7 +228,7 @@ exit; those gates remain open under #77.
 
 For the approved case IDs, custom manifests cannot redefine the pinned source
 attribution, licensing, original file identity, trim, original duration or fixed
-18-frame plan. Approval comparisons use this
+browser plan (18 samples for H1/H3, 87 for the dense TUM capture). Approval comparisons use this
 repository’s production corpus, never caller metadata or the working directory.
 The CLI and direct preparation/receipt entrypoints reject differences before
 source decoding or output writes. The runner checks selected approved identities
@@ -253,7 +253,8 @@ bun tools/run_real_video_case.ts --case approved-controlled-room-tum --asset-roo
 
 This uses the same preparation/receipt authority and lossless VP9 WebM carrier
 recipe as H1/H3. Its interval covers the full 86.166667-second original, with
-18 fixed browser-plan requests at 360×270. The independently observed inventory
+87 fixed browser-plan requests at 360×270: the browser's automatic cap for
+long clips (at most 1 s spacing, #230) replaced the original 18-sample plan. The independently observed inventory
 includes the globe/support, yellow die, purple office chair and plush bear;
 it does not establish reconstructed identities or unseen geometry. Preparation
 records actual source frame ordinals, PTS, hashes, derived-carrier identity and
@@ -285,7 +286,7 @@ bun scripts/capture-real-room-native-acceptance.ts --original /path/to/originals
 ```
 
 Keep the printed `witness_hash` outside the capture directory. It binds the
-original/carrier identities, browser version, sampling metadata and all 18 raw
+original/carrier identities, browser version, sampling metadata and all 87 raw
 RGBA frame hashes. Pixel identities describe that captured browser run; a future
 capture may differ and must receive its own witness hash. Offline PPMs and
 screenshots cannot substitute for browser pixels.

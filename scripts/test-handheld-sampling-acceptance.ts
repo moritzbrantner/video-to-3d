@@ -23,7 +23,7 @@ for (const fixture of expected.cases) {
     duration: trim.end_seconds - trim.start_seconds,
     videoWidth: 640,
     videoHeight: 480,
-  });
+  }, { maxFrames: 18 });
   assert.deepEqual(actual, fixture.preparation.plan);
   assert.equal(actual.sampleCount, 18);
   assert.equal(actual.analysisWidth, 360);

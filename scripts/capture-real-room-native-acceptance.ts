@@ -46,7 +46,7 @@ try {
   assert.equal(captured.info.displayWidth, 640);
   assert.equal(captured.info.displayHeight, 480);
   assert(Math.abs(captured.info.duration - 86.166667) <= 1 / 30);
-  assert.equal(captured.frames.length, 18);
+  assert.equal(captured.frames.length, expected.preparation.plan.sampleCount);
   const frames = captured.frames.map((frame: { width: number; height: number; rgba: number[]; browser_hash: string; requested_time: number; presented_time: number; presented_time_decoded: boolean }, index: number) => {
     assert.equal(frame.width, 360);
     assert.equal(frame.height, 270);

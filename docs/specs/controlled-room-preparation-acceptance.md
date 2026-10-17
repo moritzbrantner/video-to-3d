@@ -32,6 +32,14 @@ that a pipeline produced any of them. Hidden surfaces, contact geometry and
 exact dimensions remain unknown. The bear is separate from its support chair;
 desk divider panels must not become permanent room walls by relabeling.
 
+**Dense recapture (#230, owner answers 2026-10-17).** The 18-request plan left
+consecutive views too far apart (about 4.8 s) for any classical matcher to chain
+cameras. The fixture now uses the browser's automatic plan for long clips: 87
+requests at most 1 s apart, same original, same full interval and same 360x270
+analysis size. The derived carrier is unchanged; the sampling receipt and source
+review were regenerated. The visible sample sets were re-authored on an 87-frame
+contact sheet of the prepared references. The old 18-sample fixture is not kept.
+
 `approved-controlled-room-expectations.json` pins source, license, attribution,
 full interval, sampling and nonmetric inventory. The separate source-review
 fixture pins nearest-original PTS/ordinal and PPM hashes. Its oracle reuses the

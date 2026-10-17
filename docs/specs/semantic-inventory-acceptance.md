@@ -157,7 +157,8 @@ GPU it requires: available evidence with detector and segmenter identity,
 `runtime.device = cuda`, a `device_name` containing `3060`, measured
 `elapsed_seconds > 0` and `0 < peak_gpu_memory_bytes <= 8 GiB`; die-like
 (`die`/`dice`/`cube`) masked observations on at least two of the
-independently inventoried visible samples 0/1/2/15/16/17; one die-like track
+independently inventoried visible samples (0–15 and 72–86 of the dense
+87-sample capture, #230); one die-like track
 linking at least two of them; and an uncertainty record for every visible
 sample without a die mask. No pixel positions are asserted (the inventory is
 not a pixel annotation). The CPU-only smoke (`CUDA_VISIBLE_DEVICES=""`)

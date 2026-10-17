@@ -1,5 +1,5 @@
 //! Independent real-model acceptance of #60 (Decision Atlas 8.7/8.8): the
-//! actual pinned Grounding DINO + SAM 2.1 sidecar on the approved 18-frame TUM
+//! actual pinned Grounding DINO + SAM 2.1 sidecar on the approved dense 87-frame TUM
 //! browser capture (#179), through the real CLI. Explicit tier: CI has no GPU.
 //!
 //! ```sh
@@ -12,7 +12,7 @@
 //!
 //! Without `VIDEO_TO_3D_SEMANTIC_SIDECAR` the implementation's pinned default
 //! sidecar is used. The independently authored inventory reports the yellow
-//! die visible in samples 0/1/2/15/16/17; those are not pixel annotations, so
+//! die visible in samples 0-15 and 72-86; those are not pixel annotations, so
 //! no box position is asserted here.
 #![cfg(unix)]
 
@@ -44,6 +44,9 @@ const VOCABULARY: [&str; 9] = [
     "floor",
 ];
 
+/// The approved dense TUM browser plan (#230).
+const DENSE_SAMPLES: usize = 87;
+
 fn die_samples() -> Vec<u64> {
     let expected: Value = serde_json::from_str(include_str!(
         "../../../tools/tests/fixtures/approved-controlled-room-expectations.json"
@@ -66,7 +69,11 @@ fn die_samples() -> Vec<u64> {
         }
     }
     let samples = find(&expected).expect("independent yellow-die inventory");
-    assert_eq!(samples, vec![0, 1, 2, 15, 16, 17], "inventory unchanged");
+    assert_eq!(
+        samples,
+        (0..=15).chain(72..=86).collect::<Vec<u64>>(),
+        "inventory unchanged"
+    );
     samples
 }
 
@@ -87,7 +94,7 @@ fn capture() -> (Value, Vec<Vec<u8>>) {
     assert_eq!(ContentHash::of_bytes(&bytes).as_str(), witness);
     let document: Value = serde_json::from_slice(&bytes).unwrap();
     let frames = document["frames"].as_array().unwrap();
-    assert_eq!(frames.len(), 18);
+    assert_eq!(frames.len(), DENSE_SAMPLES);
     let pixels = frames
         .iter()
         .enumerate()

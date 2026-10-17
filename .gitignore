@@ -9,3 +9,4 @@ apps/web/public/feature-wasm/
 apps/web/public/litert-wasm/
 apps/desktop/src-tauri/gen/
 __pycache__/
+*.tsbuildinfo
