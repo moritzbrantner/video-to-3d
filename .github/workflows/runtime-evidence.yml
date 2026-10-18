@@ -1,22 +1,10 @@
 name: Runtime evidence, COLMAP golden, and Moonlight
 
 on:
-  pull_request:
-    branches: [main]
-    # Run expensive base-vs-candidate reconstruction evidence only for relevant changes.
-    paths:
-      - '.github/workflows/runtime-evidence.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain*'
-      - 'crates/video-to-3d-core/**'
-      - 'crates/video-to-3d-feature-wasm/**'
-      - 'profiles/runtime-profiler/**'
-      - 'tools/**'
-      - 'scripts/**'
+  workflow_call: null
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: video-to-3d-runtime-evidence-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:

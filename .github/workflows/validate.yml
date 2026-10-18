@@ -7,9 +7,43 @@ on:
 
 jobs:
   validate:
+    outputs:
+      allow-skipped: ${{ steps.merge-scope.outputs.allow-skipped }}
+      validate-runtime-evidence: ${{ steps.merge-scope.outputs.validate-runtime-evidence }}
+      validate-pages-build: ${{ steps.merge-scope.outputs.validate-pages-build }}
+      validate-blender-acceptance: ${{ steps.merge-scope.outputs.validate-blender-acceptance }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Determine required PR validation scope
+        id: merge-scope
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_BRANCH: ${{ github.base_ref }}
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, re, subprocess
+          paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", os.environ["BASE_SHA"], os.environ["HEAD_SHA"]]).decode().split("\0")
+          filters = {'validate-runtime-evidence': {'paths': ['.github/workflows/runtime-evidence.yml', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain*', 'crates/video-to-3d-core/**', 'crates/video-to-3d-feature-wasm/**', 'profiles/runtime-profiler/**', 'tools/**', 'scripts/**'], 'branches': ['main']}, 'validate-pages-build': {'paths': None, 'branches': None}, 'validate-blender-acceptance': {'paths': ['tools/blender/**', 'crates/video-to-3d-core/examples/synthetic_room_fixture.rs', '.github/workflows/blender-acceptance.yml'], 'branches': ['main']}}
+          def matches(path, pattern):
+              pattern = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+              return re.fullmatch(pattern, path) is not None
+          skipped = []
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for name, scope in filters.items():
+                  matches_paths = scope["paths"] is None or any(matches(path, pattern) for path in paths if path for pattern in scope["paths"])
+                  matches_branch = scope["branches"] is None or any(matches(os.environ["BASE_BRANCH"], pattern) for pattern in scope["branches"])
+                  required = matches_paths and matches_branch
+                  print(f"{name}={str(required).lower()}", file=output)
+                  if not required:
+                      skipped.append(name)
+              print("allow-skipped=" + json.dumps(skipped), file=output)
+          PYTHON
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
@@ -57,3 +91,38 @@ jobs:
         run: bun run benchmark:wasm-boundary
       - name: Test browser and benchmark video-sampling contract
         run: bun run test:video-sampling-contract
+
+  validate-runtime-evidence:
+    needs: validate
+    if: github.event_name == 'pull_request' && needs.validate.outputs.validate-runtime-evidence == 'true'
+    uses: ./.github/workflows/runtime-evidence.yml
+    permissions:
+      contents: read
+
+  validate-pages-build:
+    needs: validate
+    if: github.event_name == 'pull_request' && needs.validate.outputs.validate-pages-build == 'true'
+    uses: ./.github/workflows/pages-build.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+  validate-blender-acceptance:
+    needs: validate
+    if: github.event_name == 'pull_request' && needs.validate.outputs.validate-blender-acceptance == 'true'
+    uses: ./.github/workflows/blender-acceptance.yml
+    permissions:
+      contents: read
+
+  merge-ready:
+    name: merge-ready
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: ["validate", "validate-runtime-evidence", "validate-pages-build", "validate-blender-acceptance"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: moritzbrantner/reusable-workflows/.github/actions/merge-ready@b0f25f241d76af2584dfc9e375084ff5c5cb97da
+        with:
+          needs: ${{ toJSON(needs) }}
+          required: '["validate", "validate-runtime-evidence", "validate-pages-build", "validate-blender-acceptance"]'
+          allow-skipped: ${{ needs.validate.outputs.allow-skipped || '[]' }}

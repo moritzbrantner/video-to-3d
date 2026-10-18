@@ -1,21 +1,17 @@
 name: Blender scene acceptance
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "tools/blender/**"
-      - "crates/video-to-3d-core/examples/synthetic_room_fixture.rs"
-      - ".github/workflows/blender-acceptance.yml"
   push:
-    branches: [main]
+    branches:
+    - main
     paths:
-      - "tools/blender/**"
-      - "crates/video-to-3d-core/examples/synthetic_room_fixture.rs"
-      - ".github/workflows/blender-acceptance.yml"
+    - tools/blender/**
+    - crates/video-to-3d-core/examples/synthetic_room_fixture.rs
+    - .github/workflows/blender-acceptance.yml
+  workflow_call: null
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: video-to-3d-blender-acceptance-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

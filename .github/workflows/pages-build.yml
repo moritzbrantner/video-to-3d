@@ -1,10 +1,11 @@
 name: Pages
 
 on:
-  pull_request:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches:
+    - main
+  workflow_dispatch: null
+  workflow_call: null
 
 permissions:
   contents: read
@@ -12,7 +13,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages-${{ github.ref }}
+  group: video-to-3d-pages-build-pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
