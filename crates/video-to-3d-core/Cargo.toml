@@ -17,7 +17,7 @@ sha2 = "0.11"
 gltf = { version = "1.4.1", default-features = false, features = ["names", "utils"] }
 three-d-core = { git = "https://github.com/moritzbrantner/3d-lab", rev = "231d8fe1a4766753b3f6f2eb03c113b6a0cd206f" }
 three-d-assets = { git = "https://github.com/moritzbrantner/3d-lab", rev = "231d8fe1a4766753b3f6f2eb03c113b6a0cd206f" }
-three-d-animation = { git = "https://github.com/moritzbrantner/3d-lab", rev = "231d8fe1a4766753b3f6f2eb03c113b6a0cd206f" }
+three-d-animation = { git = "https://github.com/moritzbrantner/3d-lab", rev = "3854f81fec92b81d365f7dba0fdc96210fb03dcc" }
 three-d-formats = { git = "https://github.com/moritzbrantner/3d-lab", rev = "231d8fe1a4766753b3f6f2eb03c113b6a0cd206f" }
 three-d-scene = { git = "https://github.com/moritzbrantner/3d-lab", rev = "231d8fe1a4766753b3f6f2eb03c113b6a0cd206f" }
 three-d-export = { git = "https://github.com/moritzbrantner/3d-lab", rev = "231d8fe1a4766753b3f6f2eb03c113b6a0cd206f" }
