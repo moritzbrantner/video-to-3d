@@ -11,7 +11,7 @@ dependencies = [
   "pillow>=11,<13",
   # TripoSR (object generation, Atlas 8.10), fetched at a pinned commit on first need.
   "omegaconf==2.3.0",
-  "einops==0.8.1",
+  "einops==0.8.2",
   "trimesh==4.8.3",
   "scikit-image==0.25.2",
   "imageio==2.37.0",
