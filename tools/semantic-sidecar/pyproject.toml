@@ -2,7 +2,7 @@
 name = "video-to-3d-semantic-sidecar"
 version = "1.0.0"
 description = "Local Grounding DINO + SAM 2.1 semantic inventory sidecar (protocol video-to-3d-semantic-sidecar/1)"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.15,<3.16"
 dependencies = [
   "torch==2.9.1",
   "torchvision==0.24.1",
