@@ -1039,16 +1039,7 @@ mod tests {
         let cameras = vec![camera(0, 0.0), camera(1, 1.0)];
         let features = vec![Vec::<Feature>::new(), Vec::<Feature>::new()];
 
-        let result = bundle_adjust(
-            &analysis,
-            &[],
-            &[],
-            &cameras,
-            &features,
-            640,
-            480,
-            500.0,
-        );
+        let result = bundle_adjust(&analysis, &[], &[], &cameras, &features, 640, 480, 500.0);
 
         assert_eq!(result.stats.final_cameras.len(), cameras.len());
         for (retained, returned) in result.stats.final_cameras.iter().zip(&result.cameras) {

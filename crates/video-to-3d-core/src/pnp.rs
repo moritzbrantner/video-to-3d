@@ -157,7 +157,6 @@ pub(super) fn estimate_pose_with_control(
     })
 }
 
-
 #[allow(clippy::too_many_arguments)]
 fn fit_pose_with_control(
     correspondences: &[PnpCorrespondence],
