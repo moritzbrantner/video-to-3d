@@ -32,7 +32,7 @@ use video_to_3d_core::{
 
 // ---------------------------------------------------------------------------
 // Deterministic fixtures: the lateral point-scene renderer of the in-crate
-// reconstruction tests (`src/reconstruction.rs`, `scene_points`/`render_scene`).
+// reconstruction tests (`src/reconstruction/tests.rs`, `scene_points`/`render_scene`).
 // ---------------------------------------------------------------------------
 
 const SCENE_WIDTH: u32 = 640;

@@ -1323,8 +1323,7 @@ mod tests {
         for (index, point) in rotation.iter_mut().enumerate().take(13) {
             point.target[0] += 20.0 + index as f64;
         }
-        let residual =
-            least_median_rotation_residual_pixels(&rotation, 640, 480, 500.0).unwrap();
+        let residual = least_median_rotation_residual_pixels(&rotation, 640, 480, 500.0).unwrap();
         assert!(residual < 0.05, "rotation residual {residual}");
 
         // A 0.3 lateral step over 4–5.2 m relief leaves parallax no rotation absorbs.

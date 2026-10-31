@@ -157,8 +157,10 @@ impl SegmentationContext {
                         > THRESHOLDS.max_exposure_change
                     && change(frames[index - 1].mean_luma, frames[index + 1].mean_luma)
                         <= THRESHOLDS.max_exposure_change;
-                let window = index.saturating_sub(BLUR_WINDOW)..(index + BLUR_WINDOW + 1).min(frames.len());
-                let local_sharpness = median(frames[window].iter().map(|frame| frame.sharpness_ratio));
+                let window =
+                    index.saturating_sub(BLUR_WINDOW)..(index + BLUR_WINDOW + 1).min(frames.len());
+                let local_sharpness =
+                    median(frames[window].iter().map(|frame| frame.sharpness_ratio));
                 if frame.clipped_fraction > THRESHOLDS.max_clipped_fraction
                     || frame.crushed_fraction > THRESHOLDS.max_clipped_fraction
                     || exposure_outlier
@@ -244,7 +246,9 @@ impl SegmentationContext {
     /// Usable frame pairs `(before, after)` with only rejected frames between them. Links
     /// touching rejected frames never split the clip, so these spans need their own match.
     pub(crate) fn rejected_runs(&self) -> Vec<(usize, usize)> {
-        let usable: Vec<usize> = (0..self.quality.len()).filter(|&frame| self.usable(frame)).collect();
+        let usable: Vec<usize> = (0..self.quality.len())
+            .filter(|&frame| self.usable(frame))
+            .collect();
         usable
             .windows(2)
             .filter(|pair| pair[1] > pair[0] + 1)
@@ -267,7 +271,8 @@ impl SegmentationContext {
         {
             self.bridge_breaks.insert(after, reason);
         }
-    }}
+    }
+}
 
 /// `pairs` are the adjacent links `(i, i + 1)`; `frames` has one entry per frame.
 pub(crate) fn select(
@@ -281,9 +286,12 @@ pub(crate) fn select(
         if pair.to_frame >= frames.len() {
             continue;
         }
-        if let Some(reason) =
-            context.link_break(pair.from_frame, pair.matches, pair.overlap_ratio, pair.median_motion)
-        {
+        if let Some(reason) = context.link_break(
+            pair.from_frame,
+            pair.matches,
+            pair.overlap_ratio,
+            pair.median_motion,
+        ) {
             breaks.push(reason);
         }
         if let Some(&reason) = context.bridge_breaks.get(&pair.to_frame) {
@@ -400,7 +408,11 @@ fn select_in_segment(
 /// Selection over sharp, well-exposed frames: for tests that only exercise links.
 #[cfg(test)]
 pub(crate) fn select_for_pairs(pairs: &[PairStats]) -> KeyframeSelection {
-    let count = pairs.iter().map(|pair| pair.to_frame + 1).max().unwrap_or(1);
+    let count = pairs
+        .iter()
+        .map(|pair| pair.to_frame + 1)
+        .max()
+        .unwrap_or(1);
     let frames: Vec<FrameEvidence> = (0..count)
         .map(|frame_index| FrameEvidence {
             frame_index,
@@ -470,23 +482,39 @@ mod tests {
     }
 
     fn run(pairs: &[PairStats], frames: &[FrameEvidence]) -> KeyframeSelection {
-        select(pairs, frames, &SegmentationContext::new(frames, WIDTH, HEIGHT))
+        select(
+            pairs,
+            frames,
+            &SegmentationContext::new(frames, WIDTH, HEIGHT),
+        )
     }
 
     fn decisions(selection: &KeyframeSelection) -> Vec<FrameDecision> {
-        selection.stats.frames.iter().map(|frame| frame.decision).collect()
+        selection
+            .stats
+            .frames
+            .iter()
+            .map(|frame| frame.decision)
+            .collect()
     }
 
     #[test]
     fn selects_keyframes_from_overlap_and_accumulated_parallax() {
-        let pairs = [pair(0, 0.8, 0.4, true), pair(1, 0.8, 0.4, true), pair(2, 0.8, 0.5, false)];
+        let pairs = [
+            pair(0, 0.8, 0.4, true),
+            pair(1, 0.8, 0.4, true),
+            pair(2, 0.8, 0.5, false),
+        ];
 
         let selection = run(&pairs, &frames(4));
 
         assert_eq!(selection.keyframes, vec![0, 3]);
         assert_eq!(selection.stats.segments.len(), 1);
         use FrameDecision::*;
-        assert_eq!(decisions(&selection), vec![Keyframe, Redundant, Redundant, Keyframe]);
+        assert_eq!(
+            decisions(&selection),
+            vec![Keyframe, Redundant, Redundant, Keyframe]
+        );
     }
 
     #[test]
@@ -543,7 +571,10 @@ mod tests {
         jump.median_motion = 0.5 * (WIDTH as f32).hypot(HEIGHT as f32);
         let selection = run(&[pair(0, 0.8, 0.2, true), jump], &frames(3));
 
-        assert_eq!(selection.stats.segments[0].ends_with, Some(SegmentBreak::MotionJump));
+        assert_eq!(
+            selection.stats.segments[0].ends_with,
+            Some(SegmentBreak::MotionJump)
+        );
         assert_eq!(selection.keyframes, vec![0, 2]);
     }
 
@@ -561,8 +592,15 @@ mod tests {
         let selection = run(&pairs, &evidence);
 
         use FrameDecision::*;
-        assert_eq!(selection.stats.segments.len(), 1, "one bad frame does not split the clip");
-        assert_eq!(decisions(&selection), vec![Keyframe, Redundant, Redundant, Blurred, Keyframe]);
+        assert_eq!(
+            selection.stats.segments.len(),
+            1,
+            "one bad frame does not split the clip"
+        );
+        assert_eq!(
+            decisions(&selection),
+            vec![Keyframe, Redundant, Redundant, Blurred, Keyframe]
+        );
     }
 
     #[test]
@@ -571,18 +609,31 @@ mod tests {
         for frame in &mut evidence {
             frame.sharpness_ratio = 0.4;
         }
-        let selection = run(&[pair(0, 0.8, 0.7, false), pair(1, 0.8, 0.7, false)], &evidence);
+        let selection = run(
+            &[pair(0, 0.8, 0.7, false), pair(1, 0.8, 0.7, false)],
+            &evidence,
+        );
 
-        assert!(selection.stats.frames.iter().all(|frame| frame.decision != FrameDecision::Blurred));
+        assert!(selection
+            .stats
+            .frames
+            .iter()
+            .all(|frame| frame.decision != FrameDecision::Blurred));
     }
 
     #[test]
     fn poorly_exposed_frames_never_become_keyframes() {
         let mut evidence = frames(3);
         evidence[0].clipped_fraction = 0.6;
-        let selection = run(&[pair(0, 0.8, 0.7, false), pair(1, 0.8, 0.7, false)], &evidence);
+        let selection = run(
+            &[pair(0, 0.8, 0.7, false), pair(1, 0.8, 0.7, false)],
+            &evidence,
+        );
 
-        assert_eq!(selection.stats.frames[0].decision, FrameDecision::PoorExposure);
+        assert_eq!(
+            selection.stats.frames[0].decision,
+            FrameDecision::PoorExposure
+        );
         assert_eq!(selection.keyframes.first(), Some(&1));
     }
 
@@ -632,7 +683,10 @@ mod tests {
 
         use FrameDecision::*;
         assert_eq!(selection.stats.segments.len(), 1);
-        assert_eq!(decisions(&selection), vec![Keyframe, Redundant, PoorExposure, Keyframe, Redundant]);
+        assert_eq!(
+            decisions(&selection),
+            vec![Keyframe, Redundant, PoorExposure, Keyframe, Redundant]
+        );
     }
 
     #[test]
@@ -642,7 +696,10 @@ mod tests {
         let jump = 0.5 * (WIDTH as f32).hypot(HEIGHT as f32);
 
         // Reconstruction asks the same question before accepting a seed pair.
-        assert_eq!(context.link_break(0, 200, 0.7, jump), Some(SegmentBreak::MotionJump));
+        assert_eq!(
+            context.link_break(0, 200, 0.7, jump),
+            Some(SegmentBreak::MotionJump)
+        );
         assert_eq!(context.link_break(0, 200, 0.7, 4.0), None);
         assert!(!context.seed_eligible(0, 200, 0.7, jump));
         assert!(context.seed_eligible(0, 200, 0.7, 4.0));
@@ -671,7 +728,12 @@ mod tests {
             link.matches = 2;
             link
         };
-        let pairs = [pair(0, 0.8, 0.5, false), weak(1), weak(2), pair(3, 0.8, 0.5, false)];
+        let pairs = [
+            pair(0, 0.8, 0.5, false),
+            weak(1),
+            weak(2),
+            pair(3, 0.8, 0.5, false),
+        ];
         let mut context = SegmentationContext::new(&evidence, WIDTH, HEIGHT);
         assert_eq!(context.rejected_runs(), [(1, 3)]);
 
@@ -681,14 +743,23 @@ mod tests {
         let selection = select(&pairs, &evidence, &context);
 
         assert_eq!(selection.stats.segments.len(), 2);
-        assert_eq!(selection.stats.segments[0].ends_with, Some(SegmentBreak::HardCut));
+        assert_eq!(
+            selection.stats.segments[0].ends_with,
+            Some(SegmentBreak::HardCut)
+        );
         assert_eq!(selection.stats.segments[1].first_frame, 3);
         assert_eq!(selection.stats.frames[2].decision, FrameDecision::Blurred);
 
         // The same blurred frame inside one shot matches across and stays one segment.
         let mut same_shot = SegmentationContext::new(&frames_with_blur(5, 2), WIDTH, HEIGHT);
         same_shot.bridge(1, 3, 80, 0.6, 3.0);
-        assert_eq!(select(&pairs, &frames_with_blur(5, 2), &same_shot).stats.segments.len(), 1);
+        assert_eq!(
+            select(&pairs, &frames_with_blur(5, 2), &same_shot)
+                .stats
+                .segments
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -706,14 +777,20 @@ mod tests {
         // accumulates to 40%, above the one-step gate but within the two-interval gate.
         let mut continuous = SegmentationContext::new(&evidence, WIDTH, HEIGHT);
         continuous.bridge(1, 3, 80, 0.6, 0.4 * diagonal);
-        assert_eq!(select(&pairs, &evidence, &continuous).stats.segments.len(), 1);
+        assert_eq!(
+            select(&pairs, &evidence, &continuous).stats.segments.len(),
+            1
+        );
 
         // A jump beyond the scaled gate still splits the clip after the run.
         let mut jump = SegmentationContext::new(&evidence, WIDTH, HEIGHT);
         jump.bridge(1, 3, 80, 0.6, 0.8 * diagonal);
         let selection = select(&pairs, &evidence, &jump);
         assert_eq!(selection.stats.segments.len(), 2);
-        assert_eq!(selection.stats.segments[0].ends_with, Some(SegmentBreak::MotionJump));
+        assert_eq!(
+            selection.stats.segments[0].ends_with,
+            Some(SegmentBreak::MotionJump)
+        );
     }
 
     #[test]
@@ -727,7 +804,10 @@ mod tests {
 
         assert_eq!(selection.promote_segment_frames(0), 4);
         assert_eq!(selection.keyframes, vec![0, 1, 2, 4, 5]);
-        assert_eq!(selection.stats.frames[3].decision, FrameDecision::PoorExposure);
+        assert_eq!(
+            selection.stats.frames[3].decision,
+            FrameDecision::PoorExposure
+        );
         assert_eq!(selection.stats.segments[0].keyframes, 5);
         // Idempotent; an unknown segment changes nothing.
         assert_eq!(selection.promote_segment_frames(0), 0);
@@ -737,7 +817,11 @@ mod tests {
 
     #[test]
     fn selection_is_deterministic() {
-        let pairs = [pair(0, 0.8, 0.6, false), pair(1, 0.5, 0.9, false), pair(2, 0.8, 0.3, true)];
+        let pairs = [
+            pair(0, 0.8, 0.6, false),
+            pair(1, 0.5, 0.9, false),
+            pair(2, 0.8, 0.3, true),
+        ];
         let first = run(&pairs, &frames(4));
         let second = run(&pairs, &frames(4));
 

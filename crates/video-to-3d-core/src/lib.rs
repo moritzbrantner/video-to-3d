@@ -29,9 +29,37 @@ pub mod semantic_inventory;
 pub mod surface_materials;
 pub mod textured_glb;
 
-// Keep the established reconstruction API at crate root while the large kernel body
-// remains isolated from format/interchange modules.
-include!("reconstruction.rs");
+mod dense;
+mod keyframe_selection;
+mod mesh;
+mod multi_view;
+mod pnp;
+mod reconstruction;
+mod revisit;
+mod two_view;
+
+pub use dense::{DenseGridSite, DenseReferencePatchStats, DenseStats, DenseWorkingSetEstimate};
+pub use keyframe_selection::{
+    ClipSegmentStats, FrameDecision, FrameSelectionStats, KeyframeSelectionStats, SegmentBreak,
+};
+pub use mesh::{MeshStats, MeshTriangle};
+pub use multi_view::{
+    BundleAdjustmentStats, MultiViewStats, NewLandmarkStats, RegistrationCandidateStats,
+};
+pub(crate) use reconstruction::{
+    dense_warning, detect_features, match_features, mesh_warning, motion_guided_matches,
+    reconstruct_sparse_with_control, to_luma, Feature, FeatureMatch, ReconstructionControl,
+    TrackScope, MIN_TRACK_MATCHES, MIN_TRACK_OVERLAP,
+};
+pub use reconstruction::{
+    reconstruct, BootstrapDiagnosis, BootstrapEscalation, BootstrapGate, CalibratedPairStats,
+    CameraPose, FrameInput, PairStats, Point3, ReconstructionOptions, ReconstructionRequest,
+    ReconstructionResult, RegisteredViewStats, SeedCandidateStats, SeedGate, SeedGateCount,
+    SegmentSolveStats,
+};
+#[cfg(test)]
+pub(crate) use reconstruction::{reconstruct_once, reconstruct_sparse};
+pub use revisit::{RevisitCandidateStats, RevisitClosureStats, RevisitRecoveryStats, RevisitStats};
 
 mod browser_contract;
 mod controlled_json;
