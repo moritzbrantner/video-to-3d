@@ -42,29 +42,42 @@ pub(super) fn detect_features_with_control(
 ) -> Result<Vec<Feature>, String> {
     let border = options.descriptor_radius.max(3) + 2;
     let mut candidates = Vec::new();
+    let columns = width.saturating_sub(border).saturating_sub(border) as usize;
+    // Gradient products of the rows `y - 1..=y + 1`, each starting at column `border - 1`.
+    let mut window = [
+        vec![[0i32; 3]; columns + 2],
+        vec![[0i32; 3]; columns + 2],
+        vec![[0i32; 3]; columns + 2],
+    ];
 
     for y in border..height.saturating_sub(border) {
         control.check()?;
-        for x in border..width.saturating_sub(border) {
-            let mut sxx = 0.0f32;
-            let mut syy = 0.0f32;
-            let mut sxy = 0.0f32;
-            for wy in y - 1..=y + 1 {
-                for wx in x - 1..=x + 1 {
-                    let gx = sample_luma(luma, width, wx + 1, wy) as f32
-                        - sample_luma(luma, width, wx - 1, wy) as f32;
-                    let gy = sample_luma(luma, width, wx, wy + 1) as f32
-                        - sample_luma(luma, width, wx, wy - 1) as f32;
-                    sxx += gx * gx;
-                    syy += gy * gy;
-                    sxy += gx * gy;
+        if columns == 0 {
+            continue;
+        }
+        if y == border {
+            gradient_products(luma, width, border - 1, y - 1, &mut window[0]);
+            gradient_products(luma, width, border - 1, y, &mut window[1]);
+        } else {
+            window.rotate_left(1);
+        }
+        gradient_products(luma, width, border - 1, y + 1, &mut window[2]);
+        for column in 0..columns {
+            let mut sum = [0i32; 3];
+            for row in &window {
+                for products in &row[column..column + 3] {
+                    sum[0] += products[0];
+                    sum[1] += products[1];
+                    sum[2] += products[2];
                 }
             }
+            // Each sum is at most 9 * 255^2 in magnitude, so it converts to f32 exactly.
+            let [sxx, syy, sxy] = sum.map(|value| value as f32);
             let det = sxx * syy - sxy * sxy;
             let trace = sxx + syy;
             let score = det - 0.04 * trace * trace;
             if score > 1_000_000.0 {
-                candidates.push((x, y, score));
+                candidates.push((border + column as u32, y, score));
             }
         }
     }
@@ -94,6 +107,17 @@ pub(super) fn detect_features_with_control(
     }
 
     Ok(selected)
+}
+
+/// `[gx * gx, gy * gy, gx * gy]` of row `y`, for columns from `first_x`.
+fn gradient_products(luma: &[u8], width: u32, first_x: u32, y: u32, row: &mut [[i32; 3]]) {
+    for (x, products) in (first_x..).zip(row) {
+        let gx =
+            sample_luma(luma, width, x + 1, y) as i32 - sample_luma(luma, width, x - 1, y) as i32;
+        let gy =
+            sample_luma(luma, width, x, y + 1) as i32 - sample_luma(luma, width, x, y - 1) as i32;
+        *products = [gx * gx, gy * gy, gx * gy];
+    }
 }
 
 fn descriptor(luma: &[u8], width: u32, x: u32, y: u32, radius: u32) -> Vec<i16> {

@@ -60,6 +60,80 @@ fn synthetic_frame(width: u32, height: u32, shift_x: i32) -> FrameInput {
     }
 }
 
+/// The structure-tensor detector written directly from its definition: every window sum
+/// recomputes its gradients in f32.
+fn direct_feature_candidates(
+    luma: &[u8],
+    width: u32,
+    height: u32,
+    border: u32,
+) -> Vec<(u32, u32, u32)> {
+    let sample = |x: u32, y: u32| luma[y as usize * width as usize + x as usize] as f32;
+    let mut candidates = Vec::new();
+    for y in border..height.saturating_sub(border) {
+        for x in border..width.saturating_sub(border) {
+            let (mut sxx, mut syy, mut sxy) = (0.0f32, 0.0f32, 0.0f32);
+            for wy in y - 1..=y + 1 {
+                for wx in x - 1..=x + 1 {
+                    let gx = sample(wx + 1, wy) - sample(wx - 1, wy);
+                    let gy = sample(wx, wy + 1) - sample(wx, wy - 1);
+                    sxx += gx * gx;
+                    syy += gy * gy;
+                    sxy += gx * gy;
+                }
+            }
+            let score = sxx * syy - sxy * sxy - 0.04 * (sxx + syy) * (sxx + syy);
+            if score > 1_000_000.0 {
+                candidates.push((x, y, score.to_bits()));
+            }
+        }
+    }
+    candidates
+}
+
+#[test]
+fn detected_features_keep_the_direct_structure_tensor_scores() {
+    let (width, height) = (96u32, 72u32);
+    // Hard-edged noise reaches large gradients of both signs.
+    let luma: Vec<u8> = (0..width * height)
+        .map(|index| {
+            let mixed = index.wrapping_mul(2_654_435_761).rotate_left(index % 23);
+            if mixed & 8 == 0 {
+                (mixed >> 24) as u8
+            } else {
+                255 * (mixed >> 31) as u8
+            }
+        })
+        .collect();
+    for descriptor_radius in [3, 6, 35, 36, 47, 48, 400] {
+        let border = descriptor_radius.max(3) + 2;
+        let options = ReconstructionOptions {
+            max_features: 10_000,
+            min_feature_distance: 0,
+            descriptor_radius,
+            ..ReconstructionOptions::default()
+        };
+        let mut expected = direct_feature_candidates(&luma, width, height, border);
+        // Scores rank descending; the detector's sort is stable over scan order.
+        expected.sort_by(|a, b| {
+            f32::from_bits(b.2)
+                .partial_cmp(&f32::from_bits(a.2))
+                .unwrap()
+        });
+        if descriptor_radius == 3 {
+            assert!(
+                expected.len() > 1_000,
+                "the frame must exercise the detector"
+            );
+        }
+        let detected: Vec<_> = detect_features(&luma, width, height, options)
+            .iter()
+            .map(|feature| (feature.x, feature.y, feature.score.to_bits()))
+            .collect();
+        assert_eq!(detected, expected, "descriptor radius {descriptor_radius}");
+    }
+}
+
 #[test]
 fn composed_matches_follow_each_feature_through_every_link() {
     let link = |pairs: &[(usize, usize, f32)]| -> Vec<FeatureMatch> {
