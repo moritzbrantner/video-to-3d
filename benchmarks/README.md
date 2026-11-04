@@ -318,6 +318,45 @@ or quality threshold change accompanies this execution evidence.
 
 ### Local MapAnything GPU smoke (experimental, #255)
 
+For a YouTube URL or local video, the optional convenience wrapper prepares
+lossless RGB frames, then calls the **same** sequential GPU smoke harness. It
+does not replace the browser-owned capture receipt or Rust evidence validation:
+
+```sh
+# One-time dependency setup; repeat safely after future git pulls.
+./scripts/setup_mapanything.sh
+
+# Downloads only a video you explicitly name, extracts up to 16 frames at 1 fps,
+# runs the safe 8-view default, and writes into ignored target/mapanything/.
+./scripts/run_mapanything_video.sh 'https://www.youtube.com/watch?v=VIDEO_ID'
+
+# Also works for an existing local movie. 12 views remain experimental.
+./scripts/run_mapanything_video.sh /path/to/local.mp4 --view-counts 12
+
+# CPU-only preparation check, without loading or downloading a model:
+./scripts/run_mapanything_video.sh /path/to/local.mp4 --prepare-only
+```
+
+`setup_mapanything.sh` uses `uv` to create/reuse a Python 3.11 environment under
+`$XDG_CACHE_HOME/video-to-3d/mapanything-venv` (or `~/.cache/video-to-3d/`
+when XDG is unset), installs CUDA-compatible PyTorch, upstream MapAnything and
+`yt-dlp` only when needed, and verifies CUDA availability. `git`, `uv`, FFmpeg,
+`ffprobe` and the NVIDIA driver are system prerequisites; it does not change
+system packages. Override `MAPANYTHING_VENV` or `MAPANYTHING_SOURCE` when you
+already have a working installation; `--check-only` never installs anything.
+
+The wrapper caches downloaded videos and hash-verified extracted frames. A
+successful run is reused only with an immutable HF checkpoint revision; its
+default is `00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a`, the same checkpoint
+measured on the RTX 3060 Ti. Failed runs remain available for diagnostics and
+retry into a new `run-NNN` directory. `--revision main` is explicitly mutable
+and produces a new run on subsequent invocations. `--fps`, `--start-seconds`,
+`--max-frames`, `--output-root`, `--offline`, and `--dry-run` are available for
+local experiments. Use only videos you have the rights to download and process.
+Input media, derived frames and generated GLB files remain local; `share-logs.zip`
+contains only the GPU harness's JSON and logs. The wrapper's frames have
+`decoded_images` provenance, not the product's browser-capture receipt.
+
 To measure the Apache-licensed [MapAnything](https://github.com/facebookresearch/map-anything)
 model on a local NVIDIA GPU, reuse the *actual browser-decoded* `browser-frames.json`
 and `.rgba` files from the capture command above. The script validates each
