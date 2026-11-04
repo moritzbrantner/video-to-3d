@@ -180,7 +180,10 @@ def child(command: list[str], output: Path, timeout: int, env: dict, measure_gpu
     start = time.monotonic()
     baseline_mib = device_used_mib() if measure_gpu else None
     peak_mib = baseline_mib
-    with (output / "stdout.log").open("w", encoding="utf-8") as stdout, (output / "stderr.log").open("w", encoding="utf-8") as stderr:
+    with (
+        (output / "stdout.log").open("w", encoding="utf-8") as stdout,
+        (output / "stderr.log").open("w", encoding="utf-8") as stderr,
+    ):
         process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env, start_new_session=True)
         try:
             while True:
@@ -205,6 +208,9 @@ def child(command: list[str], output: Path, timeout: int, env: dict, measure_gpu
     measurements = {
         "nvidia_smi_gpu0_baseline_used_mib": baseline_mib,
         "nvidia_smi_gpu0_peak_used_sampled_mib": peak_mib,
+        "nvidia_smi_gpu0_peak_increase_sampled_mib": (
+            peak_mib - baseline_mib if baseline_mib is not None and peak_mib is not None else None
+        ),
         "nvidia_smi_sample_interval_seconds": 0.5 if measure_gpu else None,
     } if measure_gpu else {}
     return code, round(time.monotonic() - start, 3), measurements
@@ -216,7 +222,15 @@ def worker_resolve(args: argparse.Namespace) -> int:
     snapshot = Path(snapshot_download(repo_id=MODEL_ID, revision=args.revision, local_files_only=args.offline)).resolve()
     if not re.fullmatch(r"[0-9a-f]{40}", snapshot.name):
         raise RuntimeError("Hugging Face did not return a commit-addressed snapshot")
-    write_json(Path(args.result), {"model_id": MODEL_ID, "revision": snapshot.name, "snapshot_path": str(snapshot), "requested_revision": args.revision})
+    write_json(
+        Path(args.result),
+        {
+            "model_id": MODEL_ID,
+            "revision": snapshot.name,
+            "snapshot_path": str(snapshot),
+            "requested_revision": args.revision,
+        },
+    )
     return 0
 
 
@@ -256,8 +270,17 @@ def worker_infer(args: argparse.Namespace) -> int:
     try:
         model = MapAnything.from_pretrained(args.snapshot).to(device).eval()
         views = load_images(json.loads(Path(args.images_json).read_text(encoding="utf-8")))
+        report["model_input_tensor_shapes"] = [list(view["img"].shape) for view in views]
         with torch.inference_mode():
-            predictions = model.infer(views, memory_efficient_inference=True, minibatch_size=1, use_amp=True, amp_dtype="bf16", apply_mask=True, mask_edges=True)
+            predictions = model.infer(
+                views,
+                memory_efficient_inference=True,
+                minibatch_size=1,
+                use_amp=True,
+                amp_dtype="bf16",
+                apply_mask=True,
+                mask_edges=True,
+            )
         torch.cuda.synchronize(device)
         cameras, world_points, colors, masks = [], [], [], []
         for prediction in predictions:
@@ -269,15 +292,27 @@ def worker_infer(args: argparse.Namespace) -> int:
             mask &= torch.isfinite(points).all(dim=-1).cpu().numpy()
             if not bool(torch.isfinite(pose).all()) or not bool(torch.isfinite(intrinsics).all()) or not mask.any():
                 raise ValueError("model emitted nonfinite camera parameters or no valid geometry")
-            cameras.append({"intrinsics": intrinsics.cpu().tolist(), "camera_to_world": pose.cpu().tolist(), "valid_points": int(mask.sum()), "total_points": int(mask.size)})
+            cameras.append(
+                {
+                    "intrinsics": intrinsics.cpu().tolist(),
+                    "camera_to_world": pose.cpu().tolist(),
+                    "valid_points": int(mask.sum()),
+                    "total_points": int(mask.size),
+                }
+            )
             if args.export_glb:
                 world_points.append(points.cpu().numpy())
                 colors.append(prediction["img_no_norm"][0].cpu().numpy())
                 masks.append(mask)
-        report.update({"status": "model_completed", "cameras": cameras, "view_count": len(predictions), "preview_exported": False})
+        report.update(
+            {"status": "model_completed", "cameras": cameras, "view_count": len(predictions), "preview_exported": False}
+        )
         if args.export_glb:
             try:
-                scene = predictions_to_glb({"world_points": np.stack(world_points), "images": np.stack(colors), "final_masks": np.stack(masks)}, as_mesh=True)
+                scene = predictions_to_glb(
+                    {"world_points": np.stack(world_points), "images": np.stack(colors), "final_masks": np.stack(masks)},
+                    as_mesh=True,
+                )
                 scene.export(str(output.parent / "preview.glb"))
                 report["preview_exported"] = True
             except torch.cuda.OutOfMemoryError:
@@ -298,7 +333,14 @@ def worker_infer(args: argparse.Namespace) -> int:
         traceback.print_exc()
         report.update({"status": "failed", "reason": f"{type(error).__name__}: {error}"[:500]})
         returncode = 1
-    report.update({"elapsed_seconds": round(time.monotonic() - started, 3), "torch_peak_allocated_bytes": torch.cuda.max_memory_allocated(device), "torch_peak_reserved_bytes": torch.cuda.max_memory_reserved(device), "device_free_after_bytes": torch.cuda.mem_get_info(device)[0]})
+    report.update(
+        {
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "torch_peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+            "torch_peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
+            "device_free_after_bytes": torch.cuda.mem_get_info(device)[0],
+        }
+    )
     write_json(output, report)
     return returncode
 
@@ -334,24 +376,42 @@ def can_reuse_report(root: Path, plan: dict, revision: str) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sources = parser.add_mutually_exclusive_group(required=True)
-    sources.add_argument("--capture-root", type=Path, help="browser-frames.json and .rgba frames produced by the existing browser capture")
+    sources.add_argument(
+        "--capture-root", type=Path, help="browser-frames.json and .rgba frames produced by the existing browser capture"
+    )
     sources.add_argument("--images-dir", type=Path, help="already-decoded local images (never decodes the original video)")
     parser.add_argument("--output-dir", type=Path, required=True, help="fresh or previously completed result directory")
     parser.add_argument("--view-counts", default="2,4,8,16", help="increasing view counts, comma-separated")
     parser.add_argument("--start-index", type=int, default=0, help="first usable frame index, default 0")
-    parser.add_argument("--sampling-policy", choices=["contiguous", "uniform"], default="contiguous", help="contiguous frames by default; uniform spans the remainder of the video")
-    parser.add_argument("--revision", default="main", help="Hugging Face model commit or branch; resolved commit is recorded")
+    parser.add_argument(
+        "--sampling-policy",
+        choices=["contiguous", "uniform"],
+        default="contiguous",
+        help="contiguous frames by default; uniform spans the remainder of the video",
+    )
+    parser.add_argument(
+        "--revision", default="main", help="Hugging Face model commit or branch; resolved commit is recorded"
+    )
     parser.add_argument("--offline", action="store_true", help="use only already-cached checkpoint files")
     parser.add_argument("--timeout-seconds", type=int, default=1800, help="per-model-inference timeout")
     parser.add_argument("--no-glb", action="store_true", help="skip rendering the model-only GLB preview")
-    parser.add_argument("--dry-run", action="store_true", help="validate inputs and print the planned samples without CUDA/model imports")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="validate inputs and print the planned samples without CUDA/model imports"
+    )
     parser.add_argument("--_worker", choices=["resolve", "infer"], help=argparse.SUPPRESS)
     parser.add_argument("--_result", help=argparse.SUPPRESS)
     parser.add_argument("--_snapshot", help=argparse.SUPPRESS)
     parser.add_argument("--_images_json", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args._worker:
-        wargs = argparse.Namespace(revision=args.revision, offline=args.offline, result=args._result, snapshot=args._snapshot, images_json=args._images_json, export_glb=not args.no_glb)
+        wargs = argparse.Namespace(
+            revision=args.revision,
+            offline=args.offline,
+            result=args._result,
+            snapshot=args._snapshot,
+            images_json=args._images_json,
+            export_glb=not args.no_glb,
+        )
         return worker_resolve(wargs) if args._worker == "resolve" else worker_infer(wargs)
     if args.timeout_seconds <= 0:
         parser.error("timeout must be positive")
@@ -360,9 +420,38 @@ def main() -> int:
         if not counts or counts != sorted(set(counts)) or any(count < 2 for count in counts):
             raise ValueError("view counts must be unique, increasing, and >= 2")
         with tempfile.TemporaryDirectory(prefix="video-to-3d-model-smoke-") as temp:
-            images, sources = read_capture(args.capture_root, Path(temp) / "images") if args.capture_root else read_images(args.images_dir)
-            plans = [{"views": count, "source_indices": select_indices(len(images), count, args.start_index, args.sampling_policy)} for count in counts]
-            plan = {"schema": REPORT_SCHEMA, "model_id": MODEL_ID, "revision": args.revision, "input_frames": sources, "cases": plans, "sampling_policy": args.sampling_policy, "start_index": args.start_index, "input_type": "browser_capture" if args.capture_root else "decoded_images", "export_preview_glb": not args.no_glb, "upstream_geometry_accepted_by_rust": False}
+            images, sources = (
+                read_capture(args.capture_root, Path(temp) / "images")
+                if args.capture_root
+                else read_images(args.images_dir)
+            )
+            plans = [
+                {
+                    "views": count,
+                    "source_indices": select_indices(len(images), count, args.start_index, args.sampling_policy),
+                }
+                for count in counts
+            ]
+            plan = {
+                "schema": REPORT_SCHEMA,
+                "model_id": MODEL_ID,
+                "revision": args.revision,
+                "input_frames": sources,
+                "cases": plans,
+                "sampling_policy": args.sampling_policy,
+                "start_index": args.start_index,
+                "input_type": "browser_capture" if args.capture_root else "decoded_images",
+                "inference": {
+                    "memory_efficient_inference": True,
+                    "minibatch_size": 1,
+                    "use_amp": True,
+                    "amp_dtype": "bf16",
+                    "apply_mask": True,
+                    "mask_edges": True,
+                },
+                "export_preview_glb": not args.no_glb,
+                "upstream_geometry_accepted_by_rust": False,
+            }
             if args.dry_run:
                 print(json.dumps(plan, indent=2))
                 return 0
@@ -372,13 +461,29 @@ def main() -> int:
                 if can_reuse_report(root, plan, args.revision):
                     print(f"Existing report reused: {prior}")
                     return 0
-                raise ValueError("output directory is incomplete, differs, or uses a mutable model revision; use a fresh directory")
+                raise ValueError(
+                    "output directory is incomplete, differs, or uses a mutable model revision; use a fresh directory"
+                )
             root.mkdir(parents=True)
             write_json(root / "plan.json", plan)
             gpu = hardware()
-            write_json(root / "hardware.json", {"gpu": gpu, "python": sys.version.split()[0], "video_to_3d_commit": git_head(Path(__file__).resolve().parents[1])})
+            write_json(
+                root / "hardware.json",
+                {
+                    "gpu": gpu,
+                    "python": sys.version.split()[0],
+                    "video_to_3d_commit": git_head(Path(__file__).resolve().parents[1]),
+                },
+            )
             if gpu["nvidia_smi"] == "unavailable":
-                write_json(root / "summary.json", {"plan": plan, "status": "gpu_unavailable", "reason": "nvidia-smi failed; refusing to download the checkpoint without an NVIDIA GPU"})
+                write_json(
+                    root / "summary.json",
+                    {
+                        "plan": plan,
+                        "status": "gpu_unavailable",
+                        "reason": "nvidia-smi failed; refusing to download the checkpoint without an NVIDIA GPU",
+                    },
+                )
                 zip_logs(root)
                 print(f"NVIDIA GPU unavailable; diagnostics: {root / 'share-logs.zip'}")
                 return 1
@@ -392,7 +497,20 @@ def main() -> int:
                     raise ValueError("another video-to-3d GPU smoke run owns the GPU lock") from error
                 resolve_dir = root / "resolve"
                 resolve_dir.mkdir()
-                command = [sys.executable, str(Path(__file__).resolve()), "--images-dir", str(args.images_dir or args.capture_root), "--output-dir", str(root), "--_worker", "resolve", "--_result", str(root / "checkpoint.json"), "--revision", args.revision]
+                command = [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--images-dir",
+                    str(args.images_dir or args.capture_root),
+                    "--output-dir",
+                    str(root),
+                    "--_worker",
+                    "resolve",
+                    "--_result",
+                    str(root / "checkpoint.json"),
+                    "--revision",
+                    args.revision,
+                ]
                 if args.offline:
                     command.append("--offline")
                 try:
@@ -403,7 +521,12 @@ def main() -> int:
                     print(f"Interrupted; logs: {root / 'share-logs.zip'}")
                     return 130
                 if code != 0:
-                    summary = {"plan": plan, "status": "checkpoint_unavailable", "resolve_exit_code": code, "resolve_seconds": elapsed}
+                    summary = {
+                        "plan": plan,
+                        "status": "checkpoint_unavailable",
+                        "resolve_exit_code": code,
+                        "resolve_seconds": elapsed,
+                    }
                     write_json(root / "summary.json", summary)
                     zip_logs(root)
                     print(f"Checkpoint unavailable; logs: {root / 'share-logs.zip'}")
@@ -415,15 +538,34 @@ def main() -> int:
                     directory = root / f"views-{count:02d}"
                     directory.mkdir()
                     manifest = Path(temp) / f"views-{count:02d}.json"
-                    manifest.write_text(json.dumps([str(images[index]) for index in case["source_indices"]]), encoding="utf-8")
-                    command = [sys.executable, str(Path(__file__).resolve()), "--images-dir", str(args.images_dir or args.capture_root), "--output-dir", str(root), "--_worker", "infer", "--_result", str(directory / "result.json"), "--_snapshot", checkpoint["snapshot_path"], "--_images_json", str(manifest)]
+                    manifest.write_text(
+                        json.dumps([str(images[index]) for index in case["source_indices"]]), encoding="utf-8"
+                    )
+                    command = [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--images-dir",
+                        str(args.images_dir or args.capture_root),
+                        "--output-dir",
+                        str(root),
+                        "--_worker",
+                        "infer",
+                        "--_result",
+                        str(directory / "result.json"),
+                        "--_snapshot",
+                        checkpoint["snapshot_path"],
+                        "--_images_json",
+                        str(manifest),
+                    ]
                     if args.no_glb:
                         command.append("--no-glb")
                     # No inference-time network: only the explicit checkpoint resolution may download weights.
                     infer_env = {**env, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
                     print(f"Running {MODEL_ID} with {count} browser views...", flush=True)
                     try:
-                        code, elapsed, gpu_samples = child(command, directory, args.timeout_seconds, infer_env, measure_gpu=True)
+                        code, elapsed, gpu_samples = child(
+                            command, directory, args.timeout_seconds, infer_env, measure_gpu=True
+                        )
                     except KeyboardInterrupt:
                         summary["cases"].append({"views": count, "status": "interrupted"})
                         summary["status"] = "interrupted"
@@ -431,12 +573,23 @@ def main() -> int:
                         zip_logs(root)
                         print(f"Interrupted; logs: {root / 'share-logs.zip'}")
                         return 130
-                    result = json.loads((directory / "result.json").read_text(encoding="utf-8")) if (directory / "result.json").exists() else {"status": "timeout" if code == 124 else "process_failed"}
-                    summary["cases"].append({"views": count, "exit_code": code, "wall_seconds_including_load": elapsed, **gpu_samples, **result})
+                    result_file = directory / "result.json"
+                    result = (
+                        json.loads(result_file.read_text(encoding="utf-8"))
+                        if result_file.exists()
+                        else {"status": "timeout" if code == 124 else "process_failed"}
+                    )
+                    summary["cases"].append(
+                        {"views": count, "exit_code": code, "wall_seconds_including_load": elapsed, **gpu_samples, **result}
+                    )
                     write_json(root / "summary.json", summary)
                     if result["status"] in {"oom", "unavailable", "timeout", "process_failed", "failed", "preview_failed"}:
                         break
-                summary["status"] = "completed" if all(case["status"] == "model_completed" for case in summary["cases"]) else "partial_or_failed"
+                summary["status"] = (
+                    "completed"
+                    if all(case["status"] == "model_completed" for case in summary["cases"])
+                    else "partial_or_failed"
+                )
                 write_json(root / "summary.json", summary)
                 zip_logs(root)
                 print(f"Report: {root / 'summary.json'}")
