@@ -381,7 +381,10 @@ def main() -> int:
     )
     sources.add_argument("--images-dir", type=Path, help="already-decoded local images (never decodes the original video)")
     parser.add_argument("--output-dir", type=Path, required=True, help="fresh or previously completed result directory")
-    parser.add_argument("--view-counts", default="2,4,8,16", help="increasing view counts, comma-separated")
+    parser.add_argument(
+        "--view-counts", default="8",
+        help="view counts, comma-separated and increasing (default: 8; use 8,12 to compare)",
+    )
     parser.add_argument("--start-index", type=int, default=0, help="first usable frame index, default 0")
     parser.add_argument(
         "--sampling-policy",

@@ -322,9 +322,12 @@ To measure the Apache-licensed [MapAnything](https://github.com/facebookresearch
 model on a local NVIDIA GPU, reuse the *actual browser-decoded* `browser-frames.json`
 and `.rgba` files from the capture command above. The script validates each
 frame's byte length and hash, converts opaque RGBA to lossless RGB PNG (without
-decoding the original video again), and tests increasing view counts in **separate
-processes**. By default the views are contiguous prefixes (2, 4, 8 and 16)
-to retain overlap; `--start-index N` shifts that window and
+decoding the original video again), and runs each requested view count in a
+**separate process**. The default is **8 contiguous views**, based on local
+RTX 3060 Ti 8 GB smoke evidence: 16 views completed but logged a CUDA memory
+mapping warning near the device limit. Explicit `--view-counts 8,12` compares
+the current default against an experimental 12-view option without making 12
+the supported default. `--start-index N` shifts the window and
 `--sampling-policy uniform` instead spans the remaining video.
 The model uses upstream `MapAnything.infer` with the upstream
 memory-efficient dense head (`minibatch_size=1`, BF16 AMP), not a custom
@@ -337,7 +340,7 @@ First validate input contracts without any model installation, download or GPU:
 python3 scripts/smoke_mapanything.py \
   --capture-root /fresh/browser-input \
   --output-dir /path/to/gpu-smoke-tum-001 \
-  --view-counts 2,4,8,16 --dry-run
+  --dry-run
 ```
 
 For a real run, use a Python environment with **CUDA-enabled PyTorch** and
@@ -352,8 +355,7 @@ uv pip install --python "$HOME/.cache/video-to-3d/mapanything-venv/bin/python" -
 "$HOME/.cache/video-to-3d/mapanything-venv/bin/python" -c 'import torch; print("CUDA available:", torch.cuda.is_available())'
 "$HOME/.cache/video-to-3d/mapanything-venv/bin/python" scripts/smoke_mapanything.py \
   --capture-root /fresh/browser-input \
-  --output-dir /path/to/gpu-smoke-tum-001 \
-  --view-counts 2,4,8,16
+  --output-dir /path/to/gpu-smoke-tum-001
 ```
 
 For the quickest *hardware-only* tryout, you may replace `--capture-root`
