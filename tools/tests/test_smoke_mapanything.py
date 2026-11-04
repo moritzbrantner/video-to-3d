@@ -18,11 +18,11 @@ smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 
 
-def capture(root: Path, corrupt: bool = False) -> None:
+def capture(root: Path, corrupt: bool = False, frame_count: int = 4) -> None:
     frame_dir = root / "frames"
     frame_dir.mkdir()
     records = []
-    for index in range(4):
+    for index in range(frame_count):
         raw = bytes([index, 40, 90, 255] * 6)
         relative = f"frames/{index:03d}.rgba"
         (root / relative).write_bytes(raw)
@@ -41,6 +41,32 @@ def capture(root: Path, corrupt: bool = False) -> None:
 
 
 class MapAnythingSmokeTests(unittest.TestCase):
+    def test_default_uses_eight_views_and_twelve_is_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "capture"
+            root.mkdir()
+            capture(root, frame_count=12)
+            output = Path(tmp) / "results"
+            command = [
+                sys.executable, str(SCRIPT), "--capture-root", str(root),
+                "--output-dir", str(output), "--dry-run",
+            ]
+            default = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(default.returncode, 0, default.stderr)
+            self.assertEqual(
+                json.loads(default.stdout)["cases"],
+                [{"views": 8, "source_indices": list(range(8))}],
+            )
+            twelve = subprocess.run(
+                command + ["--view-counts", "12"], capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(twelve.returncode, 0, twelve.stderr)
+            self.assertEqual(
+                json.loads(twelve.stdout)["cases"],
+                [{"views": 12, "source_indices": list(range(12))}],
+            )
+            self.assertFalse(output.exists())
+
     def test_sequential_or_uniform_view_sampling_is_deterministic(self):
         self.assertEqual(smoke.select_indices(18, 2), [0, 1])
         self.assertEqual(smoke.select_indices(18, 4, start=3), [3, 4, 5, 6])
