@@ -26,7 +26,17 @@ def capture(root: Path, corrupt: bool = False) -> None:
         raw = bytes([index, 40, 90, 255] * 6)
         relative = f"frames/{index:03d}.rgba"
         (root / relative).write_bytes(raw)
-        records.append({"frame_index": index, "path": relative, "width": 3, "height": 2, "content_hash": smoke.digest(b"corrupted") if corrupt and index == 2 else smoke.digest(raw), "byte_length": len(raw), "presented_time": index / 2})
+        records.append(
+            {
+                "frame_index": index,
+                "path": relative,
+                "width": 3,
+                "height": 2,
+                "content_hash": smoke.digest(b"corrupted") if corrupt and index == 2 else smoke.digest(raw),
+                "byte_length": len(raw),
+                "presented_time": index / 2,
+            }
+        )
     (root / "browser-frames.json").write_text(json.dumps({"schema_version": 1, "frames": records}), encoding="utf-8")
 
 
@@ -87,7 +97,12 @@ class MapAnythingSmokeTests(unittest.TestCase):
         plan = {"cases": [{"views": 2}]}
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            summary = {"plan": plan, "checkpoint_commit": revision, "cases": [{"status": "model_completed"}], "status": "completed"}
+            summary = {
+                "plan": plan,
+                "checkpoint_commit": revision,
+                "cases": [{"status": "model_completed"}],
+                "status": "completed",
+            }
             smoke.write_json(root / "summary.json", summary)
             (root / "share-logs.zip").write_bytes(b"archive")
             self.assertTrue(smoke.can_reuse_report(root, plan, revision))
@@ -103,7 +118,12 @@ class MapAnythingSmokeTests(unittest.TestCase):
             root.mkdir()
             capture(root)
             output = Path(tmp) / "results"
-            with mock.patch.object(sys, "argv", [str(SCRIPT), "--capture-root", str(root), "--output-dir", str(output), "--view-counts", "2,4"]), mock.patch.object(smoke, "hardware", return_value={"nvidia_smi": "unavailable"}), mock.patch.object(smoke, "child") as child:
+            argv = [str(SCRIPT), "--capture-root", str(root), "--output-dir", str(output), "--view-counts", "2,4"]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(smoke, "hardware", return_value={"nvidia_smi": "unavailable"}),
+                mock.patch.object(smoke, "child") as child,
+            ):
                 self.assertEqual(smoke.main(), 1)
             child.assert_not_called()
             summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
@@ -121,6 +141,7 @@ class MapAnythingSmokeTests(unittest.TestCase):
             self.assertGreaterEqual(elapsed, 0)
             self.assertEqual(metrics["nvidia_smi_gpu0_baseline_used_mib"], 101)
             self.assertEqual(metrics["nvidia_smi_gpu0_peak_used_sampled_mib"], 165)
+            self.assertEqual(metrics["nvidia_smi_gpu0_peak_increase_sampled_mib"], 64)
             self.assertIn("ok", (Path(tmp) / "stdout.log").read_text(encoding="utf-8"))
 
     def test_interrupted_checkpoint_resolution_keeps_shareable_evidence(self):
@@ -130,7 +151,13 @@ class MapAnythingSmokeTests(unittest.TestCase):
             capture(root)
             output = Path(tmp) / "results"
             argv = [str(SCRIPT), "--capture-root", str(root), "--output-dir", str(output), "--view-counts", "2,4"]
-            with mock.patch.object(sys, "argv", argv), mock.patch.object(smoke, "hardware", return_value={"nvidia_smi": "RTX 3060 Ti, 8192, 580"}), mock.patch.object(smoke, "child", side_effect=KeyboardInterrupt), mock.patch.dict(smoke.os.environ, {"XDG_CACHE_HOME": str(Path(tmp) / "cache")}), mock.patch.object(smoke, "git_head", return_value="a" * 40):
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(smoke, "hardware", return_value={"nvidia_smi": "RTX 3060 Ti, 8192, 580"}),
+                mock.patch.object(smoke, "child", side_effect=KeyboardInterrupt),
+                mock.patch.dict(smoke.os.environ, {"XDG_CACHE_HOME": str(Path(tmp) / "cache")}),
+                mock.patch.object(smoke, "git_head", return_value="a" * 40),
+            ):
                 self.assertEqual(smoke.main(), 130)
             summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["status"], "interrupted_during_checkpoint_resolution")
@@ -142,10 +169,18 @@ class MapAnythingSmokeTests(unittest.TestCase):
             root.mkdir()
             capture(root)
             output = Path(tmp) / "results"
-            result = subprocess.run([sys.executable, str(SCRIPT), "--capture-root", str(root), "--view-counts", "2,4", "--output-dir", str(output), "--dry-run"], capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--capture-root", str(root), "--view-counts", "2,4", "--output-dir", str(output), "--dry-run"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(result.stdout)
-            self.assertEqual(report["cases"], [{"views": 2, "source_indices": [0, 1]}, {"views": 4, "source_indices": [0, 1, 2, 3]}])
+            self.assertEqual(
+                report["cases"],
+                [{"views": 2, "source_indices": [0, 1]}, {"views": 4, "source_indices": [0, 1, 2, 3]}],
+            )
             self.assertFalse(report["upstream_geometry_accepted_by_rust"])
             self.assertFalse(output.exists())
 
