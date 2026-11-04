@@ -356,6 +356,12 @@ uv pip install --python "$HOME/.cache/video-to-3d/mapanything-venv/bin/python" -
   --view-counts 2,4,8,16
 ```
 
+For the quickest *hardware-only* tryout, you may replace `--capture-root`
+with `--images-dir /path/to/overlapping-png-or-jpeg-frames`; there is no browser
+capture prerequisite in that mode. This explicitly marks the source as
+`decoded_images`, not a product browser-decoding witness. Use the receipt-backed
+browser capture before drawing product-quality or integration conclusions.
+
 Use an actual directory for `/path/to/map-anything` and a **fresh** directory
 for the results. A pinned `--revision` with the exact 40-character checkpoint
 commit supports idempotent reuse of a fully successful run; the default mutable
