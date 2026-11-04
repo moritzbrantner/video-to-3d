@@ -315,3 +315,78 @@ not recognition, Blender editability, physical accuracy or the three-video
 product exit. See [the independent native contract](../docs/specs/real-room-native-acceptance.md)
 for the pinned capture identity and recorded evidence. No reconstruction tuning
 or quality threshold change accompanies this execution evidence.
+
+### Local MapAnything GPU smoke (experimental, #255)
+
+To measure the Apache-licensed [MapAnything](https://github.com/facebookresearch/map-anything)
+model on a local NVIDIA GPU, reuse the *actual browser-decoded* `browser-frames.json`
+and `.rgba` files from the capture command above. The script validates each
+frame's byte length and hash, converts opaque RGBA to lossless RGB PNG (without
+decoding the original video again), and tests increasing view counts in **separate
+processes**. By default the views are contiguous prefixes (2, 4, 8 and 16)
+to retain overlap; `--start-index N` shifts that window and
+`--sampling-policy uniform` instead spans the remaining video.
+The model uses upstream `MapAnything.infer` with the upstream
+memory-efficient dense head (`minibatch_size=1`, BF16 AMP), not a custom
+reconstruction heuristic. The checkpoint is `facebook/map-anything-apache`;
+the exact Hugging Face commit is recorded in every report.
+
+First validate input contracts without any model installation, download or GPU:
+
+```sh
+python3 scripts/smoke_mapanything.py \
+  --capture-root /fresh/browser-input \
+  --output-dir /path/to/gpu-smoke-tum-001 \
+  --view-counts 2,4,8,16 --dry-run
+```
+
+For a real run, use a Python environment with **CUDA-enabled PyTorch** and
+upstream MapAnything installed. For example, using `uv` with an environment
+outside the repository (or adapt these commands to your existing setup):
+
+```sh
+git clone https://github.com/facebookresearch/map-anything.git /path/to/map-anything
+uv venv "$HOME/.cache/video-to-3d/mapanything-venv" --python 3.11
+uv pip install --python "$HOME/.cache/video-to-3d/mapanything-venv/bin/python" torch torchvision
+uv pip install --python "$HOME/.cache/video-to-3d/mapanything-venv/bin/python" -e /path/to/map-anything
+"$HOME/.cache/video-to-3d/mapanything-venv/bin/python" -c 'import torch; print("CUDA available:", torch.cuda.is_available())'
+"$HOME/.cache/video-to-3d/mapanything-venv/bin/python" scripts/smoke_mapanything.py \
+  --capture-root /fresh/browser-input \
+  --output-dir /path/to/gpu-smoke-tum-001 \
+  --view-counts 2,4,8,16
+```
+
+Use an actual directory for `/path/to/map-anything` and a **fresh** directory
+for the results. A pinned `--revision` with the exact 40-character checkpoint
+commit supports idempotent reuse of a fully successful run; the default mutable
+`main` revision always requires a fresh result directory. Subsequent view counts
+stop at the first CUDA OOM or failed case. Inference is network-offline after
+the explicit checkpoint download; use `--offline` to require a cached checkpoint
+for *all* stages. `--no-glb` isolates core inference if exporting a preview fails.
+Models are released by process exit; a Linux file lock prevents simultaneous
+runs of this harness from loading on the same device, although other GPU
+applications and independent schedulers are not yet controlled by that lock.
+
+The results include:
+
+- `plan.json`, `checkpoint.json`, `hardware.json` and `summary.json`: input
+  hashes, source/repo revisions, selected view indices, CUDA/PyTorch versions,
+  per-case time (including model load), torch peak *allocated* versus *reserved*
+  memory, `nvidia-smi` sampled total GPU-0 used memory (0.5 s interval), free
+  device memory, predicted camera matrices and valid point counts. The sampled
+  total includes other GPU processes and may miss short peaks; PyTorch peaks do
+  **not** represent every GPU consumer's total VRAM usage.
+- `views-XX/preview.glb`: upstream textured per-frame surface preview for visual
+  inspection when export succeeds. This is **not** a validated production scene,
+  detected object instances or an independently editable Blender object set.
+- `share-logs.zip`: JSON, stdout and stderr only, **no input frames or GLB**.
+  Review logs for local paths or other sensitive details before uploading them
+  to issue #255. If needed, share a preview GLB separately after reviewing it;
+  preview textures can contain recognizable footage.
+
+The actual GPU inference and reconstruction quality **cannot be checked in
+ordinary CPU-only CI**; CPU tests cover the browser frame receipts, PNG encoding,
+sampling and fail-closed experiment planning. Provider output still must pass
+the Rust `ReconstructionEvidenceView` validation/fusion contract before it may
+affect product scene export. Object segmentation, object-specific reconstruction
+and Blender independent editability remain separate gates in #77/#79.
