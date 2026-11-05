@@ -43,6 +43,9 @@ pub struct GenerationRequest {
     pub label: String,
     pub observation: String,
     pub frame_index: usize,
+    /// Original keyframe timestamp, carried without conversion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_seconds: Option<f64>,
     pub source_frame_hash: ContentHash,
     pub width: u32,
     pub height: u32,
@@ -62,6 +65,8 @@ pub struct GeneratedMesh {
     pub content_hash: ContentHash,
     pub vertices: u64,
     pub triangles: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_evidence: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -138,6 +143,15 @@ impl ObjectGenerationArtifact {
                     request.request_id
                 ));
             }
+            if request
+                .timestamp_seconds
+                .is_some_and(|time| !time.is_finite() || time < 0.0)
+            {
+                return Err(format!(
+                    "generation request {} has an invalid source timestamp",
+                    request.request_id
+                ));
+            }
             let [x0, y0, x1, y1] = request.crop;
             if x0 >= x1 || y0 >= y1 || x1 > request.width || y1 > request.height {
                 return Err(format!(
@@ -208,6 +222,7 @@ pub fn plan_generation(
             label: package.label.clone(),
             observation: view.observation.clone(),
             frame_index: view.frame_index,
+            timestamp_seconds: None,
             source_frame_hash: frame.content_hash.clone(),
             width: frame.width,
             height: frame.height,
@@ -365,6 +380,7 @@ mod tests {
             content_hash: ContentHash::of_bytes(b"glb"),
             vertices: 3,
             triangles: 1,
+            provider_evidence: None,
         });
         artifact.validate().unwrap();
         artifact.status = GenerationStatus::Unavailable;

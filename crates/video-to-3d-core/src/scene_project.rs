@@ -249,6 +249,8 @@ impl OperationKind {
                 GenerativeCompletion,
                 TextureBake,
                 SplatOptimization,
+                ObjectGeneration,
+                ObjectPlacement,
             ],
         }
     }
@@ -264,7 +266,8 @@ impl OperationKind {
             // 3: overlap seams are clipped with derived-vertex lineage (#137).
             Self::SurfaceMesh => 3,
             // 2: native classic stages and canonical observed-environment assembly.
-            Self::SparseReconstruction | Self::DenseReconstruction | Self::SceneAssembly => 2,
+            Self::SparseReconstruction | Self::DenseReconstruction | Self::ObjectPlacement => 2,
+            Self::SceneAssembly => 3,
             _ => 1,
         }
     }

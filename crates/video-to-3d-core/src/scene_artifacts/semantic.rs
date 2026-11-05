@@ -1011,6 +1011,8 @@ struct GenerationResult {
     vertices: Option<u64>,
     #[serde(default)]
     triangles: Option<u64>,
+    #[serde(default)]
+    evidence: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1099,7 +1101,7 @@ impl BuiltInExecutor {
         let references = crate::object_references::ObjectReferencesArtifact::from_json(
             &self.document(references_record, cancel)?,
         )?;
-        let plans = plan_generation(&inventory, &references, (&provider.id, &revision));
+        let mut plans = plan_generation(&inventory, &references, (&provider.id, &revision));
         let mut artifact = ObjectGenerationArtifact {
             schema_version: OBJECT_GENERATION_SCHEMA_VERSION,
             status: GenerationStatus::Available,
@@ -1117,17 +1119,24 @@ impl BuiltInExecutor {
         let mut available = true;
         if !plans.is_empty() {
             let mut entries = Vec::new();
-            for plan in &plans {
+            for plan in &mut plans {
                 let keyframe = keyframes
                     .frames
                     .iter()
                     .find(|frame| frame.frame_index == plan.frame_index)
                     .ok_or("generation frame is not a keyframe")?;
+                plan.timestamp_seconds = Some(keyframe.timestamp_seconds);
                 let source = fs::canonicalize(keyframe.pixels.resolve(&self.root))
                     .map_err(|error| error.to_string())?;
                 entries.push(serde_json::json!({
                     "request_id": plan.request_id,
                     "label": plan.label,
+                    "object": plan.object,
+                    "observed_points": plan.observed_points,
+                    "frame_index": plan.frame_index,
+                    "timestamp_seconds": plan.timestamp_seconds,
+                    "source_frame_hash": plan.source_frame_hash,
+                    "mask_hash": plan.mask_hash,
                     "width": plan.width,
                     "height": plan.height,
                     "rgba_path": source,
@@ -1232,6 +1241,7 @@ impl BuiltInExecutor {
                                         content_hash: ContentHash::of_bytes(&bytes),
                                         vertices: result.vertices.unwrap_or(0),
                                         triangles: result.triangles.unwrap_or(0),
+                                        provider_evidence: result.evidence.clone(),
                                     }),
                                     None,
                                 )
@@ -1299,53 +1309,42 @@ impl BuiltInExecutor {
     }
 }
 
-/// POSITION vertices of the first mesh primitive of a binary glTF.
+/// Read the same local mesh frame that scene export will use.
+#[cfg(not(target_arch = "wasm32"))]
 fn glb_positions(bytes: &[u8]) -> Result<Vec<[f64; 3]>, String> {
-    if bytes.len() < 20 || &bytes[..4] != b"glTF" {
-        return Err("not a binary glTF".into());
+    crate::scene_export::supported_source_layout(bytes).map_err(|error| error.to_string())?;
+    let source = gltf::Gltf::from_slice(bytes).map_err(|error| error.to_string())?;
+    let blob = source
+        .blob
+        .as_deref()
+        .ok_or("generated GLB has no embedded buffer")?;
+    let mesh = source.meshes().next().ok_or("generated GLB has no mesh")?;
+    if source.meshes().len() != 1 {
+        return Err("generated GLB must contain one mesh group".into());
     }
-    let chunk = |offset: usize| -> Result<(usize, &[u8]), String> {
-        let length = bytes
-            .get(offset..offset + 4)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
-            .ok_or("binary glTF chunk header is truncated")?;
-        let data = bytes
-            .get(offset + 8..offset + 8 + length)
-            .ok_or("binary glTF chunk is truncated")?;
-        Ok((offset + 8 + length, data))
-    };
-    let (next, json) = chunk(12)?;
-    let json: serde_json::Value =
-        serde_json::from_slice(json).map_err(|error| format!("binary glTF JSON chunk: {error}"))?;
-    let (_, binary) = chunk(next)?;
-    let accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
-        .as_u64()
-        .ok_or("binary glTF has no POSITION accessor")?;
-    let accessor = &json["accessors"][accessor as usize];
-    if accessor["componentType"] != 5126 || accessor["type"] != "VEC3" {
-        return Err("POSITION accessor is not float VEC3".into());
+    let mut vertices = Vec::new();
+    for primitive in mesh.primitives() {
+        if primitive.mode() != gltf::mesh::Mode::Triangles {
+            return Err("generated mesh primitive must contain triangles".into());
+        }
+        let reader = primitive.reader(|buffer| match buffer.source() {
+            gltf::buffer::Source::Bin => Some(blob),
+            gltf::buffer::Source::Uri(_) => None,
+        });
+        let positions = reader
+            .read_positions()
+            .ok_or("generated GLB has unreadable positions")?;
+        vertices.extend(positions.map(|position| position.map(f64::from)));
     }
-    let count = accessor["count"].as_u64().ok_or("POSITION has no count")? as usize;
-    let view = &json["bufferViews"][accessor["bufferView"]
-        .as_u64()
-        .ok_or("POSITION has no buffer view")? as usize];
-    let start = view["byteOffset"].as_u64().unwrap_or(0) as usize
-        + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
-    let stride = view["byteStride"].as_u64().unwrap_or(12) as usize;
-    (0..count)
-        .map(|index| {
-            let at = start + index * stride;
-            let value = |k: usize| -> Result<f64, String> {
-                bytes_f32(binary, at + 4 * k).ok_or_else(|| "POSITION data is truncated".into())
-            };
-            Ok([value(0)?, value(1)?, value(2)?])
-        })
-        .collect()
+    if vertices.is_empty() || vertices.iter().flatten().any(|value| !value.is_finite()) {
+        return Err("generated GLB needs finite mesh positions".into());
+    }
+    Ok(vertices)
 }
 
-fn bytes_f32(bytes: &[u8], at: usize) -> Option<f64> {
-    let value = f32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?);
-    value.is_finite().then_some(f64::from(value))
+#[cfg(target_arch = "wasm32")]
+fn glb_positions(_: &[u8]) -> Result<Vec<[f64; 3]>, String> {
+    Err("generated GLB placement requires the native mesh reader".into())
 }
 
 impl BuiltInExecutor {

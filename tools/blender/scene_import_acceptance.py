@@ -53,6 +53,7 @@ def arguments():
     parser.add_argument("--expected", required=True)
     parser.add_argument("--report", required=True)
     parser.add_argument("--render")
+    parser.add_argument("--save-blend")
     return parser.parse_args(argv)
 
 
@@ -208,7 +209,8 @@ def main():
             )
             report.check(
                 f"{element}:material",
-                any(slot.material for slot in obj.material_slots),
+                any(slot.material for slot in obj.material_slots)
+                or (expected.get("allow_vertex_color_material", False) and bool(obj.data.color_attributes)),
                 ", ".join(slot.material.name for slot in obj.material_slots if slot.material),
             )
             truth = expected.get("bounds_blender_m", {}).get(element)
@@ -275,6 +277,8 @@ def main():
 
 
 def finish(report, output, args):
+    if report.passed and args.save_blend:
+        bpy.ops.wm.save_as_mainfile(filepath=str(Path(args.save_blend).resolve()))
     output["checks"] = report.checks
     output["passed"] = report.passed
     Path(args.report).write_text(json.dumps(output, indent=2) + "\n")
