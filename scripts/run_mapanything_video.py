@@ -13,7 +13,6 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -141,23 +140,6 @@ def prepare_frames(video: Path, case_root: Path, args: argparse.Namespace, min_f
     return frame_dir
 
 
-def result_directory(root: Path, frames: Path, views: str, revision: str) -> Path:
-    immutable = re.fullmatch(r"[0-9a-f]{40}", revision) is not None
-    run_root = root / "runs" / frames.name / f"views-{views.replace(',', '-')}-rev-{revision[:12]}"
-    for index in range(1, 1000):
-        target = run_root / f"run-{index:03d}"
-        if not target.exists():
-            return target
-        if immutable:
-            try:
-                summary = json.loads((target / "summary.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if summary.get("status") == "completed" and (target / "share-logs.zip").is_file():
-                return target  # The smoke harness independently verifies the exact plan before reuse.
-    raise ValueError(f"too many existing runs under {run_root}")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video", help="one YouTube/video URL or a local video file")
@@ -212,11 +194,12 @@ def main() -> int:
             invoke(["bash", str(ROOT / "scripts/setup_mapanything.sh")])
         if not py.is_file():
             raise ValueError("MapAnything Python is missing; run ./scripts/setup_mapanything.sh")
-        output = result_directory(case_root, frames, args.view_counts, args.revision)
+        views = "-".join(map(str, counts))
+        output = case_root / "runs" / frames.name / f"views-{views}-rev-{args.revision[:12]}"
         print(f"Running MapAnything: {frames} -> {output}", flush=True)
         command = [
             str(py), str(SMOKE), "--images-dir", str(frames), "--output-dir", str(output),
-            "--view-counts", args.view_counts, "--revision", args.revision,
+            "--numbered-runs", "--view-counts", args.view_counts, "--revision", args.revision,
         ]
         if args.offline:
             command.append("--offline")

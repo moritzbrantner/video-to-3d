@@ -94,7 +94,7 @@ class MapAnythingVideoScriptsTests(unittest.TestCase):
             self.assertEqual(len(list((root / "results").glob("*/frames-*/frames.json"))), 1)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
-    def test_completed_pinned_run_reuses_output_but_new_frame_settings_do_not(self):
+    def test_runner_uses_same_numbered_run_series_only_for_same_frame_settings(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             video = root / "fixture.mp4"
@@ -105,10 +105,6 @@ class MapAnythingVideoScriptsTests(unittest.TestCase):
             def fake_run(command, *args, **kwargs):
                 if len(command) > 1 and command[1] == str(runner.SMOKE):
                     calls.append(command)
-                    output = Path(command[command.index("--output-dir") + 1])
-                    output.mkdir(parents=True, exist_ok=True)
-                    (output / "summary.json").write_text('{"status":"completed"}', encoding="utf-8")
-                    (output / "share-logs.zip").write_bytes(b"logs")
                     return subprocess.CompletedProcess(command, 0)
                 return actual_run(command, *args, **kwargs)
 
@@ -126,7 +122,7 @@ class MapAnythingVideoScriptsTests(unittest.TestCase):
             outputs = [command[command.index("--output-dir") + 1] for command in calls]
             self.assertEqual(outputs[0], outputs[1])
             self.assertNotEqual(outputs[0], outputs[2])
-            self.assertTrue(all("--revision" in command for command in calls))
+            self.assertTrue(all("--revision" in command and "--numbered-runs" in command for command in calls))
 
     @unittest.skipUnless(subprocess.run(["bash", "-c", "command -v ffmpeg && command -v ffprobe"],
                                        capture_output=True, check=False).returncode == 0, "FFmpeg unavailable")
