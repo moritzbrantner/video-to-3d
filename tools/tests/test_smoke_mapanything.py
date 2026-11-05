@@ -138,6 +138,40 @@ class MapAnythingSmokeTests(unittest.TestCase):
             smoke.write_json(root / "summary.json", summary)
             self.assertFalse(smoke.can_reuse_report(root, plan, revision))
 
+    def test_numbered_runs_skip_stale_reports_and_reuse_matching_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "capture"
+            root.mkdir()
+            capture(root)
+            output = Path(tmp) / "results"
+            revision = "a" * 40
+            argv = [
+                str(SCRIPT), "--capture-root", str(root), "--output-dir", str(output),
+                "--numbered-runs", "--view-counts", "2", "--revision", revision,
+            ]
+            stale = output / "run-001"
+            stale.mkdir(parents=True)
+            stale_summary = {"plan": {}, "status": "completed"}
+            smoke.write_json(stale / "summary.json", stale_summary)
+            (stale / "share-logs.zip").touch()
+            fresh = output / "run-002"
+
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(smoke, "hardware", return_value={"nvidia_smi": "unavailable"}) as hardware,
+            ):
+                self.assertEqual(smoke.main(), 1)
+                summary = json.loads((fresh / "summary.json").read_text(encoding="utf-8"))
+                summary.update(
+                    status="completed", checkpoint_commit=revision,
+                    cases=[{"status": "model_completed"}],
+                )
+                smoke.write_json(fresh / "summary.json", summary)
+                self.assertEqual(smoke.main(), 0)
+                hardware.assert_called_once()
+            self.assertEqual(json.loads((stale / "summary.json").read_text()), stale_summary)
+            self.assertFalse((output / "run-003").exists())
+
     def test_missing_nvidia_gpu_stops_before_model_download(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "capture"

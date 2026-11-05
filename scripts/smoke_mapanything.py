@@ -373,6 +373,19 @@ def can_reuse_report(root: Path, plan: dict, revision: str) -> bool:
     )
 
 
+def select_run_directory(series: Path, plan: dict, revision: str) -> tuple[Path, bool]:
+    for index in range(1, 1000):
+        root = series / f"run-{index:03d}"
+        try:
+            root.mkdir(parents=True)
+        except FileExistsError:
+            if can_reuse_report(root, plan, revision):
+                return root, True
+        else:
+            return root, False
+    raise ValueError(f"too many existing runs under {series}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sources = parser.add_mutually_exclusive_group(required=True)
@@ -381,6 +394,7 @@ def main() -> int:
     )
     sources.add_argument("--images-dir", type=Path, help="already-decoded local images (never decodes the original video)")
     parser.add_argument("--output-dir", type=Path, required=True, help="fresh or previously completed result directory")
+    parser.add_argument("--numbered-runs", action="store_true", help="store runs in numbered subdirectories of --output-dir")
     parser.add_argument(
         "--view-counts", default="8",
         help="view counts, comma-separated and increasing (default: 8; use 8,12 to compare)",
@@ -459,15 +473,19 @@ def main() -> int:
                 print(json.dumps(plan, indent=2))
                 return 0
             root = args.output_dir.resolve()
-            if root.exists():
-                prior = root / "summary.json"
-                if can_reuse_report(root, plan, args.revision):
-                    print(f"Existing report reused: {prior}")
-                    return 0
-                raise ValueError(
-                    "output directory is incomplete, differs, or uses a mutable model revision; use a fresh directory"
-                )
-            root.mkdir(parents=True)
+            if args.numbered_runs:
+                root, reuse = select_run_directory(root, plan, args.revision)
+            else:
+                reuse = root.exists() and can_reuse_report(root, plan, args.revision)
+                if root.exists() and not reuse:
+                    raise ValueError(
+                        "output directory is incomplete, differs, or uses a mutable model revision; use a fresh directory"
+                    )
+                if not reuse:
+                    root.mkdir(parents=True)
+            if reuse:
+                print(f"Existing report reused: {root / 'summary.json'}")
+                return 0
             write_json(root / "plan.json", plan)
             gpu = hardware()
             write_json(
