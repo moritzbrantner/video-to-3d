@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Local Grounding DINO + SAM 2.1 semantic inventory sidecar (protocol video-to-3d-semantic-sidecar/1)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "torch==2.9.1",
+  "torch==2.11.0+cu128",
   "torchvision==0.24.1",
   "transformers==4.57.6",
   "numpy>=2.1,<3",
