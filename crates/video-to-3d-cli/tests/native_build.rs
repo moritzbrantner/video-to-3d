@@ -684,3 +684,176 @@ fn actual_opaque_revision_one_receipt_is_rebuilt_before_downstream_dispatch() {
 
 #[path = "acceptance/overlap_lineage_store.rs"]
 mod overlap_lineage_acceptance;
+
+#[test]
+fn native_assembly_exports_a_validated_candidate_as_its_own_mesh() {
+    // Synthetic stage artifacts exercise the assembly/export seam only.
+    let project = Project::new("editable-candidate", true);
+    project.assert_complete();
+    let mesh = fs::read(
+        project
+            .root
+            .join("artifacts/native/assemble/environment.glb"),
+    )
+    .unwrap();
+    fs::create_dir(project.root.join("test-inputs")).unwrap();
+    fs::write(project.root.join("test-inputs/candidate.glb"), &mesh).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(project.manifest()).unwrap()).unwrap();
+    manifest["quality_mode"] = json!("standard");
+    manifest["provider_policy"]["providers"] = json!([
+        {"id":"test-semantic","location":"local","capabilities":["semantic_inventory"],"revision":"fixture"},
+        {"id":"test-generator","location":"local","capabilities":["object_generation"],"revision":"fixture"}
+    ]);
+    let operations = manifest["operations"].as_array_mut().unwrap();
+    let assembly = operations
+        .iter_mut()
+        .find(|op| op["id"] == "assemble")
+        .unwrap();
+    assembly["inputs"].as_array_mut().unwrap().extend([
+        json!({"operation":"generation"}),
+        json!({"operation":"placement"}),
+    ]);
+    operations.extend([
+        json!({"id":"semantic","kind":"semantic_inventory","provider":"test-semantic","inputs":[{"operation":"ingest"}]}),
+        json!({"id":"objects","kind":"object_identity","inputs":[{"operation":"semantic"},{"operation":"sparse"},{"operation":"mesh"}]}),
+        json!({"id":"masks","kind":"object_masks","inputs":[{"operation":"semantic"},{"operation":"objects"},{"operation":"sparse"},{"operation":"mesh"}]}),
+        json!({"id":"references","kind":"object_references","inputs":[{"operation":"semantic"},{"operation":"objects"},{"operation":"masks"},{"operation":"sparse"},{"operation":"mesh"}]}),
+        json!({"id":"generation","kind":"object_generation","provider":"test-generator","inputs":[{"operation":"ingest"},{"operation":"semantic"},{"operation":"references"}]}),
+        json!({"id":"placement","kind":"object_placement","inputs":[{"operation":"semantic"},{"operation":"objects"},{"operation":"references"},{"operation":"generation"},{"operation":"sparse"},{"operation":"mesh"}]}),
+    ]);
+    manifest["exports"] = json!([{"id":"blender","format":"glb","path":"exports/scene.glb",
+        "includes":["assembled_scene"]}]);
+    fs::write(project.manifest(), manifest.to_string()).unwrap();
+    let (store, mut manifest) = project.open();
+    let fixture = CandidateFixture::new(project.root.clone(), &mesh);
+    let report = store
+        .build(
+            &mut manifest,
+            &fixture,
+            RunOptions::default(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(
+        report.run.states["placement"].is_complete(),
+        "{:?}",
+        report.run.states
+    );
+    project.assert_complete();
+    let export = |mode: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_video-to-3d"))
+            .arg("export")
+            .arg(project.manifest())
+            .args(["--target", "glb", "--scene-mode", mode])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(project.root.join("exports/scene.glb")).unwrap();
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        serde_json::from_slice::<Value>(&bytes[20..20 + json_len]).unwrap()
+    };
+    let completed = export("completed");
+    let nodes = completed["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2);
+    let environment = nodes
+        .iter()
+        .find(|node| node["name"] == "environment")
+        .unwrap();
+    let die = nodes
+        .iter()
+        .find(|node| node["name"] == "tracked-die")
+        .unwrap();
+    assert!(environment["mesh"].is_u64() && die["mesh"].is_u64());
+    assert_ne!(environment["mesh"], die["mesh"]);
+    assert_eq!(completed["scenes"][0]["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(die["translation"], json!([1.0, -2.0, -3.0]));
+    assert_eq!(die["scale"], json!([0.5, 0.5, 0.5]));
+    assert_eq!(die["rotation"], json!([1.0, 0.0, 0.0, 0.0]));
+    assert_eq!(die["extras"]["role"], "editable_object");
+    assert_eq!(
+        die["extras"]["provenance"]["visual"],
+        json!(["generative_completion"])
+    );
+    let observed = export("observed");
+    assert_eq!(observed["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(observed["nodes"][0]["name"], "environment");
+}
+
+struct CandidateFixture {
+    root: PathBuf,
+    generation: String,
+    placement: String,
+}
+
+impl CandidateFixture {
+    fn new(root: PathBuf, mesh: &[u8]) -> Self {
+        let placeholder = ContentHash::of_bytes(b"synthetic stage input");
+        let generation = json!({
+            "schema_version":1, "status":"available",
+            "provider":{"id":"test-generator","revision":"fixture","models":[],"runtime":null},
+            "object_references":placeholder,
+            "objects":[{
+                "request":{"request_id":"gen-die","object":"tracked-die","label":"yellow die",
+                    "observation":"obs-1","frame_index":0,"timestamp_seconds":0.125,
+                    "source_frame_hash":placeholder,"width":1,"height":1,"crop":[0,0,1,1],
+                    "mask_hash":placeholder,"mask":{"encoding":"rle_row_major","width":1,"height":1,"counts":[0,1]},
+                    "observed_points":3},
+                "classification":"generative_candidate",
+                "output":{"path":"test-inputs/candidate.glb","content_hash":ContentHash::of_bytes(mesh),
+                    "vertices":3,"triangles":1}
+            }]
+        }).to_string();
+        let candidate = json!({
+            "object":"tracked-die","label":"yellow die","generation_request":"gen-die",
+            "rotation":[1,0,0,0,1,0,0,0,1],"scale":0.5,"translation":[1,2,3],
+            "scale_source":"observed","observed_points":3,"reference_frame":0,
+            "contact":"no_contact_evidence","support":null,"contact_gap":null,
+            "reason":"CPU assembly fixture",
+            "validation":{"verdict":"accepted","needs_review":false,"views":[],"reason":"fixture verdict"}
+        });
+        let mut rejected = candidate.clone();
+        rejected["object"] = json!("rejected-die");
+        rejected["validation"]["verdict"] = json!("contradicted");
+        rejected["validation"]["needs_review"] = json!(true);
+        let placement = json!({
+            "schema_version":video_to_3d_core::object_placement::OBJECT_PLACEMENT_SCHEMA_VERSION,"status":"available","object_generation":ContentHash::of_bytes(generation.as_bytes()),
+            "up":[0,-1,0],"up_source":"camera_up","supports":[],"placements":[candidate,rejected],
+            "unplaced":[],"metric_scale_hint":null,"metric_hint_labels":[]
+        }).to_string();
+        Self {
+            root,
+            generation,
+            placement,
+        }
+    }
+}
+
+impl OperationExecutor for CandidateFixture {
+    fn execute(&self, request: &OperationRequest, cancel: &CancellationToken) -> AttemptOutcome {
+        let document = match request.operation.id.as_str() {
+            "generation" => &self.generation,
+            "placement" => &self.placement,
+            // The intermediate semantics are outside this assembly test.
+            "semantic" | "objects" | "masks" | "references" => "{}",
+            "assemble" => {
+                return AttemptOutcome::Unsupported("assembly left to the real CLI".into())
+            }
+            _ => {
+                return BuiltInExecutor::for_project(&self.root, self.root.join("project.json"))
+                    .execute(request, cancel)
+            }
+        };
+        let path = ProjectPath::new(format!("test-inputs/{}.json", request.operation.id)).unwrap();
+        fs::write(path.resolve(&self.root), document).unwrap();
+        AttemptOutcome::Succeeded(ProducedArtifact::new(
+            path,
+            ContentHash::of_bytes(document.as_bytes()),
+            Reproducibility::Deterministic,
+        ))
+    }
+}

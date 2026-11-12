@@ -151,21 +151,25 @@ impl OperationExecutor for Import<'_> {
     }
 }
 
-struct Temporary(PathBuf);
+struct Temporary(PathBuf, bool);
 impl Drop for Temporary {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        if !self.1 {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 }
 
-fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
+fn project(document: &Value, pixels: &[Vec<u8>], output: Option<&Path>) -> Temporary {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
+    let temporary = std::env::temp_dir().join(format!(
         "objects-real-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::SeqCst)
     ));
-    fs::create_dir_all(root.join("media")).unwrap();
+    let root = output.map_or(temporary, |path| path.join("project"));
+    fs::create_dir(&root).expect("a fresh project directory");
+    fs::create_dir(root.join("media")).unwrap();
     // The capture metadata stands in as the media identity; no native decoding.
     let source = fs::read(
         PathBuf::from(std::env::var_os("VIDEO_TO_3D_REAL_ROOM_INPUT").unwrap())
@@ -173,7 +177,7 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
     )
     .unwrap();
     fs::write(root.join("media/browser-frames.json"), &source).unwrap();
-    fs::write(root.join("project.json"), json!({
+    let mut manifest = json!({
         "schema_version": 1, "project_id": "approved-real-room-objects", "quality_mode": "standard",
         "inputs": [{"id": "clip", "path": "media/browser-frames.json",
                     "content_hash": ContentHash::of_bytes(&source).as_str(), "byte_length": source.len()}],
@@ -205,7 +209,30 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
                         {"operation": "generated"}, {"operation": "sparse"}, {"operation": "mesh"}]}
         ],
         "requested_outputs": ["assembled_scene", "object_identity", "object_masks", "object_references", "clean_plates", "generated_objects", "object_placements"]
-    }).to_string()).unwrap();
+    });
+    if output.is_some() {
+        let operations = manifest["operations"].as_array_mut().unwrap();
+        operations.retain(|operation| operation["id"] != "plates");
+        let assembly = operations
+            .iter_mut()
+            .find(|op| op["id"] == "assemble")
+            .unwrap();
+        assembly["inputs"].as_array_mut().unwrap().extend([
+            json!({"operation":"generated"}),
+            json!({"operation":"placement"}),
+        ]);
+        manifest["requested_outputs"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|kind| kind != "clean_plates");
+        manifest["exports"] = json!([{"id":"blender","format":"glb","path":"exports/scene.glb",
+            "includes":["assembled_scene"]}]);
+        manifest["provider_policy"]["providers"][2]["revision"] = json!(std::env::var(
+            "VIDEO_TO_3D_TRIPOSR_BUNDLE_SHA256"
+        )
+        .expect("pin the model bundle"));
+    }
+    fs::write(root.join("project.json"), manifest.to_string()).unwrap();
     let (store, mut manifest) = ProjectStore::open(&root.join("project.json")).unwrap();
     let report = store
         .build(
@@ -220,7 +247,7 @@ fn project(document: &Value, pixels: &[Vec<u8>]) -> Temporary {
         )
         .unwrap();
     assert!(report.run.states["ingest"].is_complete());
-    Temporary(root)
+    Temporary(root, output.is_some())
 }
 
 fn build(root: &Path, hide_gpu: bool) -> (i32, Value, String) {
@@ -283,10 +310,52 @@ fn read(root: &Path, id: &str) -> String {
 #[test]
 #[ignore = "explicit #221 real-video tier: approved TUM capture and a local CUDA GPU required"]
 fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
+    check_real_yellow_die(None);
+}
+
+#[test]
+#[ignore = "explicit #255 tier: approved TUM capture, pinned TripoSR runtime and Blender"]
+fn real_yellow_die_exports_an_independent_blender_mesh() {
+    let output = PathBuf::from(
+        std::env::var_os("VIDEO_TO_3D_OBJECT_EVIDENCE").expect("fresh output directory"),
+    );
+    assert!(output.is_absolute());
+    fs::create_dir(&output).expect("fresh output directory");
+    report("earliest_incomplete_stage", json!("approved_capture"));
+    check_real_yellow_die(Some(&output));
+}
+
+fn check_real_yellow_die(output: Option<&Path>) {
     let samples = die_samples();
     let (document, pixels) = capture();
-    let root = project(&document, &pixels);
+    let root = project(&document, &pixels, output);
     let (code, result, stderr) = build(&root.0, false);
+    report("build", result.clone());
+    if output.is_some() {
+        let order = [
+            "ingest",
+            "sparse",
+            "dense",
+            "mesh",
+            "semantic",
+            "objects",
+            "masks",
+            "references",
+            "generated",
+            "placement",
+            "assemble",
+        ];
+        let first = order.into_iter().find(|id| {
+            !matches!(
+                result["operations"][id]["state"].as_str(),
+                Some("succeeded" | "reused")
+            )
+        });
+        report(
+            "earliest_incomplete_stage",
+            json!(first.unwrap_or("object_evidence")),
+        );
+    }
     let (_, semantic_value) = semantic(&root.0);
     let identities = ObjectIdentityArtifact::from_json(&read(&root.0, "objects")).unwrap();
     let masks = ObjectMasksArtifact::from_json(&read(&root.0, "masks")).unwrap();
@@ -384,44 +453,49 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
     for view in std::iter::once(&package.primary).chain(&package.additional) {
         assert!(best.observations.contains(&view.observation));
     }
-    // #64: the die's primary view gets a LaMa clean plate; pixels outside the
-    // removal mask are unchanged and the original keyframe stays untouched.
-    assert_eq!(
-        result["operations"]["plates"]["state"], "succeeded",
-        "{stderr}"
-    );
-    let plates = CleanPlateArtifact::from_json(&read(&root.0, "plates")).unwrap();
-    let die_frame = package.primary.frame_index;
-    let plate = plates
-        .plates
-        .iter()
-        .find(|plate| {
-            plate.request.frame_index == die_frame && plate.request.objects.contains(&best.id)
-        })
-        .expect("a clean plate removing the die");
-    let output = plate.output.as_ref().expect("the edit succeeded");
-    let edited = fs::read(output.path.resolve(&root.0)).unwrap();
-    let original = &pixels[die_frame];
-    let mut inside_changed = 0;
-    let mut position = 0usize;
-    for (run_index, run) in plate.request.removal_mask.counts.iter().enumerate() {
-        for pixel in position..position + *run as usize {
-            let same = edited[pixel * 4..pixel * 4 + 4] == original[pixel * 4..pixel * 4 + 4];
-            if run_index % 2 == 0 {
-                assert!(same, "pixel {pixel} outside the mask changed");
-            } else if !same {
-                inside_changed += 1;
+    if output.is_none() {
+        // #64: the die's primary view gets a LaMa clean plate; pixels outside the
+        // removal mask are unchanged and the original keyframe stays untouched.
+        assert_eq!(
+            result["operations"]["plates"]["state"], "succeeded",
+            "{stderr}"
+        );
+        let plates = CleanPlateArtifact::from_json(&read(&root.0, "plates")).unwrap();
+        let die_frame = package.primary.frame_index;
+        let plate = plates
+            .plates
+            .iter()
+            .find(|plate| {
+                plate.request.frame_index == die_frame && plate.request.objects.contains(&best.id)
+            })
+            .expect("a clean plate removing the die");
+        let output = plate.output.as_ref().expect("the edit succeeded");
+        let edited = fs::read(output.path.resolve(&root.0)).unwrap();
+        let original = &pixels[die_frame];
+        let mut inside_changed = 0;
+        let mut position = 0usize;
+        for (run_index, run) in plate.request.removal_mask.counts.iter().enumerate() {
+            for pixel in position..position + *run as usize {
+                let same = edited[pixel * 4..pixel * 4 + 4] == original[pixel * 4..pixel * 4 + 4];
+                if run_index % 2 == 0 {
+                    assert!(same, "pixel {pixel} outside the mask changed");
+                } else if !same {
+                    inside_changed += 1;
+                }
             }
+            position += *run as usize;
         }
-        position += *run as usize;
-    }
-    assert!(inside_changed > 0, "the die region was inpainted");
-    report(
-        "clean_plate",
-        json!({"frame": die_frame, "edit_id": plate.request.edit_id, "objects": plate.request.objects,
+        assert!(inside_changed > 0, "the die region was inpainted");
+        report(
+            "clean_plate",
+            json!({"frame": die_frame, "edit_id": plate.request.edit_id, "objects": plate.request.objects,
                "inside_changed_pixels": inside_changed, "plates": plates.plates.len(),
                "provider": plates.provider, "output": output.path.as_str()}),
-    );
+        );
+    }
+    if output.is_some() {
+        report("earliest_incomplete_stage", json!("model_inference"));
+    }
     // #68: TripoSR generates a candidate mesh for the die from its primary view.
     assert_eq!(
         result["operations"]["generated"]["state"], "succeeded",
@@ -446,8 +520,49 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
                "vertices": mesh.vertices, "triangles": mesh.triangles, "glb_bytes": glb.len(),
                "generated": generated.objects.iter().filter(|o| o.output.is_some()).count(),
                "failed": generated.objects.iter().filter(|o| o.output.is_none()).count(),
-               "provider": generated.provider}),
+               "provider": generated.provider, "conditioning": die.request,
+               "provider_evidence": mesh.provider_evidence}),
     );
+    if output.is_some() {
+        assert_eq!(
+            die.request.timestamp_seconds.unwrap().to_bits(),
+            document["frames"][die.request.frame_index]["presented_time"]
+                .as_f64()
+                .unwrap()
+                .to_bits()
+        );
+        assert!(samples.contains(&(die.request.frame_index as u64)));
+        assert_eq!(
+            die.request.source_frame_hash.as_str(),
+            document["frames"][die.request.frame_index]["content_hash"]
+        );
+        let runtime = generated
+            .provider
+            .runtime
+            .as_ref()
+            .expect("CUDA runtime evidence");
+        assert_eq!(runtime.device, "cuda");
+        assert!(runtime
+            .device_name
+            .as_deref()
+            .is_some_and(|name| name.contains("3060 Ti")));
+        let evidence = mesh
+            .provider_evidence
+            .as_ref()
+            .expect("Asset Tooling operation evidence");
+        assert_eq!(evidence["observations"]["reproducibility"], "approximate");
+        assert_eq!(
+            evidence["output"]["sha256"],
+            &mesh.content_hash.as_str()["sha256:".len()..]
+        );
+        assert!(
+            evidence["sampled_device_memory"]["peak_mib"]
+                .as_u64()
+                .is_some_and(|peak| peak > 0 && peak <= 8192),
+            "{evidence:#}"
+        );
+        report("earliest_incomplete_stage", json!("object_placement"));
+    }
     // #69: the die candidate is placed from observed evidence in the scene gauge.
     assert_eq!(
         result["operations"]["placement"]["state"], "succeeded",
@@ -473,11 +588,88 @@ fn real_yellow_die_keeps_one_identity_and_its_masks_are_diagnosed() {
                "die": {"scale": placed.scale, "translation": placed.translation, "contact": placed.contact,
                        "support": placed.support, "gap": placed.contact_gap, "reason": placed.reason,
                        "validation": {"verdict": placed.validation.verdict, "reason": placed.validation.reason,
-                                      "views": placed.validation.views.len()}},
+                                      "views": placed.validation.views}},
                "validation": {
                    "accepted": placements.placements.iter().filter(|p| p.validation.verdict == PlacementVerdict::Accepted).count(),
                    "approximate": placements.placements.iter().filter(|p| p.validation.verdict == PlacementVerdict::Approximate).count(),
                    "contradicted": placements.placements.iter().filter(|p| p.validation.verdict == PlacementVerdict::Contradicted).count()},
                "metric_scale_hint": placements.metric_scale_hint, "hint_labels": placements.metric_hint_labels}),
     );
+    if let Some(output) = output {
+        assert_eq!(
+            placed.validation.verdict,
+            PlacementVerdict::Accepted,
+            "{:#?}",
+            placed.validation
+        );
+        report("earliest_incomplete_stage", json!("scene_assembly"));
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(
+            result["operations"]["assemble"]["observations"]["editable_objects"],
+            "1"
+        );
+        report("earliest_incomplete_stage", json!("glb_and_blender"));
+        verify_blender(&root.0, output, &best.id);
+        report("earliest_incomplete_stage", json!("verified_replay"));
+        let (replay_code, replay, replay_stderr) = build(&root.0, false);
+        report("replay", replay.clone());
+        assert_eq!(replay_code, 0, "{replay_stderr}");
+        assert!(replay["operations"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|operation| operation["state"] == "reused"));
+        report("earliest_incomplete_stage", Value::Null);
+    }
+}
+
+fn verify_blender(root: &Path, output: &Path, object: &str) {
+    let exported = Command::new(env!("CARGO_BIN_EXE_video-to-3d"))
+        .arg("export")
+        .arg(root.join("project.json"))
+        .args(["--target", "glb"])
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let expected = output.join("blender-expected.json");
+    fs::write(
+        &expected,
+        json!({
+            "schema": "video-to-3d/blender-scene-expectation/v1",
+            "architecture": ["environment"], "objects": [object],
+            "min_independent_object_nodes": 1, "allow_vertex_color_material": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/blender/scene_import_acceptance.py");
+    let blender_report = output.join("blender-report.json");
+    let status = Command::new(std::env::var_os("BLENDER").unwrap_or_else(|| "blender".into()))
+        .args([
+            "--background",
+            "--factory-startup",
+            "--python-exit-code",
+            "1",
+            "--python",
+        ])
+        .arg(script)
+        .args(["--", "--glb"])
+        .arg(root.join("exports/scene.glb"))
+        .arg("--expected")
+        .arg(expected)
+        .arg("--report")
+        .arg(&blender_report)
+        .arg("--render")
+        .arg(output.join("blender-preview.png"))
+        .arg("--save-blend")
+        .arg(output.join("yellow-die.blend"))
+        .status()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&fs::read(blender_report).unwrap()).unwrap();
+    assert!(status.success() && value["passed"] == true, "{value:#}");
 }

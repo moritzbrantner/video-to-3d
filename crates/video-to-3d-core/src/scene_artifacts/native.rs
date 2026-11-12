@@ -155,6 +155,18 @@ impl BuiltInExecutor {
             ],
             _ => return None,
         };
+        let expected = if request.operation.kind == OperationKind::SceneAssembly
+            && request.inputs.len() == 4
+        {
+            &[
+                ArtifactKind::SparseReconstruction,
+                ArtifactKind::SurfaceMesh,
+                ArtifactKind::GeneratedObjects,
+                ArtifactKind::ObjectPlacements,
+            ][..]
+        } else {
+            expected
+        };
         if request.inputs.len() != expected.len()
             || expected.iter().any(|kind| {
                 request.inputs.iter().filter(|input| {
@@ -196,6 +208,7 @@ impl BuiltInExecutor {
         let directory = format!("artifacts/native/{}", request.operation.id);
         let output =
             ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
+        let mut observations = BTreeMap::new();
         let document = match request.operation.kind {
             OperationKind::SparseReconstruction => {
                 crate::reconstruct_cameras_with_cancel(&self.frames(request, cancel)?, || {
@@ -292,29 +305,38 @@ impl BuiltInExecutor {
                     }
                 })?
             }
-            OperationKind::SceneAssembly => crate::controlled_json::to_string(
-                &self.assemble(request, &directory, cancel)?,
-                true,
-                true,
-                &mut || {
+            OperationKind::SceneAssembly => {
+                let scene = self.assemble(request, &directory, cancel)?;
+                observations.insert(
+                    "editable_objects".into(),
+                    scene
+                        .assets
+                        .iter()
+                        .filter(|asset| asset.role == AssetRole::EditableObject)
+                        .count()
+                        .to_string(),
+                );
+                crate::controlled_json::to_string(&scene, true, true, &mut || {
                     if cancel.is_canceled() {
                         Err("native assembly write canceled".into())
                     } else {
                         Ok(())
                     }
-                },
-            )?,
+                })?
+            }
             _ => return Err("unsupported native stage".into()),
         };
         if cancel.is_canceled() {
             return Err("native stage canceled".into());
         }
         write_atomically(&output.resolve(&self.root), document.as_bytes())?;
-        Ok(ProducedArtifact::new(
+        let mut produced = ProducedArtifact::new(
             output,
             ContentHash::of_bytes(document.as_bytes()),
             Reproducibility::Deterministic,
-        ))
+        );
+        produced.observations = observations;
+        Ok(produced)
     }
 
     fn assemble(
@@ -435,7 +457,7 @@ impl BuiltInExecutor {
             .iter()
             .map(|camera| camera.frame_index)
             .collect();
-        let scene = AssembledScene {
+        let mut scene = AssembledScene {
             schema_version: ASSEMBLED_SCENE_SCHEMA_VERSION,
             frame: SceneFrame {
                 unit: SceneUnit::ArbitraryMonocular,
@@ -472,6 +494,35 @@ impl BuiltInExecutor {
             lights: Vec::new(),
             audio: Vec::new(),
         };
+        if request.inputs.len() == 4 {
+            use crate::scene_project::OperationInput;
+
+            let generation_record = self.input(request, ArtifactKind::GeneratedObjects)?;
+            let placement_record = self.input(request, ArtifactKind::ObjectPlacements)?;
+            let placement_op = manifest
+                .operations
+                .iter()
+                .find(|op| op.id == placement_record.produced_by)
+                .ok_or("object placement producer missing")?;
+            for record in [sparse_record, mesh_record, generation_record] {
+                if !placement_op
+                    .inputs
+                    .contains(&OperationInput::Operation(record.produced_by.clone()))
+                {
+                    return Err("object placement does not share the scene's camera, surface and generation ancestry".into());
+                }
+            }
+            let generation = crate::object_generation::ObjectGenerationArtifact::from_json(
+                &self.document(generation_record, cancel)?,
+            )?;
+            let placements = crate::object_placement::ObjectPlacementArtifact::from_json(
+                &self.document(placement_record, cancel)?,
+            )?;
+            if placements.object_generation != generation_record.content_hash {
+                return Err("object placement references a different generation artifact".into());
+            }
+            append_placed_objects(&mut scene, &generation, &placements)?;
+        }
         scene
             .validate_with_cancel(&mut || {
                 if cancel.is_canceled() {
@@ -509,4 +560,80 @@ fn scene_camera(camera: &EvidenceCamera) -> SceneCamera {
         },
         intrinsics: None,
     }
+}
+
+/// Convert placement from the reconstruction basis to the same glTF basis as
+/// the observed environment. The provider mesh's local frame stays intact.
+fn append_placed_objects(
+    scene: &mut AssembledScene,
+    generation: &crate::object_generation::ObjectGenerationArtifact,
+    placements: &crate::object_placement::ObjectPlacementArtifact,
+) -> Result<(), String> {
+    use crate::placement_validation::PlacementVerdict;
+    use nalgebra::{Matrix3, Rotation3, UnitQuaternion};
+
+    let to_gltf = Matrix3::from_diagonal(&nalgebra::Vector3::new(1.0, -1.0, -1.0));
+    for placement in &placements.placements {
+        if placement.validation.verdict != PlacementVerdict::Accepted {
+            continue;
+        }
+        let generated = generation
+            .objects
+            .iter()
+            .find(|candidate| {
+                candidate.request.object == placement.object
+                    && candidate.request.request_id == placement.generation_request
+                    && candidate.request.frame_index == placement.reference_frame
+            })
+            .ok_or("accepted object placement has no matching generation request")?;
+        let mesh = generated
+            .output
+            .as_ref()
+            .ok_or("accepted object placement has no mesh")?;
+        let rotation = Matrix3::from_row_slice(&placement.rotation);
+        if (rotation.transpose() * rotation - Matrix3::identity()).norm() > 1e-6
+            || (rotation.determinant() - 1.0).abs() > 1e-6
+        {
+            return Err("object placement rotation must be a proper rotation".into());
+        }
+        let rotation = UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(
+            to_gltf * rotation,
+        ));
+        let [x, y, z] = placement.translation.map(|value| value as f32);
+        let resource = format!("generated-{}", placement.object);
+        scene.resources.push(SceneResource {
+            id: resource.clone(),
+            kind: ResourceKind::Mesh,
+            path: mesh.path.clone(),
+            content_hash: mesh.content_hash.clone(),
+            provenance: vec![SceneProvenance::GenerativeCompletion],
+            confidence: None,
+            source_frames: Vec::new(),
+        });
+        scene.assets.push(SceneAsset {
+            id: placement.object.clone(),
+            role: AssetRole::EditableObject,
+            parent: None,
+            transform: Transform {
+                translation: [x, -y, -z],
+                rotation: [rotation.i, rotation.j, rotation.k, rotation.w]
+                    .map(|value| value as f32),
+                scale: [placement.scale as f32; 3],
+            },
+            visual: Some(VisualRepresentation {
+                mesh: Some(MeshVisual {
+                    mesh: resource,
+                    material: None,
+                }),
+                splat: None,
+            }),
+            collision: None,
+            labels: vec![SemanticLabel {
+                name: generated.request.label.clone(),
+                confidence: None,
+            }],
+            collision_provenance: None,
+        });
+    }
+    Ok(())
 }
