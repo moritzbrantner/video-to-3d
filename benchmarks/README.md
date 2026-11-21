@@ -78,7 +78,7 @@ Each fixture's baseline records the checks that fail today, each with the issue 
 
 | Fixture | Target status | First failing stage | Expected failures | COLMAP reference (expected) |
 | --- | --- | --- | --- | --- |
-| `slow-lateral-pan` | Expected failure | `mesh`. Before #127 the seed failed: no adjacent pair passed the residual-parallax gate (0.0–0.38 px against 0.55 px). Now the segment seeds from a wider pair (frames 5–11), over composed, sub-pixel-refined matches whose least-median pure-rotation fit leaves 2.33 px (true relief parallax 3.77 px); all 18 views register (pose RMSE 0.0065, orientation error ≤ 0.33°), and dense, texture and, since #126, mesh topology pass (duplicated coverage 0.036, one patch component) | median surface error 0.034 m and unsupported-triangle share 0.33 (#138) | registers |
+| `slow-lateral-pan` | Expected failure | `mesh`. Before #127 the seed failed: no adjacent pair passed the residual-parallax gate (0.0–0.38 px against 0.55 px). Now the segment seeds from a wider pair (frames 5–11), over composed, sub-pixel-refined matches whose least-median pure-rotation fit leaves 2.33 px (true relief parallax 3.77 px); all 18 views register (pose RMSE 0.0065, orientation error ≤ 0.33°), and dense, texture and, since #126, mesh topology pass (duplicated coverage 0.036, one patch component) | unsupported-triangle share 0.18 (#138); the median surface error passes at 0.023 m since 2026-11-21 | registers |
 | `pure-rotation` | Pass | — (no seed pair, decisive gate `baseline`, 0 registered) | none | no model |
 | `overlapping-references` | Pass (since #126) | — Before #126 the mesh failed: 0 cross-reference triangles, 3 unconnected reference patches, 38 % of covered cells meshed twice. Now overlap ownership in the owning reference camera's image leaves 9.5 % duplicated cells, with 135 cross-reference triangles and one patch-graph component; everything before the mesh still passes (10/18 registered, orientation error ≤ 2.1°, dense depth within 0.7 % after a 3–4 % per-reference scale bias, texels within 0.75 px) | none. The mesh stage also gates `mesh_components` ≤ 80 (true surface: 1): trimmed seams are re-stitched and retained overlap seams clipped with lineage-carrying derived vertices (#137). The bound is temporary per the owner decision of 2026-10-17, which accepted the current clipping result; restoring the earlier ≤ 40 gate (no more connected components than before the overlap trim) is #213 | registers |
 
@@ -437,3 +437,109 @@ sampling and fail-closed experiment planning. Provider output still must pass
 the Rust `ReconstructionEvidenceView` validation/fusion contract before it may
 affect product scene export. Object segmentation, object-specific reconstruction
 and Blender independent editability remain separate gates in #77/#79.
+
+## Compare a reconstruction with a Blender scene
+
+Use a static scene with a perspective camera, opaque visible geometry, and matching viewport and render geometry. Extract any linked assets alongside the blend file. The following example uses Christophe Seux’s [Classroom from Blender’s demo collection](https://www.blender.org/download/demo-files/). Run from the repository root with Blender and FFmpeg on the path and the [converter set up](../README.md#convert-a-local-video).
+
+```bash
+source_scene=/path/to/classroom/classroom.blend
+capture=target/classroom-comparison
+blender --disable-autoexec -b "$source_scene" --python-exit-code 1 \
+  -P tools/blender/render_camera_sweep.py -- --output "$capture" \
+  --travel 1.30 --forward 0.38 --focus-distance 6
+bun run reconstruct "$capture/scene.webm" "$capture"
+blender --disable-autoexec -b --factory-startup --python-exit-code 1 \
+  -P tools/blender/score_rendered_scene.py -- --source "$source_scene" \
+  --glb "$capture/scene.glb" --cameras "$capture/cameras.json" --report "$capture/score.json"
+```
+
+The capture holds frame 1 of the source scene fixed, moves the camera through 18 views, and saves its camera-to-world matrices in sampled-frame order. Only the encoded RGB video enters reconstruction. A surface GLB from the current converter carries the accepted world-to-camera poses in `asset.extras.video_to_3d.accepted_camera_evidence`. The scorer fits one rotation, translation and positive scale using only the cameras, then casts the same rays into the original scene and the exported visual mesh. It also accepts a static GLB as the reference source.
+
+Compare `visible_rays_within_2pct_depth` or `visible_rays_within_5pct_depth` across runs. Each is a fraction of all rays that hit the reference, so missing geometry lowers the score. `median_relative_depth_error_on_overlap` measures only rays that hit both surfaces. The default grid has 80 columns and preserves the capture aspect ratio. A point-cloud-only run has no surface score.
+
+### TUM reconstruction quality with local COLMAP
+
+The fixed 87-frame browser witness is the parity baseline. The separate local
+Studio profile samples the identical approved RGB movie at 640×480 and retains
+108 browser frames. Reconstruction receives RGB only. Official TUM motion
+capture aligns the estimated cameras with a single similarity. Kinect depth is
+reserved for evaluation. Every row below is raycast against the same 339,023
+valid reference rays from 85 TUM poses.
+
+| Pipeline | Registered views | Surface triangles before texture seams | Valid reference rays hit | Within 10 cm of Kinect |
+| --- | ---: | ---: | ---: | ---: |
+| Rust browser baseline | 8/87 | 1,503 | 3.35% | 0.64% |
+| COLMAP sparse and Rust surface | 87/87 | 1,551 | 11.67% | 6.00% |
+| 640×480 COLMAP sparse and bounded CUDA PatchMatch | 108/108 | 58,252 | 51.19% | 38.52% |
+| 32 grouped stereo views, finer source depth sampling, and verified supplemental cells | 108/108 | 108,445 | 70.44% | 54.25% |
+| Fresh Studio observed export with the 32-view settings | 108/108 | 108,400 | 70.81% | 54.40% |
+
+The production CUDA run reconstructed 24 overlapping reference views in 98 seconds on
+an RTX 3060 Ti. The finished observed surface also scored 38.56% within 10 cm across
+80 camera poses held out of both sampling plans. Median depth error where the
+new mesh hits a valid ray was 2.36 cm, with a 52.5 cm 90th percentile.
+Coverage, depth error and novel-view results are tracked together because
+camera registration alone can leave most of the scene missing.
+
+The 32-view run used the same 108 registered frames. Its 80 held-out poses
+scored 54.41% within 10 cm. Median depth error on hits was 2.63 cm and the
+90th percentile dropped to 32.55 cm. Some textureless floor and furniture
+remain unreconstructed. No reference depth entered reconstruction.
+
+The fresh Studio observed export took 4m22s with saved detections. The
+CUDA stage took 127s on the RTX 3060 Ti. Whole-device VRAM peaked at
+2,261 MiB and peak process RSS was 2,384,760 KiB. The fresh observed mesh
+reached 54.49% within 10 cm at the 80 held-out poses. Its median depth
+error on hits was 2.67 cm and the 90th percentile was 33.10 cm.
+
+The production converter took 5m23s with saved detections and cached model
+candidates. Whole-device VRAM peaked at 2,806 MiB during that run. A separate
+108-frame focused Grounding DINO and SAM 2.1 pass took 9m56s and peaked at
+1,894,035,968 bytes of PyTorch allocations.
+
+The completed GLB placed a 36,676-triangle multi-view silhouette reconstruction
+of the actual yellow die. Two separate RGB-D views gave silhouette IoUs of
+0.873 and 0.788 and median axial depth errors of 8.2 mm and 14.5 mm on
+the overlapping pixels. Blender verified an object transform and vertex edit
+with the room and other objects unchanged. The observed and completed scenes
+retain separate provenance. Other yellow objects still produced false positive
+labels. The 32-view reconstruction also recovered a directly observed
+897-triangle die as an independent Blender mesh. In the same two views the
+observed mesh reached IoUs of 0.894 and 0.716 and median depth errors of 14.7 mm
+and 13.0 mm. Blender verified an independent object transform and vertex edit.
+The fresh Studio export repeated the same check with 895 observed triangles
+on the die, IoUs of 0.881 and 0.713, and median depth errors of 14.8 mm and
+13.1 mm.
+
+Calibrated global mapping expanded accepted camera coverage from 10/33 to
+19–20/33 on handheld H1 and from an earlier 14/32 baseline to 30–31/32 on
+handheld H3. In the 19-view H1 comparison, the number of verified textured
+triangles rose from 18,731 to 25,777. The mesh includes parts of the balcony
+door and floor in a view the baseline could not register.
+The existing multi-view object stage isolated a 35,100-triangle armchair
+from the same capture and placed it in the scene. Blender verified a separate
+mesh and independent edit. Its held-out mask IoU was 0.483, and the render
+shows that the method recovered only part of the chair.
+
+A separate H3 trial reached 32/32, then produced only one fused COLMAP point
+and four Rust-validated textured triangles. Its camera pairs had a median
+triangulation angle of 1.2° despite sharing hundreds of landmarks. On TUM
+that median was 6.1°. An experimental wider-baseline stereo selection on
+the same H3 poses produced 2,221 verified textured triangles with the updated
+grid exporter, but covered just 1.2% of pixels across three held-out views.
+The three-video quality gate remains open.
+
+Run the same product path with the pinned prepared carrier and a fresh
+destination after `bun run build`:
+
+```sh
+VIDEO_TO_3D_OBJECT_LABELS='yellow die' \
+  bun run reconstruct /path/to/prepared/approved-controlled-room-tum/derived.webm ./exports/tum
+```
+
+See [the dense provider benchmark](../tools/colmap-dense/README.md) for the
+per-surface scorer and GPU reproduction commands. Shared engineering policy
+revision for this experiment was `15f348b072188255da837578eaafc8a98f12fdf0`.
+The controlled-room fixture and both handheld clips retain the requirements
+in the [three-video acceptance specification](../docs/specs/hybrid-room-to-blender-acceptance.md).

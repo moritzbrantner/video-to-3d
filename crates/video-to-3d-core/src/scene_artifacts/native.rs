@@ -5,6 +5,62 @@ use crate::scene_model::*;
 use crate::{CameraStageArtifact, DenseStageArtifact, FrameInput, ReconstructionRequest};
 
 impl BuiltInExecutor {
+    /// Prefer the repository's pinned local camera provider for staged native builds.
+    /// `VIDEO_TO_3D_CAMERA_SIDECAR` can select an installed runtime.
+    pub fn with_local_camera_registration(mut self) -> Self {
+        let bundled =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/colmap-sparse/run.sh");
+        self.camera_sidecar = Some(
+            std::env::var_os("VIDEO_TO_3D_CAMERA_SIDECAR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    if bundled.is_file() {
+                        bundled
+                    } else {
+                        "video-to-3d-camera-sidecar".into()
+                    }
+                }),
+        );
+        self
+    }
+
+    fn register_cameras(
+        &self,
+        program: &Path,
+        frames: &ReconstructionRequest,
+        mut keyframes: KeyframesArtifact,
+        cancel: &CancellationToken,
+    ) -> Result<CameraStageArtifact, String> {
+        use super::sidecar::{run_sidecar, Exchange, SidecarRun};
+        if frames.frames.len() < 3 {
+            return Err("COLMAP registration needs at least three sampled frames".into());
+        }
+        let exchange = Exchange::new("camera-registration")?;
+        for (index, (record, frame)) in keyframes.frames.iter_mut().zip(&frames.frames).enumerate()
+        {
+            if cancel.is_canceled() {
+                return Err("native registration canceled".into());
+            }
+            // Pass the exact verified bytes, with paths relative to the private exchange.
+            record.pixels = ProjectPath::new(format!("{index}.rgba")).map_err(|e| e.to_string())?;
+            fs::write(record.pixels.resolve(&exchange.0), &frame.rgba)
+                .map_err(|e| e.to_string())?;
+        }
+        let request = exchange.0.join("keyframes.json");
+        let response = exchange.0.join("registered.json");
+        fs::write(&request, keyframes.to_json()).map_err(|e| e.to_string())?;
+        match run_sidecar("COLMAP", program, &request, &response, &exchange.0, cancel)? {
+            SidecarRun::Response(bytes) => {
+                let registered: crate::registered_sparse::RegisteredSparseInput =
+                    serde_json::from_slice(&bytes)
+                        .map_err(|e| format!("invalid COLMAP response: {e}"))?;
+                registered.camera_stage(frames, || cancel.is_canceled())
+            }
+            SidecarRun::NotStarted(reason) => Err(reason),
+            SidecarRun::Canceled => Err("native registration canceled".into()),
+        }
+    }
+
     fn manifest(&self) -> Result<SceneProjectManifest, String> {
         match &self.reservations {
             Reservations::Fixed { manifest } => manifest
@@ -15,6 +71,48 @@ impl BuiltInExecutor {
                 SceneProjectManifest::load(path).map_err(|e| e.to_string())
             }
         }
+    }
+
+    /// Placement consumes the same browser frames as its generated-object input.
+    /// Follow that operation's declared parent even if the project has other clips.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn generation_keyframes(
+        &self,
+        generation: &crate::scene_project::ArtifactRecord,
+        cancel: &CancellationToken,
+    ) -> Result<KeyframesArtifact, String> {
+        let manifest = self.manifest()?;
+        let identities = manifest.operation_identities().map_err(|e| e.to_string())?;
+        if identities.get(&generation.produced_by) != Some(&generation.operation_identity) {
+            return Err("generated objects have stale operation identity".into());
+        }
+        let operation = manifest
+            .operations
+            .iter()
+            .find(|op| op.id == generation.produced_by)
+            .ok_or("object generation producer is missing")?;
+        let mut inputs = operation.inputs.iter().filter_map(|input| match input {
+            crate::scene_project::OperationInput::Operation(id) => manifest
+                .artifacts
+                .iter()
+                .find(|record| record.produced_by == *id && record.kind == ArtifactKind::Keyframes),
+            _ => None,
+        });
+        let record = inputs
+            .next()
+            .ok_or("generated objects have no keyframes ancestor")?;
+        if inputs.next().is_some()
+            || identities.get(&record.produced_by) != Some(&record.operation_identity)
+        {
+            return Err("generated objects require one current keyframes ancestor".into());
+        }
+        KeyframesArtifact::from_json_with_cancel(&self.document(record, cancel)?, || {
+            if cancel.is_canceled() {
+                Err("object placement canceled".into())
+            } else {
+                Ok(())
+            }
+        })
     }
 
     pub(super) fn input<'a>(
@@ -54,7 +152,7 @@ impl BuiltInExecutor {
         &self,
         request: &OperationRequest,
         cancel: &CancellationToken,
-    ) -> Result<ReconstructionRequest, String> {
+    ) -> Result<(ReconstructionRequest, KeyframesArtifact), String> {
         let keyframes = KeyframesArtifact::from_json_with_cancel(
             &self.document(self.input(request, ArtifactKind::Keyframes)?, cancel)?,
             || {
@@ -83,10 +181,13 @@ impl BuiltInExecutor {
                     .load_pixels_with_cancel(&self.root, index, || cancel.is_canceled())?,
             });
         }
-        Ok(ReconstructionRequest {
-            frames,
-            options: Default::default(),
-        })
+        Ok((
+            ReconstructionRequest {
+                frames,
+                options: Default::default(),
+            },
+            keyframes,
+        ))
     }
 
     /// Resolve the declared sparse parent of dense through the reconciled
@@ -196,14 +297,46 @@ impl BuiltInExecutor {
         let directory = format!("artifacts/native/{}", request.operation.id);
         let output =
             ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
+        let mut observations = BTreeMap::new();
+        let mut reproducibility = Reproducibility::Deterministic;
         let document = match request.operation.kind {
             OperationKind::SparseReconstruction => {
-                crate::reconstruct_cameras_with_cancel(&self.frames(request, cancel)?, || {
-                    cancel.is_canceled()
-                })
-                .map_err(|e| e.to_string())?
-                .to_json_with_cancel(|| cancel.is_canceled())
-                .map_err(|error| error.to_string())?
+                let (frames, keyframes) = self.frames(request, cancel)?;
+                let classic = || {
+                    crate::reconstruct_cameras_with_cancel(&frames, || cancel.is_canceled())
+                        .map_err(|e| e.to_string())
+                };
+                let cameras = if let Some(program) = &self.camera_sidecar {
+                    match self.register_cameras(program, &frames, keyframes, cancel) {
+                        Ok(cameras) => {
+                            reproducibility = Reproducibility::SeededStochastic;
+                            observations.insert("random_seed".into(), "0".into());
+                            observations.insert("camera_provider".into(), "colmap".into());
+                            observations.insert(
+                                "diagnostic".into(),
+                                cameras.sparse.bootstrap.summary.clone(),
+                            );
+                            cameras
+                        }
+                        Err(reason) if cancel.is_canceled() => return Err(reason),
+                        Err(reason) => {
+                            observations.insert(
+                                "camera_provider".into(),
+                                crate::ReconstructionProviderDescriptor::classic().id,
+                            );
+                            observations.insert(
+                                "diagnostic".into(),
+                                format!("Using Rust camera registration. Local COLMAP: {reason}"),
+                            );
+                            classic()?
+                        }
+                    }
+                } else {
+                    classic()?
+                };
+                cameras
+                    .to_json_with_cancel(|| cancel.is_canceled())
+                    .map_err(|error| error.to_string())?
             }
             OperationKind::DenseReconstruction => {
                 let cameras = CameraStageArtifact::from_json_with_cancel(
@@ -215,7 +348,7 @@ impl BuiltInExecutor {
                 )
                 .map_err(|e| e.to_string())?;
                 crate::reconstruct_dense_with_cancel(
-                    &self.frames(request, cancel)?,
+                    &self.frames(request, cancel)?.0,
                     &cameras,
                     || cancel.is_canceled(),
                 )
@@ -269,7 +402,12 @@ impl BuiltInExecutor {
                 )?;
                 let provider = evidence.provider;
                 let scale = evidence.scale;
-                let evidence_cameras = evidence.cameras;
+                let mut evidence_cameras = evidence.cameras;
+                if cameras.registration_provider.is_some() {
+                    for camera in &mut evidence_cameras {
+                        camera.authority = EvidenceCameraAuthority::ProviderEstimated;
+                    }
+                }
                 let regions = evidence.regions;
                 let artifact = SurfaceMeshArtifact {
                     schema_version: SURFACE_MESH_ARTIFACT_SCHEMA_VERSION,
@@ -310,11 +448,13 @@ impl BuiltInExecutor {
             return Err("native stage canceled".into());
         }
         write_atomically(&output.resolve(&self.root), document.as_bytes())?;
-        Ok(ProducedArtifact::new(
+        let mut produced = ProducedArtifact::new(
             output,
             ContentHash::of_bytes(document.as_bytes()),
-            Reproducibility::Deterministic,
-        ))
+            reproducibility,
+        );
+        produced.observations = observations;
+        Ok(produced)
     }
 
     fn assemble(

@@ -158,6 +158,65 @@ struct AcceptedPatch {
     completion_attributes: Vec<EvidencePointAttributes>,
 }
 
+/// Use a finer sweep grid only when the sparse map spans at least half the tiles
+/// in a majority of registered views. A single unusually close view cannot raise
+/// the resolution of every reference patch.
+/// Two landmarks per tile keep a single isolated observation from counting as coverage.
+fn has_distributed_landmarks(
+    frames: &[FrameInput],
+    cameras: &[RegisteredCamera],
+    sparse_points: &[Vector3<f64>],
+    focal: f64,
+    control: &mut ReconstructionControl<'_>,
+) -> bool {
+    let majority = cameras.len() / 2 + 1;
+    let mut covered_views = 0;
+    for camera in cameras {
+        let Some(frame) = frames.get(camera.frame_index) else {
+            continue;
+        };
+        let mut tiles = [[0u8; 4]; 4];
+        let mut supported = 0;
+        'points: for chunk in sparse_points.chunks(256) {
+            if control.is_canceled() {
+                return false;
+            }
+            for point in chunk {
+                let Some((x, y, _)) =
+                    legacy::project(camera, *point, frame.width, frame.height, focal)
+                else {
+                    continue;
+                };
+                if !(0.0..f64::from(frame.width)).contains(&x)
+                    || !(0.0..f64::from(frame.height)).contains(&y)
+                {
+                    continue;
+                }
+                let col = (4.0 * x / f64::from(frame.width)) as usize;
+                let row = (4.0 * y / f64::from(frame.height)) as usize;
+                let tile = &mut tiles[row][col];
+                *tile = tile.saturating_add(1);
+                if *tile == 2 {
+                    supported += 1;
+                    if supported >= 8 {
+                        covered_views += 1;
+                        if covered_views == majority {
+                            return true;
+                        }
+                        break 'points;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn grid_stride(width: u32, height: u32, fine_grid: bool) -> usize {
+    let rows = if fine_grid { 64 } else { 48 };
+    (width.min(height) / rows).clamp(4, 12) as usize
+}
+
 /// The unlimited dense run; production enters through the budgeted plan.
 #[cfg(test)]
 pub(super) fn estimate_depth_points(
@@ -172,6 +231,13 @@ pub(super) fn estimate_depth_points(
         sparse_points,
         focal,
         MAX_REFERENCE_VIEWS,
+        has_distributed_landmarks(
+            frames,
+            cameras,
+            sparse_points,
+            focal,
+            &mut ReconstructionControl::new(&mut || false),
+        ),
         &mut ReconstructionControl::new(&mut || false),
     )
     .0
@@ -187,6 +253,7 @@ fn estimate_depth_points_limited(
     sparse_points: &[Vector3<f64>],
     focal: f64,
     reference_views: usize,
+    fine_grid: bool,
     control: &mut ReconstructionControl<'_>,
 ) -> (DenseAnalysis, bool) {
     let reference_order = reference_candidate_order(frames, cameras, sparse_points, focal);
@@ -196,6 +263,7 @@ fn estimate_depth_points_limited(
             cameras,
             sparse_points,
             focal,
+            fine_grid,
             control,
         ));
         return (legacy, false);
@@ -218,6 +286,7 @@ fn estimate_depth_points_limited(
             sparse_points,
             focal,
             camera_index,
+            fine_grid,
             control,
         ) else {
             continue;
@@ -249,6 +318,7 @@ fn estimate_depth_points_limited(
             cameras,
             sparse_points,
             focal,
+            fine_grid,
             control,
         ));
         let fallback_attempts = std::mem::take(&mut fallback.stats.reference_attempts);
@@ -292,15 +362,28 @@ pub(super) fn estimate_depth_points_with_budget_and_control(
     descriptor_radius: u32,
     control: &mut ReconstructionControl<'_>,
 ) -> DenseAnalysis {
-    let full = estimate_working_set(frames, max_features, descriptor_radius, MAX_REFERENCE_VIEWS);
-    // Bounded progress: when the whole input does not fit, keep the most reference views
-    // whose working set does. Every reference-scaled buffer grows with the views kept.
-    let plan = (1..=MAX_REFERENCE_VIEWS).rev().find_map(|views| {
-        let estimate = estimate_working_set(frames, max_features, descriptor_radius, views);
-        (estimate.total_bytes <= working_set_budget_bytes).then_some((views, estimate))
+    let estimate =
+        |views, fine| estimate_working_set(frames, max_features, descriptor_radius, views, fine);
+    // Preserve the full set of reference views before spending memory on a finer grid.
+    let finer_spacing_available = frames.first().is_some_and(|frame| {
+        grid_stride(frame.width, frame.height, true) < grid_stride(frame.width, frame.height, false)
     });
+    let fine_estimate = (finer_spacing_available
+        && has_distributed_landmarks(frames, cameras, sparse_points, focal, control))
+    .then(|| estimate(MAX_REFERENCE_VIEWS, true))
+    .filter(|full| full.total_bytes <= working_set_budget_bytes);
+    let fine_grid = fine_estimate.is_some();
+    let full = fine_estimate.unwrap_or_else(|| estimate(MAX_REFERENCE_VIEWS, false));
+    let plan = if full.total_bytes <= working_set_budget_bytes {
+        Some((MAX_REFERENCE_VIEWS, full))
+    } else {
+        (1..MAX_REFERENCE_VIEWS).rev().find_map(|views| {
+            let limited = estimate(views, false);
+            (limited.total_bytes <= working_set_budget_bytes).then_some((views, limited))
+        })
+    };
     let Some((reference_views, working_set_estimate)) = plan else {
-        let single = estimate_working_set(frames, max_features, descriptor_radius, 1);
+        let single = estimate(1, false);
         return DenseAnalysis {
             stats: DenseStats {
                 skip_reason: Some(format!(
@@ -324,6 +407,7 @@ pub(super) fn estimate_depth_points_with_budget_and_control(
         sparse_points,
         focal,
         reference_views,
+        fine_grid,
         control,
     );
     analysis.stats.working_set_estimate = working_set_estimate;
@@ -341,6 +425,7 @@ fn estimate_working_set(
     max_features: usize,
     descriptor_radius: u32,
     reference_views: usize,
+    fine_grid: bool,
 ) -> DenseWorkingSetEstimate {
     let frame_bytes = frames
         .iter()
@@ -359,7 +444,7 @@ fn estimate_working_set(
     let grid_samples_per_reference = frames
         .first()
         .map(|frame| {
-            let stride = (frame.width.min(frame.height) / 48).clamp(4, 12) as usize;
+            let stride = grid_stride(frame.width, frame.height, fine_grid);
             grid_axis_samples(frame.width as usize, stride)
                 .saturating_mul(grid_axis_samples(frame.height as usize, stride))
         })
@@ -592,6 +677,7 @@ fn reconstruct_reference_patch(
     sparse_points: &[Vector3<f64>],
     focal: f64,
     reference_camera_index: usize,
+    fine_grid: bool,
     control: &mut ReconstructionControl<'_>,
 ) -> Option<legacy::DenseAnalysis> {
     let reference_camera = cameras.get(reference_camera_index)?;
@@ -642,6 +728,7 @@ fn reconstruct_reference_patch(
         &remapped_cameras,
         &visible_sparse,
         focal,
+        fine_grid,
         control,
     );
     analysis.stats.reference_frame = Some(reference_camera.frame_index);
@@ -999,6 +1086,76 @@ mod multi_reference_tests {
     use super::*;
     use nalgebra::Matrix3;
 
+    #[test]
+    fn clustered_landmark_scan_can_be_canceled_within_one_camera() {
+        let frame = FrameInput {
+            width: 240,
+            height: 240,
+            rgba: Vec::new(),
+        };
+        let points = vec![Vector3::new(0.0, 0.0, 4.0); 4096];
+        let mut polls = 0;
+        let mut cancel = || {
+            polls += 1;
+            polls == 3
+        };
+        let mut control = ReconstructionControl::new(&mut cancel);
+        assert!(!has_distributed_landmarks(
+            &[frame],
+            &[camera(0, 0.0)],
+            &points,
+            200.0,
+            &mut control
+        ));
+        assert!(control.is_canceled());
+        assert_eq!(polls, 3);
+    }
+
+    #[test]
+    fn finer_dense_grid_requires_distributed_landmarks_and_room_for_all_views() {
+        let (width, height, focal) = (240, 240, 200.0);
+        let frame = FrameInput {
+            width,
+            height,
+            rgba: vec![128; (width * height * 4) as usize],
+        };
+        let frames = [frame.clone(), frame];
+        let cameras = [camera(0, 0.0), camera(1, 0.2)];
+        let world = |x: f64, y: f64| {
+            Vector3::new((x - 120.0) / focal * 4.0, (y - 120.0) / focal * 4.0, 4.0)
+        };
+        let mut distributed = Vec::new();
+        for y in [30.0, 90.0, 150.0, 210.0] {
+            for x in [30.0, 90.0, 150.0, 210.0] {
+                distributed.push(world(x, y));
+                distributed.push(world(x + 2.0, y));
+            }
+        }
+        let concentrated: Vec<_> = (0..distributed.len())
+            .map(|i| world(90.0 + i as f64, 90.0))
+            .collect();
+        let fine = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS, true);
+        let coarse = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS, false);
+        assert!(fine.total_bytes > coarse.total_bytes);
+        for (sparse, budget, expected_stride, expected_bytes) in [
+            (&distributed, fine.total_bytes, 4, fine.total_bytes),
+            (&concentrated, fine.total_bytes, 5, coarse.total_bytes),
+            (&distributed, coarse.total_bytes, 5, coarse.total_bytes),
+        ] {
+            let result =
+                estimate_depth_points_with_budget(&frames, &cameras, sparse, focal, budget, 320, 3);
+            assert_eq!(result.stats.grid_stride, expected_stride);
+            assert_eq!(
+                result.stats.working_set_estimate.total_bytes,
+                expected_bytes
+            );
+            assert!(
+                result.points.is_empty(),
+                "flat images carry no depth evidence at either spacing"
+            );
+        }
+    }
+
     fn camera(frame_index: usize, center_x: f64) -> RegisteredCamera {
         RegisteredCamera {
             frame_index,
@@ -1155,8 +1312,9 @@ mod multi_reference_tests {
             full.stats.reference_patches.len() >= 2,
             "the fixture needs several patches"
         );
-        let one_view = estimate_working_set(&frames, 320, 3, 1).total_bytes;
-        let all_views = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS).total_bytes;
+        let one_view = estimate_working_set(&frames, 320, 3, 1, false).total_bytes;
+        let all_views =
+            estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS, false).total_bytes;
         assert!(one_view < all_views);
 
         let limited =
@@ -1186,7 +1344,7 @@ mod multi_reference_tests {
         }
 
         // Two views fit between one and three: the limit follows the budget deterministically.
-        let two_views = estimate_working_set(&frames, 320, 3, 2).total_bytes;
+        let two_views = estimate_working_set(&frames, 320, 3, 2, false).total_bytes;
         let wider =
             estimate_depth_points_with_budget(&frames, &cameras, &sparse, focal, two_views, 320, 3);
         assert_eq!(wider.stats.reference_view_limit, Some(2));
@@ -1277,8 +1435,8 @@ mod multi_reference_tests {
         ];
         // The ordinary run may keep every reference view; a registration retry with more
         // features may fit only one. The retry must still charge the larger retained result.
-        let ordinary = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS);
-        let retry = estimate_working_set(&frames, 1200, 3, 1);
+        let ordinary = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS, false);
+        let retry = estimate_working_set(&frames, 1200, 3, 1, false);
 
         assert!(retry.sparse_pipeline_bytes > ordinary.sparse_pipeline_bytes);
         assert!(retry.dense_sample_bytes < ordinary.dense_sample_bytes);
@@ -1304,7 +1462,7 @@ mod multi_reference_tests {
         ];
         let cameras = vec![camera(0, 0.0), camera(1, 0.24)];
         let sparse = sparse_plane(width, height, focal, depth);
-        let two_views = estimate_working_set(&frames, 320, 3, 2).total_bytes;
+        let two_views = estimate_working_set(&frames, 320, 3, 2, false).total_bytes;
 
         let limited =
             estimate_depth_points_with_budget(&frames, &cameras, &sparse, focal, two_views, 320, 3);
@@ -1321,8 +1479,8 @@ mod multi_reference_tests {
             plane_frame(68, 48, 60.0, -0.22, 4.0),
         ];
 
-        let ordinary = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS);
-        let feature_heavy = estimate_working_set(&frames, 640, 7, MAX_REFERENCE_VIEWS);
+        let ordinary = estimate_working_set(&frames, 320, 3, MAX_REFERENCE_VIEWS, false);
+        let feature_heavy = estimate_working_set(&frames, 640, 7, MAX_REFERENCE_VIEWS, false);
 
         assert!(feature_heavy.sparse_pipeline_bytes > ordinary.sparse_pipeline_bytes);
         assert!(feature_heavy.total_bytes > ordinary.total_bytes);

@@ -85,6 +85,7 @@ export type SurfaceMaterialSource = Pick<
   | "dense_grid_sites"
   | "mesh_triangles"
   | "accepted_camera_evidence"
+  | "sparse_camera_provider"
   | "calibrated_pair"
 > &
   Partial<Pick<ReconstructionResult, "dense_point_attributes">> & {
@@ -130,6 +131,7 @@ export function buildSurfaceMaterialRequest(
   source: SurfaceMaterialSource,
   referenceImages: ReferenceImage[],
   previousAppearance: RecordedAppearance[] = [],
+  inventoryJson?: string,
 ) {
   return {
     dense_point_count: source.dense_points.length,
@@ -156,10 +158,12 @@ export function buildSurfaceMaterialRequest(
       completed_points: patch.completed_points,
     })),
     cameras: source.accepted_camera_evidence,
+    camera_provider: source.sparse_camera_provider ?? null,
     reference_images: referenceImages,
     // Intrinsics of the accepted cameras; without them Rust textures no seam.
     seam_focal_pixels: source.calibrated_pair?.focal_pixels ?? null,
     previous_appearance: previousAppearance,
+    semantic_inventory: inventoryJson ?? null,
   };
 }
 
@@ -199,11 +203,12 @@ export async function bakeTexturedSurface(
   source: SurfaceMaterialSource,
   referenceImages: ReferenceImage[],
   previousAppearance: RecordedAppearance[] = [],
+  inventoryJson?: string,
 ): Promise<SurfaceMaterialBakeResult> {
   const wasm = await loadReconstructionWasm();
   return normalizeSurfaceMaterialResult(
     wasm.bake_textured_surface(
-      buildSurfaceMaterialRequest(source, referenceImages, previousAppearance),
+      buildSurfaceMaterialRequest(source, referenceImages, previousAppearance, inventoryJson),
     ),
   );
 }

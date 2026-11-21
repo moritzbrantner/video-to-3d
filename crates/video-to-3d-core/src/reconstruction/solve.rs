@@ -2,11 +2,12 @@
 
 use super::bootstrap::{diagnose_bootstrap, ineligible_link_gate};
 use super::control::ReconstructionControl;
-use super::features::{detect_features_with_control, sample_rgb, to_luma};
+use super::features::{detect_features_with_control, sample_rgb, to_luma, FeatureSpacing};
 use super::matching::{compensate_global_motion, match_features, median, motion_guided_matches};
 use super::seed::{
     best_seed_index, calibrated_pair_stats, compose_track_matches, record_two_view_evidence,
-    seed_pair_cameras, wide_seed_candidate_with_control, MAX_SEED_SPAN_INTERVALS,
+    seed_pair_cameras, wide_seed_candidate_with_control, WideSeedSelection,
+    MAX_SEED_SPAN_INTERVALS,
 };
 use super::segment::{segment_solve_stats, solve_segment, SegmentSolve};
 use super::types::{
@@ -26,11 +27,16 @@ pub(crate) const MIN_TRACK_OVERLAP: f32 = 0.18;
 pub(crate) fn reconstruct_once(
     request: &ReconstructionRequest,
 ) -> Result<SparseReconstruction, String> {
-    reconstruct_once_with_control(request, &mut ReconstructionControl::new(&mut || false))
+    reconstruct_once_with_control(
+        request,
+        FeatureSpacing::Requested,
+        &mut ReconstructionControl::new(&mut || false),
+    )
 }
 
 pub(super) fn reconstruct_once_with_control(
     request: &ReconstructionRequest,
+    spacing: FeatureSpacing,
     control: &mut ReconstructionControl<'_>,
 ) -> Result<SparseReconstruction, String> {
     validate_request(request)?;
@@ -46,7 +52,7 @@ pub(super) fn reconstruct_once_with_control(
     let mut features = Vec::with_capacity(luma_frames.len());
     for luma in &luma_frames {
         features.push(detect_features_with_control(
-            luma, width, height, options, control,
+            luma, width, height, options, spacing, control,
         )?);
     }
 
@@ -64,6 +70,7 @@ pub(super) fn reconstruct_once_with_control(
     // from its own best candidate.
     control.check()?;
     let mut seed_candidates: Vec<([usize; 2], two_view::TwoViewEstimate)> = Vec::new();
+    let mut provisional_seeds = Vec::new();
     // Whether each adjacent link may carry a seed: both frames usable and the link
     // seed-eligible. A wider seed pair needs every link between its frames.
     let mut seed_links: Vec<bool> = Vec::with_capacity(request.frames.len() - 1);
@@ -206,6 +213,9 @@ pub(super) fn reconstruct_once_with_control(
             );
             control.check()?;
             record_two_view_evidence(&mut seed, &outcome.evidence);
+            if let Some(provisional) = outcome.provisional {
+                provisional_seeds.push(([pair_index, pair_index + 1], provisional));
+            }
             match outcome.result {
                 Ok(estimate) => seed_candidates.push(([pair_index, pair_index + 1], estimate)),
                 Err(rejection) => seed.rejected_gate = Some(SeedGate::from_two_view(rejection)),
@@ -302,10 +312,10 @@ pub(super) fn reconstruct_once_with_control(
         {
             continue;
         }
-        // Every span is tried; the widest-angle accepted pair seeds, since a short
-        // low-parallax baseline gives an ill-conditioned essential matrix.
-        let mut best: Option<([usize; 2], two_view::TwoViewEstimate)> = None;
+        let mut best_angle = 0.0;
+        let mut best = None;
         for interval in 2..=MAX_SEED_SPAN_INTERVALS {
+            let mut wide_seeds = WideSeedSelection::default();
             for from in span.first_frame..=span.last_frame.saturating_sub(interval) {
                 control.check()?;
                 let to = from + interval;
@@ -324,13 +334,12 @@ pub(super) fn reconstruct_once_with_control(
                 );
                 seed_evidence.push(seed);
                 if let Some(estimate) = estimate {
-                    if best.as_ref().is_none_or(|(_, current)| {
-                        estimate.median_triangulation_angle_degrees
-                            > current.median_triangulation_angle_degrees
-                    }) {
-                        best = Some(([from, to], estimate));
-                    }
+                    wide_seeds.consider([from, to], estimate);
                 }
+            }
+            if wide_seeds.widest_angle > best_angle {
+                best_angle = wide_seeds.widest_angle;
+                best = wide_seeds.finish();
             }
         }
         if let Some(best) = best {
@@ -343,6 +352,47 @@ pub(super) fn reconstruct_once_with_control(
         .map(|segment| (segment, keyframe_selection.promote_segment_frames(segment)))
         .collect();
     let clip_segments = &keyframe_selection.stats.segments;
+    let mut corroborated_solve = None;
+    for segment in 0..clip_segments.len() {
+        if seed_candidates
+            .iter()
+            .any(|(frames, _)| segment_of_pair(frames[0]) == segment)
+        {
+            continue;
+        }
+        let Some(index) =
+            best_seed_index(&provisional_seeds, |from| segment_of_pair(from) == segment)
+        else {
+            continue;
+        };
+        let candidate = provisional_seeds.swap_remove(index);
+        let solve = solve_segment(
+            Some(&candidate),
+            &keyframe_selection,
+            &adjacent_matches,
+            &features,
+            &revisit_context,
+            width,
+            height,
+            focal as f64,
+            clip_segments.len() > 1,
+            control,
+        )?;
+        let corroborating = solve.registered_views.len();
+        let ([from, to], estimate) = &candidate;
+        if corroborating < 2 {
+            warnings.push(format!("Frames {}–{} reached a provisional {:.2}° median triangulation angle. Only {} additional views registered; two are required before this low-angle seed can be accepted.",
+                from + 1, to + 1, estimate.median_triangulation_angle_degrees, corroborating));
+            continue;
+        }
+        seed_evidence[*from].rejected_gate = None;
+        warnings.push(format!("Frames {}–{} have a {:.2}° median triangulation angle, below the ordinary {:.2}° seed gate. No wider seed passed; {} additional registered views corroborate this seed (minimum 2).",
+            from + 1, to + 1, estimate.median_triangulation_angle_degrees, two_view::MIN_SEED_TRIANGULATION_ANGLE_DEGREES, corroborating));
+        seed_candidates.push(candidate);
+        if clip_segments.len() == 1 {
+            corroborated_solve = Some(solve);
+        }
+    }
     // A split clip solves every segment that has a usable seed on its own, in its own
     // arbitrary frame. The segment whose solve registers the most cameras fills the
     // primary output (#230); the strongest seed breaks ties.
@@ -437,18 +487,22 @@ pub(super) fn reconstruct_once_with_control(
     }
     let best_two_view = primary_index.map(|index| seed_candidates.swap_remove(index));
     drop(seed_candidates);
-    let primary_solve = solve_segment(
-        best_two_view.as_ref(),
-        &keyframe_selection,
-        &adjacent_matches,
-        &features,
-        &revisit_context,
-        width,
-        height,
-        focal as f64,
-        false,
-        control,
-    )?;
+    let primary_solve = if let Some(solve) = corroborated_solve {
+        solve
+    } else {
+        solve_segment(
+            best_two_view.as_ref(),
+            &keyframe_selection,
+            &adjacent_matches,
+            &features,
+            &revisit_context,
+            width,
+            height,
+            focal as f64,
+            false,
+            control,
+        )?
+    };
     if let Some(segment) = primary_segment.filter(|_| clip_segments.len() > 1) {
         segment_solves.push(segment_solve_stats(
             segment,
@@ -792,7 +846,7 @@ pub(super) fn reconstruct_once_with_control(
     })
 }
 
-fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
+pub(crate) fn validate_request(request: &ReconstructionRequest) -> Result<(), String> {
     if request.frames.len() < 2 {
         return Err("at least two sampled frames are required".into());
     }

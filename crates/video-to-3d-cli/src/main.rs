@@ -6,6 +6,10 @@
 //! exactly one JSON document on stdout (results, or `{command, error,
 //! exit_code}` on failure); human-readable diagnostics go to stderr.
 
+mod colmap_surface;
+mod generate_objects;
+
+mod complete_scene;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -40,6 +44,10 @@ enum Exit {
 
 const USAGE: &str = "usage:
   video-to-3d build <project.json> [--jobs <n>]
+  video-to-3d detect <keyframes.json> [object labels...]
+  video-to-3d object-library <object-directory> <output.glb>
+  video-to-3d complete-scene <observed.glb> <object-directory> <completed.glb>
+  video-to-3d generate-objects <keyframes.json> <inventory.json> <geometry.json> <output-dir>
   video-to-3d status <project.json>
   video-to-3d inspect <project.json>
   video-to-3d export <project.json> --target web|glb [--scene-mode completed|observed]
@@ -76,6 +84,46 @@ fn main() -> ExitCode {
 
 type Outcome = Result<(Value, Exit), (String, Exit)>;
 
+fn detect(path: &std::path::Path, terms: &[String]) -> Outcome {
+    use video_to_3d_core::scene_artifacts::{
+        detect_keyframe_objects, KeyframesArtifact, DEFAULT_SIDECAR, SIDECAR_ENVIRONMENT,
+    };
+    use video_to_3d_core::semantic_inventory::{
+        default_room_vocabulary, SemanticVocabulary, VocabularySource,
+    };
+    let document =
+        std::fs::read_to_string(path).map_err(|e| (e.to_string(), Exit::InvalidProject))?;
+    let frames = KeyframesArtifact::from_json(&document).map_err(|e| (e, Exit::InvalidProject))?;
+    let sidecar = std::env::var_os(SIDECAR_ENVIRONMENT)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SIDECAR));
+    let artifact = detect_keyframe_objects(
+        path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+        &frames,
+        &sidecar,
+        "grounded-sam",
+        "1",
+        if terms.is_empty() {
+            SemanticVocabulary {
+                source: VocabularySource::Default,
+                terms: default_room_vocabulary(),
+            }
+        } else {
+            SemanticVocabulary {
+                source: VocabularySource::Project,
+                terms: terms.to_vec(),
+            }
+        },
+        &CancellationToken::new(),
+    )
+    .map_err(|e| (e, Exit::OperationFailure))?
+    .ok_or_else(|| ("object detection canceled".into(), Exit::Incomplete))?;
+    Ok((
+        serde_json::to_value(artifact).map_err(|e| (e.to_string(), Exit::Internal))?,
+        Exit::Success,
+    ))
+}
+
 fn dispatch(args: &[String]) -> Outcome {
     let usage = |message: &str| Err((message.to_owned(), Exit::Usage));
     let Some(command) = args.first() else {
@@ -87,6 +135,36 @@ fn dispatch(args: &[String]) -> Outcome {
     let manifest = PathBuf::from(manifest);
     let options = &args[2..];
     match command.as_str() {
+        "generate-objects" => match options {
+            [inventory, geometry, output] => generate_objects::run(&manifest, inventory.as_ref(), geometry.as_ref(), output.as_ref())
+                .map(|result| (result, Exit::Success)).map_err(|reason| (reason, Exit::OperationFailure)),
+            _ => usage("generate-objects needs keyframes.json, inventory.json, geometry.json and an output directory")
+        },
+        "object-library" => match options{
+            [destination] => complete_scene::run(None,&manifest,std::path::Path::new(destination))
+                .map(|report|(report,Exit::Success)).map_err(|e|(e,Exit::OperationFailure)),
+            _=>usage("object-library requires <object-directory> <output.glb>"),
+        },
+        "complete-scene" => match options {
+            [objects, destination] => complete_scene::run(Some(&manifest), std::path::Path::new(objects), std::path::Path::new(destination))
+                .map(|report|(report,Exit::Success)).map_err(|e|(e,Exit::OperationFailure)),
+            _ => usage("complete-scene requires <observed.glb> <object-directory> <completed.glb>"),
+        },
+        "colmap-surface" => match options {
+            [registered, grids, output, inventory @ ..] if inventory.len() <= 1 => {
+                colmap_surface::run(
+                    &manifest,
+                    registered.as_ref(),
+                    grids.as_ref(),
+                    output.as_ref(),
+                    inventory.first().map(|path| path.as_ref()),
+                )
+                .map(|report| (report, Exit::Success))
+                .map_err(|e| (e, Exit::OperationFailure))
+            }
+            _ => usage("colmap-surface needs keyframes.json, registered.json, depth grids, a GLB destination and optionally an inventory"),
+        },
+        "detect" => detect(&manifest, options),
         "build" => {
             let jobs = match options {
                 [] => 1,
@@ -220,7 +298,8 @@ fn build(manifest_path: &std::path::Path, jobs: usize) -> Outcome {
     // Imported browser keyframes feed independent classic reconstruction
     // stages and observed scene assembly; unavailable capabilities stay explicit.
     // Reservations come from the reconciled manifest the build persists.
-    let executor = BuiltInExecutor::for_project(store.root(), manifest_path);
+    let executor =
+        BuiltInExecutor::for_project(store.root(), manifest_path).with_local_camera_registration();
     let report = store
         .build(
             &mut manifest,

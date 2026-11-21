@@ -535,6 +535,9 @@ fn textured_glb_is_self_contained_and_preserves_accepted_geometry() {
     let extras = &json["asset"]["extras"]["video_to_3d"];
     assert_eq!(extras["schema"], "video-to-3d/textured-surface");
     assert_eq!(extras["provider"]["id"], "video-to-3d-core/classic");
+    let exported: Vec<crate::EvidenceCamera> =
+        serde_json::from_value(extras["accepted_camera_evidence"].clone()).unwrap();
+    assert_eq!(exported, evidence.cameras);
     assert_eq!(extras["textured_triangles"], 4);
     assert_eq!(extras["fallback_triangles"], 1);
     assert!(json.get("uri").is_none() && json["buffers"][0].get("uri").is_none());
@@ -619,3 +622,49 @@ fn glb_export_rejects_a_bake_for_different_topology() {
 
 #[path = "native_glb_cancel_acceptance_tests.rs"]
 mod native_glb_cancel_acceptance;
+
+#[test]
+fn attributed_faces_move_to_a_separate_visual_node_and_keep_materials() {
+    let fixture = Fixture::new();
+    let evidence = fixture.evidence();
+    let bake = fixture.bake();
+    let partition = crate::object_surface::ObjectSurfacePartition {
+        groups: vec![Some(0), None, Some(0), None, None],
+        objects: vec![("obj-1".into(), "chair".into())],
+        inventory_hash: crate::scene_project::ContentHash::of_bytes(b"inventory"),
+    };
+    let glb = crate::textured_glb::encode_textured_glb_with_objects(
+        &evidence,
+        &bake,
+        None,
+        Some(&partition),
+    )
+    .unwrap();
+    let (json, _) = glb_parts(&glb);
+    assert_eq!(json["scenes"][0]["nodes"], serde_json::json!([0, 1]));
+    assert_eq!(json["nodes"][0]["name"], "accepted-surface");
+    assert_eq!(
+        json["nodes"][1]["extras"]["video_to_3d"]["object_id"],
+        "obj-1"
+    );
+    let faces = |mesh: usize| {
+        json["meshes"][mesh]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                let idx = p["indices"].as_u64().unwrap() as usize;
+                json["accessors"][idx]["count"].as_u64().unwrap() / 3
+            })
+            .sum::<u64>()
+    };
+    assert_eq!((faces(0), faces(1)), (3, 2));
+    let chair = json["meshes"][1]["primitives"].as_array().unwrap();
+    for primitive in chair {
+        assert!(primitive["attributes"]["TEXCOORD_0"].is_u64());
+        let positions = primitive["attributes"]["POSITION"].as_u64().unwrap() as usize;
+        // Each chair primitive owns a single face. Its bounds and loose vertices
+        // must not include any geometry belonging to the environment.
+        assert_eq!(json["accessors"][positions]["count"], 3);
+    }
+}

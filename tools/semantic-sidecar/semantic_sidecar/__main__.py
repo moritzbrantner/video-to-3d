@@ -22,7 +22,9 @@ from pathlib import Path
 
 PROTOCOL = "video-to-3d-semantic-sidecar/1"
 DETECTOR = "IDEA-Research/grounding-dino-tiny"
+DETECTOR_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
 SEGMENTER = "facebook/sam2.1-hiera-small"
+SEGMENTER_REVISION = "ee5bba1d82bb8749febdf90f45e84b687142ba03"
 BOX_THRESHOLD = 0.3
 TEXT_THRESHOLD = 0.25
 # A propagated mask must overlap a same-label detection this much to link it.
@@ -109,9 +111,8 @@ def main(request_path: str, response_path: str) -> None:
         rgba = np.frombuffer(Path(frame["rgba_path"]).read_bytes(), dtype=np.uint8)
         images.append(Image.fromarray(rgba.reshape(height, width, 4)[:, :, :3].copy()))
 
-    detector_processor = transformers.AutoProcessor.from_pretrained(DETECTOR)
-    detector = transformers.AutoModelForZeroShotObjectDetection.from_pretrained(DETECTOR).to(device)
-    detector_version = getattr(detector.config, "_commit_hash", None) or transformers.__version__
+    detector_processor = transformers.AutoProcessor.from_pretrained(DETECTOR, revision=DETECTOR_REVISION)
+    detector = transformers.AutoModelForZeroShotObjectDetection.from_pretrained(DETECTOR, revision=DETECTOR_REVISION).to(device)
     prompt = ". ".join(term.lower() for term in terms) + "."
     detections = []  # (frame position, label, box, score)
     with torch.inference_mode():
@@ -141,9 +142,8 @@ def main(request_path: str, response_path: str) -> None:
     del detector
     torch.cuda.empty_cache()
 
-    segmenter_processor = transformers.Sam2Processor.from_pretrained(SEGMENTER)
-    segmenter = transformers.Sam2Model.from_pretrained(SEGMENTER).to(device)
-    segmenter_version = getattr(segmenter.config, "_commit_hash", None) or transformers.__version__
+    segmenter_processor = transformers.Sam2Processor.from_pretrained(SEGMENTER, revision=SEGMENTER_REVISION)
+    segmenter = transformers.Sam2Model.from_pretrained(SEGMENTER, revision=SEGMENTER_REVISION).to(device)
     masks: list = [None] * len(detections)
     mask_scores: list = [None] * len(detections)
     with torch.inference_mode():
@@ -168,8 +168,8 @@ def main(request_path: str, response_path: str) -> None:
 
     # Tracks: propagate every unassigned candidate's mask through all frames
     # with the SAM 2.1 video predictor and link same-label detections it covers.
-    video_processor = transformers.Sam2VideoProcessor.from_pretrained(SEGMENTER)
-    video_model = transformers.Sam2VideoModel.from_pretrained(SEGMENTER).to(device)
+    video_processor = transformers.Sam2VideoProcessor.from_pretrained(SEGMENTER, revision=SEGMENTER_REVISION)
+    video_model = transformers.Sam2VideoModel.from_pretrained(SEGMENTER, revision=SEGMENTER_REVISION).to(device)
     track_of = [None] * len(detections)
     tracks = []
     order = sorted(
@@ -177,15 +177,22 @@ def main(request_path: str, response_path: str) -> None:
         key=lambda index: -detections[index][3],
     )
     with torch.inference_mode():
+        # Encode each image once on ordinary 18-view clips. The image features
+        # depend only on the frame; tracks retain separate prompts and memory.
+        session = video_processor.init_video_session(
+            video=images, inference_device=device, inference_state_device="cpu",
+            # Transformers otherwise normalizes the entire video on CUDA before
+            # moving it to CPU storage. Long clips can exhaust VRAM before tracking starts.
+            processing_device="cpu", video_storage_device="cpu",
+            max_vision_features_cache_size=min(len(images), 18), dtype=torch.float32,
+        ) if order else None
         for seed in order:
             if track_of[seed] is not None:
                 continue
-            position, label, box, _ = detections[seed]
-            session = video_processor.init_video_session(
-                video=images, inference_device=device, dtype=torch.float32
-            )
+            position, label, _, _ = detections[seed]
+            session.reset_tracking_data()
             video_processor.add_inputs_to_inference_session(
-                inference_session=session, frame_idx=position, obj_ids=1, input_boxes=[[box]]
+                inference_session=session, frame_idx=position, obj_ids=1, input_masks=masks[seed]
             )
             video_model(inference_session=session, frame_idx=position)
             propagated = {}
@@ -197,24 +204,22 @@ def main(request_path: str, response_path: str) -> None:
                         [output.pred_masks], original_sizes=[[images[0].size[1], images[0].size[0]]], binarize=True
                     )[0]
                     propagated[output.frame_idx] = mask[0, 0].cpu().numpy().astype(bool)
-            members = [seed]
-            overlaps = []
+            strongest = {}
             for other in order:
                 if other == seed or track_of[other] is not None:
                     continue
                 other_position, other_label, _, _ = detections[other]
                 if other_label != label or other_position == position:
                     continue
-                if any(detections[member][0] == other_position for member in members):
-                    continue
                 candidate = propagated.get(other_position)
                 if candidate is None:
                     continue
                 overlap = mask_iou(candidate, masks[other])
-                if overlap >= TRACK_IOU:
-                    members.append(other)
-                    overlaps.append(overlap)
-            if len(members) >= 2:
+                if overlap >= TRACK_IOU and (other_position not in strongest or overlap > strongest[other_position][0]):
+                    strongest[other_position] = (overlap, other)
+            if strongest:
+                members = [seed, *(other for _, other in strongest.values())]
+                overlaps = [overlap for overlap, _ in strongest.values()]
                 for member in members:
                     track_of[member] = len(tracks)
                 tracks.append((label, sorted(members, key=lambda index: detections[index][0]), float(np.mean(overlaps))))
@@ -268,9 +273,9 @@ def main(request_path: str, response_path: str) -> None:
             "protocol": PROTOCOL,
             "status": "available",
             "models": [
-                {"role": "detector", "id": DETECTOR, "version": detector_version,
+                {"role": "detector", "id": DETECTOR, "version": DETECTOR_REVISION,
                  "url": f"https://huggingface.co/{DETECTOR}"},
-                {"role": "segmenter", "id": SEGMENTER, "version": segmenter_version,
+                {"role": "segmenter", "id": SEGMENTER, "version": SEGMENTER_REVISION,
                  "url": f"https://huggingface.co/{SEGMENTER}"},
             ],
             "runtime": {

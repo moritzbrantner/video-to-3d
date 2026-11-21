@@ -37,6 +37,8 @@ const BLUR_WINDOW: usize = 3;
 #[serde(rename_all = "snake_case")]
 pub enum FrameDecision {
     Keyframe,
+    /// No pose in the external provider's registered component.
+    Unregistered,
     /// Usable, but too little parallax since the last keyframe.
     Redundant,
     Blurred,

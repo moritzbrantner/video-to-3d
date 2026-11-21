@@ -1,3 +1,4 @@
+import { objectCameraView, sceneCameraView } from "../apps/web/src/sourceView";
 import {
   affineTriangleTransform,
   buildDensePointReferenceFrames,
@@ -76,5 +77,16 @@ assert(
   ) === null,
   "degenerate texture triangle must fail closed",
 );
+
+// Orbit a glTF preview from a known CV camera center, with the original vertical FOV.
+const camera = { frame_index: 0, rotation: [1,0,0, 0,1,0, 0,0,1], translation: [-1,-2,-3],
+  authority: "registered_geometry" as const, confidence: 1, median_reprojection_error_pixels: 0 };
+const sourceScene = sceneCameraView({ accepted_camera_evidence: [camera], calibrated_pair: { focal_pixels: 100 },
+  points: [{x:1,y:2,z:7}] }, [{height:200}], null);
+assert(sourceScene?.target === "1m -2m -7m", "viewer target must map accepted source camera into glTF");
+assert(sourceScene.orbit === `0rad ${Math.PI / 2}rad 4m` && sourceScene.fov === `${Math.PI / 2}rad`,
+  "source view should reproduce distance, rotation and focal");
+const cropView = objectCameraView(camera, [140, 90, 160, 110], {width:200,height:200}, 100);
+assert(approximatelyEqual(parseFloat(cropView.orbit), -Math.atan(0.5)), "off-center object should be viewed from its source ray");
 
 console.log("texture projection contract passed");

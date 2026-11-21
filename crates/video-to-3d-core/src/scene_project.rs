@@ -259,12 +259,20 @@ impl OperationKind {
     /// provider declaration instead.
     pub fn implementation_revision(self) -> u32 {
         match self {
-            // 2: the built-in executor and the versioned surface-textures format.
-            Self::TextureBake => 2,
+            // 3: GLB exports carry all accepted camera poses for reference comparison.
+            Self::TextureBake => 3,
             // 3: overlap seams are clipped with derived-vertex lineage (#137).
             Self::SurfaceMesh => 3,
+            // 7: incomplete incremental maps can recover supported views with calibrated global SfM.
+            Self::SparseReconstruction => 7,
+            // 3: adapt plane sweep density to sparse image coverage and memory.
+            Self::DenseReconstruction => 3,
             // 2: native classic stages and canonical observed-environment assembly.
-            Self::SparseReconstruction | Self::DenseReconstruction | Self::SceneAssembly => 2,
+            Self::SceneAssembly => 2,
+            // 2: separate isolated inconsistent observations from long stationary tracks.
+            Self::ObjectIdentity => 2,
+            // 5: recover the exact generated-object keyframes for RGB patch depth fitting.
+            Self::ObjectPlacement => 5,
             _ => 1,
         }
     }

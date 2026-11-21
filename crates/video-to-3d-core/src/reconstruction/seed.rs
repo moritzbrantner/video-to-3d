@@ -253,6 +253,52 @@ pub(super) fn record_two_view_evidence(
     }
 }
 
+/// Wide seeds must first pass the two-view geometry gates. Keep the best depth
+/// conditioning supported by at least as many landmarks as the widest-angle seed.
+/// A candidate dominated in both support and precision cannot win for any support
+/// floor, so its triangulated points can be dropped immediately.
+#[derive(Default)]
+pub(super) struct WideSeedSelection {
+    pub(super) widest_angle: f64,
+    widest_support: usize,
+    candidates: Vec<(f64, [usize; 2], two_view::TwoViewEstimate)>,
+}
+
+impl WideSeedSelection {
+    pub(super) fn consider(&mut self, frames: [usize; 2], estimate: two_view::TwoViewEstimate) {
+        let angle = estimate.median_triangulation_angle_degrees;
+        let support = estimate.points.len();
+        if angle > self.widest_angle {
+            self.widest_angle = angle;
+            self.widest_support = support;
+        }
+
+        // Relative triangulation precision scales with sin(parallax) and the
+        // square root of the observation count. A quarter-pixel noise floor for
+        // the subpixel patch fit prevents tiny residuals from dominating.
+        let uncertainty = estimate.median_reprojection_error_pixels.hypot(0.25);
+        let precision = (support as f64).sqrt() * angle.to_radians().sin() / uncertainty;
+        if self
+            .candidates
+            .iter()
+            .any(|(score, _, seed)| *score >= precision && seed.points.len() >= support)
+        {
+            return;
+        }
+        self.candidates
+            .retain(|(score, _, seed)| *score > precision || seed.points.len() > support);
+        self.candidates.push((precision, frames, estimate));
+    }
+
+    pub(super) fn finish(self) -> Option<([usize; 2], two_view::TwoViewEstimate)> {
+        self.candidates
+            .into_iter()
+            .filter(|(_, _, seed)| seed.points.len() >= self.widest_support)
+            .max_by(|left, right| left.0.total_cmp(&right.0))
+            .map(|(_, frames, estimate)| (frames, estimate))
+    }
+}
+
 /// The best seed candidate among the pairs `include` accepts, using the same ordering
 /// and tie-break (earliest pair wins) as a single sequential scan.
 pub(super) fn best_seed_index(
@@ -323,5 +369,42 @@ pub(super) fn calibrated_pair_stats(
             estimate.translation.y as f32,
             estimate.translation.z as f32,
         ],
+    }
+}
+
+#[cfg(test)]
+mod wide_seed_tests {
+    use super::*;
+    use nalgebra::{Matrix3, Vector3};
+
+    fn seed(support: usize, angle: f64, error: f64) -> two_view::TwoViewEstimate {
+        let point = two_view::TriangulatedPoint {
+            source_feature_index: 0,
+            descriptor_distance: 0.0,
+            position: Vector3::z(),
+            reprojection_error_pixels: error,
+            triangulation_angle_degrees: angle,
+        };
+        two_view::TwoViewEstimate {
+            rotation: Matrix3::identity(),
+            translation: Vector3::x(),
+            camera_center: -Vector3::x(),
+            matches: support,
+            inliers: support,
+            median_sampson_error_pixels: error,
+            median_reprojection_error_pixels: error,
+            median_triangulation_angle_degrees: angle,
+            points: vec![point; support],
+        }
+    }
+
+    #[test]
+    fn wide_seed_prefers_precision_without_sacrificing_widest_angles_support() {
+        let mut selection = WideSeedSelection::default();
+        selection.consider([0, 3], seed(20, 5., 1.));
+        selection.consider([1, 4], seed(22, 4., 0.3));
+        selection.consider([2, 5], seed(19, 4.9, 0.01));
+        selection.consider([3, 6], seed(22, 4., 0.3));
+        assert_eq!(selection.finish().unwrap().0, [1, 4]);
     }
 }

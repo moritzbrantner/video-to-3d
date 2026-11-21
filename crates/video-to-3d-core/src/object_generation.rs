@@ -331,6 +331,80 @@ mod tests {
     }
 
     #[test]
+    fn cached_generation_binds_the_mesh_and_the_source_pixels() {
+        use crate::scene_artifacts::{
+            generate_object_candidates, KeyframeRecord, KeyframesArtifact,
+        };
+        use crate::scene_runner::CancellationToken;
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!(
+            "video-to-3d-generation-cache-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("objects")).unwrap();
+        let pixels = [0_u8; 64];
+        let (mut inventory, mut refs) = inputs();
+        let hash = ContentHash::of_bytes(&pixels);
+        inventory.frames[0].content_hash = hash.clone();
+        refs.packages[0].primary.frame_hash = hash.clone();
+        let frames = KeyframesArtifact {
+            schema_version: 1,
+            frames: vec![KeyframeRecord {
+                frame_index: 3,
+                timestamp_seconds: 0.,
+                width: 4,
+                height: 4,
+                pixels: ProjectPath::new("frame.rgba").unwrap(),
+                content_hash: hash,
+            }],
+        };
+        fs::write(root.join("frame.rgba"), pixels).unwrap();
+        let run = |cache: Option<&ObjectGenerationArtifact>| {
+            generate_object_candidates(
+                &root,
+                &frames,
+                &inventory,
+                &refs,
+                ContentHash::of_bytes(refs.to_json().as_bytes()),
+                &root,
+                "objects",
+                ("triposr", "test"),
+                &root.join("missing-provider"),
+                cache.map(|a| (root.as_path(), a)),
+                &CancellationToken::new(),
+            )
+        };
+        let mut prior = run(None).unwrap().unwrap();
+        assert_eq!(prior.status, GenerationStatus::Unavailable);
+        let id = &prior.objects[0].request.request_id;
+        let path = ProjectPath::new(format!("objects/{id}.glb")).unwrap();
+        // A cache receipt validates byte identity; geometry decoding is tested
+        // separately by the placement stage.
+        let fixture = b"mesh fixture";
+        fs::write(path.resolve(&root), fixture).unwrap();
+        prior.status = GenerationStatus::Available;
+        prior.unavailable_reason = None;
+        prior.objects[0].failure = None;
+        prior.objects[0].output = Some(GeneratedMesh {
+            path: path.clone(),
+            content_hash: ContentHash::of_bytes(fixture),
+            vertices: 3,
+            triangles: 1,
+        });
+        assert_eq!(run(Some(&prior)).unwrap().unwrap(), prior);
+
+        fs::write(path.resolve(&root), b"replaced bytes").unwrap();
+        let result = run(Some(&prior)).unwrap().unwrap();
+        assert_eq!(result.status, GenerationStatus::Unavailable);
+        assert!(result.objects[0].output.is_none());
+
+        fs::write(root.join("frame.rgba"), [255_u8; 64]).unwrap();
+        assert!(run(Some(&prior)).unwrap_err().contains("pixels differ"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_generation_has_exactly_a_mesh_or_a_failure_and_stays_a_candidate() {
         let (inventory, references) = inputs();
         let request = plan_generation(&inventory, &references, ("triposr", "r1")).remove(0);

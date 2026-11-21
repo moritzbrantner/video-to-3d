@@ -253,6 +253,12 @@ impl Project {
             .arg("build")
             .arg(self.manifest())
             .env("VIDEO_TO_3D_SEMANTIC_SIDECAR", sidecar)
+            // This contract compares independent projects byte-for-byte under
+            // the same deterministic geometry provider.
+            .env(
+                "VIDEO_TO_3D_CAMERA_SIDECAR",
+                self.double.join("no-camera-provider"),
+            )
             .current_dir(std::env::temp_dir())
             .output()
             .unwrap();

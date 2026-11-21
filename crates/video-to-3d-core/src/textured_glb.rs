@@ -8,7 +8,9 @@
 //! texturing camera, the rule that admitted the material's triangles
 //! (`same_reference_grid` or `seam_single_camera_projection`, the latter with
 //! the seam's reference frames and focal length), provenance, appearance key,
-//! and fallback reasons.
+//! and fallback reasons. Asset extras also retain every accepted world-to-camera
+//! pose in reconstruction coordinates, indexed by sampled frame, for comparison
+//! against independently measured camera paths.
 //!
 //! Frame: reconstruction coordinates follow the camera convention of the seed
 //! camera (+X right, +Y down, +Z forward). glTF is +Y up with cameras looking
@@ -26,12 +28,13 @@
 
 use crate::coarse_collision::CoarseCollider;
 use crate::geometry_confidence::GeometryConfidenceField;
+use crate::object_surface::ObjectSurfacePartition;
 use crate::surface_materials::{
     MaterialRule, SurfaceMaterialBake, SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
 };
 use crate::ReconstructionEvidenceView;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;
@@ -185,10 +188,38 @@ pub fn encode_textured_glb_with_collider(
     bake: &SurfaceMaterialBake,
     collider: Option<&CoarseCollider>,
 ) -> Result<Vec<u8>, String> {
+    encode_textured_glb_with_objects(evidence, bake, collider, None)
+}
+
+/// Separate observed object surfaces into independently transformable visual nodes.
+pub fn encode_textured_glb_with_objects(
+    evidence: &ReconstructionEvidenceView<'_>,
+    bake: &SurfaceMaterialBake,
+    collider: Option<&CoarseCollider>,
+    partition: Option<&ObjectSurfacePartition>,
+) -> Result<Vec<u8>, String> {
+    encode_textured_glb_with_camera_provider(evidence, bake, collider, partition, None)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CameraProviderMetadata {
+    pub id: String,
+    pub version: String,
+}
+
+pub fn encode_textured_glb_with_camera_provider(
+    evidence: &ReconstructionEvidenceView<'_>,
+    bake: &SurfaceMaterialBake,
+    collider: Option<&CoarseCollider>,
+    partition: Option<&ObjectSurfacePartition>,
+    camera_provider: Option<&CameraProviderMetadata>,
+) -> Result<Vec<u8>, String> {
     encode_textured_glb_controlled(
         evidence,
         bake,
         collider,
+        partition,
+        camera_provider,
         &mut crate::ReconstructionControl::new(&mut || false),
     )
 }
@@ -203,6 +234,8 @@ pub(crate) fn encode_textured_glb_with_cancel(
         evidence,
         bake,
         None,
+        None,
+        None,
         &mut crate::ReconstructionControl::new(&mut is_canceled),
     )
 }
@@ -211,6 +244,8 @@ fn encode_textured_glb_controlled(
     evidence: &ReconstructionEvidenceView<'_>,
     bake: &SurfaceMaterialBake,
     collider: Option<&CoarseCollider>,
+    partition: Option<&ObjectSurfacePartition>,
+    camera_provider: Option<&CameraProviderMetadata>,
     control: &mut crate::ReconstructionControl<'_>,
 ) -> Result<Vec<u8>, String> {
     control.check()?;
@@ -262,7 +297,11 @@ fn encode_textured_glb_controlled(
         [point.x, -point.y, -point.z]
     };
     let mut gltf = GltfBuilder::default();
-    let mut primitives = Vec::new();
+    if partition.is_some_and(|part| part.groups.len() != triangles.len()) {
+        return Err("object surface partition and accepted geometry do not match".into());
+    }
+    let group_of = |i: usize| partition.and_then(|p| p.groups[i]);
+    let mut primitives: BTreeMap<Option<usize>, Vec<Value>> = BTreeMap::new();
     let mut materials = Vec::new();
     let mut images = Vec::new();
     let mut textures = Vec::new();
@@ -277,10 +316,10 @@ fn encode_textured_glb_controlled(
                 material.triangles.len()
             ));
         }
-        let mut vertices = PrimitiveVertices::default();
-        let mut uvs = Vec::new();
+        let mut groups: BTreeMap<_, (PrimitiveVertices, Vec<f32>)> = BTreeMap::new();
         for (triangle, corner_uvs) in material.triangles.iter().zip(&material.corner_uvs) {
             control.check()?;
+            let (vertices, uvs) = groups.entry(group_of(*triangle)).or_default();
             let triangle = &triangles[*triangle];
             for (point, uv) in [
                 (triangle.a, corner_uvs[0]),
@@ -292,19 +331,25 @@ fn encode_textured_glb_controlled(
                 }
             }
         }
-        let positions = vertices
-            .order
-            .iter()
-            .flat_map(|index| position(*index))
-            .map(|value| {
-                control.check()?;
-                Ok(value)
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true, control)?;
-        let uv_accessor = gltf.float_accessor(&uvs, "VEC2", 2, false, control)?;
-        let index_accessor = gltf.index_accessor(&vertices.indices, control)?;
+        for (group, (vertices, uvs)) in groups {
+            let positions = vertices
+                .order
+                .iter()
+                .flat_map(|index| position(*index))
+                .map(|value| {
+                    control.check()?;
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true, control)?;
+            let uv_accessor = gltf.float_accessor(&uvs, "VEC2", 2, false, control)?;
 
+            let index_accessor = gltf.index_accessor(&vertices.indices, control)?;
+            primitives.entry(group).or_default().push(json!({
+                "attributes": { "POSITION": position_accessor, "TEXCOORD_0": uv_accessor },
+                "indices": index_accessor, "material": materials.len(),
+            }));
+        }
         let texture = &material.texture;
         let png = encode_png_rgb_with_cancel(texture.width, texture.height, &texture.rgba, || {
             control.is_canceled()
@@ -360,46 +405,48 @@ fn encode_textured_glb_controlled(
             "extensions": { "KHR_materials_unlit": {} },
             "extras": { "video_to_3d": provenance },
         }));
-        primitives.push(json!({
-            "attributes": { "POSITION": position_accessor, "TEXCOORD_0": uv_accessor },
-            "indices": index_accessor,
-            "material": materials.len() - 1,
-        }));
     }
 
     if !bake.fallback.triangles.is_empty() {
-        let mut vertices = PrimitiveVertices::default();
+        let mut groups: BTreeMap<_, PrimitiveVertices> = BTreeMap::new();
         for triangle in &bake.fallback.triangles {
             control.check()?;
+            let vertices = groups.entry(group_of(*triangle)).or_default();
             let triangle = &triangles[*triangle];
             for point in [triangle.a, triangle.c, triangle.b] {
                 vertices.push(point);
             }
         }
-        let positions = vertices
-            .order
-            .iter()
-            .flat_map(|index| position(*index))
-            .map(|value| {
-                control.check()?;
-                Ok(value)
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let colors = vertices
-            .order
-            .iter()
-            .flat_map(|index| {
-                let point = &points[*index];
-                [point.r, point.g, point.b].map(srgb_to_linear)
-            })
-            .map(|value| {
-                control.check()?;
-                Ok(value)
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true, control)?;
-        let color_accessor = gltf.float_accessor(&colors, "VEC3", 3, false, control)?;
-        let index_accessor = gltf.index_accessor(&vertices.indices, control)?;
+        for (group, vertices) in groups {
+            let positions = vertices
+                .order
+                .iter()
+                .flat_map(|index| position(*index))
+                .map(|value| {
+                    control.check()?;
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let colors = vertices
+                .order
+                .iter()
+                .flat_map(|index| {
+                    let point = &points[*index];
+                    [point.r, point.g, point.b].map(srgb_to_linear)
+                })
+                .map(|value| {
+                    control.check()?;
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let position_accessor = gltf.float_accessor(&positions, "VEC3", 3, true, control)?;
+            let color_accessor = gltf.float_accessor(&colors, "VEC3", 3, false, control)?;
+            let index_accessor = gltf.index_accessor(&vertices.indices, control)?;
+            primitives.entry(group).or_default().push(json!({
+                "attributes": { "POSITION": position_accessor, "COLOR_0": color_accessor },
+                "indices":index_accessor,"material":materials.len()
+            }));
+        }
         materials.push(json!({
             "name": "vertex-color-fallback",
             "pbrMetallicRoughness": {
@@ -415,16 +462,27 @@ fn encode_textured_glb_controlled(
                 "reasons": bake.fallback.reasons,
             }},
         }));
-        primitives.push(json!({
-            "attributes": { "POSITION": position_accessor, "COLOR_0": color_accessor },
-            "indices": index_accessor,
-            "material": materials.len() - 1,
-        }));
     }
-
-    let mut meshes = vec![json!({ "name": "accepted-surface", "primitives": primitives })];
-    let mut nodes = vec![json!({ "name": "accepted-surface", "mesh": 0 })];
-    let mut scenes = vec![json!({ "name": "visual", "nodes": [0] })];
+    let mut meshes = Vec::new();
+    let mut nodes = Vec::new();
+    for (group, primitives) in primitives {
+        let object = group.and_then(|i| partition.and_then(|p| p.objects.get(i)));
+        let name = object.map_or_else(
+            || "accepted-surface".to_string(),
+            |(id, label)| format!("{label} {id}"),
+        );
+        let mut node = json!({ "name": name, "mesh": meshes.len() });
+        if let (Some((id, label)), Some(partition)) = (object, partition) {
+            node["extras"] = json!({ "video_to_3d": {
+                "role":"observed_object_surface", "object_id": id, "label":label, "semantic_inventory": partition.inventory_hash,
+                "association":"cross_view_consistent_masks", "geometry_origin":"geometric_multi_view"
+            }});
+        }
+        meshes.push(json!({ "name": name, "primitives": primitives }));
+        nodes.push(node);
+    }
+    let mut scenes =
+        vec![json!({ "name": "visual", "nodes": (0..nodes.len()).collect::<Vec<_>>() })];
     let collision = collider.map(|collider| {
         json!({
             "role": collider.role,
@@ -451,8 +509,8 @@ fn encode_textured_glb_controlled(
             }],
             "extras": extras,
         }));
-        nodes.push(json!({ "name": "coarse-collider", "mesh": 1, "extras": extras }));
-        scenes.push(json!({ "name": "collision", "nodes": [1] }));
+        nodes.push(json!({ "name": "coarse-collider", "mesh": meshes.len()-1, "extras": extras }));
+        scenes.push(json!({ "name": "collision", "nodes": [nodes.len()-1] }));
     }
 
     let mut document = json!({
@@ -464,6 +522,7 @@ fn encode_textured_glb_controlled(
                 "schema_version": SURFACE_MATERIAL_BAKE_SCHEMA_VERSION,
                 "provider": evidence.provider,
                 "scale": evidence.scale,
+                "accepted_camera_evidence": evidence.cameras,
                 "frame": "reconstruction camera frame (+Y down, +Z forward) rotated 180 degrees about X into glTF (+Y up, -Z forward)",
                 "points": points.len(),
                 "triangles": triangles.len(),
@@ -482,6 +541,10 @@ fn encode_textured_glb_controlled(
         "accessors": gltf.accessors,
         "bufferViews": gltf.buffer_views,
     });
+    if let Some(partition) = partition {
+        document["asset"]["extras"]["video_to_3d"]["semantic_inventory"] =
+            json!(partition.inventory_hash);
+    }
     if !images.is_empty() {
         document["images"] = json!(images);
         document["textures"] = json!(textures);
@@ -492,7 +555,17 @@ fn encode_textured_glb_controlled(
             "wrapT": CLAMP_TO_EDGE,
         }]);
     }
-    let mut bin = gltf.bin;
+    if let Some(provider) = camera_provider {
+        document["asset"]["extras"]["video_to_3d"]["camera_provider"] = serde_json::json!(provider);
+    }
+    pack_scene_glb(document, gltf.bin, control)
+}
+
+pub(crate) fn pack_scene_glb(
+    mut document: Value,
+    mut bin: Vec<u8>,
+    control: &mut crate::ReconstructionControl<'_>,
+) -> Result<Vec<u8>, String> {
     while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }

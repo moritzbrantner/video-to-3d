@@ -9,8 +9,8 @@ video / keyframes
       |
       +--> built-in Rust SfM + dense depth
       +--> native learned multi-view provider (future)
-      +--> external classical provider (future)
-      +--> generative completion provider (future, separate provenance)
+      +--> local COLMAP registration in Studio
+      +--> local TripoSR object candidates (separate provenance)
                  |
                  v
         ReconstructionEvidenceView
@@ -37,10 +37,11 @@ it does not imply the three-real-video scene-to-Blender acceptance target is met
 | Capability/provider | Current role | Source of usage and proof |
 | --- | --- | --- |
 | Built-in Rust SfM/dense reconstruction | **Active product implementation; not yet product-accepted** | [Core reconstruction](../crates/video-to-3d-core/src/lib.rs), [WASM adapter](../crates/video-to-3d-wasm/src/lib.rs), [evidence contract](../crates/video-to-3d-core/src/reconstruction_evidence.rs), and [real-video/benchmark evidence](../benchmarks/README.md). It runs the ordinary browser path, but passing its current technical gates does not prove editable real-scene acceptance. |
-| External COLMAP via `pycolmap==4.2.1` | **Reference/benchmark only; not an in-product reconstruction provider** | [Pinned version](../tools/requirements-colmap.txt), [reference runner](../tools/colmap_golden.py), [golden comparison](../tools/check_colmap_golden.py), and [runtime-profiler scenario](../profiles/runtime-profiler/golden-colmap.json). The same fixture images are compared against the internal Rust path; COLMAP output is **not** ground truth. |
+| External COLMAP via `pycolmap==4.2.1` | **Independent reference runner and dependency of the local Studio provider** | [Pinned version](../tools/requirements-colmap.txt), [reference runner](../tools/colmap_golden.py), [golden comparison](../tools/check_colmap_golden.py), and [runtime-profiler scenario](../profiles/runtime-profiler/golden-colmap.json). The same fixture images are compared against the internal Rust path; COLMAP output is **not** ground truth. |
 | COLMAP sparse text interchange | **Implemented import/interop capability, not COLMAP execution** | [Rust parser](../crates/video-to-3d-core/src/colmap.rs) reads cameras/images/points. [Spatial Media Explorer](https://github.com/moritzbrantner/spatial-media-explorer/blob/main/Cargo.toml) directly consumes `video-to-3d-core` plus the [3D Lab spatial contract](https://github.com/moritzbrantner/3d-lab/blob/main/crates/three-d-spatial/src/lib.rs) to display existing COLMAP reconstructions and annotations. The Explorer does not run COLMAP itself. |
-| COLMAP as an in-product native reconstruction provider | **Proposed; not integrated** | The provider-neutral contract above can accept an adapted provider, but there is no product invocation/admission path for COLMAP reconstruction. Evaluate against the existing golden runner and real-video acceptance before promoting it. |
-| Learned multi-view / generative completion | **Provider contract exists; production providers pending** | This document's provider classes describe the interface, not an implemented model-backed path; compare future providers using the same evidence/validation authority. |
+| Local COLMAP sparse registration | Studio invokes PyCOLMAP on locally decoded frames. When incremental mapping leaves cameras unregistered, calibrated global mapping can supply a larger model with an exportable seed and retained track support. Rust checks frame identity, poses, triangulated tracks and image reprojections before passing accepted geometry to the shared dense stage. The built-in solver handles failures and the standalone browser workflow. | [Registration sidecar](../tools/colmap-sparse/register.py), [Rust evidence validation](../crates/video-to-3d-core/src/registered_sparse.rs), [Studio](../scripts/local-studio.ts). |
+| Local COLMAP dense reconstruction | CUDA PatchMatch supplies depth from covisible camera groups. Rust checks reprojection, color and depth constraints before exporting textured surfaces and partitioning observed object meshes. Studio retains the Rust surface if the native mesh reports fewer validated triangles. | [Dense sidecar](../tools/colmap-dense/run.sh), [Rust surface assembly](../crates/video-to-3d-core/src/colmap_surface.rs), [quality benchmark](../benchmarks/README.md#tum-reconstruction-quality-with-local-colmap). |
+| Local generative completion | TripoSR produces individual mesh candidates from masked crops. Geometry remains labeled as inferred, and placement decisions use the original imagery. | [Candidate generator](../tools/semantic-sidecar/semantic_sidecar/object_generation.py), [placement checks](../crates/video-to-3d-core/src/placement_validation.rs). |
 
 **To track adoption:** name the capability, distinguish direct runtime use from
 reference/test-only use and format-only interoperability, link the actual import/call
@@ -49,6 +50,16 @@ consumer requirements. When code changes, update the affected row in that
 integration PR. Derive reverse consumers from source dependencies and repository
 metadata; do not keep a separate manually mirrored fleet dependency list.
 The [benchmark strategy](../benchmarks/README.md) owns measurement details.
+
+## Native provider comparison
+
+| Provider | Role and local constraints |
+| --- | --- |
+| COLMAP | BSD-licensed native sparse reconstruction. The pinned CPU wheel supports SIFT and incremental mapping. The separate CUDA 12 wheel runs PatchMatch on a compatible NVIDIA GPU. Rust validates admitted camera, depth and surface evidence. [COLMAP installation](https://colmap.github.io/install.html) |
+| GLOMAP | Global structure from motion, now available through the COLMAP global mapper. It can provide another sparse camera estimate on the same imagery. It needs an overlapping feature graph and a separate dense stage. [GLOMAP repository](https://github.com/colmap/glomap) |
+| OpenMVS | AGPL-3.0 dense reconstruction, mesh refinement and texturing with CPU support and optional CUDA. Its mesh would require the same input and evidence checks. [OpenMVS repository](https://github.com/cdcseacave/openMVS) |
+| MapAnything | Apache-licensed code and Apache checkpoint available for local inference. The bounded GPU smoke harness can evaluate weak classical regions on the same frames. Full-scene fusion requires independent quality verification. [MapAnything models](https://github.com/facebookresearch/map-anything#models) |
+| VGGT | Predicts cameras, depth, point maps and feature tracks. The commercial checkpoint uses separate gated terms. Memory use depends on the frame batch and needs measurement on the target 8 GB GPU. [VGGT documentation](https://github.com/facebookresearch/vggt) |
 
 ## Provenance
 

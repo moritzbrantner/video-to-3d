@@ -596,7 +596,7 @@ fn remap_material(
     Ok(value)
 }
 
-fn supported_source_layout(bytes: &[u8]) -> Result<(), ExportError> {
+pub(crate) fn supported_source_layout(bytes: &[u8]) -> Result<(), ExportError> {
     // The established mesh loader owns attributes/materials, but does not lower
     // source node placement. Reject unsupported layouts rather than losing it.
     let source = gltf::Gltf::from_slice(bytes).map_err(unsupported)?;

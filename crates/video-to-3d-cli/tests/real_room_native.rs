@@ -380,7 +380,8 @@ fn reject_false_cancellation_and_unavailable_quality(
         let (store, mut manifest) = ProjectStore::open(&project.0.join("project.json")).unwrap();
         let cancel = CancellationToken::new();
         let executor = FailStage {
-            delegate: BuiltInExecutor::for_project(&project.0, project.0.join("project.json")),
+            delegate: BuiltInExecutor::for_project(&project.0, project.0.join("project.json"))
+                .with_local_camera_registration(),
             kind,
         };
         let report = if kind == OperationKind::SparseReconstruction {
@@ -511,10 +512,10 @@ fn approved_room_browser_pixels_reach_actual_cli_and_verified_receipt_reuse() {
     let report = interrupted_store
         .build(
             &mut interrupted_manifest,
-            &CancelAfterSparse(BuiltInExecutor::for_project(
-                &interrupted.0,
-                interrupted.0.join("project.json"),
-            )),
+            &CancelAfterSparse(
+                BuiltInExecutor::for_project(&interrupted.0, interrupted.0.join("project.json"))
+                    .with_local_camera_registration(),
+            ),
             RunOptions::default(),
             &cancel,
         )

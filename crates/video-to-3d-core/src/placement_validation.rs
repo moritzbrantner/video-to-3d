@@ -211,6 +211,14 @@ pub fn validate_placement(
         let projected: Vec<([f64; 2], f64)> = scene_vertices
             .iter()
             .filter_map(|vertex| project(camera, *vertex))
+            .filter(|(pixel, _)| {
+                observation.mask.as_ref().is_none_or(|m| {
+                    pixel[0] >= 0.
+                        && pixel[0] < f64::from(m.width)
+                        && pixel[1] >= 0.
+                        && pixel[1] < f64::from(m.height)
+                })
+            })
             .collect();
         let landmarks = front_points(observation, camera, points);
         let landmark_residual = (height > 0.0)
@@ -262,12 +270,6 @@ pub fn validate_placement(
             f64::NEG_INFINITY,
         ];
         for (pixel, depth) in &projected {
-            pixel_box = [
-                pixel_box[0].min(pixel[0]),
-                pixel_box[1].min(pixel[1]),
-                pixel_box[2].max(pixel[0]),
-                pixel_box[3].max(pixel[1]),
-            ];
             let in_mask = inside(observation, *pixel);
             let scene_depth = grid.get(&cell(*pixel)).copied();
             let behind = scene_depth.is_some_and(|scene| *depth > scene * (1.0 + DEPTH_MARGIN));
@@ -276,6 +278,12 @@ pub fn validate_placement(
                 violations += 1;
             }
             if !behind {
+                pixel_box = [
+                    pixel_box[0].min(pixel[0]),
+                    pixel_box[1].min(pixel[1]),
+                    pixel_box[2].max(pixel[0]),
+                    pixel_box[3].max(pixel[1]),
+                ];
                 visible += 1;
                 if in_mask {
                     visible_inside += 1;
@@ -283,7 +291,12 @@ pub fn validate_placement(
             }
         }
         let inside_share = (visible > 0).then(|| visible_inside as f64 / visible as f64);
-        let iou = box_iou(pixel_box, observation.bbox);
+        let silhouette_box = observation
+            .mask
+            .as_ref()
+            .and_then(|m| m.foreground_bounds())
+            .unwrap_or(observation.bbox);
+        let iou = box_iou(pixel_box, silhouette_box);
         let violation_share = violations as f64 / projected.len() as f64;
         residual.inside_share = inside_share;
         residual.box_iou = Some(iou);

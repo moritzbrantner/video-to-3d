@@ -2,6 +2,25 @@
 
 A privacy-first Rust/Tauri + WebAssembly experiment for reconstructing a 3D scene from ordinary video.
 
+## Convert a local video
+
+With the development prerequisites below installed, run the following from the repository root:
+
+```bash
+bun install
+bun run build
+bunx playwright-core install chromium
+bun run reconstruct trevi.webm
+```
+
+The last command runs the built app in local headless Chromium and writes `target/video-to-scene/trevi.glb`. Substitute your own video and optionally an output directory, for example `bun run reconstruct room.mp4 ./exports`. The converter keeps existing scene files. If an export is interrupted after detection finishes, repeat the command in the same directory to reuse matching frame evidence. It uses the same browser decoder, Rust/WASM reconstruction, and export controls as the interactive app. The native object detector runs on the same sampled pixels with Grounding DINO and SAM 2.1 on a local CUDA GPU. Install `uv` for the Python runtime. The first run downloads model weights and dependencies, and later runs can use the local cache. The converter saves labels, masks, and cross-frame tracks alongside the geometry in `trevi.objects.json`. CPU-only runs retain geometry export and report detection as unavailable. Run `bun run test:video-to-scene` to verify a real video produces a readable GLB with surface triangles.
+
+Local Studio samples at up to 640 pixels on the long edge and keeps up to 120 overlapping frames. It tries local COLMAP camera registration and CUDA PatchMatch with Rust validation. The browser build retains the 360-pixel plan and Rust solver. If the CUDA pass is unavailable or insufficient, Studio can still export the Rust surface using accepted cameras. Set `VIDEO_TO_3D_COLMAP_DENSE=0` to compare the Rust surface on the same native samples. Set `VIDEO_TO_3D_OBJECT_LABELS='yellow die,chair'` to pass a focused vocabulary to the local detector.
+
+The local converter also reconstructs individual object models. It uses masks from registered views to carve object shapes and reserves a view for silhouette verification when enough views exist. A local TripoSR model can supply an inferred shape from a reference crop. The completed scene includes separately named meshes whose placement passes the available camera and image checks. The sibling `*.object-library.glb` contains individually editable candidates arranged for inspection, including objects with uncertain placement. The `*.models/` directory records the source views, candidate provenance, and placement decisions. Repeated detections may still correspond to one physical object, and a good silhouette match can coexist with a depth error.
+
+For interactive object detection, run `bun run studio` after building, open the printed loopback address, and choose **Select video files**. Inspect detected masks on sampled video frames. The standalone static app can import saved detection evidence for the matching video. A **Surface ready** result can be opened in Blender through **File → Import → glTF 2.0**. When only calibrated points are recovered, the converter writes a colored PLY point cloud. If camera calibration fails, the app explains the result and the converter exits without producing geometry. Monocular scale is arbitrary. The observed scene contains surfaces supported by the footage. The completed scene can also include inferred object surfaces.
+
 **Documentation authority:** The [Decision Atlas](docs/DECISION-ATLAS.md) owns product intent (stable IDs); [acceptance specifications](docs/specs/hybrid-room-to-blender-acceptance.md) own observable release requirements; [whole-scene](docs/video-to-world-roadmap.md) and [engine](ROADMAP.md) roadmaps own implementation sequencing. The implementation status below is not evidence that the Atlas's product gate (IDs `3.1`, `3.6`) has passed.
 
 The current implementation has an integrated **Slice 3 sparse-SfM pipeline** and an advancing **Slice 4 dense-reconstruction foundation**. One or more videos can be selected and are decoded locally in the browser, then processed independently and sequentially. For each clip, Rust/WASM detects and matches features, chains adjacent matches into deterministic multi-frame tracks, screens keyframe candidates from overlap and residual parallax, links the actually triangulated landmarks from the strongest calibrated seed pair into other selected keyframes, and can register additional cameras with bounded deterministic robust PnP when their 3D↔2D evidence passes inlier and reprojection gates. A bounded set of selected non-adjacent keyframe pairs is also screened with mutual descriptor matches. Strong direct evidence back to the calibrated seed can recover an otherwise unregistered selected keyframe or propose a bounded correction for an already registered camera whose pose has drifted. Revisit corrections are retained only when the existing rollback-safe bundle-adjustment acceptance also holds. Once an additional view is accepted, non-seed tracks observed by registered cameras can be triangulated into new sparse landmarks when they pass positive-depth, multi-view support, reprojection, and triangulation-angle gates. After the final accepted sparse geometry is established, Rust can run a conservative coarse plane-sweep depth pass over textured reference-frame samples. A primary depth hypothesis is retained only after the existing photometric and ambiguity gates and a reciprocal source-view depth check derived from that source camera's own visible sparse-landmark envelope. Reciprocal source depths are converted back to world-space observations, spatial outliers are rejected, and the surviving multi-view observations are fused into one dense scene point. Accepted fused points can then be connected into a bounded reference-grid triangle surface only when neighboring samples pass explicit depth-continuity, 3D edge-length, and non-degenerate-area gates. Dense points and mesh topology remain separate from the sparse map. If evidence is weak, neither dense points nor surface triangles are invented. If no pair passes the calibrated geometry gates, the app explicitly falls back to the conservative slice-1 preview instead of fabricating a calibrated result.
@@ -9,7 +28,7 @@ The current implementation has an integrated **Slice 3 sparse-SfM pipeline** and
 ## Current slice
 
 1. Pick one or more local video files.
-2. The browser processes selected videos sequentially and samples up to 18 reduced-resolution frames per video.
+2. The browser processes selected videos sequentially. Short clips use up to 18 frames by default. Longer clips retain additional overlapping views.
 3. Rust/WASM detects Harris-style corners and normalized local patch descriptors.
 4. Rust matches adjacent frames with a local search, ratio test, and unique-match selection.
 5. Adjacent one-to-one matches are chained into deterministic feature tracks spanning multiple sampled frames.
@@ -70,11 +89,13 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked
 bun run dev
 ```
 
-For desktop:
+To run the desktop development window with local camera registration and object providers:
 
 ```bash
 bun run tauri:dev
 ```
+
+This builds the shared web app and opens it in Tauri on a private loopback port. Closing the window shuts down its Studio server and provider processes. The packaged desktop build currently embeds the browser/WASM app. Native provider execution requires the development launcher or local Studio.
 
 Validation:
 
@@ -90,10 +111,10 @@ before running `tools/run_colmap_golden.sh`. One pinned PyCOLMAP runs every stag
 `colmap` package. Mixing the two aborted the mapper on Ubuntu 26.04. Exact matching is used
 because approximate matching varies even with a fixed seed and one thread. CI compares
 match and verified-geometry tables between independent quality and runtime runs, alongside
-the existing camera, point, reprojection, and pose gates. This reference dependency is development-only.
+the existing camera, point, reprojection, and pose gates. Local Studio also runs pinned PyCOLMAP on the sampled video frames. Rust checks the frame hashes, camera poses and feature reprojections before using the recovered geometry. If registration is unavailable or its evidence fails validation, processing continues with the built-in Rust camera solver.
 See [reconstruction provider adoption](docs/reconstruction-providers.md#adoption-and-integration-evidence)
 for the separate status of the built-in Rust path, COLMAP reference execution, sparse
-COLMAP import consumers, and possible future in-product providers.
+COLMAP import consumers, and the native registration provider.
 
 ## GitHub Pages demo
 

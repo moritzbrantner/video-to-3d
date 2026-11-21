@@ -19,11 +19,11 @@ import {
   describeGeometryConfidence,
   describeSeedRejections,
   describeSegmentSolves,
-  reconstructFrames,
   type FrameCameraState,
   type ReconstructionResult,
   type SampledFrame,
 } from "../src/reconstruction";
+import { observedPointCloudPly, observedPointCount } from "../src/pointCloud";
 import { SceneCanvas } from "../src/SceneCanvas";
 import {
   bakeTexturedSurface,
@@ -33,6 +33,10 @@ import {
 } from "../src/surfaceMaterials";
 import { assessReadiness, type ReadinessReport } from "../src/readiness";
 import { sampleVideoWithInfo } from "../src/video";
+import { completeLocalScene, detectInLocalStudio, localStudio, reconstructLocalObjects, reconstructStudioFrames, type ObjectModels as ModelRun } from "../src/localObjects";
+import { sceneCameraView, type CameraView } from "../src/sourceView";
+import { MeshViewer, ObjectModels } from "./ObjectModels";
+import { ObjectDetections, previewFrames, readInventory, type ImportedInventory, type PreviewFrame } from "./ObjectDetections";
 
 type RunPhase =
   | "queued"
@@ -40,16 +44,24 @@ type RunPhase =
   | "reconstructing"
   | "learned"
   | "done"
-  | "partial"
+  | "points"
+  | "preview"
   | "error";
-type StatusPhase = "idle" | RunPhase;
-type PreviewFrame = Pick<SampledFrame, "height" | "thumbnail" | "time" | "width">;
+type StatusPhase = "idle" | "detecting" | "generating" | RunPhase;
 
 type VideoRun = {
   id: string;
   fileName: string;
+  file: File | null;
+  models: ModelRun | null;
+  generating: boolean;
+  generationError: string;
   phase: RunPhase;
   frames: PreviewFrame[];
+  objectInventory: ImportedInventory | null;
+  detectingObjects: boolean;
+  detectionError: string;
+  cameraRegistration: string;
   reconstruction: ReconstructionResult | null;
   error: string;
   samplingFps: number;
@@ -62,6 +74,8 @@ type VideoRun = {
   /** RGBA of accepted dense reference frames only; kept for material export. */
   referenceImages: ReferenceImage[];
   materialExport: MaterialExportState | null;
+  scenePreview: Blob | null;
+  nativeSurface: Blob | null;
 };
 
 type MaterialExportState = {
@@ -84,15 +98,6 @@ const TREVI_DEMO_FILE_PAGE =
 const TREVI_DEMO_LICENSE = "https://creativecommons.org/licenses/by-sa/4.0/";
 const TREVI_DEMO_FILE_NAME = "trevi-fountain-demo.webm";
 
-function previewFrames(frames: SampledFrame[]): PreviewFrame[] {
-  return frames.map((frame) => ({
-    width: frame.width,
-    height: frame.height,
-    thumbnail: frame.thumbnail,
-    time: frame.time,
-  }));
-}
-
 function normalizedSamplingFps(value: number): number {
   if (!Number.isFinite(value)) return 1.25;
   return Math.min(MAX_SAMPLING_FPS, Math.max(MIN_SAMPLING_FPS, value));
@@ -103,20 +108,52 @@ function normalizedFrameCap(value: number | null): number | null {
   return Math.min(MAX_FRAME_CAP, Math.max(MIN_FRAME_CAP, Math.floor(value)));
 }
 
-function phaseLabel(phase: RunPhase): string {
+function downloadFile(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function CompletedScenePreview({ scene, camera }: { scene: Blob; camera?: CameraView }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    const next = URL.createObjectURL(scene);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [scene]);
+  return url ? <MeshViewer url={url} camera={camera} alt="Completed 3D scene with accepted object placements" /> : null;
+}
+
+function geometryPhase(result: ReconstructionResult): RunPhase {
+  if (result.mesh_triangles.length > 0) {
+    return "done";
+  }
+  return observedPointCount(result) > 0 ? "points" : "preview";
+}
+
+function phaseLabel(phase: RunPhase | "detecting" | "generating"): string {
   switch (phase) {
     case "queued":
       return "Queued";
     case "sampling":
       return "Sampling";
+    case "generating":
+      return "Reconstructing objects";
+    case "detecting":
+      return "Detecting objects";
     case "reconstructing":
       return "Rust/WASM";
     case "learned":
       return "AI model";
     case "done":
-      return "Ready";
-    case "partial":
-      return "AI model incomplete";
+      return "Surface ready";
+    case "points":
+      return "Point cloud ready";
+    case "preview":
+      return "No calibrated scene";
     case "error":
       return "Failed";
   }
@@ -221,9 +258,13 @@ export default function Home() {
 
     const nextRuns: VideoRun[] = files.map((file, index) => ({
       id: `${file.name}:${file.size}:${file.lastModified}:${index}`,
-      fileName: file.name,
+      fileName: file.name, file, models: null, generating: false, generationError: "",
       phase: "queued",
       frames: [],
+      objectInventory: null,
+      detectingObjects: false,
+      detectionError: "",
+      cameraRegistration: "",
       reconstruction: null,
       error: "",
       samplingFps: runSamplingFps,
@@ -233,7 +274,7 @@ export default function Home() {
       readiness: null,
       readinessError: "",
       referenceImages: [],
-      materialExport: null,
+      materialExport: null, scenePreview: null, nativeSurface: null,
     }));
 
     setRuns(nextRuns);
@@ -242,11 +283,13 @@ export default function Home() {
 
     for (const [index, file] of files.entries()) {
       const run = nextRuns[index];
+      let detection: Promise<ImportedInventory | null> | undefined;
       try {
         updateRun(run.id, { phase: "sampling", error: "" });
         const { frames: sampled, info } = await sampleVideoWithInfo(file, {
           framesPerSecond: run.samplingFps,
           maxFrames: run.frameCap ?? undefined,
+          profile: localStudio() ? "local-reconstruction" : "browser",
         });
         // Readiness is evidence only: it never prevents the reconstruction attempt.
         let readiness: ReadinessReport | null = null;
@@ -257,13 +300,32 @@ export default function Home() {
           readinessError =
             readinessFailure instanceof Error ? readinessFailure.message : String(readinessFailure);
         }
+        const previews = await previewFrames(sampled);
         updateRun(run.id, {
           phase: "reconstructing",
-          frames: previewFrames(sampled),
+          frames: previews,
+          detectingObjects: true,
           readiness,
           readinessError,
         });
-        const result = await reconstructFrames(sampled);
+        const solving = reconstructStudioFrames(sampled, cameraRegistration => {
+          updateRun(run.id, { cameraRegistration });
+        }, async () => (await detection)?.json ?? null, reconstruction => {
+          updateRun(run.id, { reconstruction });
+        });
+        detection = detectInLocalStudio(sampled).then(async (json) => {
+          if (json !== null) {
+            const objectInventory = await readInventory(json, previews);
+            updateRun(run.id, { objectInventory });
+            return objectInventory;
+          }
+          return null;
+        }).catch((cause: unknown) => {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          updateRun(run.id, { detectionError: `Local object detection failed. ${message}` });
+          return null;
+        }).finally(() => updateRun(run.id, { detectingObjects: false }));
+        const { result, nativeSurface } = await solving;
         updateRun(run.id, { referenceImages: retainReferenceImages(result, sampled) });
         let learnedBenchmark: LearnedBenchmarkSuite | null = null;
         const learnedIssues: string[] = [];
@@ -287,7 +349,8 @@ export default function Home() {
           }
         }
         updateRun(run.id, {
-          phase: learnedIssues.length > 0 ? "partial" : "done",
+          phase: nativeSurface ? "done" : geometryPhase(result),
+          nativeSurface,
           reconstruction: result,
           learnedBenchmark,
           error:
@@ -295,36 +358,80 @@ export default function Home() {
               ? `${learnedIssues.join(" ")} The Rust/WASM reconstruction is shown without AI model evidence.`
               : "",
         });
+        const detected = await detection;
+        if (detected) { await generateObjects(run.id, sampled, detected, result); }
       } catch (caught) {
         updateRun(run.id, {
           phase: "error",
           error: caught instanceof Error ? caught.message : String(caught),
         });
+      } finally {
+        await detection;
       }
     }
   }
 
-  async function exportTexturedSurface(run: VideoRun) {
-    if (!run.reconstruction || run.materialExport?.busy) return;
+  async function generateObjects(id: string, frames: SampledFrame[], inventory: ImportedInventory, result: ReconstructionResult) {
+    if (inventory.inventory.status !== "available") { return; }
+    updateRun(id, { generating: true, generationError: "", models: null });
+    try {
+      const models = await reconstructLocalObjects(frames, inventory.json, result);
+      updateRun(id, { models });
+    } catch (cause) {
+      updateRun(id, { generationError: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      updateRun(id, { generating: false });
+    }
+  }
+
+  async function importObjectInventory(run: VideoRun, objectInventory: ImportedInventory) {
+    updateRun(run.id, {
+      objectInventory, detectionError: "", materialExport: null, scenePreview: null, models: null, generationError: "",
+      nativeSurface: run.objectInventory?.json === objectInventory.json ? run.nativeSurface : null,
+    });
+    if (!run.file || !run.reconstruction || !localStudio()) { return; }
+    updateRun(run.id, { generating: true });
+    try {
+      const { frames } = await sampleVideoWithInfo(run.file, {
+        framesPerSecond: run.samplingFps, maxFrames: run.frameCap ?? undefined,
+        profile: "local-reconstruction",
+      });
+      const matched = await readInventory(objectInventory.json, await previewFrames(frames));
+      await generateObjects(run.id, frames, matched, run.reconstruction);
+    } catch (cause) {
+      updateRun(run.id, { generationError: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      updateRun(run.id, { generating: false });
+    }
+  }
+
+  async function exportTexturedSurface(run: VideoRun, action: "completed" | "observed" | "preview" = "completed") {
+    if (!run.reconstruction || run.materialExport?.busy || run.detectingObjects || run.generating) return;
+    if (action === "completed" && run.scenePreview) {
+      downloadFile(run.scenePreview, `${run.fileName.replace(/\.[^.]+$/, "")}-completed.glb`);
+      return;
+    }
     const previous = run.materialExport?.appearance ?? [];
     updateRun(run.id, {
       materialExport: { busy: true, diagnostic: "", error: "", appearance: previous },
     });
     try {
-      const baked = await bakeTexturedSurface(run.reconstruction, run.referenceImages, previous);
-      const blob = new Blob([baked.glb.slice().buffer], { type: "model/gltf-binary" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${run.fileName.replace(/\.[^.]+$/, "")}-textured-surface.glb`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
+      const baked = run.nativeSurface ? null : await bakeTexturedSurface(run.reconstruction, run.referenceImages, previous, run.objectInventory?.json);
+      const blob = baked ? new Blob([baked.glb.slice().buffer], { type: "model/gltf-binary" }) : run.nativeSurface;
+      if (!blob) { throw new Error("No reconstructed surface is available"); }
+      const complete = action !== "observed" && run.models?.candidates.some(c => c.placement === "accepted" && c.meshUrl);
+      const scene = complete && run.models ? await completeLocalScene(blob, run.models) : blob;
+      if (action === "preview") {
+        updateRun(run.id, { scenePreview: scene });
+      } else {
+        downloadFile(scene, `${run.fileName.replace(/\.[^.]+$/, "")}-${complete ? "completed" : "observed"}.glb`);
+      }
       updateRun(run.id, {
         materialExport: {
           busy: false,
-          diagnostic: baked.diagnostic,
+          diagnostic: baked?.diagnostic ?? "Textured COLMAP surface validated against the video.",
           error: "",
-          appearance: baked.appearance,
+          appearance: baked?.appearance ?? previous,
         },
       });
     } catch (caught) {
@@ -378,9 +485,13 @@ export default function Home() {
       const runFrameCap = normalizedFrameCap(frameCap);
       const failedRun: VideoRun = {
         id: "trevi-fountain-demo:error",
-        fileName: TREVI_DEMO_FILE_NAME,
+        fileName: TREVI_DEMO_FILE_NAME, file: null, models: null, generating: false, generationError: "",
         phase: "error",
         frames: [],
+        objectInventory: null,
+        detectingObjects: false,
+        detectionError: "",
+        cameraRegistration: "",
         reconstruction: null,
         error: message,
         samplingFps: runSamplingFps,
@@ -388,7 +499,7 @@ export default function Home() {
         mode,
         learnedBenchmark: null,
         referenceImages: [],
-        materialExport: null,
+        materialExport: null, scenePreview: null, nativeSurface: null,
         readiness: null,
         readinessError: "",
       };
@@ -404,20 +515,25 @@ export default function Home() {
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
   const processingRun = runs.find(
     (run) =>
-      run.phase === "sampling" || run.phase === "reconstructing" || run.phase === "learned",
+      run.phase === "sampling" || run.phase === "reconstructing" || run.phase === "learned" || run.detectingObjects || run.generating,
   );
   const processingIndex = processingRun
     ? runs.findIndex((run) => run.id === processingRun.id)
     : -1;
-  const failedCount = runs.filter((run) => run.phase === "error").length;
-  const readyCount = runs.filter((run) => run.phase === "done").length;
-  const partialCount = runs.filter((run) => run.phase === "partial").length;
+  const detectingAfterGeometry = processingRun?.detectingObjects &&
+    !["sampling", "reconstructing", "learned"].includes(processingRun.phase);
+  let progressPhase: StatusPhase | undefined = processingRun?.phase;
+  if (detectingAfterGeometry) { progressPhase = "detecting"; }
+  if (processingRun?.generating) { progressPhase = "generating"; }
   const statusPhase: StatusPhase = demoDownloading
     ? "sampling"
-    : (processingRun?.phase ?? activeRun?.phase ?? "idle");
+    : (progressPhase ?? activeRun?.phase ?? "idle");
   const frames = activeRun?.frames ?? [];
   const reconstruction = activeRun?.reconstruction ?? null;
   const error = activeRun?.error ?? "";
+  const hasCompletedScene = activeRun?.models?.candidates.some(c => c.placement === "accepted" && c.meshUrl);
+  let exportLabel = hasCompletedScene ? "Export completed scene GLB" : "Export textured GLB";
+  if (activeRun?.materialExport?.busy) { exportLabel = "Baking materials…"; }
   const selectedFrame =
     selectedFrameIndex === null ? null : (frames[selectedFrameIndex] ?? null);
   const selectedFrameState =
@@ -436,7 +552,11 @@ export default function Home() {
   if (demoDownloading) {
     status = "Downloading the Trevi test video from Wikimedia Commons…";
   } else if (processingRun) {
-    if (processingRun.phase === "sampling") {
+    if (processingRun.generating) {
+      status = `Reconstructing objects in video ${processingIndex + 1} of ${runs.length} locally…`;
+    } else if (detectingAfterGeometry) {
+      status = `Detecting objects in video ${processingIndex + 1} of ${runs.length} locally…`;
+    } else if (processingRun.phase === "sampling") {
       status = `Sampling video ${processingIndex + 1} of ${runs.length} locally…`;
     } else if (processingRun.phase === "reconstructing") {
       status = `Running Rust/WASM reconstruction for video ${processingIndex + 1} of ${runs.length}…`;
@@ -444,13 +564,28 @@ export default function Home() {
       status = `Running ${learnedModeLabel(processingRun.mode)} on accepted frames for video ${processingIndex + 1} of ${runs.length}…`;
     }
   } else if (runs.length > 0) {
-    const outcomes = [`${readyCount} ready`];
-    if (partialCount > 0) outcomes.push(`${partialCount} AI model incomplete`);
-    if (failedCount > 0) outcomes.push(`${failedCount} failed`);
-    status =
-      outcomes.length > 1
-        ? outcomes.join(" · ")
-        : `${readyCount} ${readyCount === 1 ? "video" : "videos"} ready`;
+    if (runs.length === 1) {
+      status = phaseLabel(runs[0].phase);
+    } else {
+      const outcomes = new Map<string, number>();
+      for (const run of runs) {
+        const label = phaseLabel(run.phase);
+        outcomes.set(label, (outcomes.get(label) ?? 0) + 1);
+      }
+      status = Array.from(outcomes, ([label, count]) => `${label} (${count})`).join(" · ");
+    }
+  }
+
+  let materialNote = "Try a clip where the camera moves sideways around a textured, stationary subject.";
+  if (hasRegisteredGeometry) {
+    materialNote = "No surface triangles were recovered.";
+  }
+  if (reconstruction && reconstruction.mesh_triangles.length > 0) {
+    materialNote = activeRun?.materialExport?.diagnostic ||
+      "The GLB contains the reconstructed surface and its baked appearance.";
+  }
+  if (activeRun?.materialExport?.error) {
+    materialNote = `Material export failed: ${activeRun.materialExport.error}`;
   }
 
   const selectedProvider =
@@ -607,11 +742,29 @@ export default function Home() {
         </nav>
       ) : null}
 
+      {activeRun?.cameraRegistration && <p data-testid="camera-registration">{activeRun.cameraRegistration}</p>}
       {error ? <section className="notice notice-error">{error}</section> : null}
+
+      {activeRun && frames.length > 0 && (
+        <ObjectDetections key={activeRun.id} frames={frames} imported={activeRun.objectInventory}
+          frameIndex={selectedFrameIndex} onSelectFrame={setSelectedFrameIndex}
+          busy={activeRun.materialExport?.busy === true || activeRun.generating} detecting={activeRun.detectingObjects}
+          detectionError={activeRun.detectionError}
+          onSave={() => {
+            if (activeRun.objectInventory) {
+              downloadFile(new Blob([activeRun.objectInventory.json], { type: "application/json" }),
+                `${activeRun.fileName.replace(/\.[^.]+$/, "")}.objects.json`);
+            }
+          }}
+          onImport={(objectInventory) => void importObjectInventory(activeRun, objectInventory)} />
+      )}
+
+      {activeRun && <ObjectModels key={`models-${activeRun.id}`} frames={frames} scene={reconstruction} result={activeRun.models} running={activeRun.generating}
+        error={activeRun.generationError} onFrame={setSelectedFrameIndex} />}
 
       <section className="workspace">
         <div className="viewer-panel">
-          {reconstruction ? (
+          {activeRun?.scenePreview && reconstruction ? <CompletedScenePreview scene={activeRun.scenePreview} camera={sceneCameraView(reconstruction, frames, selectedFrameIndex)} /> : reconstruction ? (
             <>
               <SceneCanvas
                 reconstruction={reconstruction}
@@ -657,26 +810,38 @@ export default function Home() {
             are only approximate motion samples. Dense-eligible cameras are tracked as a separate
             subset and never inferred from the display path.
           </p>
-          {activeRun?.reconstruction ? (
+          {activeRun && reconstruction ? (
             <div className="material-export">
+              {observedPointCount(reconstruction) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const fileName = activeRun.fileName.replace(/\.[^.]+$/, "");
+                    downloadFile(observedPointCloudPly(reconstruction), `${fileName}-points.ply`);
+                  }}
+                >
+                  Export point cloud (PLY)
+                </button>
+              )}
               <button
                 type="button"
                 disabled={
-                  activeRun.reconstruction.mesh_triangles.length === 0 ||
+                  activeRun.detectingObjects || activeRun.generating || (!activeRun.nativeSurface && reconstruction.mesh_triangles.length === 0) ||
                   activeRun.materialExport?.busy === true
                 }
                 onClick={() => void exportTexturedSurface(activeRun)}
               >
-                {activeRun.materialExport?.busy ? "Baking materials…" : "Export textured GLB"}
+                {exportLabel}
               </button>
-              <p className="method-note">
-                {activeRun.reconstruction.mesh_triangles.length === 0
-                  ? "Material export needs accepted surface triangles."
-                  : activeRun.materialExport?.error
-                    ? `Material export failed: ${activeRun.materialExport.error}`
-                    : activeRun.materialExport?.diagnostic ||
-                      "Bakes accepted reference-view appearance into a self-contained GLB; ambiguous triangles keep vertex colors and geometry is never changed."}
-              </p>
+              {(hasCompletedScene || activeRun.nativeSurface) && <>
+                <button type="button" disabled={activeRun.materialExport?.busy || (!activeRun.nativeSurface && reconstruction.mesh_triangles.length === 0)}
+                  onClick={() => activeRun.scenePreview ? updateRun(activeRun.id, { scenePreview: null }) : void exportTexturedSurface(activeRun, "preview")}>
+                  {activeRun.scenePreview ? "Show camera evidence" : hasCompletedScene ? "Inspect completed scene" : "Inspect observed scene"}
+                </button>
+                <button type="button" disabled={activeRun.materialExport?.busy || (!activeRun.nativeSurface && reconstruction.mesh_triangles.length === 0)}
+                  onClick={() => void exportTexturedSurface(activeRun, "observed")}>Export observed-only GLB</button>
+              </>}
+              <p className="method-note">{materialNote}</p>
             </div>
           ) : null}
         </aside>
@@ -862,7 +1027,7 @@ export default function Home() {
                     <td>{reconstruction.multi_view.track_count}</td>
                   </tr>
                   <tr>
-                    <th>Sparse points</th>
+                    <th>{hasRegisteredGeometry ? "Sparse landmarks" : "Approximate preview points"}</th>
                     <td>{reconstruction.points.length}</td>
                   </tr>
                   <tr>
@@ -911,7 +1076,7 @@ export default function Home() {
                                   .map((frameIndex) => frameIndex + 1)
                                   .join(", ")
                               : "none"
-                          }`
+                          } · grid spacing ${reconstruction.dense.grid_stride} px`
                         : reconstruction.dense.skip_reason ?? "Not run"}
                     </td>
                   </tr>

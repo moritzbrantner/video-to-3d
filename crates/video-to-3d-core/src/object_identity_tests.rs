@@ -311,3 +311,24 @@ fn unavailable_semantics_yield_an_unavailable_result() {
         .contains("no CUDA device"));
     assert!(artifact.objects.is_empty());
 }
+
+#[test]
+fn stationary_track_can_reject_one_isolated_observation_without_hiding_motion() {
+    let mut locations: Vec<_> = (0..9)
+        .map(|frame_index| ObjectLocation {
+            observation: format!("obs-{frame_index}"),
+            frame_index,
+            position: [0.01 * frame_index as f64, 0.0, 3.0],
+            depth: 3.0,
+            points: 3,
+        })
+        .collect();
+    assert!(isolated_location(&locations).is_none());
+    locations[4].position[0] = 1.5;
+    assert_eq!(
+        isolated_location(&locations).map(|loc| loc.frame_index),
+        Some(4)
+    );
+    locations[5].position[0] = 1.4;
+    assert!(isolated_location(&locations).is_none());
+}

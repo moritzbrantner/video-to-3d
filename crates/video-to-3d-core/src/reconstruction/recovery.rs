@@ -2,6 +2,7 @@
 //! when it lacks multi-view evidence.
 
 use super::control::ReconstructionControl;
+use super::features::{FeatureSpacing, SCARCE_FEATURE_TARGET};
 use super::solve::{reconstruct_once_with_control, MIN_TRACK_MATCHES, MIN_TRACK_OVERLAP};
 use super::types::{ReconstructionRequest, ReconstructionResult, SegmentSolveStats};
 use crate::reconstruction_stages;
@@ -38,8 +39,43 @@ pub(crate) fn reconstruct_sparse_with_control(
     request: &ReconstructionRequest,
     control: &mut ReconstructionControl<'_>,
 ) -> Result<SparseReconstruction, String> {
+    let best = solve_with_registration_recovery(request, control)?;
+    // Preserve ordinary solves with independent multi-view support. If even the
+    // existing registration retries leave very few cameras, previously suppressed
+    // corners on feature-poor frames may provide tracks across a wider baseline.
+    let scarce = best.pairs.iter().any(|pair| {
+        pair.features_from.min(pair.features_to)
+            < SCARCE_FEATURE_TARGET.min(request.options.max_features)
+    });
+    if request.frames.len() < 3
+        || best.registered_views.len() > 1
+        || request.options.min_feature_distance
+            <= request.options.descriptor_radius.saturating_add(1)
+        || !scarce
+    {
+        return Ok(best);
+    }
+    let mut retry =
+        reconstruct_once_with_control(request, FeatureSpacing::RecoverScarceCorners, control)?;
+    let scope = best.track_scope.primary;
+    if retry.calibrated_pair.is_some()
+        && reconstruction_score(&retry, scope) > reconstruction_score(&best, scope)
+    {
+        retry.warnings_after_mesh.push(format!(
+            "Camera recovery retained well-separated corners and admitted closer neighbors on frames with fewer than {SCARCE_FEATURE_TARGET} features. The recovered solve registered {} camera(s) beyond the seed pair.",
+            retry.registered_views.len()
+        ));
+        return Ok(retry);
+    }
+    Ok(best)
+}
+
+fn solve_with_registration_recovery(
+    request: &ReconstructionRequest,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<SparseReconstruction, String> {
     control.check()?;
-    let initial = reconstruct_once_with_control(request, control)?;
+    let initial = reconstruct_once_with_control(request, FeatureSpacing::Requested, control)?;
     if !needs_registration_recovery(request, &initial) {
         return Ok(initial);
     }
@@ -63,7 +99,8 @@ pub(crate) fn reconstruct_sparse_with_control(
             .options
             .ratio_threshold
             .min(PAN_RECOVERY_RATIO_THRESHOLD);
-        let pan_retry = reconstruct_once_with_control(&pan_request, control)?;
+        let pan_retry =
+            reconstruct_once_with_control(&pan_request, FeatureSpacing::Requested, control)?;
         if score(&pan_retry) > score(&best) {
             best = pan_retry;
             selected_recovery = Some("bounded displacement-informed match-radius recovery");
@@ -95,7 +132,11 @@ pub(crate) fn reconstruct_sparse_with_control(
             != (b.match_radius, b.max_features, b.min_feature_distance)
             || a.ratio_threshold != b.ratio_threshold
     }) {
-        let registration_retry = reconstruct_once_with_control(&registration_request, control)?;
+        let registration_retry = reconstruct_once_with_control(
+            &registration_request,
+            FeatureSpacing::Requested,
+            control,
+        )?;
         if score(&registration_retry) > score(&best) {
             best = registration_retry;
             selected_recovery = Some(

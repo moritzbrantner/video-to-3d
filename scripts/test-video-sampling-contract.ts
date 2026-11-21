@@ -28,6 +28,21 @@ assert.equal(explicit.sampleCount, 18, "an explicit cap still wins");
 // A 16 s clip keeps the 18-frame default.
 assert.equal(buildVideoSamplingPlan({ duration: 16, videoWidth: 640, videoHeight: 480 }).sampleCount, 18);
 
+const native = buildVideoSamplingPlan(
+  { duration: 86.166667, videoWidth: 640, videoHeight: 480 },
+  { profile: "local-reconstruction" },
+);
+assert.equal(native.sampleCount, 108);
+assert.deepEqual([native.analysisWidth, native.analysisHeight], [640, 480]);
+assert.ok(native.times[1] - native.times[0] < long.times[1] - long.times[0]);
+for (const [videoWidth, videoHeight] of [[4000, 4000], [1080, 1920], [3840, 2160]]) {
+  const plan = buildVideoSamplingPlan(
+    { duration: 200, videoWidth, videoHeight },
+    { profile: "local-reconstruction" },
+  );
+  assert.ok(plan.analysisWidth * plan.analysisHeight * plan.sampleCount * 4 < 160 * 1024 * 1024);
+}
+
 const short = buildVideoSamplingPlan({
   duration: 1,
   videoWidth: 640,
