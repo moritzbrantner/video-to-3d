@@ -2,39 +2,43 @@ import assert from "node:assert/strict";
 import { buildVideoSamplingPlan } from "../apps/web/src/videoSampling";
 import { ppmSize, samplingReport } from "../tools/check_reference_sampling";
 
+// Atlas 3.13.1: short clips at movie frame rates are sampled at 12 fps up to 120 frames.
 const defaults = buildVideoSamplingPlan({
-  duration: 10,
+  duration: 3,
   videoWidth: 1920,
   videoHeight: 1080,
 });
-assert.equal(defaults.framesPerSecond, 1.25);
-assert.equal(defaults.maxFrames, 18);
-assert.equal(defaults.sampleCount, 13);
+assert.equal(defaults.framesPerSecond, 12);
+assert.equal(defaults.maxFrames, 120);
+assert.equal(defaults.sampleCount, 36);
 assert.equal(defaults.analysisWidth, 360);
 assert.equal(defaults.analysisHeight, 203);
-assert.equal(defaults.times[0], 0.5);
-assert.equal(defaults.times.at(-1), 9.5);
+assert.equal(Number(defaults.times[0].toFixed(3)), 0.15);
+assert.equal(Number(defaults.times.at(-1)!.toFixed(3)), 2.85);
+assert.equal(buildVideoSamplingPlan({ duration: 10, videoWidth: 640, videoHeight: 480 }).sampleCount, 120);
 
-// Long clips without an explicit cap are sampled at least once per second (#230).
+// Long clips spread the 120-frame bound evenly; keyframe selection drops redundant samples.
 const long = buildVideoSamplingPlan({ duration: 86.166667, videoWidth: 640, videoHeight: 480 });
-assert.equal(long.maxFrames, 87);
-assert.equal(long.sampleCount, 87);
+assert.equal(long.maxFrames, 120);
+assert.equal(long.sampleCount, 120);
 assert.ok(long.times[1] - long.times[0] <= 1.0);
 const explicit = buildVideoSamplingPlan(
   { duration: 86.166667, videoWidth: 640, videoHeight: 480 },
   { maxFrames: 18 },
 );
 assert.equal(explicit.sampleCount, 18, "an explicit cap still wins");
-// A 16 s clip keeps the 18-frame default.
-assert.equal(buildVideoSamplingPlan({ duration: 16, videoWidth: 640, videoHeight: 480 }).sampleCount, 18);
+// Pinned fixture plans keep their recorded rate (Atlas 3.13.1).
+assert.equal(
+  buildVideoSamplingPlan({ duration: 10, videoWidth: 640, videoHeight: 480 }, { framesPerSecond: 1.25, maxFrames: 18 }).sampleCount,
+  13,
+);
 
 const native = buildVideoSamplingPlan(
   { duration: 86.166667, videoWidth: 640, videoHeight: 480 },
   { profile: "local-reconstruction" },
 );
-assert.equal(native.sampleCount, 108);
+assert.equal(native.sampleCount, 120);
 assert.deepEqual([native.analysisWidth, native.analysisHeight], [640, 480]);
-assert.ok(native.times[1] - native.times[0] < long.times[1] - long.times[0]);
 for (const [videoWidth, videoHeight] of [[4000, 4000], [1080, 1920], [3840, 2160]]) {
   const plan = buildVideoSamplingPlan(
     { duration: 200, videoWidth, videoHeight },
@@ -43,11 +47,10 @@ for (const [videoWidth, videoHeight] of [[4000, 4000], [1080, 1920], [3840, 2160
   assert.ok(plan.analysisWidth * plan.analysisHeight * plan.sampleCount * 4 < 160 * 1024 * 1024);
 }
 
-const short = buildVideoSamplingPlan({
-  duration: 1,
-  videoWidth: 640,
-  videoHeight: 480,
-});
+const short = buildVideoSamplingPlan(
+  { duration: 1, videoWidth: 640, videoHeight: 480 },
+  { framesPerSecond: 1.25 },
+);
 assert.equal(short.sampleCount, 4);
 assert.deepEqual(
   short.times.map((time) => Number(time.toFixed(2))),
@@ -58,7 +61,7 @@ const capped = buildVideoSamplingPlan(
   { duration: 100, videoWidth: 3840, videoHeight: 2160 },
   { framesPerSecond: 99, maxFrames: 999 },
 );
-assert.equal(capped.framesPerSecond, 8);
+assert.equal(capped.framesPerSecond, 15);
 assert.equal(capped.maxFrames, 120);
 assert.equal(capped.sampleCount, 120);
 
@@ -79,13 +82,15 @@ assert.throws(
   /usable dimensions/,
 );
 
-// The reference-fixture sampling stage (#129) judges exported frames by this same plan.
-const fixturePlan = buildVideoSamplingPlan({ duration: 16, videoWidth: 1920, videoHeight: 1080 });
+// The reference-fixture sampling stage (#129) judges exported frames by the default plan:
+// the fixtures declare a 1.5 s clip, which the 12 fps default samples 18 times.
+const fixturePlan = buildVideoSamplingPlan({ duration: 1.5, videoWidth: 1920, videoHeight: 1080 });
+assert.equal(fixturePlan.sampleCount, 18);
 const fixtureTruth = {
   sampling: {
     source_width: 1920,
     source_height: 1080,
-    duration_seconds: 16,
+    duration_seconds: 1.5,
     times: fixturePlan.times,
     analysis_width: 360,
     analysis_height: 203,

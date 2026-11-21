@@ -35,6 +35,7 @@ import { assessReadiness, type ReadinessReport } from "../src/readiness";
 import { sampleVideoWithInfo } from "../src/video";
 import { completeLocalScene, detectInLocalStudio, localStudio, reconstructLocalObjects, reconstructStudioFrames, type ObjectModels as ModelRun } from "../src/localObjects";
 import { sceneCameraView, type CameraView } from "../src/sourceView";
+import { DEFAULT_SAMPLING_FPS, MAX_SAMPLED_FRAMES, MAX_SAMPLING_FPS } from "../src/videoSampling";
 import { MeshViewer, ObjectModels } from "./ObjectModels";
 import { ObjectDetections, previewFrames, readInventory, type ImportedInventory, type PreviewFrame } from "./ObjectDetections";
 
@@ -86,9 +87,8 @@ type MaterialExportState = {
 };
 
 const MIN_SAMPLING_FPS = 0.25;
-const MAX_SAMPLING_FPS = 8;
 const MIN_FRAME_CAP = 4;
-const MAX_FRAME_CAP = 120;
+const MAX_FRAME_CAP = MAX_SAMPLED_FRAMES;
 const RECONSTRUCTION_MODE_QUERY_PARAM = "reconstruction";
 
 const TREVI_DEMO_URL =
@@ -99,7 +99,7 @@ const TREVI_DEMO_LICENSE = "https://creativecommons.org/licenses/by-sa/4.0/";
 const TREVI_DEMO_FILE_NAME = "trevi-fountain-demo.webm";
 
 function normalizedSamplingFps(value: number): number {
-  if (!Number.isFinite(value)) return 1.25;
+  if (!Number.isFinite(value)) return DEFAULT_SAMPLING_FPS;
   return Math.min(MAX_SAMPLING_FPS, Math.max(MIN_SAMPLING_FPS, value));
 }
 
@@ -209,7 +209,7 @@ export default function Home() {
   const [activeRunId, setActiveRunId] = useState("");
   const [batchRunning, setBatchRunning] = useState(false);
   const [demoDownloading, setDemoDownloading] = useState(false);
-  const [samplingFps, setSamplingFps] = useState(1.25);
+  const [samplingFps, setSamplingFps] = useState(DEFAULT_SAMPLING_FPS);
   const [frameCap, setFrameCap] = useState<number | null>(null);
   const [mode, setMode] = useState<LearnedReconstructionMode>("classic");
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);

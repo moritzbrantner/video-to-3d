@@ -28,7 +28,7 @@ The current implementation has an integrated **Slice 3 sparse-SfM pipeline** and
 ## Current slice
 
 1. Pick one or more local video files.
-2. The browser processes selected videos sequentially. Short clips use up to 18 frames by default. Longer clips retain additional overlapping views.
+2. The browser processes selected videos sequentially. By default it samples 12 frames per second, up to 120 frames: a 3-second clip yields 36 frames, and longer clips spread 120 frames evenly. Keyframe selection then drops redundant frames.
 3. Rust/WASM detects Harris-style corners and normalized local patch descriptors.
 4. Rust matches adjacent frames with a local search, ratio test, and unique-match selection.
 5. Adjacent one-to-one matches are chained into deterministic feature tracks spanning multiple sampled frames.

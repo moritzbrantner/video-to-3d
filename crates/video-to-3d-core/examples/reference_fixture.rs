@@ -31,8 +31,10 @@ const SEED: u64 = 0x0128_7e71_f00d_5eed;
 // `apps/web/src/videoSampling.ts`: width min(360, source width), height rounded to aspect.
 const SOURCE_WIDTH: u32 = 1920;
 const SOURCE_HEIGHT: u32 = 1080;
-const DURATION_SECONDS: f64 = 16.0;
-const FRAMES_PER_SECOND: f64 = 1.25;
+// A notional 1.5 s clip at the browser default of 12 fps (Atlas 3.13.1) yields 18 samples;
+// camera motion is parameterised by normalised time, so the rendered views are unchanged.
+const DURATION_SECONDS: f64 = 1.5;
+const FRAMES_PER_SECOND: f64 = 12.0;
 const MAX_FRAMES: usize = 18;
 const ANALYSIS_MAX_WIDTH: u32 = 360;
 /// Sub-pixel rays per axis: each analysis pixel is the area average of a 3×3 grid, the
@@ -1222,8 +1224,8 @@ mod tests {
         let plan = sampling_plan();
         assert_eq!((plan.width, plan.height), (360, 203));
         assert_eq!(plan.times.len(), 18);
-        assert!((plan.times[0] - 0.8).abs() < 1e-9);
-        assert!((plan.times[17] - 15.2).abs() < 1e-9);
+        assert!((plan.times[0] - 0.075).abs() < 1e-9);
+        assert!((plan.times[17] - 1.425).abs() < 1e-9);
         assert!((Intrinsics::for_plan(&plan).focal - 309.6).abs() < 1e-9);
     }
 

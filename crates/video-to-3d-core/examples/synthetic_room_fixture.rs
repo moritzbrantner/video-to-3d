@@ -38,8 +38,10 @@ const SEED: u64 = 0x0075_5ce9_e0ac_1e00;
 // `apps/web/src/videoSampling.ts` (see the reference fixtures).
 const SOURCE_WIDTH: u32 = 1920;
 const SOURCE_HEIGHT: u32 = 1080;
-const DURATION_SECONDS: f64 = 16.0;
-const FRAMES_PER_SECOND: f64 = 1.25;
+// A notional 1.5 s clip at the browser default of 12 fps (Atlas 3.13.1) yields 18 samples;
+// camera motion is parameterised by normalised time, so the rendered views are unchanged.
+const DURATION_SECONDS: f64 = 1.5;
+const FRAMES_PER_SECOND: f64 = 12.0;
 const MAX_FRAMES: usize = 18;
 const ANALYSIS_MAX_WIDTH: u32 = 360;
 /// Sub-pixel rays per axis averaged into each analysis pixel.
