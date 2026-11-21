@@ -36,6 +36,125 @@ pub struct SurfaceReport {
     pub textured_triangles: usize,
     pub object_surfaces: usize,
     pub object_triangles: usize,
+    /// Where accepted geometry was lost on its way from depth samples to the exported surface.
+    pub diagnostics: SurfaceDiagnostics,
+}
+
+/// Stage funnel for one export. Counts are deterministic for identical inputs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SurfaceDiagnostics {
+    /// Reference-grid depth samples checked against each supporting source view.
+    pub verification: VerificationFunnel,
+    pub meshing: MeshingFunnel,
+    pub topology: SurfaceTopology,
+    /// The verification check that rejected the most reference samples.
+    pub dominant_rejection: Option<&'static str>,
+}
+
+/// One reference sample is counted once per source view that attempted to verify it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct VerificationFunnel {
+    pub reference_samples: usize,
+    pub missing_reference_depth: usize,
+    pub insufficient_parallax: usize,
+    pub behind_source: usize,
+    pub outside_source: usize,
+    pub missing_source_depth: usize,
+    pub depth_disagreement: usize,
+    pub color_disagreement: usize,
+    pub accepted: usize,
+}
+
+impl VerificationFunnel {
+    fn add(&mut self, other: &Self) {
+        self.reference_samples += other.reference_samples;
+        self.missing_reference_depth += other.missing_reference_depth;
+        self.insufficient_parallax += other.insufficient_parallax;
+        self.behind_source += other.behind_source;
+        self.outside_source += other.outside_source;
+        self.missing_source_depth += other.missing_source_depth;
+        self.depth_disagreement += other.depth_disagreement;
+        self.color_disagreement += other.color_disagreement;
+        self.accepted += other.accepted;
+    }
+
+    fn dominant_rejection(&self) -> Option<&'static str> {
+        [
+            ("missing_reference_depth", self.missing_reference_depth),
+            ("insufficient_parallax", self.insufficient_parallax),
+            ("behind_source", self.behind_source),
+            ("outside_source", self.outside_source),
+            ("missing_source_depth", self.missing_source_depth),
+            ("depth_disagreement", self.depth_disagreement),
+            ("color_disagreement", self.color_disagreement),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .max_by_key(|(name, count)| (*count, std::cmp::Reverse(*name)))
+        .map(|(name, _)| name)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct MeshingFunnel {
+    /// Depth maps available for validation, and how many were meshed as references.
+    pub depth_views: usize,
+    pub meshed_reference_views: usize,
+    pub candidate_cells: usize,
+    pub rejected_discontinuities: usize,
+    pub rejected_degenerate: usize,
+    pub source_triangles: usize,
+    /// Triangles discarded because another source already meshed the same reference cell.
+    pub duplicate_cell_triangles: usize,
+    pub exported_triangles: usize,
+}
+
+/// Connectivity of the exported surface. Separate reference views and supporting sources never
+/// share vertices, so each meshed patch is at least one island even where two views observed the
+/// same wall.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SurfaceTopology {
+    pub islands: usize,
+    /// Islands with fewer than [`SMALL_ISLAND_TRIANGLES`] triangles.
+    pub small_islands: usize,
+    pub small_island_triangles: usize,
+    pub largest_island_triangles: usize,
+    pub boundary_edges: usize,
+}
+
+pub const SMALL_ISLAND_TRIANGLES: usize = 32;
+
+fn surface_topology(vertex_count: usize, triangles: &[MeshTriangle]) -> SurfaceTopology {
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut parent: Vec<usize> = (0..vertex_count).collect();
+    let mut edges = BTreeMap::<(usize, usize), usize>::new();
+    for t in triangles {
+        for (a, b) in [(t.a, t.b), (t.b, t.c), (t.c, t.a)] {
+            *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+            let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+            if ra != rb {
+                parent[ra.max(rb)] = ra.min(rb);
+            }
+        }
+    }
+    let mut sizes = BTreeMap::<usize, usize>::new();
+    for t in triangles {
+        *sizes.entry(root(&mut parent, t.a)).or_default() += 1;
+    }
+    let small = || sizes.values().filter(|&&n| n < SMALL_ISLAND_TRIANGLES);
+    SurfaceTopology {
+        islands: sizes.len(),
+        small_islands: small().count(),
+        small_island_triangles: small().sum(),
+        largest_island_triangles: sizes.values().copied().max().unwrap_or(0),
+        boundary_edges: edges.values().filter(|&&n| n == 1).count(),
+    }
 }
 
 struct View<'a> {
@@ -61,6 +180,7 @@ fn verify_patch(
     stride: usize,
     reference_stride: usize,
     focal: f64,
+    funnel: &mut VerificationFunnel,
 ) -> Vec<(Point3, DenseGridSite)> {
     let width = reference.image.width as usize;
     let height = reference.image.height as usize;
@@ -73,12 +193,14 @@ fn verify_patch(
     let ref_center = reference.camera.camera_center();
     let min_parallax_cos = 0.5_f64.to_radians().cos();
     for (i, &z) in reference.grid.depth.iter().enumerate() {
-        if z <= 0. {
-            continue;
-        }
         let x = (i % cols) * stride;
         let y = (i / cols) * stride;
         if !x.is_multiple_of(reference_stride) || !y.is_multiple_of(reference_stride) {
+            continue;
+        }
+        funnel.reference_samples += 1;
+        if z <= 0. {
+            funnel.missing_reference_depth += 1;
             continue;
         }
         let ray = Vector3::new(
@@ -91,26 +213,35 @@ fn verify_patch(
         let direction = world - ref_center;
         let from_source = world - source_center;
         if direction.dot(&from_source) >= min_parallax_cos * direction.norm() * from_source.norm() {
+            funnel.insufficient_parallax += 1;
             continue;
         }
         let q = source.camera.rotation * world + source.camera.translation;
         if q.z <= 0. {
+            funnel.behind_source += 1;
             continue;
         }
         let u = focal * q.x / q.z + cx - 0.5;
         let v = focal * q.y / q.z + cy - 0.5;
-        if !(0.0..width as f64).contains(&u) || !(0.0..height as f64).contains(&v) {
-            continue;
-        }
         let col = (u / stride as f64).round() as usize;
         let row = (v / stride as f64).round() as usize;
-        if col >= cols || row >= rows {
+        if !(0.0..width as f64).contains(&u)
+            || !(0.0..height as f64).contains(&v)
+            || col >= cols
+            || row >= rows
+        {
+            funnel.outside_source += 1;
             continue;
         }
         let other = f64::from(source.grid.depth[row * cols + col]);
         // Require an independent measurement in the source map. A foreground/background
         // transition, an unobserved pixel, or an inconsistent depth cannot create topology.
-        if other <= 0. || (other - q.z).abs() > 0.02 * q.z {
+        if other <= 0. {
+            funnel.missing_source_depth += 1;
+            continue;
+        }
+        if (other - q.z).abs() > 0.02 * q.z {
+            funnel.depth_disagreement += 1;
             continue;
         }
         let [r, g, b] = reference.rgb(x, y);
@@ -122,8 +253,10 @@ fn verify_patch(
             + u32::from(g.abs_diff(rgb[1]))
             + u32::from(b.abs_diff(rgb[2]));
         if color_error > 105 {
+            funnel.color_disagreement += 1;
             continue;
         }
+        funnel.accepted += 1;
         points.push((
             Point3 {
                 x: world.x as f32,
@@ -226,6 +359,8 @@ pub fn export(
     let mut references = Vec::new();
     let mut cancel = || false;
     let mut control = ReconstructionControl::new(&mut cancel);
+    let mut diagnostics = SurfaceDiagnostics::default();
+    diagnostics.meshing.depth_views = views.len();
     // Keep the export bounded while covering the camera path. The adjacent views still
     // supply depth validation even when their own reference grid is not meshed.
     let step = views.len().div_ceil(36).max(1);
@@ -235,7 +370,16 @@ pub fn export(
             let other = views
                 .get(&source)
                 .ok_or("geometric depth source is unregistered")?;
-            let patch = verify_patch(reference, other, grids.stride, reference_stride, focal);
+            let mut funnel = VerificationFunnel::default();
+            let patch = verify_patch(
+                reference,
+                other,
+                grids.stride,
+                reference_stride,
+                focal,
+                &mut funnel,
+            );
+            diagnostics.verification.add(&funnel);
             candidates.push((source, patch));
         }
         candidates.sort_by_key(|(_, patch)| std::cmp::Reverse(patch.len()));
@@ -259,7 +403,14 @@ pub fn export(
                 focal,
                 &mut control,
             );
+            let meshing = &mut diagnostics.meshing;
+            meshing.candidate_cells += mesh.stats.candidate_cells;
+            meshing.rejected_discontinuities += mesh.stats.rejected_discontinuities;
+            meshing.rejected_degenerate += mesh.stats.rejected_degenerate;
+            let source_triangles = mesh.triangles.len();
+            meshing.source_triangles += source_triangles;
             let retained = uncovered_triangles(mesh.triangles, &g, &mut covered_cells);
+            meshing.duplicate_cell_triangles += source_triangles - retained.len();
             if retained.is_empty() {
                 continue;
             }
@@ -297,6 +448,10 @@ pub fn export(
     if triangles.is_empty() {
         return Err("COLMAP stereo produced no cross-view verified surface triangles".into());
     }
+    diagnostics.meshing.meshed_reference_views = references.len();
+    diagnostics.meshing.exported_triangles = triangles.len();
+    diagnostics.topology = surface_topology(points.len(), &triangles);
+    diagnostics.dominant_rejection = diagnostics.verification.dominant_rejection();
     let evidence_cameras = cameras
         .iter()
         .map(|c| EvidenceCamera {
@@ -362,6 +517,7 @@ pub fn export(
         object_triangles: partition
             .as_ref()
             .map_or(0, |part| part.groups.iter().flatten().count()),
+        diagnostics,
     };
     Ok((bytes, report))
 }
@@ -437,27 +593,90 @@ mod tests {
             grid: &map,
             image: &frame,
         };
-        assert_eq!(verify_patch(&reference, &source, 4, 4, 20.).len(), 20);
-        let coarse = verify_patch(&reference, &source, 4, 8, 20.);
+        let mut funnel = VerificationFunnel::default();
+        assert_eq!(
+            verify_patch(&reference, &source, 4, 4, 20., &mut funnel).len(),
+            20
+        );
+        // The one-pixel baseline shifts a column of samples out of the source image.
+        assert_eq!(
+            funnel,
+            VerificationFunnel {
+                reference_samples: 24,
+                outside_source: 4,
+                accepted: 20,
+                ..Default::default()
+            }
+        );
+        let coarse = verify_patch(
+            &reference,
+            &source,
+            4,
+            8,
+            20.,
+            &mut VerificationFunnel::default(),
+        );
         assert_eq!(coarse.len(), 4);
         assert!(coarse
             .iter()
             .all(|(_, site)| site.x % 8 == 0 && site.y % 8 == 0));
-        for rejected in [
-            View {
-                grid: &wrong,
-                ..source
-            },
-            View {
-                image: &other_color,
-                ..source
-            },
-            View {
-                camera: &first,
-                ..source
-            },
+        for (rejected, expected) in [
+            (
+                View {
+                    grid: &wrong,
+                    ..source
+                },
+                "depth_disagreement",
+            ),
+            (
+                View {
+                    image: &other_color,
+                    ..source
+                },
+                "color_disagreement",
+            ),
+            (
+                View {
+                    camera: &first,
+                    ..source
+                },
+                "insufficient_parallax",
+            ),
         ] {
-            assert!(verify_patch(&reference, &rejected, 4, 4, 20.).is_empty());
+            let mut funnel = VerificationFunnel::default();
+            assert!(verify_patch(&reference, &rejected, 4, 4, 20., &mut funnel).is_empty());
+            assert_eq!(funnel.accepted, 0);
+            assert_eq!(funnel.dominant_rejection(), Some(expected));
         }
+    }
+
+    #[test]
+    fn topology_counts_islands_and_open_boundaries() {
+        let face = |a, b, c| MeshTriangle {
+            a,
+            b,
+            c,
+            confidence: 1.,
+        };
+        // A two-triangle quad, plus the same quad meshed again from another reference view
+        // with its own vertices: the duplicate is a separate island, not a joined surface.
+        let triangles = [face(0, 1, 2), face(1, 3, 2), face(4, 5, 6), face(5, 7, 6)];
+        let topology = surface_topology(8, &triangles);
+        assert_eq!(
+            topology,
+            SurfaceTopology {
+                islands: 2,
+                small_islands: 2,
+                small_island_triangles: 4,
+                largest_island_triangles: 2,
+                boundary_edges: 8,
+            }
+        );
+        let large: Vec<_> = (0..SMALL_ISLAND_TRIANGLES)
+            .map(|i| face(i, i + 1, i + 2))
+            .collect();
+        let topology = surface_topology(SMALL_ISLAND_TRIANGLES + 2, &large);
+        assert_eq!((topology.islands, topology.small_islands), (1, 0));
+        assert_eq!(topology.largest_island_triangles, SMALL_ISLAND_TRIANGLES);
     }
 }

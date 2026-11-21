@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { link, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import type { ModelCandidate, ObjectModels } from "../apps/web/src/localObjects";
+import { denseDiagnosticSummary } from "./dense-report";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
@@ -271,8 +272,10 @@ export async function startLocalStudio(savedInventory?: string) {
             headers.set("X-Video-To-3D-Dense-Triangles", String(report.triangles));
           }
           if (Number.isSafeInteger(report.textured_triangles) && Number.isSafeInteger(report.object_surfaces)) {
+            const diagnostics = denseDiagnosticSummary(report);
             headers.set("X-Video-To-3D-Dense-Report",
-              `${report.textured_triangles} textured triangles and ${report.object_surfaces} observed object surfaces.`);
+              `${report.textured_triangles} textured triangles and ${report.object_surfaces} observed object surfaces.`
+              + (diagnostics ? " " + diagnostics : ""));
           }
           return new Response(await Bun.file(output).arrayBuffer(), { headers });
         });
