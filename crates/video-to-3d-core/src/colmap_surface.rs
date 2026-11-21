@@ -103,15 +103,13 @@ pub struct MeshingFunnel {
     pub candidate_cells: usize,
     pub rejected_discontinuities: usize,
     pub rejected_degenerate: usize,
-    pub source_triangles: usize,
-    /// Triangles discarded because another source already meshed the same reference cell.
-    pub duplicate_cell_triangles: usize,
+    /// Reference samples that more than one source camera verified (meshed once).
+    pub multiply_verified_samples: usize,
     pub exported_triangles: usize,
 }
 
-/// Connectivity of the exported surface. Separate reference views and supporting sources never
-/// share vertices, so each meshed patch is at least one island even where two views observed the
-/// same wall.
+/// Connectivity of the exported surface. Separate reference views do not share vertices, so
+/// each meshed reference view is at least one island even where two views observed the same wall.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct SurfaceTopology {
     pub islands: usize,
@@ -276,25 +274,43 @@ fn verify_patch(
     points
 }
 
-/// A reference cell belongs to the first supporting source that can mesh it. A second
-/// camera may establish a different cell where the first lacked visibility.
-fn uncovered_triangles(
-    mut triangles: Vec<MeshTriangle>,
-    sites: &[DenseGridSite],
-    covered: &mut BTreeSet<(u32, u32)>,
-) -> Vec<MeshTriangle> {
-    let mut newly_covered = BTreeSet::new();
-    triangles.retain(|triangle| {
-        let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|i| sites[i]);
-        let cell = (a.x.min(b.x).min(c.x), a.y.min(b.y).min(c.y));
-        if covered.contains(&cell) {
-            return false;
+struct VerifiedSample {
+    point: Point3,
+    site: DenseGridSite,
+    /// Every source camera that independently verified this reference sample.
+    sources: Vec<usize>,
+}
+
+/// Merge the samples each source verified into one reference grid. A sample's position comes
+/// from the reference depth alone, so every verifying source agrees on it; meshing the union
+/// once keeps one reference view a connected surface instead of source-wise islands (the TUM
+/// diagnosis of 2026-11-21 measured 3,586 islands before, 466 after). Confidence keeps the
+/// strongest agreement. Output is ordered by grid row, then column.
+fn verified_union(candidates: Vec<(usize, Vec<(Point3, DenseGridSite)>)>) -> Vec<VerifiedSample> {
+    let mut union = BTreeMap::<(u32, u32), VerifiedSample>::new();
+    for (source, patch) in candidates {
+        for (point, site) in patch {
+            union
+                .entry((site.y, site.x))
+                .and_modify(|sample| {
+                    sample.point.confidence = sample.point.confidence.max(point.confidence);
+                    sample.sources.push(source);
+                })
+                .or_insert(VerifiedSample {
+                    point,
+                    site,
+                    sources: vec![source],
+                });
         }
-        newly_covered.insert(cell);
-        true
-    });
-    covered.append(&mut newly_covered);
-    triangles
+    }
+    union
+        .into_values()
+        .map(|mut sample| {
+            sample.sources.sort_unstable();
+            sample.sources.dedup();
+            sample
+        })
+        .collect()
 }
 
 pub fn export(
@@ -382,11 +398,15 @@ pub fn export(
             diagnostics.verification.add(&funnel);
             candidates.push((source, patch));
         }
-        candidates.sort_by_key(|(_, patch)| std::cmp::Reverse(patch.len()));
-        let mut covered_cells = BTreeSet::new();
         let previous_len = triangles.len();
-        for (source, patch) in candidates {
-            let (p, g): (Vec<_>, Vec<_>) = patch.into_iter().unzip();
+        let union = verified_union(candidates);
+        diagnostics.meshing.multiply_verified_samples += union
+            .iter()
+            .filter(|sample| sample.sources.len() > 1)
+            .count();
+        if !union.is_empty() {
+            let p: Vec<_> = union.iter().map(|sample| sample.point).collect();
+            let g: Vec<_> = union.iter().map(|sample| sample.site).collect();
             let stats = DenseStats {
                 attempted: true,
                 reference_frame: Some(reference.grid.frame),
@@ -407,33 +427,31 @@ pub fn export(
             meshing.candidate_cells += mesh.stats.candidate_cells;
             meshing.rejected_discontinuities += mesh.stats.rejected_discontinuities;
             meshing.rejected_degenerate += mesh.stats.rejected_degenerate;
-            let source_triangles = mesh.triangles.len();
-            meshing.source_triangles += source_triangles;
-            let retained = uncovered_triangles(mesh.triangles, &g, &mut covered_cells);
-            meshing.duplicate_cell_triangles += source_triangles - retained.len();
-            if retained.is_empty() {
-                continue;
-            }
             let start = points.len();
             let mut indices = vec![None; p.len()];
-            for mut face in retained {
+            // Provenance names exactly the cameras that verified a retained vertex.
+            let mut sources = BTreeSet::new();
+            for mut face in mesh.triangles {
                 for corner in [&mut face.a, &mut face.b, &mut face.c] {
                     let i = *corner;
                     *corner = *indices[i].get_or_insert_with(|| {
                         let index = points.len();
                         points.push(p[i]);
                         sites.push(g[i]);
+                        sources.extend(&union[i].sources);
                         index
                     });
                 }
                 triangles.push(face);
             }
-            regions.push(SurfaceEvidenceRegion {
-                origin: EvidenceOrigin::GeometricMultiView,
-                reference_frame: Some(reference.grid.frame),
-                source_frames: vec![source],
-                points: EvidenceRange::new(start, points.len() - start),
-            });
+            if points.len() > start {
+                regions.push(SurfaceEvidenceRegion {
+                    origin: EvidenceOrigin::GeometricMultiView,
+                    reference_frame: Some(reference.grid.frame),
+                    source_frames: sources.into_iter().collect(),
+                    points: EvidenceRange::new(start, points.len() - start),
+                });
+            }
         }
         if triangles.len() == previous_len {
             continue;
@@ -528,27 +546,88 @@ mod tests {
     use nalgebra::Matrix3;
 
     #[test]
-    fn alternate_source_adds_only_previously_unmeshed_cells() {
-        let sites =
-            [(0, 0), (4, 0), (8, 0), (0, 4), (4, 4), (8, 4)].map(|(x, y)| DenseGridSite { x, y });
-        let face = |a, b, c| MeshTriangle {
-            a,
-            b,
-            c,
-            confidence: 1.,
+    fn sources_verifying_one_sample_share_one_vertex() {
+        let sample = |x: u32, y: u32, confidence: f32| {
+            (
+                Point3 {
+                    x: x as f32,
+                    y: y as f32,
+                    z: 5.,
+                    r: 1,
+                    g: 2,
+                    b: 3,
+                    confidence,
+                },
+                DenseGridSite { x, y },
+            )
         };
-        let first = vec![face(0, 1, 4), face(0, 4, 3)];
-        let alternate = vec![face(0, 1, 3), face(1, 4, 3), face(1, 2, 5), face(1, 5, 4)];
-        let mut covered = BTreeSet::new();
+        // Source 7 verified the left half of a 3x2 grid, source 3 the right half; they overlap
+        // in the middle column.
+        let union = verified_union(vec![
+            (
+                7,
+                vec![
+                    sample(0, 0, 0.9),
+                    sample(4, 0, 0.9),
+                    sample(0, 4, 0.9),
+                    sample(4, 4, 0.9),
+                ],
+            ),
+            (
+                3,
+                vec![
+                    sample(4, 0, 0.95),
+                    sample(8, 0, 0.95),
+                    sample(4, 4, 0.8),
+                    sample(8, 4, 0.95),
+                ],
+            ),
+        ]);
+        let sites: Vec<_> = union.iter().map(|s| (s.site.x, s.site.y)).collect();
+        assert_eq!(sites, [(0, 0), (4, 0), (8, 0), (0, 4), (4, 4), (8, 4)]);
+        let sources: Vec<_> = union.iter().map(|s| s.sources.clone()).collect();
         assert_eq!(
-            uncovered_triangles(first.clone(), &sites, &mut covered),
-            first
+            sources,
+            [vec![7], vec![3, 7], vec![3], vec![7], vec![3, 7], vec![3]]
         );
-        assert_eq!(
-            uncovered_triangles(alternate, &sites, &mut covered),
-            vec![face(1, 2, 5), face(1, 5, 4)]
+        // The strongest verification survives; the position is the reference depth either way.
+        assert_eq!(union[1].point.confidence, 0.95);
+        assert_eq!(union[4].point.confidence, 0.9);
+
+        // Meshed once, both halves form one island; meshed per source they would be two.
+        let cameras = [0, 3, 7].map(|frame_index| RegisteredCamera {
+            frame_index,
+            rotation: nalgebra::Matrix3::identity(),
+            translation: Vector3::zeros(),
+        });
+        let points: Vec<_> = union
+            .iter()
+            .map(|s| Point3 {
+                x: (s.site.x as f32 + 0.5 - 6.) / 20. * 5.,
+                y: (s.site.y as f32 + 0.5 - 4.) / 20. * 5.,
+                ..s.point
+            })
+            .collect();
+        let sites: Vec<_> = union.iter().map(|s| s.site).collect();
+        let stats = DenseStats {
+            attempted: true,
+            reference_frame: Some(0),
+            grid_stride: 4,
+            ..Default::default()
+        };
+        let mut cancel = || false;
+        let mesh = crate::mesh::reconstruct_dense_mesh_with_control(
+            &points,
+            &sites,
+            &stats,
+            &cameras,
+            12,
+            8,
+            20.,
+            &mut ReconstructionControl::new(&mut cancel),
         );
-        assert_eq!(covered, BTreeSet::from([(0, 0), (4, 0)]));
+        assert_eq!(mesh.triangles.len(), 4);
+        assert_eq!(surface_topology(points.len(), &mesh.triangles).islands, 1);
     }
 
     #[test]

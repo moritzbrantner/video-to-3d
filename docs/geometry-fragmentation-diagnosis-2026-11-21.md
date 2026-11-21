@@ -139,9 +139,31 @@ The shaded column shows the production surface as overlapping shards even where 
 
 Production PatchMatch depth at three reference views. Columns: RGB, estimated depth, validity, error. In the validity column, green has depth and red marks pixels where Kinect is valid but stereo has none. The red areas are the textureless floor, desk and partition surfaces.
 
+## Follow-up 1 result: verified samples meshed once per reference view
+
+The change is implemented in `colmap_surface.rs` as `verified_union`. Each region now lists exactly the source cameras that verified its retained vertices. The PatchMatch input, verification rules and mesh rules are the same as before.
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| TUM vertex islands (Rust report) | 3,586 | 466 |
+| TUM islands under 32 triangles | 3,436 | 358 |
+| TUM edge components / triangles in pieces under 32 triangles | 4,833 / 12.3% | 2,223 / 6.0% |
+| TUM boundary loops | 1,278 | 952 |
+| TUM held-out ≤10 cm / false positive in front / missing | 54.4% / 9.0% / 29.2% | 55.3% / 9.6% / 28.0% |
+| TUM held-out median / P90 depth error | 2.7 / 33.2 cm | 2.8 / 32.7 cm |
+| TUM precision ≤5 cm / free-space violation | 82.0% / 0.5% | 81.5% / 0.6% |
+| TUM 85 shared evaluation views: hit rate / ≤10 cm | 70.44% / 54.25% | 71.71% / 55.14% |
+| TUM triangles | 108,445 | 115,647 |
+| Yellow die: triangles, IoU in frames 6 / 101, median depth error | 897, 0.894 / 0.716, 1.47 / 1.30 cm | 930, 0.894 / 0.717, 1.47 / 1.30 cm |
+| Yellow die: headless Blender independent move and vertex edit, other meshes preserved | pass | pass |
+| H1 islands / small islands / boundary edges / triangles | 780 / 740 / 10,091 / 25,777 | 153 / 127 / 6,937 / 27,266 |
+| H3 | no verified surface | no verified surface (PatchMatch consistency, follow-up 3) |
+
+Fragmentation *within* a reference view is fixed. The largest island is still about 4% of the surface, because the 32 reference views remain separate stacked meshes; that is follow-up 2. No authored Blender scene expectation exists for H1's observed surface, so the die check is the Blender gate this stage has.
+
 ## Prioritised follow-up
 
-1. **Mesh the verified union once per reference view** (smallest fix, `colmap_surface.rs`, about 15 lines).
+1. **Done (see above).** **Mesh the verified union once per reference view** (smallest fix, `colmap_surface.rs`, about 15 lines).
    - What: build one grid from all verified samples of a reference view (positions come from the reference depth, so they are identical across sources). Mesh it once, with one `GeometricMultiView` region listing every supporting source.
    - Measured on TUM: vertex islands 3,586 → 466, edge components −54%, triangles in <32-triangle pieces 12.3% → 6.0%, boundary loops 1,278 → 952. Correct ≤10 cm 54.4% → 55.3%, false positives in front 9.0% → 9.6%, precision unchanged.
    - Gate: H1, H3 and the Blender acceptance must be rerun before merging, because exported topology changes.
