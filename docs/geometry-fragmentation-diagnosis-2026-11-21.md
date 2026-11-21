@@ -163,15 +163,17 @@ Fragmentation *within* a reference view is fixed. The largest island is still ab
 
 ## Follow-up 3, first result: PatchMatch sources need parallax
 
-`tools/colmap-dense/reconstruct.py` ranked PatchMatch sources by shared sparse points only. On a handheld walk those are the adjacent frames. PatchMatch keeps a pixel only when two sources each see it at 3° or more, but H3's chosen pairs had a median of **1.24°**: only 5% reached 3°, and 1 of 32 reference views had two usable sources. TUM's pairs had a median of 8.6°, and all 32 views had two usable sources. Sources and reference clusters are now chosen by shared points *among views at 3° or more*.
+`tools/colmap-dense/reconstruct.py` ranked PatchMatch sources by shared sparse points only. On a handheld walk those are the adjacent frames. PatchMatch keeps a pixel only when two sources each see it at 3° or more, but H3's chosen pairs had a median of **1.24°**: only 5% reached 3°, and 1 of 32 reference views had two usable sources. TUM's pairs had a median of 8.6°, and all 32 views had two usable sources.
+
+The selection keeps the covisibility ranking for clusters and sources. Only where fewer than two of the chosen views reach 3° do the least covisible picks without parallax give way to the most covisible views with it. A first version ranked *only* among views at 3° or more. It changed TUM's reference views too, and the yellow die then localized inconsistently and lost its object surface, so it was replaced. With the current rule, TUM's PatchMatch configuration is identical to before (checked offline), and so are its surface and die.
 
 | Video | Geometric depth valid | Fused points | Rust triangles | Missing reference samples | Islands |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| H3 before → after | 0.3% → 8.1% | 0 → 244 | refused → 1,619 (9 views) | – → 91.8% | – → 52 |
-| H1 before → after | – | 6,258 → 7,391 | 27,266 → 29,037 | 73.4% → 70.3% | 153 → 221 |
-| TUM before → after | 52.9% → 53.0% | 33,340 → 33,470 | 115,647 → 116,519 | 47.2% → 47.2% | 466 → 468 |
+| H3 before → after | 0.3% → 3.4% | 0 → 60 | refused → 713 (5 views) | – → 96.5% | – → 23 |
+| H1 before → after | – | 6,258 → 6,418 | 27,266 → 27,463 | 73.4% → 73.3% | 153 → 152 |
+| TUM | unchanged (identical configuration) | | | | |
 
-On TUM, the 85 shared evaluation views give a 71.92% hit rate and 55.42% within 10 cm, against 71.71% and 55.14% before. That is within PatchMatch's run-to-run variation. H3 now produces a verified surface, but a small one: only 20 of its 32 views have two sources with enough parallax. H3 has no depth oracle, so its accuracy is not measured.
+H3 now produces a verified surface, but it is very small. Restoring H3's depth needs more than source choice (follow-up 3 continues). H3 has no depth oracle, so its accuracy is not measured.
 
 ## Prioritised follow-up
 

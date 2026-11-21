@@ -30,10 +30,9 @@ def median_triangulation_angle(centres, xyz, name, other, shared):
 
 
 def ranked_neighbors(tracks, centres, xyz, min_angle=MIN_SOURCE_ANGLE_DEGREES):
-    """Per image: (shared points, name) of covisible views that also give enough parallax.
+    """Per image: covisible views ranked by shared points, and the subset with enough parallax.
 
-    Ranking by shared points alone picks the adjacent frames of a handheld walk, whose baseline
-    is too short to triangulate (H3: median 1.24 degrees, 1 of 32 views with two usable sources).
+    Returns `{name: [(shared points, other name, has parallax)]}`.
     """
     neighbors = {}
     for name, points in tracks.items():
@@ -42,10 +41,32 @@ def ranked_neighbors(tracks, centres, xyz, min_angle=MIN_SOURCE_ANGLE_DEGREES):
             shared = points & other
             if key == name or len(shared) < MIN_SHARED_POINTS:
                 continue
-            if median_triangulation_angle(centres, xyz, name, key, sorted(shared)) >= min_angle:
-                candidates.append((len(shared), key))
-        neighbors[name] = sorted(candidates, key=lambda pair: (-pair[0], pair[1]))
+            angle = median_triangulation_angle(centres, xyz, name, key, sorted(shared))
+            candidates.append((len(shared), key, angle >= min_angle))
+        neighbors[name] = sorted(candidates, key=lambda entry: (-entry[0], entry[1]))
     return neighbors
+
+
+def with_parallax(ranked, count, required=2):
+    """The `count` most covisible views, keeping at least `required` with enough parallax.
+
+    Ranking by shared points alone picks the adjacent frames of a handheld walk, whose baseline
+    is too short to triangulate (H3: median 1.24 degrees, 1 of 32 views with two usable sources).
+    Where the most covisible views already include `required` with parallax (every TUM view),
+    the choice is unchanged; otherwise the least covisible picks without parallax give way to
+    the most covisible views with it.
+    """
+    chosen = list(ranked[:count])
+    spare = [entry for entry in ranked[count:] if entry[2]]
+    while sum(entry[2] for entry in chosen) < required and spare:
+        weakest = next((entry for entry in reversed(chosen) if not entry[2]), None)
+        if weakest is None:
+            if len(chosen) >= count:
+                break
+        else:
+            chosen.remove(weakest)
+        chosen.append(spare.pop(0))
+    return [key for _, key, _ in sorted(chosen, key=lambda entry: (-entry[0], entry[1]))]
 
 
 def select_sources(model, limit):
@@ -64,10 +85,10 @@ def select_sources(model, limit):
             index = round((len(images) - 1) * (i + 0.5) / anchors)
             anchor = images[index].name
             selected.add(anchor)
-            selected.update(key for count, key in neighbors[anchor][:3] if count >= 8)
+            selected.update(with_parallax(neighbors[anchor], 3))
     config = {}
     for name in sorted(selected):
-        sources = [key for count, key in neighbors[name] if key in selected and count >= 8][:4]
+        sources = with_parallax([entry for entry in neighbors[name] if entry[1] in selected], 4)
         if len(sources) >= 2:
             config[name] = sources
     while any(any(source not in config for source in sources) for sources in config.values()):
