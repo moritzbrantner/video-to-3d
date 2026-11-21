@@ -5,20 +5,75 @@
 """Run geometric PatchMatch and multiview fusion on a local COLMAP sparse model."""
 import argparse
 import json
+import math
 from pathlib import Path
+import statistics
 from time import monotonic
 
-import pycolmap
+
+MIN_SHARED_POINTS = 8
+# PatchMatch's filter discards a pixel unless two sources each see it at >= 3 degrees
+# (PatchMatchOptions.filter_min_triangulation_angle, filter_min_num_consistent). Sources below
+# that angle cost GPU time and can never make a pixel survive.
+MIN_SOURCE_ANGLE_DEGREES = 3.0
+
+
+def median_triangulation_angle(centres, xyz, name, other, shared):
+    """Median angle (degrees) subtended at the shared sparse points by two camera centres."""
+    angles = []
+    for point in xyz(shared):
+        a = [p - c for p, c in zip(point, centres[name])]
+        b = [p - c for p, c in zip(point, centres[other])]
+        cosine = sum(x * y for x, y in zip(a, b)) / (math.hypot(*a) * math.hypot(*b))
+        angles.append(math.degrees(math.acos(max(-1.0, min(1.0, cosine)))))
+    return statistics.median(angles)
+
+
+def ranked_neighbors(tracks, centres, xyz, min_angle=MIN_SOURCE_ANGLE_DEGREES):
+    """Per image: covisible views ranked by shared points, and the subset with enough parallax.
+
+    Returns `{name: [(shared points, other name, has parallax)]}`.
+    """
+    neighbors = {}
+    for name, points in tracks.items():
+        candidates = []
+        for key, other in tracks.items():
+            shared = points & other
+            if key == name or len(shared) < MIN_SHARED_POINTS:
+                continue
+            angle = median_triangulation_angle(centres, xyz, name, key, sorted(shared))
+            candidates.append((len(shared), key, angle >= min_angle))
+        neighbors[name] = sorted(candidates, key=lambda entry: (-entry[0], entry[1]))
+    return neighbors
+
+
+def with_parallax(ranked, count, required=2):
+    """The `count` most covisible views, keeping at least `required` with enough parallax.
+
+    Ranking by shared points alone picks the adjacent frames of a handheld walk, whose baseline
+    is too short to triangulate (H3: median 1.24 degrees, 1 of 32 views with two usable sources).
+    Where the most covisible views already include `required` with parallax (every TUM view),
+    the choice is unchanged; otherwise the least covisible picks without parallax give way to
+    the most covisible views with it.
+    """
+    chosen = list(ranked[:count])
+    spare = [entry for entry in ranked[count:] if entry[2]]
+    while sum(entry[2] for entry in chosen) < required and spare:
+        weakest = next((entry for entry in reversed(chosen) if not entry[2]), None)
+        if weakest is None:
+            if len(chosen) >= count:
+                break
+        else:
+            chosen.remove(weakest)
+        chosen.append(spare.pop(0))
+    return [key for _, key, _ in sorted(chosen, key=lambda entry: (-entry[0], entry[1]))]
 
 
 def select_sources(model, limit):
     images = sorted(model.images.values(), key=lambda im: im.name)
     tracks = {im.name: {p.point3D_id for p in im.points2D if p.has_point3D()} for im in images}
-    neighbors = {
-        name: sorted(((len(points & other), key) for key, other in tracks.items() if key != name),
-                     key=lambda pair: (-pair[0], pair[1]))
-        for name, points in tracks.items()
-    }
+    centres = {im.name: tuple(im.projection_center()) for im in images}
+    neighbors = ranked_neighbors(tracks, centres, lambda ids: [tuple(model.points3D[i].xyz) for i in ids])
     if limit >= len(images):
         selected = set(tracks)
     else:
@@ -30,10 +85,10 @@ def select_sources(model, limit):
             index = round((len(images) - 1) * (i + 0.5) / anchors)
             anchor = images[index].name
             selected.add(anchor)
-            selected.update(key for count, key in neighbors[anchor][:3] if count >= 8)
+            selected.update(with_parallax(neighbors[anchor], 3))
     config = {}
     for name in sorted(selected):
-        sources = [key for count, key in neighbors[name] if key in selected and count >= 8][:4]
+        sources = with_parallax([entry for entry in neighbors[name] if entry[1] in selected], 4)
         if len(sources) >= 2:
             config[name] = sources
     while any(any(source not in config for source in sources) for sources in config.values()):
@@ -43,6 +98,8 @@ def select_sources(model, limit):
 
 
 def reconstruct(images, sparse, output, max_image_size, max_views):
+    import pycolmap
+
     if not pycolmap.has_cuda or pycolmap.get_num_cuda_devices() < 1:
         raise RuntimeError("CUDA support is required for COLMAP PatchMatch")
     model = pycolmap.Reconstruction(sparse)
