@@ -6,7 +6,7 @@ const tum = {
   triangles: 108445,
   diagnostics: {
     dominant_rejection: "missing_reference_depth",
-    meshing: { exported_triangles: 108445, duplicate_cell_triangles: 185039 },
+    meshing: { exported_triangles: 108445 },
     topology: { islands: 3586, small_islands: 3436, largest_island_triangles: 4160 },
     verification: { reference_samples: 590400, missing_reference_depth: 278912, accepted: 195320 },
   },

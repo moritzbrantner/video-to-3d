@@ -5,7 +5,7 @@ export interface DenseSurfaceDiagnostics {
     missing_reference_depth: number;
     accepted: number;
   };
-  meshing: { exported_triangles: number; duplicate_cell_triangles: number };
+  meshing: { exported_triangles: number };
   topology: { islands: number; small_islands: number; largest_island_triangles: number };
   dominant_rejection: string | null;
 }
