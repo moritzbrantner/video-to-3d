@@ -1,0 +1,1175 @@
+{
+  "adjacent_pairs": [
+    {
+      "baseline_m": 0.15,
+      "from_frame": 0,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 1
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 1,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 2
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 2,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 3
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 3,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 4
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 4,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 5
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 5,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 6
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 6,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 7
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 7,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 8
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 8,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 9
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 9,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 10
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 10,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 11
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 11,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 12
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 12,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 13
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 13,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 14
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 14,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 15
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 15,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 16
+    },
+    {
+      "baseline_m": 0.15,
+      "from_frame": 16,
+      "overlap": 0.972222,
+      "relief_parallax_pixels": 0.627567,
+      "rotation_degrees": 0.0,
+      "to_frame": 17
+    }
+  ],
+  "case": "slow-lateral-pan",
+  "clip_relief_parallax_pixels": 10.668644,
+  "depth": {
+    "format": "PFM float32 little-endian, rows bottom to top",
+    "value": "camera-space z in metres of the surface through each pixel center"
+  },
+  "frames": [
+    {
+      "center": [
+        -1.275,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-00.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-00.ppm",
+      "index": 0,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 0.8,
+      "translation": [
+        1.275,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -1.125,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-01.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-01.ppm",
+      "index": 1,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 1.647059,
+      "translation": [
+        1.125,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -0.975,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-02.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-02.ppm",
+      "index": 2,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 2.494118,
+      "translation": [
+        0.975,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -0.825,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-03.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-03.ppm",
+      "index": 3,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 3.341176,
+      "translation": [
+        0.825,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -0.675,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-04.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-04.ppm",
+      "index": 4,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 4.188235,
+      "translation": [
+        0.675,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -0.525,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-05.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-05.ppm",
+      "index": 5,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 5.035294,
+      "translation": [
+        0.525,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -0.375,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-06.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-06.ppm",
+      "index": 6,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 5.882353,
+      "translation": [
+        0.375,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -0.225,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-07.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-07.ppm",
+      "index": 7,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 6.729412,
+      "translation": [
+        0.225,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        -0.075,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-08.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-08.ppm",
+      "index": 8,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 7.576471,
+      "translation": [
+        0.075,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        0.075,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-09.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-09.ppm",
+      "index": 9,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 8.423529,
+      "translation": [
+        -0.075,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        0.225,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-10.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-10.ppm",
+      "index": 10,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 9.270588,
+      "translation": [
+        -0.225,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        0.375,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-11.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-11.ppm",
+      "index": 11,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 10.117647,
+      "translation": [
+        -0.375,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        0.525,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-12.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-12.ppm",
+      "index": 12,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 10.964706,
+      "translation": [
+        -0.525,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        0.675,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-13.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-13.ppm",
+      "index": 13,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 11.811765,
+      "translation": [
+        -0.675,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        0.825,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-14.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-14.ppm",
+      "index": 14,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 12.658824,
+      "translation": [
+        -0.825,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        0.975,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-15.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-15.ppm",
+      "index": 15,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 13.505882,
+      "translation": [
+        -0.975,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        1.125,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-16.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-16.ppm",
+      "index": 16,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 14.352941,
+      "translation": [
+        -1.125,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "center": [
+        1.275,
+        0.0,
+        0.0
+      ],
+      "depth": "truth/depth-17.pfm",
+      "depth_range": [
+        5.550000190734863,
+        6.0
+      ],
+      "image": "images/frame-17.ppm",
+      "index": 17,
+      "rotation_world_to_camera": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "time_seconds": 15.2,
+      "translation": [
+        -1.275,
+        -0.0,
+        -0.0
+      ]
+    }
+  ],
+  "generator": {
+    "example": "crates/video-to-3d-core/examples/reference_fixture.rs",
+    "facade": {
+      "block_size_m": [
+        0.62,
+        0.26
+      ],
+      "distance_m": 6.0,
+      "extent_m": [
+        -6.0,
+        6.0,
+        -3.0,
+        3.0
+      ],
+      "kind": "heightfield",
+      "mortar_m": 0.018,
+      "pilaster_half_width_m": 0.22,
+      "pilaster_period_m": 1.7,
+      "relief_edge_m": 0.08,
+      "relief_m": 0.45,
+      "surface": "z = distance - height(x, y), 0 <= height <= relief"
+    },
+    "motion": {
+      "axis": "+x",
+      "kind": "lateral",
+      "rotation": "identity",
+      "step_m_per_sample": 0.15
+    },
+    "ray_bisection_steps": 24,
+    "ray_march_steps": 32,
+    "seed": "0x01287e71f00d5eed"
+  },
+  "intent": "Small lateral steps along a textured façade with mild depth relief; relief parallax per sampling interval sits near the baseline gate. Cameras should register.",
+  "intrinsics": {
+    "cx": 180.0,
+    "cy": 101.5,
+    "focal_note": "equals the pipeline default 0.86 x max(width, height)",
+    "fx": 309.6,
+    "fy": 309.6,
+    "height": 203,
+    "model": "PINHOLE",
+    "pixel_centers": "half-integer (COLMAP convention)",
+    "width": 360
+  },
+  "pose_convention": "x_camera = R * x_world + t; camera x right, y down, z forward; rotation row-major",
+  "sampling": {
+    "analysis_height": 203,
+    "analysis_width": 360,
+    "contract": "apps/web/src/videoSampling.ts buildVideoSamplingPlan",
+    "downscale": "area average of 3x3 sub-pixel rays per analysis pixel",
+    "duration_seconds": 16.0,
+    "frames_per_second": 1.25,
+    "max_frames": 18,
+    "reconstruction_options": "apps/web/src/reconstruction.ts reconstructFrames",
+    "sample_count": 18,
+    "source_height": 1080,
+    "source_width": 1920,
+    "times": [
+      0.8,
+      1.647059,
+      2.494118,
+      3.341176,
+      4.188235,
+      5.035294,
+      5.882353,
+      6.729412,
+      7.576471,
+      8.423529,
+      9.270588,
+      10.117647,
+      10.964706,
+      11.811765,
+      12.658824,
+      13.505882,
+      14.352941,
+      15.2
+    ]
+  },
+  "schema": "video-to-3d/reference-fixture-truth/v1",
+  "surface": {
+    "connected_components": 1,
+    "format": "binary little-endian PLY; vertex x y z s t; triangle faces",
+    "grid": [
+      241,
+      121
+    ],
+    "grid_spacing_m": 0.05,
+    "holes": 0,
+    "mesh": "truth/surface.ply",
+    "triangles": 57600,
+    "vertices": 29161
+  },
+  "texture": {
+    "albedo": "truth/albedo.ppm",
+    "height": 600,
+    "pixels_per_meter": 100.0,
+    "shading": "frame radiance = albedo * (0.3 + 0.7 * max(0, n . l)), l = normalize(-0.4, -0.6, -1)",
+    "uv": "s = (x - x_min) / (x_max - x_min), t = (y - y_min) / (y_max - y_min); texel row 0 at y_min",
+    "width": 1200
+  },
+  "view_overlap": {
+    "definition": "fraction of row view's pixel grid whose surface point is unoccluded inside column view",
+    "grid": [
+      36,
+      20
+    ],
+    "matrix": [
+      [
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.833333,
+        0.829167,
+        0.802778,
+        0.777778,
+        0.75,
+        0.740278,
+        0.718056,
+        0.691667,
+        0.663889,
+        0.622222,
+        0.605556
+      ],
+      [
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.833333,
+        0.811111,
+        0.784722,
+        0.759722,
+        0.731944,
+        0.722222,
+        0.7,
+        0.655556,
+        0.627778,
+        0.602778
+      ],
+      [
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.833333,
+        0.829167,
+        0.802778,
+        0.777778,
+        0.748611,
+        0.738889,
+        0.716667,
+        0.690278,
+        0.663889
+      ],
+      [
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.833333,
+        0.829167,
+        0.802778,
+        0.777778,
+        0.75,
+        0.740278,
+        0.718056,
+        0.691667
+      ],
+      [
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.833333,
+        0.829167,
+        0.802778,
+        0.777778,
+        0.75,
+        0.740278,
+        0.718056
+      ],
+      [
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.833333,
+        0.829167,
+        0.802778,
+        0.777778,
+        0.726389,
+        0.716667
+      ],
+      [
+        0.843056,
+        0.870833,
+        0.898611,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.843056,
+        0.822222,
+        0.811111,
+        0.784722,
+        0.759722,
+        0.731944
+      ],
+      [
+        0.809722,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.840278,
+        0.829167,
+        0.801389,
+        0.777778
+      ],
+      [
+        0.829167,
+        0.840278,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.840278,
+        0.829167,
+        0.802778
+      ],
+      [
+        0.802778,
+        0.829167,
+        0.840278,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.840278,
+        0.829167
+      ],
+      [
+        0.777778,
+        0.801389,
+        0.829167,
+        0.840278,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889,
+        0.861111,
+        0.809722
+      ],
+      [
+        0.731944,
+        0.759722,
+        0.784722,
+        0.811111,
+        0.822222,
+        0.843056,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.898611,
+        0.870833,
+        0.843056
+      ],
+      [
+        0.716667,
+        0.726389,
+        0.777778,
+        0.802778,
+        0.829167,
+        0.833333,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667,
+        0.888889
+      ],
+      [
+        0.718056,
+        0.740278,
+        0.75,
+        0.777778,
+        0.802778,
+        0.829167,
+        0.833333,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667,
+        0.916667
+      ],
+      [
+        0.691667,
+        0.718056,
+        0.740278,
+        0.75,
+        0.777778,
+        0.802778,
+        0.829167,
+        0.833333,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444,
+        0.941667
+      ],
+      [
+        0.663889,
+        0.690278,
+        0.716667,
+        0.738889,
+        0.748611,
+        0.777778,
+        0.802778,
+        0.829167,
+        0.833333,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222,
+        0.944444
+      ],
+      [
+        0.602778,
+        0.627778,
+        0.655556,
+        0.7,
+        0.722222,
+        0.731944,
+        0.759722,
+        0.784722,
+        0.811111,
+        0.833333,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0,
+        0.972222
+      ],
+      [
+        0.605556,
+        0.622222,
+        0.663889,
+        0.691667,
+        0.718056,
+        0.740278,
+        0.75,
+        0.777778,
+        0.802778,
+        0.829167,
+        0.833333,
+        0.861111,
+        0.888889,
+        0.916667,
+        0.941667,
+        0.944444,
+        0.972222,
+        1.0
+      ]
+    ]
+  }
+}

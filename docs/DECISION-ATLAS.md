@@ -90,6 +90,8 @@ Sources seeded into this atlas:
 
   - **3.12** Partial Blender exports are independent scene revisions.
     - **3.12.1** [decision] Owner answers (2026-10-17, steering Q10 A and Q11 A). Permit exporting currently accepted, independently editable meshes to Blender while the rest of a reconstruction continues. Explicitly label missing, uncertain and incomplete content and preserve scene/provenance identity. Each export is an immutable snapshot; newer reconstruction results create a separate revision and never silently overwrite earlier exports or user-made Blender edits. Users may import subsequent revisions manually. Automatic Blender synchronization or refresh is not part of the initial release. A partial export is not evidence that the all-three-video acceptance gate passed. See #234, #151 and #77.
+  - **3.13** Typical input is a short, densely sampled clip.
+    - **3.13.1** [decision] Amends the default sampling of 3.11.1 (owner direction, 2026-11-21). Expect clips of at least about 3 s at roughly 12 frames per second, such as movie excerpts; a clip need not be a sparse tour of a whole room. Without explicit options, sample at 12 frames per second up to the existing 120-frame bound, so a 3 s clip yields about 36 frames and longer clips spread 120 samples evenly; keyframe selection still drops redundant samples by measured overlap. The 18-frame default no longer applies. Pinned fixture plans (the TUM 87-sample capture and the H1/H3 18-sample plans) keep their recorded sampling and authored inventories until they are deliberately re-captured and re-authored. The rest of 3.11.1 and 3.8.1 is unchanged.
 
 - **4** Local platform and execution
   - **4.1** Initial release processing is fully local.

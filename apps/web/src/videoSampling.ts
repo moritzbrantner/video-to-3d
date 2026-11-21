@@ -20,14 +20,13 @@ export type VideoSamplingPlan = {
 };
 
 /**
- * Without an explicit frame cap, long clips are sampled at least this densely so
- * consecutive samples keep enough view overlap to chain cameras (#230); the Rust
- * keyframe selection then drops redundant samples by measured overlap. Short clips
- * keep the 18-frame default.
+ * Typical input is a short clip of a few seconds at movie frame rates (Atlas 3.13.1), so
+ * clips are sampled densely up to a fixed frame bound; the Rust keyframe selection then
+ * drops redundant samples by measured overlap.
  */
-export const MAX_AUTO_SAMPLE_SPACING_SECONDS = 1.0;
-const DEFAULT_MAX_FRAMES = 18;
-const MAX_SAMPLED_FRAMES = 120;
+export const DEFAULT_SAMPLING_FPS = 12;
+export const MAX_SAMPLING_FPS = 15;
+export const MAX_SAMPLED_FRAMES = 120;
 
 function positiveFinite(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
@@ -49,15 +48,11 @@ export function buildVideoSamplingPlan(
     throw new Error("the selected video does not expose usable dimensions");
   }
 
-  const framesPerSecond = Math.min(8, positiveFinite(options.framesPerSecond, 1.25));
+  const framesPerSecond = Math.min(MAX_SAMPLING_FPS, positiveFinite(options.framesPerSecond, DEFAULT_SAMPLING_FPS));
   const local = options.profile === "local-reconstruction";
-  const automaticCap = Math.max(
-    DEFAULT_MAX_FRAMES,
-    Math.ceil(local ? metadata.duration * framesPerSecond : metadata.duration / MAX_AUTO_SAMPLE_SPACING_SECONDS),
-  );
   const maxFrames = Math.min(
     MAX_SAMPLED_FRAMES,
-    Math.max(4, Math.floor(positiveFinite(options.maxFrames, automaticCap))),
+    Math.max(4, Math.floor(positiveFinite(options.maxFrames, MAX_SAMPLED_FRAMES))),
   );
   const targetCount = Math.max(4, Math.ceil(metadata.duration * framesPerSecond));
   const sampleCount = Math.min(maxFrames, targetCount);
