@@ -106,8 +106,13 @@ pub struct MeshingFunnel {
     pub candidate_cells: usize,
     pub rejected_discontinuities: usize,
     pub rejected_degenerate: usize,
-    /// Reference samples that more than one source camera verified (meshed once).
+    /// Reference samples at least one source verified, and those more than one verified
+    /// (each meshed once).
+    pub verified_samples: usize,
     pub multiply_verified_samples: usize,
+    /// Samples whose multi-view consensus depth differs from the reference depth alone by
+    /// more than 1%: a high share means noisy per-view depth.
+    pub consensus_moved_over_one_percent: usize,
     pub exported_triangles: usize,
 }
 
@@ -204,7 +209,7 @@ fn verify_patch(
     reference_stride: usize,
     focal: f64,
     funnel: &mut VerificationFunnel,
-) -> Vec<(Point3, DenseGridSite)> {
+) -> Vec<Verified> {
     let width = reference.image.width as usize;
     let height = reference.image.height as usize;
     let cols = width.div_ceil(stride);
@@ -215,6 +220,8 @@ fn verify_patch(
     let source_center = source.camera.camera_center();
     let ref_center = reference.camera.camera_center();
     let min_parallax_cos = 0.5_f64.to_radians().cos();
+    let reference_center_depth =
+        (source.camera.rotation * ref_center + source.camera.translation).z;
     for (i, &z) in reference.grid.depth.iter().enumerate() {
         let x = (i % cols) * stride;
         let y = (i / cols) * stride;
@@ -280,8 +287,8 @@ fn verify_patch(
             continue;
         }
         funnel.accepted += 1;
-        points.push((
-            Point3 {
+        points.push(Verified {
+            point: Point3 {
                 x: world.x as f32,
                 y: world.y as f32,
                 z: world.z as f32,
@@ -290,13 +297,27 @@ fn verify_patch(
                 b,
                 confidence: (1. - (other - q.z).abs() / q.z) as f32,
             },
-            DenseGridSite {
+            site: DenseGridSite {
                 x: x as u32,
                 y: y as u32,
             },
-        ));
+            // The reference-ray point whose depth from the source equals the source's own
+            // measurement: depth seen from the source is affine along the reference ray.
+            source_depth_ratio: (other - reference_center_depth) / (q.z - reference_center_depth),
+        });
     }
     points
+}
+
+/// One reference sample a source camera verified.
+struct Verified {
+    /// Position from the reference depth alone.
+    point: Point3,
+    site: DenseGridSite,
+    /// The source's own depth measurement over the reference sample's depth seen from the
+    /// source (within the 2% agreement band). Scaling the reference ray by it places the
+    /// sample where the source measured the surface, to first order.
+    source_depth_ratio: f64,
 }
 
 struct VerifiedSample {
@@ -306,33 +327,65 @@ struct VerifiedSample {
     sources: Vec<usize>,
 }
 
-/// Merge the samples each source verified into one reference grid. A sample's position comes
-/// from the reference depth alone, so every verifying source agrees on it; meshing the union
-/// once keeps one reference view a connected surface instead of source-wise islands (the TUM
-/// diagnosis of 2026-11-21 measured 3,586 islands before, 466 after). Confidence keeps the
-/// strongest agreement. Output is ordered by grid row, then column.
-fn verified_union(candidates: Vec<(usize, Vec<(Point3, DenseGridSite)>)>) -> Vec<VerifiedSample> {
-    let mut union = BTreeMap::<(u32, u32), VerifiedSample>::new();
+/// Merge the samples each source verified into one reference grid, meshed once, so one
+/// reference view stays a connected surface instead of source-wise islands (the TUM diagnosis
+/// of 2026-11-21 measured 3,586 islands before, 466 after). Confidence keeps the strongest
+/// agreement. Output is ordered by grid row, then column.
+///
+/// The sample is placed on its reference ray at the mean of the reference depth and every
+/// verifying source's own measurement (each already within the 2% agreement band). Each
+/// view's depth alone leaves overlapping views as separate layers a few centimetres apart,
+/// which fusion can only join with steep, untexturable steps; the shared measurements pull
+/// those layers onto one surface. Only agreeing observed depths are averaged, so the sample
+/// stays geometric multi-view evidence of exactly the cameras listed in `sources`.
+fn verified_union(
+    reference_center: Vector3<f64>,
+    candidates: Vec<(usize, Vec<Verified>)>,
+    funnel: &mut MeshingFunnel,
+) -> Vec<VerifiedSample> {
+    let mut union = BTreeMap::<(u32, u32), (VerifiedSample, f64)>::new();
     for (source, patch) in candidates {
-        for (point, site) in patch {
+        for verified in patch {
+            let Verified {
+                point,
+                site,
+                source_depth_ratio,
+            } = verified;
             union
                 .entry((site.y, site.x))
-                .and_modify(|sample| {
+                .and_modify(|(sample, ratios)| {
                     sample.point.confidence = sample.point.confidence.max(point.confidence);
                     sample.sources.push(source);
+                    *ratios += source_depth_ratio;
                 })
-                .or_insert(VerifiedSample {
-                    point,
-                    site,
-                    sources: vec![source],
-                });
+                .or_insert((
+                    VerifiedSample {
+                        point,
+                        site,
+                        sources: vec![source],
+                    },
+                    1. + source_depth_ratio,
+                ));
         }
     }
     union
         .into_values()
-        .map(|mut sample| {
+        .map(|(mut sample, ratios)| {
+            // The reference measurement counts once, each verifying source once.
+            let scale = ratios / (sample.sources.len() + 1) as f64;
             sample.sources.sort_unstable();
             sample.sources.dedup();
+            if (scale - 1.).abs() > 0.01 {
+                funnel.consensus_moved_over_one_percent += 1;
+            }
+            let p = &mut sample.point;
+            let at =
+                |value: f32, center: f64| (center + (f64::from(value) - center) * scale) as f32;
+            [p.x, p.y, p.z] = [
+                at(p.x, reference_center.x),
+                at(p.y, reference_center.y),
+                at(p.z, reference_center.z),
+            ];
             sample
         })
         .collect()
@@ -424,7 +477,12 @@ pub fn export(
             candidates.push((source, patch));
         }
         let previous_len = triangles.len();
-        let union = verified_union(candidates);
+        let union = verified_union(
+            reference.camera.camera_center(),
+            candidates,
+            &mut diagnostics.meshing,
+        );
+        diagnostics.meshing.verified_samples += union.len();
         diagnostics.meshing.multiply_verified_samples += union
             .iter()
             .filter(|sample| sample.sources.len() > 1)
@@ -609,42 +667,46 @@ mod tests {
 
     #[test]
     fn sources_verifying_one_sample_share_one_vertex() {
-        let sample = |x: u32, y: u32, confidence: f32| {
-            (
-                Point3 {
-                    x: x as f32,
-                    y: y as f32,
-                    z: 5.,
-                    r: 1,
-                    g: 2,
-                    b: 3,
-                    confidence,
-                },
-                DenseGridSite { x, y },
-            )
+        let sample = |x: u32, y: u32, confidence: f32| Verified {
+            point: Point3 {
+                x: x as f32,
+                y: y as f32,
+                z: 5.,
+                r: 1,
+                g: 2,
+                b: 3,
+                confidence,
+            },
+            site: DenseGridSite { x, y },
+            source_depth_ratio: 1.,
         };
         // Source 7 verified the left half of a 3x2 grid, source 3 the right half; they overlap
         // in the middle column.
-        let union = verified_union(vec![
-            (
-                7,
-                vec![
-                    sample(0, 0, 0.9),
-                    sample(4, 0, 0.9),
-                    sample(0, 4, 0.9),
-                    sample(4, 4, 0.9),
-                ],
-            ),
-            (
-                3,
-                vec![
-                    sample(4, 0, 0.95),
-                    sample(8, 0, 0.95),
-                    sample(4, 4, 0.8),
-                    sample(8, 4, 0.95),
-                ],
-            ),
-        ]);
+        let mut funnel = MeshingFunnel::default();
+        let union = verified_union(
+            Vector3::zeros(),
+            vec![
+                (
+                    7,
+                    vec![
+                        sample(0, 0, 0.9),
+                        sample(4, 0, 0.9),
+                        sample(0, 4, 0.9),
+                        sample(4, 4, 0.9),
+                    ],
+                ),
+                (
+                    3,
+                    vec![
+                        sample(4, 0, 0.95),
+                        sample(8, 0, 0.95),
+                        sample(4, 4, 0.8),
+                        sample(8, 4, 0.95),
+                    ],
+                ),
+            ],
+            &mut funnel,
+        );
         let sites: Vec<_> = union.iter().map(|s| (s.site.x, s.site.y)).collect();
         assert_eq!(sites, [(0, 0), (4, 0), (8, 0), (0, 4), (4, 4), (8, 4)]);
         let sources: Vec<_> = union.iter().map(|s| s.sources.clone()).collect();
@@ -652,9 +714,11 @@ mod tests {
             sources,
             [vec![7], vec![3, 7], vec![3], vec![7], vec![3, 7], vec![3]]
         );
-        // The strongest verification survives; the position is the reference depth either way.
+        // The strongest verification survives; agreeing measurements leave the position alone.
         assert_eq!(union[1].point.confidence, 0.95);
         assert_eq!(union[4].point.confidence, 0.9);
+        assert_eq!([union[4].point.x, union[4].point.z], [4., 5.]);
+        assert_eq!(funnel.consensus_moved_over_one_percent, 0);
 
         // Meshed once, both halves form one island; meshed per source they would be two.
         let cameras = [0, 3, 7].map(|frame_index| RegisteredCamera {
@@ -690,6 +754,96 @@ mod tests {
         );
         assert_eq!(mesh.triangles.len(), 4);
         assert_eq!(surface_topology(points.len(), &mesh.triangles).islands, 1);
+    }
+
+    #[test]
+    fn agreeing_source_depths_move_a_sample_along_its_reference_ray() {
+        let at = |source_depth_ratio: f64| Verified {
+            point: Point3 {
+                x: 2.,
+                y: 0.,
+                z: 4.,
+                r: 0,
+                g: 0,
+                b: 0,
+                confidence: 1.,
+            },
+            site: DenseGridSite { x: 0, y: 0 },
+            source_depth_ratio,
+        };
+        let center = Vector3::new(1., 0., 0.);
+        let mut funnel = MeshingFunnel::default();
+        // Reference 1, sources 1.02 and 1.03: the mean 1.0167 scales the ray from the center.
+        let union = verified_union(
+            center,
+            vec![(4, vec![at(1.02)]), (9, vec![at(1.03)])],
+            &mut funnel,
+        );
+        let p = union[0].point;
+        let scale = (1. + 1.02 + 1.03) / 3.;
+        assert!((f64::from(p.x) - (1. + scale)).abs() < 1e-6);
+        assert!((f64::from(p.z) - 4. * scale).abs() < 1e-6);
+        assert_eq!(p.y, 0.);
+        assert_eq!(union[0].sources, [4, 9]);
+        assert_eq!(funnel.consensus_moved_over_one_percent, 1);
+
+        // A single agreeing source moves the sample halfway, here by less than 1%.
+        let mut funnel = MeshingFunnel::default();
+        let union = verified_union(center, vec![(4, vec![at(0.99)])], &mut funnel);
+        assert!((f64::from(union[0].point.z) - 4. * 0.995).abs() < 1e-6);
+        assert_eq!(funnel.consensus_moved_over_one_percent, 0);
+    }
+
+    #[test]
+    fn source_depth_ratio_lands_on_the_source_measurement() {
+        // Reference at the origin looking down +z; source one metre to the right, same axes.
+        let frame = FrameInput {
+            width: 24,
+            height: 16,
+            rgba: vec![100; 24 * 16 * 4],
+        };
+        let near = Grid {
+            frame: 0,
+            sources: vec![1],
+            depth: vec![8.; 24],
+        };
+        let far = Grid {
+            frame: 1,
+            sources: vec![0],
+            depth: vec![8.08; 24],
+        };
+        let first = RegisteredCamera {
+            frame_index: 0,
+            rotation: Matrix3::identity(),
+            translation: Vector3::zeros(),
+        };
+        let second = RegisteredCamera {
+            frame_index: 1,
+            rotation: Matrix3::identity(),
+            translation: Vector3::new(-1., 0., 0.),
+        };
+        let view = |camera, grid| View {
+            camera,
+            grid,
+            image: &frame,
+        };
+        let verified = verify_patch(
+            &view(&first, &near),
+            &view(&second, &far),
+            4,
+            4,
+            20.,
+            &mut VerificationFunnel::default(),
+        );
+        assert!(!verified.is_empty());
+        // Fronto-parallel planes: the source measured 1% deeper everywhere it sees the sample.
+        for v in &verified {
+            assert!(
+                (v.source_depth_ratio - 1.01).abs() < 1e-6,
+                "{}",
+                v.source_depth_ratio
+            );
+        }
     }
 
     #[test]
@@ -735,10 +889,12 @@ mod tests {
             image: &frame,
         };
         let mut funnel = VerificationFunnel::default();
-        assert_eq!(
-            verify_patch(&reference, &source, 4, 4, 20., &mut funnel).len(),
-            20
-        );
+        let verified = verify_patch(&reference, &source, 4, 4, 20., &mut funnel);
+        assert_eq!(verified.len(), 20);
+        // Both maps measure 8 m: the source puts every sample exactly where the reference does.
+        assert!(verified
+            .iter()
+            .all(|v| (v.source_depth_ratio - 1.).abs() < 1e-12));
         // The one-pixel baseline shifts a column of samples out of the source image.
         assert_eq!(
             funnel,
@@ -760,7 +916,7 @@ mod tests {
         assert_eq!(coarse.len(), 4);
         assert!(coarse
             .iter()
-            .all(|(_, site)| site.x % 8 == 0 && site.y % 8 == 0));
+            .all(|v| v.site.x % 8 == 0 && v.site.y % 8 == 0));
         for (rejected, expected) in [
             (
                 View {

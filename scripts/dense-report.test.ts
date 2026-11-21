@@ -29,3 +29,21 @@ test("omits the summary for reports without a valid funnel", () => {
   negative.diagnostics.topology.islands = -1;
   expect(denseDiagnosticSummary(negative)).toBeNull();
 });
+
+test("reports how often views disagreed before their depths were averaged", () => {
+  // The fused TUM export with multi-view depth consensus (2026-11-21).
+  const fused = {
+    diagnostics: {
+      dominant_rejection: "missing_reference_depth",
+      meshing: { exported_triangles: 77061, verified_samples: 73875, consensus_moved_over_one_percent: 1595 },
+      topology: { islands: 611, small_islands: 593, largest_island_triangles: 71823 },
+      verification: { reference_samples: 590400, missing_reference_depth: 278912, accepted: 195320 },
+    },
+  };
+  expect(denseDiagnosticSummary(fused)).toBe(
+    "Surface is 611 disconnected pieces (largest 93% of triangles, 593 tiny). " +
+      "Stereo gave no depth for 47% of reference samples. " +
+      "Views disagreed by over 1% in depth on 2% of verified samples (averaged). " +
+      "Most rejected samples: missing reference depth.",
+  );
+});
