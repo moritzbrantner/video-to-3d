@@ -2,7 +2,7 @@
 //! reference grids to the shared topology, provenance, material and GLB exporters.
 use crate::multi_view::RegisteredCamera;
 use crate::registered_sparse::RegisteredSparseInput;
-use crate::surface_materials::{bake_surface_materials, ReferenceImage};
+use crate::surface_materials::{bake_surface_materials_with_seams, ReferenceImage, SeamProjection};
 use crate::textured_glb::{encode_textured_glb_with_camera_provider, CameraProviderMetadata};
 use crate::*;
 use nalgebra::Vector3;
@@ -46,6 +46,9 @@ pub struct SurfaceDiagnostics {
     /// Reference-grid depth samples checked against each supporting source view.
     pub verification: VerificationFunnel,
     pub meshing: MeshingFunnel,
+    pub fusion: ViewFusionFunnel,
+    /// Why exported triangles keep the untextured fallback material.
+    pub untextured: crate::surface_materials::FallbackReasons,
     pub topology: SurfaceTopology,
     /// The verification check that rejected the most reference samples.
     pub dominant_rejection: Option<&'static str>,
@@ -106,6 +109,28 @@ pub struct MeshingFunnel {
     /// Reference samples that more than one source camera verified (meshed once).
     pub multiply_verified_samples: usize,
     pub exported_triangles: usize,
+}
+
+/// How independently meshed reference views were joined (see `surface_fusion.rs` and
+/// `surface_merge.rs`): only mutually nearest, normal-aligned seam vertices are fused, and
+/// only views linked that way may own each other's duplicated overlap.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ViewFusionFunnel {
+    pub reference_views: usize,
+    pub fused_seam_pairs: usize,
+    pub cross_reference_triangles: usize,
+    pub removed_duplicate_triangles: usize,
+    pub stitched_seam_triangles: usize,
+    /// Clip vertices on owner edges, with source-triangle lineage (derived, not observed).
+    pub derived_vertices: usize,
+    /// Connected components of the reference-view graph after the merge.
+    pub patch_components: usize,
+    /// Triangles dropped because no clip split was possible without a T-junction.
+    pub dropped_unconformable_triangles: usize,
+    /// Partially overlapping triangles kept to preserve supported geometry.
+    pub remaining_overlap_triangles: usize,
+    /// Removed seam triangles that another view owned only in part.
+    pub trimmed_seam_triangles: usize,
 }
 
 /// Connectivity of the exported surface. Separate reference views do not share vertices, so
@@ -467,9 +492,35 @@ pub fn export(
         return Err("COLMAP stereo produced no cross-view verified surface triangles".into());
     }
     diagnostics.meshing.meshed_reference_views = references.len();
+    diagnostics.dominant_rejection = diagnostics.verification.dominant_rejection();
+    // Reference views were meshed independently; join the views that observed the same
+    // surface with the classic pipeline's fusion and ownership merge (Rust owns fusion).
+    let consolidated = crate::surface_fusion::consolidate_reference_views(
+        points,
+        triangles,
+        &regions,
+        &cameras,
+        &mut control,
+    )?;
+    let points = consolidated.points;
+    let triangles = consolidated.triangles;
+    let derived_vertices = consolidated.derived_vertices;
+    let triangle_sources = consolidated.triangle_sources;
+    let merge = &consolidated.merge;
+    diagnostics.fusion = ViewFusionFunnel {
+        reference_views: consolidated.support_groups,
+        fused_seam_pairs: consolidated.fused_pairs,
+        cross_reference_triangles: merge.cross_reference_triangles,
+        removed_duplicate_triangles: merge.removed_duplicate_triangles,
+        stitched_seam_triangles: merge.stitched_seam_triangles,
+        derived_vertices: merge.derived_vertices,
+        patch_components: merge.patch_components,
+        dropped_unconformable_triangles: merge.dropped_unconformable_triangles,
+        remaining_overlap_triangles: merge.remaining_overlap_triangles,
+        trimmed_seam_triangles: merge.trimmed_seam_triangles,
+    };
     diagnostics.meshing.exported_triangles = triangles.len();
     diagnostics.topology = surface_topology(points.len(), &triangles);
-    diagnostics.dominant_rejection = diagnostics.verification.dominant_rejection();
     let evidence_cameras = cameras
         .iter()
         .map(|c| EvidenceCamera {
@@ -485,7 +536,7 @@ pub fn export(
             median_reprojection_error_pixels: None,
         })
         .collect();
-    let evidence = ReconstructionEvidenceView::new(
+    let evidence = ReconstructionEvidenceView::new_with_derived_vertices(
         ReconstructionProviderDescriptor::new(
             "colmap-patch-match",
             ReconstructionProviderClass::GeometricMultiView,
@@ -496,8 +547,19 @@ pub fn export(
         regions,
         &points,
         &triangles,
+        &derived_vertices,
+    )?
+    .with_triangle_sources(&triangle_sources)?;
+    // Cross-reference triangles are textured from a camera that sees all their corners.
+    let bake = bake_surface_materials_with_seams(
+        &evidence,
+        &sites,
+        &references,
+        Some(SeamProjection {
+            focal_pixels: focal as f32,
+        }),
     )?;
-    let bake = bake_surface_materials(&evidence, &sites, &references)?;
+    diagnostics.untextured = bake.fallback.reasons.clone();
     let partition = inventory
         .map(|(inventory, hash)| {
             crate::object_surface::partition_object_surfaces(
@@ -522,7 +584,7 @@ pub fn export(
     let report = SurfaceReport {
         registered_views: cameras.len(),
         reference_views: references.len(),
-        verified_points: points.len(),
+        verified_points: points.len() - derived_vertices.len(),
         triangles: triangles.len(),
         textured_triangles: bake.textured_triangles(),
         object_surfaces: partition.as_ref().map_or(0, |part| {

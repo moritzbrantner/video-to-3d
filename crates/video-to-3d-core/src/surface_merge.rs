@@ -132,7 +132,7 @@ impl ReferenceCamera {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct MergeStats {
+pub(crate) struct MergeStats {
     pub fused_pairs: usize,
     pub shared_vertices: usize,
     pub cross_reference_triangles: usize,
@@ -196,6 +196,9 @@ pub(super) struct MergeStats {
     /// Triangles that needed such a split but could not be split; an owned
     /// merge with any is rejected rather than published with T-junctions.
     pub conformance_failures: usize,
+    /// Triangles a T-junction-free split was impossible for, dropped instead of rejecting
+    /// the merge (only when the caller opts in; their holes stay open and are counted).
+    pub dropped_unconformable_triangles: usize,
     /// Retained triangles that canonicalization re-indexed, with the corners they were
     /// triangulated over, sorted by their index in the merged triangle buffer.
     pub triangle_sources: Vec<crate::TriangleSourceCorners>,
@@ -271,6 +274,7 @@ pub(super) fn merge_fused_patches_with_control(
         point_origins,
         control,
         false,
+        false,
     )
     .0
 }
@@ -307,6 +311,45 @@ pub(super) fn merge_fused_patches_owned(
     )
 }
 
+/// [`merge_fused_patches_owned_with_control`], except that a triangle the clips cannot
+/// split without a T-junction is dropped (and counted in
+/// `dropped_unconformable_triangles`) instead of rejecting the whole merge.
+pub(crate) fn merge_fused_patches_owned_dropping_unconformable(
+    mut points: Vec<Point3>,
+    mut triangles: Vec<MeshTriangle>,
+    membership: &[Option<usize>],
+    pairs: &[(usize, usize)],
+    reference_cameras: &[Option<ReferenceCamera>],
+    point_origins: &[Option<crate::EvidenceOrigin>],
+    control: &mut crate::ReconstructionControl<'_>,
+) -> Result<OwnedMerge, String> {
+    control.check()?;
+    let (stats, derived) = merge_impl(
+        &points,
+        &mut triangles,
+        membership,
+        pairs,
+        reference_cameras,
+        point_origins,
+        control,
+        true,
+        true,
+    );
+    control.check()?;
+    let mut derived_vertices = Vec::with_capacity(derived.len());
+    for entry in derived {
+        debug_assert_eq!(entry.source.point_index, points.len());
+        points.push(entry.point);
+        derived_vertices.push(entry.source);
+    }
+    Ok(OwnedMerge {
+        points,
+        triangles,
+        derived_vertices,
+        stats,
+    })
+}
+
 /// [`OwnedMerge`] with cooperative cancellation: a canceled merge returns an
 /// error and no partial geometry.
 pub(crate) fn merge_fused_patches_owned_with_control(
@@ -328,6 +371,7 @@ pub(crate) fn merge_fused_patches_owned_with_control(
         point_origins,
         control,
         true,
+        false,
     );
     control.check()?;
     if stats.conformance_failures > 0 {
@@ -361,6 +405,7 @@ fn merge_impl(
     point_origins: &[Option<crate::EvidenceOrigin>],
     control: &mut crate::ReconstructionControl<'_>,
     clip_overlaps: bool,
+    drop_unconformable: bool,
 ) -> (MergeStats, Vec<clip::DerivedPoint>) {
     let group_of = |vertex: usize| membership.get(vertex).copied().flatten();
     let valid = |triangle: &MeshTriangle| {
@@ -972,6 +1017,7 @@ fn merge_impl(
     // Zipper: split every edge a clip placed a vertex inside.
     let mut conformed_triangles = 0;
     let mut conformance_failures = 0;
+    let mut dropped_unconformable_triangles = 0;
     if clip_state.has_records() {
         let derived_position = |vertex: usize| {
             if vertex < points.len() {
@@ -986,10 +1032,37 @@ fn merge_impl(
         else {
             return Default::default();
         };
-        conformance_failures = failures;
         conformed_triangles = split.len();
         let split: BTreeSet<usize> = split.into_iter().collect();
         triangle_sources.retain(|source| !split.contains(&source.triangle));
+        if drop_unconformable && !failures.is_empty() {
+            // Each failure would publish a T-junction. Drop only those triangles: the hole
+            // is reported, and every other clip keeps its verified split.
+            let failed: BTreeSet<usize> = failures.into_iter().collect();
+            let mut remap = Vec::with_capacity(triangles.len());
+            let mut next = 0;
+            for slot in 0..triangles.len() {
+                remap.push((!failed.contains(&slot)).then(|| {
+                    next += 1;
+                    next - 1
+                }));
+            }
+            let mut slot = 0;
+            triangles.retain(|_| {
+                slot += 1;
+                !failed.contains(&(slot - 1))
+            });
+            triangle_sources.retain_mut(|source| match remap[source.triangle] {
+                Some(index) => {
+                    source.triangle = index;
+                    true
+                }
+                None => false,
+            });
+            dropped_unconformable_triangles = failed.len();
+        } else {
+            conformance_failures = failures.len();
+        }
     }
     let derived_groups: Vec<Option<usize>> =
         clip_state.derived.iter().map(|entry| entry.group).collect();
@@ -1042,6 +1115,7 @@ fn merge_impl(
         unclipped_overlap_triangles: clip_failures,
         conformed_triangles,
         conformance_failures,
+        dropped_unconformable_triangles,
         fused_pairs,
         shared_vertices,
         cross_reference_triangles,

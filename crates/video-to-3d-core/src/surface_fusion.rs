@@ -228,6 +228,77 @@ pub(crate) fn consolidate_surface_recording_with_control(
     Ok(moved_indices)
 }
 
+/// Independently meshed reference views after cross-reference fusion and the merge.
+pub(crate) struct ConsolidatedReferenceViews {
+    /// Observed points (seam pairs aligned) followed by derived clip vertices.
+    pub points: Vec<Point3>,
+    pub triangles: Vec<MeshTriangle>,
+    pub derived_vertices: Vec<crate::DerivedVertexSource>,
+    pub triangle_sources: Vec<crate::TriangleSourceCorners>,
+    pub fused_pairs: usize,
+    pub merge: crate::surface_merge::MergeStats,
+    pub support_groups: usize,
+}
+
+/// The cross-reference fusion and connected-surface merge of the classic pipeline, for a
+/// provider whose evidence already arrives as explicit regions over registered cameras
+/// (for example verified external stereo depth). Region `i`'s reference camera owns the
+/// overlap it meshes; no vertex is fabricated, and gaps no view observed stay open.
+pub(crate) fn consolidate_reference_views(
+    mut points: Vec<Point3>,
+    triangles: Vec<MeshTriangle>,
+    regions: &[SurfaceEvidenceRegion],
+    cameras: &[crate::multi_view::RegisteredCamera],
+    control: &mut ReconstructionControl<'_>,
+) -> Result<ConsolidatedReferenceViews, String> {
+    let (membership, support_groups) = evidence_support_membership(regions, points.len());
+    let mut reference_cameras = vec![None; support_groups];
+    let mut point_origins = vec![None; points.len()];
+    for region in regions {
+        control.check()?;
+        let end = region.points.start.saturating_add(region.points.count);
+        if let Some(range) = point_origins.get_mut(region.points.start..end) {
+            range.fill(Some(region.origin));
+        }
+        let Some(group) = membership.get(region.points.start).copied().flatten() else {
+            continue;
+        };
+        if reference_cameras[group].is_none() {
+            reference_cameras[group] = cameras
+                .iter()
+                .find(|camera| Some(camera.frame_index) == region.reference_frame)
+                .map(|camera| crate::surface_merge::ReferenceCamera {
+                    rotation: camera.rotation,
+                    translation: camera.translation,
+                });
+        }
+    }
+    let outcome = if support_groups < 2 {
+        FusionOutcome::default()
+    } else {
+        fuse_mutually_supported_vertices_with_control(&mut points, &triangles, &membership, control)
+    };
+    let merged = crate::surface_merge::merge_fused_patches_owned_dropping_unconformable(
+        points,
+        triangles,
+        &membership,
+        &outcome.pairs,
+        &reference_cameras,
+        &point_origins,
+        control,
+    )?;
+    let mut merge = merged.stats;
+    Ok(ConsolidatedReferenceViews {
+        points: merged.points,
+        triangles: merged.triangles,
+        derived_vertices: merged.derived_vertices,
+        triangle_sources: std::mem::take(&mut merge.triangle_sources),
+        fused_pairs: outcome.stats.fused_pairs,
+        merge,
+        support_groups,
+    })
+}
+
 /// The mesh diagnostic was rendered before the merge: bring the aggregate and
 /// per-reference-patch triangle counts, and that warning, in line with the
 /// merged mesh.
@@ -913,6 +984,50 @@ mod tests {
 
         assert_eq!(groups, 2);
         assert_eq!(membership, vec![Some(0), Some(0), Some(0), Some(1), None]);
+    }
+
+    #[test]
+    fn reference_views_meshing_the_same_sheet_consolidate_into_one_surface() {
+        // Two reference views (frames 0 and 1, both looking down +z) each meshed the same
+        // square 5 m ahead; view 1's copy sits 6 mm behind, within depth noise.
+        let sheet = |z: f32| {
+            [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)].map(|(x, y)| point(x, y, z, 1.0))
+        };
+        let points: Vec<_> = sheet(5.0).into_iter().chain(sheet(5.006)).collect();
+        let triangles = vec![
+            triangle(0, 1, 3),
+            triangle(0, 3, 2),
+            triangle(4, 5, 7),
+            triangle(4, 7, 6),
+        ];
+        let regions = vec![
+            region(EvidenceOrigin::GeometricMultiView, Some(0), vec![2], 0, 4),
+            region(EvidenceOrigin::GeometricMultiView, Some(1), vec![2], 4, 4),
+        ];
+        let cameras = [0, 1, 2].map(|frame_index| crate::multi_view::RegisteredCamera {
+            frame_index,
+            rotation: nalgebra::Matrix3::identity(),
+            translation: Vector3::zeros(),
+        });
+
+        let merged = consolidate_reference_views(
+            points,
+            triangles,
+            &regions,
+            &cameras,
+            &mut ReconstructionControl::new(&mut || false),
+        )
+        .unwrap();
+
+        assert_eq!(merged.support_groups, 2);
+        assert_eq!(merged.fused_pairs, 4);
+        // The duplicated copy is dropped in favour of the view already meshing the sheet;
+        // nothing is fabricated, so the observed points stay and no vertex is derived.
+        assert_eq!(merged.merge.removed_duplicate_triangles, 2);
+        assert_eq!(merged.triangles.len(), 2);
+        assert_eq!(merged.points.len(), 8);
+        assert!(merged.derived_vertices.is_empty());
+        assert_eq!(merged.merge.dropped_unconformable_triangles, 0);
     }
 
     #[test]
