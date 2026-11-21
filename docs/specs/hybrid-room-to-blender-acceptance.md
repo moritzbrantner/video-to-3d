@@ -72,8 +72,8 @@ From the Video-to-3D checkout with the #255 changes, set the local paths and
 the independently recorded model ZIP digest, then run:
 
 ```bash
-export VIDEO_TO_3D_REAL_ROOM_INPUT="$HOME/.local/share/coding-agent/video179-independent-browser-input"
-export VIDEO_TO_3D_REAL_ROOM_WITNESS_HASH=sha256:f45e0cf9ade9a203dc52da6be87c6154ef5c501b454eedbc3d6ec63f46bea92d
+export VIDEO_TO_3D_REAL_ROOM_INPUT="$HOME/.local/share/coding-agent/video230-dense-browser-input"
+export VIDEO_TO_3D_REAL_ROOM_WITNESS_HASH=sha256:2c80e92e231823469e21eb286a926d1f99d0ea1f520c018ca9a173ae8ea9f354
 export VIDEO_TO_3D_ASSET_TOOLING=/absolute/path/to/asset-tooling
 export VIDEO_TO_3D_TRIPOSR_BUNDLE=/absolute/path/to/triposr.zip
 export VIDEO_TO_3D_TRIPOSR_BUNDLE_SHA256='<64-character bundle SHA-256>'
