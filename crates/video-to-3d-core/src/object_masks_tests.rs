@@ -334,3 +334,104 @@ fn a_single_view_is_unverified_and_unavailable_semantics_propagate() {
     assert_eq!(artifact.status, MasksStatus::Unavailable);
     artifact.validate().unwrap();
 }
+
+#[test]
+fn only_multi_view_mask_supported_front_faces_become_object_surfaces() {
+    use crate::object_surface::partition_object_surfaces;
+    use crate::semantic_inventory::SemanticTrack;
+    use crate::{
+        EvidenceCamera, EvidenceCameraAuthority, EvidenceOrigin, EvidenceRange, EvidenceScale,
+        MeshTriangle, Point3, ReconstructionEvidenceView, ReconstructionProviderDescriptor,
+        SurfaceEvidenceRegion,
+    };
+
+    let toy = [[0., 0., 3.], [0.2, 0., 3.], [0., 0.2, 3.]];
+    let mut case = Case::new(toy.to_vec());
+    let observations = (0..3)
+        .map(|frame| {
+            case.observe(
+                "toy",
+                frame,
+                &[[-0.02, -0.02, 3.], [0.22, 0.22, 3.]],
+                Some(0.95),
+            )
+        })
+        .collect();
+    case.inventory.tracks.push(SemanticTrack {
+        id: "track".into(),
+        label: "toy".into(),
+        observations,
+        association_confidence: 0.9,
+    });
+    case.inventory.validate().unwrap();
+    let points: Vec<_> = toy
+        .into_iter()
+        .chain(toy.map(|[x, y, _]| [x, y, 6.]))
+        .map(|[x, y, z]| Point3 {
+            x: x as f32,
+            y: y as f32,
+            z: z as f32,
+            confidence: 1.,
+            r: 1,
+            g: 2,
+            b: 3,
+        })
+        .collect();
+    let triangles = [
+        MeshTriangle {
+            a: 0,
+            b: 1,
+            c: 2,
+            confidence: 1.,
+        },
+        MeshTriangle {
+            a: 3,
+            b: 4,
+            c: 5,
+            confidence: 1.,
+        },
+    ];
+    let cameras = (0..3)
+        .map(|i| {
+            let c = camera(i);
+            EvidenceCamera {
+                frame_index: i,
+                authority: EvidenceCameraAuthority::CalibratedSeed,
+                rotation: c.rotation.map(|x| x as f32),
+                translation: c.translation.map(|x| x as f32),
+                confidence: Some(1.),
+                median_reprojection_error_pixels: Some(0.),
+            }
+        })
+        .collect();
+    let evidence = ReconstructionEvidenceView::new(
+        ReconstructionProviderDescriptor::classic(),
+        EvidenceScale::ArbitraryMonocular,
+        cameras,
+        vec![SurfaceEvidenceRegion {
+            origin: EvidenceOrigin::GeometricMultiView,
+            reference_frame: Some(0),
+            source_frames: vec![1, 2],
+            points: EvidenceRange::new(0, 6),
+        }],
+        &points,
+        &triangles,
+    )
+    .unwrap();
+    let classify = |inventory: &SemanticInventoryArtifact| {
+        partition_object_surfaces(
+            &evidence,
+            inventory,
+            ContentHash::of_bytes(b"test"),
+            [W, H],
+            Some(FOCAL as f32),
+        )
+        .unwrap()
+        .groups
+    };
+    assert_eq!(classify(&case.inventory), [Some(0), None]);
+    for obs in &mut case.inventory.observations[1..] {
+        obs.mask_confidence = Some(0.15);
+    }
+    assert_eq!(classify(&case.inventory), [None, None]);
+}

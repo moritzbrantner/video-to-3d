@@ -1074,6 +1074,7 @@ fn staged_mesh_stage_records_the_dense_points_surface_fusion_moves() {
         .collect();
 
     let camera_artifact = CameraStageArtifact {
+        registration_provider: None,
         schema_version: CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
         request_hash: request_content_hash(&request),
         sparse: sparse.clone(),

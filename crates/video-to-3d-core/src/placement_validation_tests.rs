@@ -253,3 +253,27 @@ fn a_wrong_orientation_is_contradicted() {
         "{validation:#?}"
     );
 }
+
+#[test]
+fn loose_detector_box_does_not_contradict_a_precise_segmentation() {
+    let cameras = cameras();
+    let observations: Vec<_> = cameras
+        .iter()
+        .map(|camera| {
+            let mut obs = observation(camera);
+            obs.bbox = [0., 0., f64::from(WIDTH), f64::from(HEIGHT)];
+            obs
+        })
+        .collect();
+    let views: Vec<_> = observations.iter().zip(&cameras).collect();
+    let vertices = box_surface(0.05);
+    assert_eq!(
+        validate_placement(
+            &placed(&vertices, SCALE, CENTRE),
+            &views,
+            &true_surface(0.05)
+        )
+        .verdict,
+        PlacementVerdict::Accepted
+    );
+}

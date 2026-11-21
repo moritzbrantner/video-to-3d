@@ -45,13 +45,40 @@ pub const FRONT_DEPTH_BAND: f64 = 0.1;
 pub const STATIONARY_TOLERANCE: f64 = 0.08;
 
 /// A registered pinhole camera of one keyframe (world-to-camera, row-major).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FrameCamera {
     pub frame_index: usize,
     pub rotation: [f64; 9],
     pub translation: [f64; 3],
     pub focal_pixels: f64,
     pub principal_point: [f64; 2],
+}
+
+/// Browser handoff of registered cameras and observed points in the same
+/// reconstruction coordinate system. No provider-completed points belong here.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisteredObjectGeometry {
+    pub cameras: Vec<FrameCamera>,
+    pub points: Vec<[f64; 3]>,
+}
+
+impl RegisteredObjectGeometry {
+    pub fn from_json(document: &str) -> Result<Self, String> {
+        let geometry: Self = serde_json::from_str(document)
+            .map_err(|error| format!("registered object geometry: {error}"))?;
+        let mut indices = BTreeSet::new();
+        for camera in &geometry.cameras {
+            if !indices.insert(camera.frame_index) || camera.focal_pixels <= 0. {
+                return Err(
+                    "registered cameras require unique frame indices and positive focal lengths"
+                        .into(),
+                );
+            }
+        }
+        Ok(geometry)
+    }
 }
 
 impl FrameCamera {
@@ -351,12 +378,40 @@ fn spread(locations: &[&ObjectLocation]) -> Option<f64> {
     Some(largest / depth.max(1.0e-9))
 }
 
+/// Split off one isolated observation only when the rest of a long track
+/// already meets the unchanged stationary bound. Real motion across multiple
+/// views remains a moving or disputed identity.
+fn isolated_location(locations: &[ObjectLocation]) -> Option<&ObjectLocation> {
+    if locations.len() < 8 {
+        return None;
+    }
+    let nearest = |index: usize| {
+        locations
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .map(|(_, other)| distance(locations[index].position, other.position))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let index = (0..locations.len()).max_by(|a, b| nearest(*a).total_cmp(&nearest(*b)))?;
+    let retained: Vec<_> = locations
+        .iter()
+        .enumerate()
+        .filter_map(|(i, loc)| (i != index).then_some(loc))
+        .collect();
+    let depth = retained.iter().map(|loc| loc.depth).sum::<f64>() / retained.len() as f64;
+    (nearest(index) > 2. * STATIONARY_TOLERANCE * depth
+        && spread(&retained).is_some_and(|value| value <= STATIONARY_TOLERANCE))
+    .then_some(&locations[index])
+}
+
 struct Candidate {
     label: String,
     observations: Vec<String>,
     tracks: Vec<String>,
     frames: BTreeSet<usize>,
     locations: Vec<ObjectLocation>,
+    rejected_observations: Vec<String>,
 }
 
 fn stable_id(label: &str, observations: &[String]) -> String {
@@ -425,12 +480,29 @@ pub fn identify_objects(
             .collect();
         members.sort_by(|a, b| a.frame_index.cmp(&b.frame_index).then(a.id.cmp(&b.id)));
         tracked.extend(track.observations.iter().map(String::as_str));
+        let mut locations: Vec<_> = members.iter().filter_map(|o| location_of(&o.id)).collect();
+        let outlier = isolated_location(&locations).map(|loc| loc.observation.clone());
+        if let Some(id) = &outlier {
+            let frame = observations[id.as_str()].frame_index;
+            locations.retain(|loc| loc.observation != *id);
+            members.retain(|obs| obs.id != *id);
+            // Preserve the rejected observation for inspection as its own unknown identity.
+            candidates.push(Candidate {
+                label: track.label.clone(),
+                observations: vec![id.clone()],
+                tracks: Vec::new(),
+                frames: BTreeSet::from([frame]),
+                locations: Vec::new(),
+                rejected_observations: Vec::new(),
+            });
+        }
         candidates.push(Candidate {
             label: track.label.clone(),
             observations: members.iter().map(|o| o.id.clone()).collect(),
             tracks: vec![track.id.clone()],
             frames: members.iter().map(|o| o.frame_index).collect(),
-            locations: members.iter().filter_map(|o| location_of(&o.id)).collect(),
+            locations,
+            rejected_observations: outlier.into_iter().collect(),
         });
     }
     for observation in &inventory.observations {
@@ -443,6 +515,7 @@ pub fn identify_objects(
             tracks: Vec::new(),
             frames: BTreeSet::from([observation.frame_index]),
             locations: location_of(&observation.id).into_iter().collect(),
+            rejected_observations: Vec::new(),
         });
     }
 
@@ -487,6 +560,9 @@ pub fn identify_objects(
                 existing.tracks.extend(candidate.tracks);
                 existing.frames.extend(candidate.frames);
                 existing.locations.extend(candidate.locations);
+                existing
+                    .rejected_observations
+                    .extend(candidate.rejected_observations);
             }
             None => {
                 if !structure(&candidate.label) {
@@ -518,7 +594,16 @@ pub fn identify_objects(
         candidate.tracks.sort();
     }
     for candidate in &merged {
-        let id = stable_id(&candidate.label, &candidate.observations);
+        // A quarantined observation is still part of the source track identity.
+        // Keep the same key when sparse and dense views disagree on that observation.
+        let id = if candidate.rejected_observations.is_empty() {
+            stable_id(&candidate.label, &candidate.observations)
+        } else {
+            let mut source = candidate.observations.clone();
+            source.extend(candidate.rejected_observations.iter().cloned());
+            source.sort_by_key(|id| (observations[id.as_str()].frame_index, id.clone()));
+            stable_id(&candidate.label, &source)
+        };
         let category = if structure(&candidate.label) {
             ObjectCategory::Structure
         } else {
@@ -531,7 +616,7 @@ pub fn identify_objects(
             .iter()
             .map(|location| location.frame_index)
             .collect();
-        let (motion, reason) = match (category, spread_value) {
+        let (motion, mut reason) = match (category, spread_value) {
             (ObjectCategory::Structure, _) => (
                 MotionClass::StaticStructure,
                 format!("`{}` is architecture: fixed scene structure", candidate.label),
@@ -562,6 +647,12 @@ pub fn identify_objects(
                 ),
             ),
         };
+        if !candidate.rejected_observations.is_empty() {
+            reason.push_str(&format!(
+                " Separated {} isolated observation(s) from the source track.",
+                candidate.rejected_observations.len()
+            ));
+        }
         if candidate.tracks.len() == 1 && motion == MotionClass::Moving {
             ambiguities.push(IdentityAmbiguity {
                 kind: AmbiguityKind::Split,

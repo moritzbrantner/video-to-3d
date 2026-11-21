@@ -10,13 +10,17 @@ pub mod coarse_collision;
 pub mod colmap;
 pub mod evidence_interchange;
 pub mod feature_analysis;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod generated_scene;
 pub mod geometry_confidence;
 pub mod input_readiness;
+pub mod multi_view_objects;
 pub mod object_generation;
 pub mod object_identity;
 pub mod object_masks;
 pub mod object_placement;
 pub mod object_references;
+pub mod object_surface;
 pub mod placement_validation;
 pub mod scene_artifacts;
 #[cfg(not(target_arch = "wasm32"))]
@@ -62,10 +66,13 @@ pub(crate) use reconstruction::{reconstruct_once, reconstruct_sparse};
 pub use revisit::{RevisitCandidateStats, RevisitClosureStats, RevisitRecoveryStats, RevisitStats};
 
 mod browser_contract;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod colmap_surface;
 mod controlled_json;
 mod learned_depth;
 mod reconstruction_evidence;
 mod reconstruction_stages;
+pub mod registered_sparse;
 mod surface_fusion;
 mod surface_merge;
 pub use browser_contract::{

@@ -245,6 +245,11 @@ struct Output {
 fn cli(project: &Project, command: &str) -> Output {
     let output = Command::new(env!("CARGO_BIN_EXE_video-to-3d"))
         .arg(command)
+        // This suite compares the deterministic Rust fallback byte-for-byte with reconstruct().
+        .env(
+            "VIDEO_TO_3D_CAMERA_SIDECAR",
+            project.root.join("absent-camera-sidecar"),
+        )
         .arg(project.manifest())
         .current_dir(std::env::temp_dir())
         .output()
@@ -270,6 +275,15 @@ fn native_build_computes_real_stages_and_environment_with_verified_receipts() {
     let result = project.build();
     assert_eq!(result.code, 0, "{}", result.stderr);
     assert_eq!(result.json["complete"], true);
+    let registration = &result.json["operations"]["sparse"]["observations"];
+    assert_eq!(
+        registration["camera_provider"],
+        video_to_3d_core::ReconstructionProviderDescriptor::classic().id
+    );
+    assert!(registration["diagnostic"]
+        .as_str()
+        .unwrap()
+        .contains("could not be started"));
     assert_eq!(result.json["operations"]["ingest"]["state"], "reused");
     for id in ["sparse", "dense", "mesh", "assemble"] {
         assert_eq!(result.json["operations"][id]["state"], "succeeded", "{id}");

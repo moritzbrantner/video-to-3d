@@ -1,7 +1,11 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { observedPointCloudPly, observedPointCount } from "../apps/web/src/pointCloud";
 import init, {
   assess_input_readiness,
   bake_textured_surface,
   reconstruct_sequence,
+  reconstruct_sequence_with_registered_geometry,
 } from "../apps/web/public/wasm/video_to_3d_wasm.js";
 import {
   assertReconstructionContract,
@@ -50,6 +54,36 @@ const result = normalizeWasmReconstruction(
 );
 
 assertReconstructionContract(result, 2);
+
+// Three registered views share a sparse track set. The fourth image has no correspondences.
+const registrationFrames = Array.from({ length: 4 }, (_, index) => ({
+  width: 120, height: 90, rgba: new Uint8Array(120 * 90 * 4).fill(index),
+}));
+const cameras = [0, 1, 2].map(frame_index => ({
+  frame_index, rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1], translation: [-frame_index, 0, 0],
+}));
+const registration = {
+  schema_version: 1, provider: "colmap", version: "4.2.1", width: 120, height: 90, focal_pixels: 100,
+  frames: registrationFrames.map(({ rgba }, frame_index) => ({
+    frame_index, content_hash: "sha256:" + createHash("sha256").update(rgba).digest("hex"),
+  })),
+  cameras,
+  landmarks: Array.from({ length: 24 }, (_, i) => {
+    const xyz = [(i % 6) * .15, Math.floor(i / 6) * .12, 5 + .1 * (i % 3)];
+    const observations = cameras.map(({ frame_index }) => ({
+      frame_index, xy: [60 + 100 * (xyz[0] - frame_index) / xyz[2], 45 + 100 * xyz[1] / xyz[2]],
+    }));
+    return { xyz, rgb: [5, 10, 20], observations };
+  }),
+};
+const sparse = normalizeWasmReconstruction(
+  reconstruct_sequence_with_registered_geometry({ frames: registrationFrames, options: {} }, registration),
+);
+assertReconstructionContract(sparse, 4);
+assert.equal(sparse.accepted_camera_evidence.length, 3);
+assert.equal(sparse.multi_view.keyframe_selection.frames[3].decision, "unregistered");
+assert.deepEqual(buildSurfaceMaterialRequest(sparse, []).camera_provider, { id: "colmap", version: "4.2.1" });
+
 
 if (
   result.dense.working_set_estimate.total_bytes <= 0 ||
@@ -323,6 +357,31 @@ const materialSource: SurfaceMaterialSource = {
   calibrated_pair: null,
   dense: { reference_patches: [patch(0, 1, 0), patch(1, 0, 3)] },
 };
+// A preview can contain apparent points even when the seed solve failed.
+const cloudSource = {
+  ...materialSource,
+  points: [{ x: 7, y: -2, z: 3, r: 10, g: 20, b: 30, confidence: 0.75 }],
+  geometry_confidence: { regions: [
+    { origin: "revalidated_completion" as const, points: { start: 0, count: 3 } },
+    { origin: "geometric_multi_view" as const, points: { start: 3, count: 1 } },
+  ] },
+};
+assert.equal(observedPointCount(cloudSource), 0);
+assert.throws(() => observedPointCloudPly(cloudSource), /No calibrated/);
+const cloud = observedPointCloudPly({ ...cloudSource, calibrated_pair: contradictory.calibrated_pair });
+const cloudBytes = Buffer.from(await cloud.arrayBuffer());
+const bodyStart = cloudBytes.indexOf("end_header\n") + "end_header\n".length;
+assert.match(cloudBytes.subarray(0, bodyStart).toString(), /element vertex 2\n/);
+const body = cloudBytes.subarray(bodyStart);
+assert.equal(body.length, 40);
+assert.equal(body.readFloatLE(4), -2);
+assert.deepEqual([...body.subarray(12, 15)], [10, 20, 30]);
+assert.equal(body.readFloatLE(15), 0.75);
+assert.equal(body[19], 0);
+assert.equal(body.readFloatLE(20), 2);
+assert.deepEqual([...body.subarray(32, 35)], [140, 140, 140]);
+assert.equal(body[39], 1);
+
 const referenceImages = retainReferenceImages(materialSource, [
   { width, height, rgba },
   { width, height, rgba },
@@ -350,6 +409,11 @@ if (glb.getUint32(0, true) !== 0x46546c67 || glb.getUint32(8, true) !== baked.gl
 }
 const jsonLength = glb.getUint32(12, true);
 const gltf = JSON.parse(new TextDecoder().decode(baked.glb.subarray(20, 20 + jsonLength)));
+const exportCameras = gltf.asset.extras.video_to_3d.accepted_camera_evidence;
+assert.deepEqual(exportCameras.map((camera: { frame_index: number }) => camera.frame_index), [0, 1]);
+assert.deepEqual(exportCameras[1].rotation, identity);
+assert.equal(exportCameras[1].authority, "calibrated_seed");
+assert(Math.abs(exportCameras[1].translation[0] - 0.2) < 1e-6);
 const binOffset = 20 + jsonLength + 8;
 const pngView = gltf.bufferViews[gltf.images[0].bufferView];
 const pngSignature = baked.glb.subarray(binOffset + pngView.byteOffset, binOffset + pngView.byteOffset + 4);

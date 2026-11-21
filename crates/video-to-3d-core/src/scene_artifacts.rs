@@ -28,6 +28,7 @@ use crate::scene_model::{Material, ResourceKind, SceneProvenance, SceneResource}
 
 mod native;
 mod semantic;
+mod sidecar;
 use crate::scene_project::{
     ArtifactKind, ContentHash, OperationKind, ProjectPath, SceneProjectManifest,
 };
@@ -48,9 +49,9 @@ use crate::{
     RECONSTRUCTION_EVIDENCE_SCHEMA_VERSION,
 };
 pub use semantic::{
-    CLEAN_PLATE_ENVIRONMENT, CLEAN_PLATE_PROTOCOL, DEFAULT_CLEAN_PLATE_SIDECAR,
-    DEFAULT_GENERATION_SIDECAR, DEFAULT_SIDECAR, GENERATION_ENVIRONMENT, GENERATION_PROTOCOL,
-    SIDECAR_ENVIRONMENT, SIDECAR_PROTOCOL,
+    detect_keyframe_objects, generate_object_candidates, CLEAN_PLATE_ENVIRONMENT,
+    CLEAN_PLATE_PROTOCOL, DEFAULT_CLEAN_PLATE_SIDECAR, DEFAULT_GENERATION_SIDECAR, DEFAULT_SIDECAR,
+    GENERATION_ENVIRONMENT, GENERATION_PROTOCOL, SIDECAR_ENVIRONMENT, SIDECAR_PROTOCOL,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -144,7 +145,11 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Read a sidecar file and check it against its recorded hash.
-fn read_verified(root: &Path, path: &ProjectPath, hash: &ContentHash) -> Result<Vec<u8>, String> {
+pub(crate) fn read_verified(
+    root: &Path,
+    path: &ProjectPath,
+    hash: &ContentHash,
+) -> Result<Vec<u8>, String> {
     let bytes = fs::read(path.resolve(root))
         .map_err(|error| format!("cannot read `{}`: {error}", path.as_str()))?;
     if ContentHash::of_bytes(&bytes) != *hash {
@@ -186,7 +191,7 @@ fn read_with_cancel(
 
 /// [`read_verified`] streamed in bounded chunks with cooperative
 /// cancellation, rejecting a file of the wrong length before reading it.
-fn read_verified_with_cancel(
+pub(crate) fn read_verified_with_cancel(
     root: &Path,
     path: &ProjectPath,
     hash: &ContentHash,
@@ -1756,6 +1761,7 @@ pub fn texture_bake_output(operation_id: &str) -> Result<ProjectPath, String> {
 pub struct BuiltInExecutor {
     root: PathBuf,
     reservations: Reservations,
+    camera_sidecar: Option<PathBuf>,
     /// Semantic sidecar program overriding the environment and default.
     semantic_sidecar: Option<PathBuf>,
     /// Clean-plate sidecar program overriding the environment and default.
@@ -1847,6 +1853,7 @@ impl BuiltInExecutor {
             root,
             reservations,
             semantic_sidecar: None,
+            camera_sidecar: None,
             clean_plate_sidecar: None,
             generation_sidecar: None,
         }
@@ -1863,6 +1870,7 @@ impl BuiltInExecutor {
             root: project_root.into(),
             reservations: Reservations::ManifestFile(manifest_path.into()),
             semantic_sidecar: None,
+            camera_sidecar: None,
             clean_plate_sidecar: None,
             generation_sidecar: None,
         }
@@ -2028,6 +2036,7 @@ impl OperationExecutor for BuiltInExecutor {
         if kind == OperationKind::ObjectReferences && request.provider.is_none() {
             return self.object_references(request, cancel);
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if kind == OperationKind::ObjectPlacement && request.provider.is_none() {
             return self.object_placement(request, cancel);
         }

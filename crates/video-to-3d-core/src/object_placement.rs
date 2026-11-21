@@ -28,6 +28,8 @@
 //! Nothing here changes cameras, the reconstructed geometry or the candidate
 //! meshes: a placement is a transform plus its evidence.
 
+mod multi_view_fit;
+
 use crate::object_generation::ObjectGenerationArtifact;
 use crate::object_identity::{front_points, FrameCamera, ObjectCategory, ObjectIdentityArtifact};
 use crate::object_references::ObjectReferencesArtifact;
@@ -94,6 +96,10 @@ pub enum ContactState {
 pub enum ScaleSource {
     /// Width and height across the view from observed points.
     Observed,
+    /// A segmented reference silhouette back-projected at observed front depth.
+    MaskAtObservedDepth,
+    /// Metric-free scale from calibrated separation of corresponding object masks.
+    MultiViewSilhouettes,
     /// Too little observed extent to scale the object.
     Unknown,
 }
@@ -111,6 +117,16 @@ pub struct SupportPlane {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SilhouetteRegistration {
+    #[serde(default)]
+    pub matched_patch_depths: usize,
+    pub fitting_frames: Vec<usize>,
+    pub heldout_frame: usize,
+    pub heldout_mask_iou: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectPlacement {
     pub object: String,
     pub label: String,
@@ -121,6 +137,8 @@ pub struct ObjectPlacement {
     pub scale: f64,
     pub translation: [f64; 3],
     pub scale_source: ScaleSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silhouette_registration: Option<SilhouetteRegistration>,
     pub observed_points: usize,
     pub reference_frame: usize,
     pub contact: ContactState,
@@ -200,6 +218,24 @@ impl ObjectPlacementArtifact {
             return Err("object placement up direction is not a unit vector".into());
         }
         for placement in &self.placements {
+            if let Some(fit) = &placement.silhouette_registration {
+                if fit.fitting_frames.len() < 2
+                    || fit.fitting_frames.windows(2).any(|w| w[0] >= w[1])
+                    || fit.fitting_frames.contains(&fit.heldout_frame)
+                    || !(0.0..=1.0).contains(&fit.heldout_mask_iou)
+                    || placement.scale_source != ScaleSource::MultiViewSilhouettes
+                {
+                    return Err(format!(
+                        "object {} has invalid silhouette registration evidence",
+                        placement.object
+                    ));
+                }
+            } else if placement.scale_source == ScaleSource::MultiViewSilhouettes {
+                return Err(format!(
+                    "object {} is missing its silhouette registration evidence",
+                    placement.object
+                ));
+            }
             let finite = placement
                 .rotation
                 .iter()
@@ -248,7 +284,7 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 /// Least-squares plane through `points`: (unit normal, offset).
-fn fit_plane(points: &[[f64; 3]]) -> Option<([f64; 3], f64)> {
+pub(crate) fn fit_plane(points: &[[f64; 3]]) -> Option<([f64; 3], f64)> {
     if points.len() < 3 {
         return None;
     }
@@ -327,6 +363,33 @@ pub fn place_objects(
     mesh_vertices: &BTreeMap<String, Vec<[f64; 3]>>,
     cameras: &[FrameCamera],
     points: &[[f64; 3]],
+) -> ObjectPlacementArtifact {
+    place_objects_with_faces(
+        inventory,
+        identities,
+        references,
+        generation,
+        generation_hash,
+        mesh_vertices,
+        None,
+        cameras,
+        points,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn place_objects_with_faces(
+    inventory: &SemanticInventoryArtifact,
+    identities: &ObjectIdentityArtifact,
+    references: &ObjectReferencesArtifact,
+    generation: &ObjectGenerationArtifact,
+    generation_hash: ContentHash,
+    mesh_vertices: &BTreeMap<String, Vec<[f64; 3]>>,
+    mesh_faces: Option<&BTreeMap<String, Vec<[u32; 3]>>>,
+    cameras: &[FrameCamera],
+    points: &[[f64; 3]],
+    frames: &[crate::multi_view_objects::FramePixels],
 ) -> ObjectPlacementArtifact {
     let cameras_by_frame: BTreeMap<usize, &FrameCamera> = cameras
         .iter()
@@ -471,20 +534,6 @@ pub fn place_objects(
             ));
             continue;
         };
-        let mut placement = match place_one(
-            request,
-            &package.observed_points,
-            bounds,
-            camera,
-            up,
-            &artifact.supports,
-        ) {
-            Ok(placement) => placement,
-            Err(reason) => {
-                artifact.unplaced.push(unplaced(reason));
-                continue;
-            }
-        };
         let views: Vec<_> = identities
             .objects
             .iter()
@@ -501,17 +550,106 @@ pub fn place_objects(
                     .collect()
             })
             .unwrap_or_default();
-        placement.validation = validate_placement(
-            &PlacedMesh {
-                rotation: placement.rotation,
-                scale: placement.scale,
-                translation: placement.translation,
-                vertices: vertices.map(Vec::as_slice).unwrap_or_default(),
-                reference_frame: placement.reference_frame,
-            },
-            &views,
-            points,
+        let validate = |placement: &mut ObjectPlacement| {
+            placement.validation = validate_placement(
+                &PlacedMesh {
+                    rotation: placement.rotation,
+                    scale: placement.scale,
+                    translation: placement.translation,
+                    vertices: vertices.map(Vec::as_slice).unwrap_or_default(),
+                    reference_frame: placement.reference_frame,
+                },
+                &views,
+                points,
+            );
+        };
+        let mut proposal = place_one(
+            request,
+            &package.observed_points,
+            bounds,
+            camera,
+            up,
+            &artifact.supports,
         );
+        if let Ok(p) = &mut proposal {
+            validate(p);
+        }
+        // Sparse landmarks can cover only one chair leg. If that hypothesis
+        // misses the *source* silhouette, estimate extent from the measured
+        // mask at the depth of observed foreground landmarks instead.
+        let fits_source = |p: &ObjectPlacement| {
+            p.validation.views.iter().any(|v| {
+                v.frame_index == request.frame_index
+                    && v.verdict == crate::placement_validation::ViewVerdict::Consistent
+            })
+        };
+        if !proposal.as_ref().is_ok_and(fits_source) {
+            if let Some(obs) = observations.get(request.observation.as_str()) {
+                if let Some(mut fitted) =
+                    place_from_mask(request, obs, bounds, camera, up, &artifact.supports, points)
+                {
+                    validate(&mut fitted);
+                    if proposal.is_err() || fits_source(&fitted) {
+                        proposal = Ok(fitted);
+                    }
+                }
+            }
+        }
+        let eligible = identities.objects.iter().any(|o| {
+            o.id == request.object && o.motion != crate::object_identity::MotionClass::Moving
+        }) && !identities
+            .ambiguities
+            .iter()
+            .any(|a| a.objects.contains(&request.object));
+        if eligible {
+            if let (Some(vertices), Some(faces)) = (
+                vertices,
+                mesh_faces.and_then(|m| m.get(&request.request_id)),
+            ) {
+                if let Some((mut fitted, heldout, iou)) = multi_view_fit::fit(
+                    request,
+                    bounds,
+                    vertices,
+                    faces,
+                    &views,
+                    up,
+                    &artifact.supports,
+                    points,
+                    proposal.as_ref().ok(),
+                    frames,
+                ) {
+                    validate(&mut fitted);
+                    let check = fitted
+                        .validation
+                        .views
+                        .iter()
+                        .find(|v| v.frame_index == heldout);
+                    let agrees = check.is_some_and(|v| {
+                        v.verdict == crate::placement_validation::ViewVerdict::Consistent
+                    }) && iou >= 0.4;
+                    if !agrees {
+                        fitted.validation.verdict = PlacementVerdict::Contradicted;
+                        fitted.validation.needs_review = true;
+                    }
+                    let matched_depths = fitted
+                        .silhouette_registration
+                        .as_ref()
+                        .map_or(0, |r| r.matched_patch_depths);
+                    fitted.validation.reason = format!(
+                        "Held-out frame {heldout} silhouette IoU {iou:.2}. {matched_depths} image patch depths constrained fitting. {}",
+                        fitted.validation.reason
+                    );
+                    proposal = Ok(fitted);
+                }
+            }
+        }
+        let placement = match proposal {
+            Ok(p) => p,
+            Err(reason) => {
+                artifact.unplaced.push(unplaced(reason));
+                continue;
+            }
+        };
         let height = placement.scale * (bounds.max[2] - bounds.min[2]);
         if let Some(prior) = size_prior(&request.label) {
             if height > 0.0 {
@@ -529,6 +667,67 @@ pub fn place_objects(
         artifact.metric_hint_labels = labels;
     }
     artifact
+}
+
+// Only the primary frame participates in this fit. Other registered views
+// continue to test placement, including possible occlusion/depth conflicts.
+fn place_from_mask(
+    request: &crate::object_generation::GenerationRequest,
+    obs: &crate::semantic_inventory::SemanticObservation,
+    bounds: MeshBounds,
+    camera: &FrameCamera,
+    up: [f64; 3],
+    supports: &[SupportPlane],
+    scene_points: &[[f64; 3]],
+) -> Option<ObjectPlacement> {
+    let mask = obs.mask.as_ref()?;
+    let width = u64::from(mask.width);
+    let (mut x0, mut y0, mut x1, mut y1) = (width, u64::from(mask.height), 0, 0);
+    let mut start = 0;
+    for (index, count) in mask.counts.iter().enumerate() {
+        let end = start + count;
+        if index % 2 == 1 && end > start {
+            let first_row = start / width;
+            let last_row = (end - 1) / width;
+            if first_row != last_row {
+                x0 = 0;
+                x1 = width;
+            } else {
+                x0 = x0.min(start % width);
+                x1 = x1.max((end - 1) % width + 1);
+            }
+            y0 = y0.min(first_row);
+            y1 = y1.max(last_row + 1);
+        }
+        start = end;
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let mut front = front_points(obs, camera, scene_points);
+    if front.is_empty() {
+        return None;
+    }
+    front.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let z = front[front.len() / 2].0;
+    let (eye, right, down, forward) = camera_axes(camera);
+    let footprint = [[x0, y0], [x0, y1], [x1, y0], [x1, y1]].map(|[x, y]| {
+        let u = (x as f64 - camera.principal_point[0]) / camera.focal_pixels;
+        let v = (y as f64 - camera.principal_point[1]) / camera.focal_pixels;
+        add(
+            eye,
+            scaled(add(forward, add(scaled(right, u), scaled(down, v))), z),
+        )
+    });
+    let mut placed = place_one(request, &footprint, bounds, camera, up, supports).ok()?;
+    placed.observed_points = front.len();
+    placed.scale_source = ScaleSource::MaskAtObservedDepth;
+    placed.reason = format!(
+        "Reference mask extent at depth {z:.3} supported by {} foreground landmarks; {:?}",
+        front.len(),
+        placed.contact
+    );
+    Some(placed)
 }
 
 /// Place one candidate mesh from its object's observed points and reference
@@ -603,7 +802,40 @@ pub(crate) fn place_one(
             scale,
         ),
     );
-    let height = scale * mesh_size[2];
+    Ok(placed_transform(
+        request,
+        rotation,
+        scale,
+        translation,
+        centre_scene,
+        object_up,
+        mesh_size[2],
+        supports,
+        ScaleSource::Observed,
+        observed.len(),
+        format!(
+            "Scale {scale:.4} from {} observed width/height samples in frame {}",
+            observed.len(),
+            request.frame_index
+        ),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn placed_transform(
+    request: &crate::object_generation::GenerationRequest,
+    rotation: nalgebra::Matrix3<f64>,
+    scale: f64,
+    translation: [f64; 3],
+    centre_scene: [f64; 3],
+    object_up: [f64; 3],
+    model_height: f64,
+    supports: &[SupportPlane],
+    scale_source: ScaleSource,
+    observed_points: usize,
+    reason: String,
+) -> ObjectPlacement {
+    let height = scale * model_height;
     let bottom = sub(centre_scene, scaled(object_up, height / 2.0));
     // Nearest support below the object whose points lie under it.
     let mut support = None;
@@ -658,42 +890,38 @@ pub(crate) fn place_one(
             "no horizontal floor or furniture support was observed below it".into(),
         ),
     };
-    Ok(ObjectPlacement {
-            object: request.object.clone(),
-            label: request.label.clone(),
-            generation_request: request.request_id.clone(),
-            rotation: [
-                rotation[(0, 0)],
-                rotation[(0, 1)],
-                rotation[(0, 2)],
-                rotation[(1, 0)],
-                rotation[(1, 1)],
-                rotation[(1, 2)],
-                rotation[(2, 0)],
-                rotation[(2, 1)],
-                rotation[(2, 2)],
-            ],
-            scale,
-            translation,
-            scale_source: ScaleSource::Observed,
-            observed_points: observed.len(),
-            reference_frame: request.frame_index,
-            contact,
-            support: support_object,
-            contact_gap,
-            reason: format!(
-                "scale {:.4} from the observed width/height across reference frame {} ({} points); {contact_reason}",
-                scale,
-                request.frame_index,
-                observed.len()
-            ),
-            validation: PlacementValidation {
-                verdict: PlacementVerdict::Approximate,
-                needs_review: true,
-                views: Vec::new(),
-                reason: "not validated against other views".into(),
-            },
-        })
+    ObjectPlacement {
+        object: request.object.clone(),
+        label: request.label.clone(),
+        generation_request: request.request_id.clone(),
+        rotation: [
+            rotation[(0, 0)],
+            rotation[(0, 1)],
+            rotation[(0, 2)],
+            rotation[(1, 0)],
+            rotation[(1, 1)],
+            rotation[(1, 2)],
+            rotation[(2, 0)],
+            rotation[(2, 1)],
+            rotation[(2, 2)],
+        ],
+        scale,
+        translation,
+        scale_source,
+        silhouette_registration: None,
+        observed_points,
+        reference_frame: request.frame_index,
+        contact,
+        support: support_object,
+        contact_gap,
+        reason: format!("{reason}; {contact_reason}"),
+        validation: PlacementValidation {
+            verdict: PlacementVerdict::Approximate,
+            needs_review: true,
+            views: Vec::new(),
+            reason: "not validated against other views".into(),
+        },
+    }
 }
 
 #[cfg(test)]

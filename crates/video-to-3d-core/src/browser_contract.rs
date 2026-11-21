@@ -84,9 +84,15 @@ pub fn reconstruct_browser(
     request: &ReconstructionRequest,
 ) -> Result<BrowserReconstructionResult, String> {
     let reconstruction = crate::reconstruct(request)?;
-    let camera_state =
-        CameraPipelineState::from_reconstruction(&reconstruction, request.frames.len());
-    validate_browser_contract(&reconstruction, &camera_state, request.frames.len())?;
+    from_reconstruction(reconstruction, request.frames.len())
+}
+
+pub(crate) fn from_reconstruction(
+    reconstruction: ReconstructionResult,
+    frame_count: usize,
+) -> Result<BrowserReconstructionResult, String> {
+    let camera_state = CameraPipelineState::from_reconstruction(&reconstruction, frame_count);
+    validate_browser_contract(&reconstruction, &camera_state, frame_count)?;
     let evidence = ReconstructionEvidenceView::from_classic(&reconstruction)?;
     let geometry_confidence = GeometryConfidenceField::from_evidence(&evidence);
     let geometry_confidence_summary = geometry_confidence.summary(evidence.triangles);

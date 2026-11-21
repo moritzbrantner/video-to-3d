@@ -205,3 +205,58 @@ fn too_little_observed_extent_is_not_placed_and_priors_never_scale() {
     assert_eq!(size_prior("Office chair"), Some(0.9));
     assert_eq!(size_prior("spaceship"), None);
 }
+
+#[test]
+fn partial_landmarks_fix_depth_while_the_source_mask_fixes_object_extent() {
+    let (w, h) = (320, 240);
+    let mut counts = vec![0];
+    let mut current = false;
+    for y in 0..h {
+        for x in 0..w {
+            let foreground = (140..180).contains(&x) && (105..135).contains(&y);
+            if foreground != current {
+                counts.push(0);
+                current = foreground;
+            }
+            *counts.last_mut().unwrap() += 1;
+        }
+    }
+    let observation = crate::semantic_inventory::SemanticObservation {
+        id: "o".into(),
+        label: "chair".into(),
+        frame_index: 0,
+        bbox: [139., 104., 181., 136.],
+        detection_confidence: 1.,
+        mask_confidence: Some(1.),
+        mask: Some(SemanticMask {
+            encoding: MaskEncoding::RleRowMajor,
+            width: w,
+            height: h,
+            counts,
+        }),
+    };
+    let small_patch = [[0., 0., 3.], [0.01, 0., 3.], [0., 0.01, 3.]];
+    let placement = place_from_mask(
+        &request(),
+        &observation,
+        bounds(),
+        &camera(),
+        [0., -1., 0.],
+        &[],
+        &small_patch,
+    )
+    .unwrap();
+    assert_eq!(placement.scale_source, ScaleSource::MaskAtObservedDepth);
+    assert_eq!(placement.observed_points, 3);
+    assert!((placement.scale - 0.4).abs() < 1e-9);
+    assert!(place_from_mask(
+        &request(),
+        &observation,
+        bounds(),
+        &camera(),
+        [0., -1., 0.],
+        &[],
+        &[]
+    )
+    .is_none());
+}

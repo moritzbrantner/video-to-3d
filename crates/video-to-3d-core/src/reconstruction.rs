@@ -25,6 +25,6 @@ pub(crate) use recovery::reconstruct_sparse;
 pub(crate) use recovery::reconstruct_sparse_with_control;
 #[cfg(test)]
 pub(crate) use solve::reconstruct_once;
-pub(crate) use solve::{MIN_TRACK_MATCHES, MIN_TRACK_OVERLAP};
+pub(crate) use solve::{validate_request, MIN_TRACK_MATCHES, MIN_TRACK_OVERLAP};
 pub use types::*;
 pub(crate) use warnings::{dense_warning, mesh_warning};

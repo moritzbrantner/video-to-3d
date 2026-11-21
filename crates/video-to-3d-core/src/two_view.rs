@@ -7,7 +7,11 @@ const RANSAC_TARGET_CONFIDENCE: f64 = 0.99;
 const SAMPSON_THRESHOLD_PIXELS: f64 = 1.75;
 const MIN_INLIER_RATIO: f64 = 0.5;
 const MAX_ROTATION_ONLY_RESIDUAL_PIXELS: f64 = 1.25;
-const MIN_TRIANGULATION_ANGLE_DEGREES: f64 = 0.5;
+// The initial camera pair sets the coordinate system for every later solve. Near-
+// parallel rays can reproject accurately while barely constraining depth. Reject
+// such seeds so the segment can try a wider tracked baseline.
+const MIN_TRIANGULATION_ANGLE_DEGREES: f64 = 1.5;
+pub(super) const MIN_CORROBORATED_ANGLE_DEGREES: f64 = 0.5;
 const MAX_REPROJECTION_ERROR_PIXELS: f64 = 4.0;
 /// Bound on the deterministic RANSAC of [`essential_inlier_mask`].
 const MAX_MASK_ITERATIONS: usize = 2000;
@@ -87,10 +91,24 @@ pub(super) struct PoseEvidence {
     pub median_triangulation_angle_degrees: Option<f64>,
 }
 
+impl PoseEvidence {
+    fn has_provisional_support(&self) -> bool {
+        self.accepted_points >= self.required_points
+            && self
+                .median_triangulation_angle_degrees
+                .is_some_and(|angle| {
+                    (MIN_CORROBORATED_ANGLE_DEGREES..MIN_TRIANGULATION_ANGLE_DEGREES)
+                        .contains(&angle)
+                })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct TwoViewOutcome {
     pub evidence: TwoViewEvidence,
     pub result: Result<TwoViewEstimate, TwoViewRejection>,
+    /// An angle-limited hypothesis that needs independent registration before use.
+    pub provisional: Option<TwoViewEstimate>,
 }
 
 pub(super) const MIN_SEED_INLIERS: usize = RANSAC_SAMPLE_SIZE;
@@ -379,6 +397,7 @@ pub(super) fn evaluate_two_view_points_with_control(
     let reject = |evidence: TwoViewEvidence, gate| TwoViewOutcome {
         evidence,
         result: Err(gate),
+        provisional: None,
     };
     if points.len() < RANSAC_SAMPLE_SIZE || focal_pixels <= 0.0 {
         return reject(evidence, TwoViewRejection::Matches);
@@ -473,32 +492,51 @@ pub(super) fn evaluate_two_view_points_with_control(
     // The strongest pose hypothesis of either model, kept as evidence when both fail.
     // Only its ranking and scalar evidence are kept, never its triangulated points.
     let mut strongest: Option<PoseSummary> = None;
-    let mut gated = |candidate: Option<PoseCandidate>| {
+    let mut provisional: Option<(Matrix3<f64>, PoseCandidate)> = None;
+    let mut gated = |essential: Matrix3<f64>, candidate: Option<PoseCandidate>| {
         let candidate = candidate?;
         let summary = candidate.summary(required_points);
-        let rejected = summary.rejection.is_some();
+        let rejection = summary.rejection;
+        let provisional_support = summary.evidence.has_provisional_support();
         if strongest
             .as_ref()
             .is_none_or(|current| summary.outranks(current))
         {
             strongest = Some(summary);
         }
-        (!rejected).then_some(candidate)
+        if rejection.is_none() {
+            return Some(candidate);
+        }
+        if rejection == Some(TwoViewRejection::TriangulationAngle)
+            && provisional_support
+            && provisional
+                .as_ref()
+                .is_none_or(|(_, current)| candidate.outranks(current))
+        {
+            provisional = Some((essential, candidate));
+        }
+        None
     };
-    let ransac_pose = gated(best_pose(
-        &ransac_essential,
-        &correspondences,
-        &best_inliers,
-        focal_pixels,
-    ));
+    let ransac_pose = gated(
+        ransac_essential,
+        best_pose(
+            &ransac_essential,
+            &correspondences,
+            &best_inliers,
+            focal_pixels,
+        ),
+    );
     let refined_model =
         estimate_essential(&correspondences, &best_inliers).and_then(|refined_essential| {
-            gated(best_pose(
-                &refined_essential,
-                &correspondences,
-                &best_inliers,
-                focal_pixels,
-            ))
+            gated(
+                refined_essential,
+                best_pose(
+                    &refined_essential,
+                    &correspondences,
+                    &best_inliers,
+                    focal_pixels,
+                ),
+            )
             .map(|pose| (refined_essential, pose))
         });
     evidence.pose = strongest.as_ref().map(|summary| summary.evidence);
@@ -518,11 +556,14 @@ pub(super) fn evaluate_two_view_points_with_control(
         (Some(refined_model), None) => refined_model,
         (None, Some(ransac_pose)) => (ransac_essential, ransac_pose),
         (None, None) => {
-            let gate = strongest
-                .as_ref()
-                .and_then(|summary| summary.rejection)
-                .unwrap_or(TwoViewRejection::Cheirality);
-            return reject(evidence, gate);
+            let Some(provisional_model) = provisional else {
+                let gate = strongest
+                    .as_ref()
+                    .and_then(|summary| summary.rejection)
+                    .unwrap_or(TwoViewRejection::Cheirality);
+                return reject(evidence, gate);
+            };
+            provisional_model
         }
     };
     evidence.pose = Some(pose.evidence(required_points));
@@ -545,9 +586,18 @@ pub(super) fn evaluate_two_view_points_with_control(
         median_triangulation_angle_degrees: pose.median_triangulation_angle_degrees,
         points: pose.points,
     };
-    TwoViewOutcome {
-        evidence,
-        result: Ok(estimate),
+    if estimate.median_triangulation_angle_degrees < MIN_TRIANGULATION_ANGLE_DEGREES {
+        TwoViewOutcome {
+            evidence,
+            result: Err(TwoViewRejection::TriangulationAngle),
+            provisional: Some(estimate),
+        }
+    } else {
+        TwoViewOutcome {
+            evidence,
+            result: Ok(estimate),
+            provisional: None,
+        }
     }
 }
 
@@ -1034,6 +1084,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_triangulations_cannot_bypass_the_minimum_landmark_count_on_a_provisional_seed() {
+        let evidence = PoseEvidence {
+            required_points: 12,
+            accepted_points: 6,
+            failed_triangulation: 14,
+            median_triangulation_angle_degrees: Some(0.8),
+            ..Default::default()
+        };
+        assert_eq!(
+            pose_rejection_from_counts(6, 0, 14, 0, 0.8, 12),
+            Some(TwoViewRejection::TriangulationAngle)
+        );
+        assert!(!evidence.has_provisional_support());
+        assert!(PoseEvidence {
+            accepted_points: 12,
+            ..evidence
+        }
+        .has_provisional_support());
+    }
+
+    #[test]
     fn too_few_pose_points_blame_the_larger_loss() {
         let angle = MIN_TRIANGULATION_ANGLE_DEGREES * 4.0;
         // 20 inliers need 12; 6 survive. More points behind a camera: cheirality.
@@ -1403,40 +1474,47 @@ mod tests {
     }
 
     #[test]
-    fn short_baseline_to_deep_points_is_rejected_at_the_angle_gate() {
-        // Depths from 1 to 13 units with a 0.03-unit baseline: the depth spread leaves
-        // parallax no rotation explains, but the median ray angle stays below the gate.
-        let (width, height, focal) = (640, 480, 500.0);
-        let translation = Vector3::new(-0.03, 0.0, 0.0);
-        let mut source = Vec::new();
-        let mut target = Vec::new();
-        let mut matches = Vec::new();
-        for index in 0..40 {
-            let depth = 1.0 + (index % 8) as f64 * 1.7;
-            let point = Vector3::new(
-                ((index % 5) as f64 * 0.3 - 0.6) * depth,
-                ((index / 5) as f64 * 0.1 - 0.35) * depth,
-                depth,
+    fn short_baselines_to_deep_points_are_rejected_at_the_angle_gate() {
+        for baseline in [0.03, 0.10] {
+            // Depths from 1 to 13 units across two short baselines: the depth spread leaves
+            // parallax no rotation explains, but the median ray angle stays below the gate.
+            let (width, height, focal) = (640, 480, 500.0);
+            let translation = Vector3::new(-baseline, 0.0, 0.0);
+            let mut source = Vec::new();
+            let mut target = Vec::new();
+            let mut matches = Vec::new();
+            for index in 0..40 {
+                let depth = 1.0 + (index % 8) as f64 * 1.7;
+                let point = Vector3::new(
+                    ((index % 5) as f64 * 0.3 - 0.6) * depth,
+                    ((index / 5) as f64 * 0.1 - 0.35) * depth,
+                    depth,
+                );
+                let x1 = project(point, Matrix3::identity(), Vector3::zeros());
+                let x2 = project(point, Matrix3::identity(), translation);
+                source.push(feature_from_bearing(x1, width, height, focal, index as i16));
+                target.push(feature_from_bearing(x2, width, height, focal, index as i16));
+                matches.push(FeatureMatch {
+                    a: index,
+                    b: index,
+                    distance: 0.2,
+                });
+            }
+            let outcome = evaluate_two_view(&source, &target, &matches, width, height, focal);
+            assert_eq!(
+                outcome.result.as_ref().err(),
+                Some(&TwoViewRejection::TriangulationAngle),
+                "evidence: {:?}",
+                outcome.evidence
             );
-            let x1 = project(point, Matrix3::identity(), Vector3::zeros());
-            let x2 = project(point, Matrix3::identity(), translation);
-            source.push(feature_from_bearing(x1, width, height, focal, index as i16));
-            target.push(feature_from_bearing(x2, width, height, focal, index as i16));
-            matches.push(FeatureMatch {
-                a: index,
-                b: index,
-                distance: 0.2,
-            });
+            // Only the 0.10 baseline clears the provisional floor. It still must be
+            // corroborated by additional registered views in the sequence solver.
+            assert_eq!(outcome.provisional.is_some(), baseline == 0.10);
+            let pose = outcome.evidence.pose.expect("pose evidence");
+            assert!(pose.accepted_points >= pose.required_points);
+            assert!(
+                pose.median_triangulation_angle_degrees.unwrap() < MIN_TRIANGULATION_ANGLE_DEGREES
+            );
         }
-        let outcome = evaluate_two_view(&source, &target, &matches, width, height, focal);
-        assert_eq!(
-            outcome.result.as_ref().err(),
-            Some(&TwoViewRejection::TriangulationAngle),
-            "evidence: {:?}",
-            outcome.evidence
-        );
-        let pose = outcome.evidence.pose.expect("pose evidence");
-        assert!(pose.accepted_points >= pose.required_points);
-        assert!(pose.median_triangulation_angle_degrees.unwrap() < MIN_TRIANGULATION_ANGLE_DEGREES);
     }
 }

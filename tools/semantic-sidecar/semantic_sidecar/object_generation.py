@@ -26,6 +26,7 @@ PROTOCOL = "video-to-3d-object-generation-sidecar/1"
 TRIPOSR_COMMIT = "107cefdc244c39106fa830359024f6a2f1c78871"
 TRIPOSR_SOURCE = f"https://github.com/VAST-AI-Research/TripoSR/archive/{TRIPOSR_COMMIT}.tar.gz"
 MODEL_ID = "stabilityai/TripoSR"
+MODEL_REVISION = "5b521936b01fbe1890f6f9baed0254ab6351c04a"
 RESOLUTION = 256
 FOREGROUND_RATIO = 0.85
 
@@ -102,6 +103,16 @@ def object_image(entry):
     return Image.fromarray((image * 255.0).astype(np.uint8)).resize((512, 512))
 
 
+def remove_collapsed_faces(mesh):
+    """Marching cubes followed by vertex welding can collapse a face onto an edge."""
+    valid = mesh.nondegenerate_faces()
+    if not valid.all():
+        mesh.update_faces(valid)
+        mesh.remove_unreferenced_vertices()
+    if not len(mesh.faces):
+        raise ValueError("object extraction produced no nondegenerate triangle")
+
+
 def main(request_path: str, response_path: str) -> None:
     request = json.loads(Path(request_path).read_text())
     if request.get("protocol") != PROTOCOL:
@@ -119,10 +130,12 @@ def main(request_path: str, response_path: str) -> None:
     sys.path.insert(0, str(triposr_source()))
     from tsr.system import TSR
 
-    model = TSR.from_pretrained(MODEL_ID, config_name="config.yaml", weight_name="model.ckpt")
+    from huggingface_hub import snapshot_download
+
+    weights = snapshot_download(MODEL_ID, revision=MODEL_REVISION, allow_patterns=["config.yaml", "model.ckpt"])
+    model = TSR.from_pretrained(weights, config_name="config.yaml", weight_name="model.ckpt")
     model.renderer.set_chunk_size(8192)
     model.to(device)
-    version = getattr(getattr(model, "cfg", None), "_commit_hash", None) or "model.ckpt"
     results = []
     for entry in request["requests"]:
         try:
@@ -130,7 +143,21 @@ def main(request_path: str, response_path: str) -> None:
             with torch.no_grad():
                 scene_codes = model([image], device=device)
                 mesh = model.extract_mesh(scene_codes, True, resolution=RESOLUTION)[0]
-            mesh.export(entry["output_path"], file_type="glb")
+            remove_collapsed_faces(mesh)
+
+            def label_candidate(document):
+                document["asset"].setdefault("extras", {})["video_to_3d"] = {
+                    "role": "generated_object_candidate", "geometry_origin": "generative_completion",
+                    "placement": "unvalidated", "provider": MODEL_ID, "revision": MODEL_REVISION,
+                    "request_id": entry["request_id"], "object": entry.get("object"),
+                    "label": entry["label"], "frame_index": entry.get("frame_index"),
+                    "observation": entry.get("observation"), "source_frame_hash": entry.get("source_frame_hash"),
+                }
+                for node in document["nodes"]:
+                    if "mesh" in node:
+                        node["name"] = f"{entry['label']} {entry['request_id']}"
+
+            mesh.export(entry["output_path"], file_type="glb", tree_postprocessor=label_candidate)
             results.append({
                 "request_id": entry["request_id"], "status": "ok",
                 "vertices": int(len(mesh.vertices)), "triangles": int(len(mesh.faces)),
@@ -141,7 +168,7 @@ def main(request_path: str, response_path: str) -> None:
     Path(response_path).write_text(json.dumps({
         "protocol": PROTOCOL,
         "status": "available",
-        "models": [{"role": "generator", "id": MODEL_ID, "version": str(version),
+        "models": [{"role": "generator", "id": MODEL_ID, "version": MODEL_REVISION,
                     "url": f"https://huggingface.co/{MODEL_ID}"},
                    {"role": "generator", "id": "VAST-AI-Research/TripoSR (code)", "version": TRIPOSR_COMMIT,
                     "url": TRIPOSR_SOURCE}],

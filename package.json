@@ -11,14 +11,20 @@
     "check": "bun run typecheck && bun test scripts/build-wasm.acceptance.test.ts && bun run test:learned-provider-contract && bun run test:texture-projection && cargo fmt --check && cargo fmt --manifest-path crates/video-to-3d-feature-wasm/Cargo.toml --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo test -p video-to-3d-core --example golden_fixture && cargo test -p video-to-3d-core --example reference_fixture && cargo test -p video-to-3d-core --example synthetic_room_fixture && bun run build && bun run test:browser-contract && bun run test:video-sampling-contract && python3 -m unittest discover -s tools/tests -p 'test_*.py' && python3 -m py_compile tools/fetch_tanks_and_temples.py tools/score_tanks_and_temples.py",
     "dev": "bun run wasm:build && bun --cwd apps/web dev",
     "tauri:build": "bun run wasm:build && bun --cwd apps/desktop tauri build --no-bundle",
-    "tauri:dev": "bun run wasm:build && bun --cwd apps/desktop tauri dev",
+    "tauri:dev": "bun run build && bun scripts/desktop-dev.ts",
     "test": "cargo test --workspace",
+    "studio": "bun scripts/local-studio.ts",
+    "reconstruct": "bun scripts/video-to-scene.ts",
     "test:browser-contract": "bun scripts/test-browser-contract.ts",
     "test:learned-provider-contract": "bun scripts/test-learned-provider-contract.ts",
     "test:texture-projection": "bun scripts/test-texture-projection.ts",
+    "test:video-to-scene": "bun test scripts/video-to-scene.test.ts",
     "test:video-sampling-contract": "bun scripts/test-video-sampling-contract.ts",
     "typecheck": "bun --cwd apps/web typecheck",
     "wasm:build": "bash scripts/build-wasm.sh",
     "wasm:check": "cargo check --target wasm32-unknown-unknown -p video-to-3d-wasm"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.0"
   }
 }

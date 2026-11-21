@@ -141,6 +141,7 @@ pub(super) fn estimate_depth_points(
         cameras,
         sparse_points,
         focal,
+        false,
         &mut crate::ReconstructionControl::new(&mut || false),
     )
 }
@@ -150,6 +151,7 @@ pub(super) fn estimate_depth_points_with_control(
     cameras: &[RegisteredCamera],
     sparse_points: &[Vector3<f64>],
     focal: f64,
+    fine_grid: bool,
     control: &mut crate::ReconstructionControl<'_>,
 ) -> DenseAnalysis {
     if frames.is_empty() {
@@ -251,7 +253,7 @@ pub(super) fn estimate_depth_points_with_control(
         .map(|source| source.camera.frame_index)
         .collect();
 
-    let stride = (width.min(height) / 48).clamp(4, 12) as usize;
+    let stride = super::grid_stride(width, height, fine_grid);
     let border = (PATCH_RADIUS + 2) as u32;
     let mut points = Vec::new();
     let mut grid_sites = Vec::new();
@@ -1008,7 +1010,7 @@ fn unproject(
     camera.rotation.transpose() * (camera_point - camera.translation)
 }
 
-fn project(
+pub(super) fn project(
     camera: &RegisteredCamera,
     point: Vector3<f64>,
     width: u32,

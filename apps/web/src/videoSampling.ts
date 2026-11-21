@@ -1,6 +1,7 @@
 export type VideoSamplingOptions = {
   framesPerSecond?: number;
   maxFrames?: number;
+  profile?: "browser" | "local-reconstruction";
 };
 
 export type VideoSamplingMetadata = {
@@ -49,9 +50,10 @@ export function buildVideoSamplingPlan(
   }
 
   const framesPerSecond = Math.min(8, positiveFinite(options.framesPerSecond, 1.25));
+  const local = options.profile === "local-reconstruction";
   const automaticCap = Math.max(
     DEFAULT_MAX_FRAMES,
-    Math.ceil(metadata.duration / MAX_AUTO_SAMPLE_SPACING_SECONDS),
+    Math.ceil(local ? metadata.duration * framesPerSecond : metadata.duration / MAX_AUTO_SAMPLE_SPACING_SECONDS),
   );
   const maxFrames = Math.min(
     MAX_SAMPLED_FRAMES,
@@ -59,10 +61,17 @@ export function buildVideoSamplingPlan(
   );
   const targetCount = Math.max(4, Math.ceil(metadata.duration * framesPerSecond));
   const sampleCount = Math.min(maxFrames, targetCount);
-  const analysisWidth = Math.min(360, Math.floor(metadata.videoWidth));
+  // Bound the local RGBA transfer for landscape, portrait and square videos.
+  const scale = local ? Math.min(
+    1, 640 / Math.max(metadata.videoWidth, metadata.videoHeight),
+    Math.sqrt((640 * 480) / (metadata.videoWidth * metadata.videoHeight)),
+  ) : 1;
+  const analysisWidth = local ? Math.max(1, Math.floor(scale * metadata.videoWidth))
+    : Math.min(360, Math.floor(metadata.videoWidth));
   const analysisHeight = Math.max(
     1,
-    Math.round((analysisWidth / metadata.videoWidth) * metadata.videoHeight),
+    local ? Math.floor(scale * metadata.videoHeight) :
+      Math.round((analysisWidth / metadata.videoWidth) * metadata.videoHeight),
   );
   const times = Array.from({ length: sampleCount }, (_, index) => {
     const fraction = sampleCount === 1 ? 0.5 : 0.05 + (0.9 * index) / (sampleCount - 1);

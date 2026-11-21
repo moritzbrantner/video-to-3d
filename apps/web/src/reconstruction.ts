@@ -131,7 +131,7 @@ export type BundleAdjustmentStats = {
   final_rmse_reprojection_error_pixels: number | null;
 };
 
-export type FrameDecision = "keyframe" | "redundant" | "blurred" | "poor_exposure";
+export type FrameDecision = "keyframe" | "redundant" | "blurred" | "poor_exposure" | "unregistered";
 
 export type SegmentBreak = "hard_cut" | "lost_overlap" | "motion_jump";
 
@@ -156,6 +156,7 @@ export type KeyframeSelectionStats = {
 };
 
 const FRAME_DECISION_LABELS: Record<FrameDecision, string> = {
+  unregistered: "COLMAP could not register this frame",
   keyframe: "keyframe",
   redundant: "not a keyframe: too little parallax since the last keyframe",
   blurred: "rejected: motion blur",
@@ -644,6 +645,7 @@ export type CoarseCollider = {
 };
 
 export type ReconstructionResult = {
+  sparse_camera_provider?: { id: string; version: string } | null;
   cameras: CameraPose[];
   points: Point3[];
   dense_points: DensePointBuffer;
@@ -670,6 +672,8 @@ export type ReconstructionResult = {
 type WasmModule = {
   default: () => Promise<unknown>;
   reconstruct_sequence: (request: unknown) => unknown;
+  reconstruct_sequence_with_registered_geometry: (request: unknown, geometry: unknown) => unknown;
+  validate_semantic_inventory: (inventory: unknown) => void;
   bake_textured_surface: (request: unknown) => unknown;
 };
 
@@ -918,20 +922,24 @@ function assertBootstrapContract(result: ReconstructionResult, expectedFrameCoun
   const candidates = result.seed_candidates;
   const bootstrap = result.bootstrap;
   const adjacentPairs = Math.max(0, expectedFrameCount - 1);
-  // Every adjacent pair in order, then any wider pairs of a segment none of whose
-  // adjacent pairs seeded (#127).
-  if (
-    !Array.isArray(candidates) ||
-    candidates.length < adjacentPairs ||
-    !candidates.every((candidate, index) =>
+  if (!Array.isArray(candidates) || !bootstrap || typeof bootstrap.summary !== "string") {
+    throw new Error("bootstrap contract mismatch: seed candidates or diagnostics are missing");
+  }
+  if (result.sparse_camera_provider != null) {
+    const { id, version } = result.sparse_camera_provider;
+    if (id !== "colmap" || typeof version !== "string" || !version || !result.calibrated_pair) {
+      throw new Error("bootstrap contract mismatch: external camera registration has incomplete provenance");
+    }
+  } else {
+    // The built-in solver scans every adjacent pair, then any wider pairs in unresolved segments.
+    const scanned = candidates.length >= adjacentPairs && candidates.every((candidate, index) =>
       index < adjacentPairs
         ? candidate.from_frame === index && candidate.to_frame === index + 1
         : candidate.to_frame > candidate.from_frame + 1 && candidate.to_frame < expectedFrameCount,
-    ) ||
-    !bootstrap ||
-    typeof bootstrap.summary !== "string"
-  ) {
-    throw new Error("bootstrap contract mismatch: seed candidates do not cover every adjacent pair");
+    );
+    if (!scanned) {
+      throw new Error("bootstrap contract mismatch: seed candidates do not cover every adjacent pair");
+    }
   }
   const pair = result.calibrated_pair;
   const seed = pair
@@ -1247,22 +1255,24 @@ function assertConfidenceContract(result: ReconstructionResult): void {
   }
 }
 
-export async function reconstructFrames(frames: SampledFrame[]): Promise<ReconstructionResult> {
+export async function reconstructFrames(frames: SampledFrame[], registeredGeometry?: unknown): Promise<ReconstructionResult> {
   const wasm = await loadReconstructionWasm();
-  const result = normalizeWasmReconstruction(
-    wasm.reconstruct_sequence({
-      frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
-      options: {
-        max_features: 320,
-        min_feature_distance: 7,
-        descriptor_radius: 3,
-        match_radius: 42,
-        max_descriptor_distance: 36,
-        ratio_threshold: 0.82,
-        max_dense_working_set_bytes: 256 * 1024 * 1024,
-      },
-    }),
-  );
+  const request = {
+    frames: frames.map(({ width, height, rgba }) => ({ width, height, rgba })),
+    options: {
+      max_features: 320,
+      min_feature_distance: 7,
+      descriptor_radius: 3,
+      match_radius: 42,
+      max_descriptor_distance: 36,
+      ratio_threshold: 0.82,
+      max_dense_working_set_bytes: 256 * 1024 * 1024,
+    },
+  };
+  const raw = registeredGeometry === undefined
+    ? wasm.reconstruct_sequence(request)
+    : wasm.reconstruct_sequence_with_registered_geometry(request, registeredGeometry);
+  const result = normalizeWasmReconstruction(raw);
   assertReconstructionContract(result, frames.length);
   return result;
 }

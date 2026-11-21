@@ -10,7 +10,9 @@ use video_to_3d_core::surface_materials::{
     bake_surface_materials_with_seams, AppearanceInvalidation, RecordedAppearance, ReferenceImage,
     SeamProjection, SurfaceMaterialBake,
 };
-use video_to_3d_core::textured_glb::encode_textured_glb_with_collider;
+use video_to_3d_core::textured_glb::{
+    encode_textured_glb_with_camera_provider, CameraProviderMetadata,
+};
 use video_to_3d_core::{
     classic_reference_patch_regions, evaluate_relative_depth, reconstruct_browser,
     BootstrapDiagnosis, CalibratedPairStats, CameraPipelineState, CameraPose, DenseGridSite,
@@ -114,6 +116,7 @@ struct PackedMeshTriangleBuffer {
 
 #[derive(Serialize)]
 struct WasmBrowserReconstructionResult<'a> {
+    sparse_camera_provider: Option<CameraProviderMetadata>,
     cameras: &'a [CameraPose],
     points: &'a [Point3],
     dense_points: PackedDensePointBuffer,
@@ -499,6 +502,17 @@ struct WasmReadinessRequest {
     metadata: SamplingMetadata,
 }
 
+/// Check the imported inventory with the same contract used by the native provider.
+#[wasm_bindgen]
+pub fn validate_semantic_inventory(value: JsValue) -> Result<(), JsValue> {
+    let inventory: video_to_3d_core::semantic_inventory::SemanticInventoryArtifact =
+        serde_wasm_bindgen::from_value(value)
+            .map_err(|error| JsValue::from_str(&format!("invalid object detections: {error}")))?;
+    inventory
+        .validate()
+        .map_err(|error| JsValue::from_str(&error))
+}
+
 /// Measure reconstruction readiness of sampled frames (core-owned evidence).
 #[wasm_bindgen]
 pub fn assess_input_readiness(value: JsValue) -> Result<JsValue, JsValue> {
@@ -527,10 +541,41 @@ pub fn reconstruct_sequence(value: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&format!("invalid reconstruction request: {error}")))?;
     let request = ReconstructionRequest::from(request);
     let result = reconstruct_browser(&request).map_err(|error| JsValue::from_str(&error))?;
+    serialize_browser_result(&result, None)
+}
+
+#[wasm_bindgen]
+pub fn reconstruct_sequence_with_registered_geometry(
+    value: JsValue,
+    geometry: JsValue,
+) -> Result<JsValue, JsValue> {
+    let request: WasmReconstructionRequest =
+        serde_wasm_bindgen::from_value(value).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let geometry =
+        serde_wasm_bindgen::from_value(geometry).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let result = video_to_3d_core::registered_sparse::reconstruct_browser_with_registered_geometry(
+        &request.into(),
+        geometry,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    serialize_browser_result(
+        &result,
+        Some(CameraProviderMetadata {
+            id: "colmap".into(),
+            version: "4.2.1".into(),
+        }),
+    )
+}
+
+fn serialize_browser_result(
+    result: &video_to_3d_core::BrowserReconstructionResult,
+    sparse_camera_provider: Option<CameraProviderMetadata>,
+) -> Result<JsValue, JsValue> {
     let reconstruction = &result.reconstruction;
     let evidence = ReconstructionEvidenceView::from_classic(reconstruction)
         .map_err(|error| JsValue::from_str(&error))?;
     let payload = WasmBrowserReconstructionResult {
+        sparse_camera_provider,
         cameras: &reconstruction.cameras,
         points: &reconstruction.points,
         dense_points: pack_dense_points(&reconstruction.dense_points),
@@ -622,6 +667,10 @@ struct WasmSurfaceMaterialRequest {
     seam_focal_pixels: Option<f32>,
     #[serde(default)]
     previous_appearance: Vec<RecordedAppearance>,
+    #[serde(default)]
+    semantic_inventory: Option<String>,
+    #[serde(default)]
+    camera_provider: Option<CameraProviderMetadata>,
 }
 
 #[derive(Serialize)]
@@ -813,12 +862,44 @@ pub fn bake_textured_surface(value: JsValue) -> Result<JsValue, JsValue> {
     let confidence = GeometryConfidenceField::from_evidence(&evidence);
     let collider =
         CoarseCollider::from_evidence(&evidence, &confidence, CoarseColliderOptions::default());
-    let glb = encode_textured_glb_with_collider(&evidence, &bake, Some(&collider))
+    let partition = request
+        .semantic_inventory
+        .as_ref()
+        .map(|document| {
+            let inventory =
+                video_to_3d_core::semantic_inventory::SemanticInventoryArtifact::from_json(
+                    document,
+                )?;
+            // All accepted cameras share the browser sampling geometry. A run without
+            // reference images has no observed mesh patch to attribute.
+            let dimensions = images
+                .first()
+                .map_or([0, 0], |image| [image.width, image.height]);
+            video_to_3d_core::object_surface::partition_object_surfaces(
+                &evidence,
+                &inventory,
+                video_to_3d_core::scene_project::ContentHash::of_bytes(document.as_bytes()),
+                dimensions,
+                request.seam_focal_pixels,
+            )
+        })
+        .transpose()
         .map_err(|error| JsValue::from_str(&error))?;
+    let glb = encode_textured_glb_with_camera_provider(
+        &evidence,
+        &bake,
+        Some(&collider),
+        partition.as_ref(),
+        request.camera_provider.as_ref(),
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
     let invalidation = bake.invalidation_against(&request.previous_appearance);
     let mut diagnostic = bake.diagnostic();
     if !request.previous_appearance.is_empty() {
         diagnostic = format!("{diagnostic} {}", invalidation.diagnostic());
+    }
+    if let Some(partition) = partition {
+        diagnostic = format!("{diagnostic} {}", partition.diagnostic());
     }
     let diagnostic = format!("{diagnostic} {}", collider.diagnostic());
     let payload = WasmSurfaceMaterialResult {

@@ -230,6 +230,37 @@ pub(crate) fn validate_terms(terms: &[String]) -> Result<(), String> {
 }
 
 impl SemanticMask {
+    /// Tight half-open bounds of a validated row-major foreground mask.
+    pub(crate) fn foreground_bounds(&self) -> Option<[f64; 4]> {
+        let width = u64::from(self.width);
+        if width == 0 {
+            return None;
+        }
+        let mut bounds = [width, u64::from(self.height), 0, 0];
+        let mut start = 0u64;
+        for (i, &count) in self.counts.iter().enumerate() {
+            let end = start.checked_add(count)?;
+            if i % 2 == 1 && count > 0 {
+                let last = end - 1;
+                let first_row = start / width;
+                let last_row = last / width;
+                let (left, right) = if first_row == last_row {
+                    (start % width, last % width + 1)
+                } else {
+                    (0, width)
+                };
+                bounds = [
+                    bounds[0].min(left),
+                    bounds[1].min(first_row),
+                    bounds[2].max(right),
+                    bounds[3].max(last_row + 1),
+                ];
+            }
+            start = end;
+        }
+        (bounds[2] > bounds[0]).then(|| bounds.map(|v| v as f64))
+    }
+
     fn validate(&self, frame: &SemanticFrame, bbox: &[f64; 4], id: &str) -> Result<(), String> {
         if self.width != frame.width || self.height != frame.height {
             return Err(format!(

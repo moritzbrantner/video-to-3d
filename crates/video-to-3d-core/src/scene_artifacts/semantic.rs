@@ -13,6 +13,7 @@
 //! `PATH`. A program that cannot be started records an unavailable result:
 //! segmentation is an optional capability (Atlas 4.6), so the rest of the
 //! build stays usable.
+use super::sidecar::{run_sidecar, Exchange, SidecarRun};
 use super::*;
 use crate::semantic_inventory::{
     default_room_vocabulary, SegmentationStatus, SemanticFrame, SemanticInventoryArtifact,
@@ -21,8 +22,6 @@ use crate::semantic_inventory::{
     SEMANTIC_INVENTORY_SCHEMA_VERSION,
 };
 use serde::Deserialize;
-use std::process::{Command, Stdio};
-use std::time::Duration;
 
 pub const SIDECAR_PROTOCOL: &str = "video-to-3d-semantic-sidecar/1";
 /// Environment variable naming the sidecar executable.
@@ -30,9 +29,6 @@ pub const SIDECAR_ENVIRONMENT: &str = "VIDEO_TO_3D_SEMANTIC_SIDECAR";
 /// The sidecar looked up on the `PATH` when nothing else names one; the
 /// repository ships it as `tools/semantic-sidecar/video-to-3d-semantic-sidecar`.
 pub const DEFAULT_SIDECAR: &str = "video-to-3d-semantic-sidecar";
-/// Largest sidecar response accepted (masks of many frames are large but
-/// bounded).
-const MAX_RESPONSE_BYTES: u64 = 512 << 20;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,36 +51,6 @@ struct UnavailableResponse {
     #[allow(dead_code)]
     status: String,
     reason: String,
-}
-
-/// A scratch directory for one sidecar exchange, removed on drop.
-struct Exchange(PathBuf);
-
-impl Exchange {
-    fn new(operation: &str) -> Result<Self, String> {
-        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "video-to-3d-semantic-{operation}-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        ));
-        fs::create_dir_all(&path).map_err(|error| {
-            format!("cannot create sidecar exchange {}: {error}", path.display())
-        })?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for Exchange {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-enum SidecarRun {
-    Response(Vec<u8>),
-    NotStarted(String),
-    Canceled,
 }
 
 impl BuiltInExecutor {
@@ -153,102 +119,18 @@ impl BuiltInExecutor {
             Some(terms) => (VocabularySource::Project, terms.clone()),
             None => (VocabularySource::Default, default_room_vocabulary()),
         };
-        let revision = provider.revision.clone().unwrap_or_default();
-        let mut frames = Vec::with_capacity(keyframes.frames.len());
-        let mut offered = Vec::with_capacity(keyframes.frames.len());
-        for frame in &keyframes.frames {
-            if cancel.is_canceled() {
-                return Ok(None);
-            }
-            let path = frame.pixels.resolve(&self.root);
-            let expected = u64::from(frame.width) * u64::from(frame.height) * 4;
-            match crate::scene_store::hash_file(&path) {
-                Some((hash, length)) if hash == frame.content_hash && length == expected => {}
-                _ => {
-                    return Err(format!(
-                        "keyframe {} pixels do not match their recorded identity",
-                        frame.frame_index
-                    ))
-                }
-            }
-            let absolute = fs::canonicalize(&path).map_err(|error| error.to_string())?;
-            offered.push(serde_json::json!({
-                "frame_index": frame.frame_index,
-                "width": frame.width,
-                "height": frame.height,
-                "content_hash": frame.content_hash.as_str(),
-                "rgba_path": absolute,
-            }));
-            frames.push(SemanticFrame {
-                frame_index: frame.frame_index,
-                width: frame.width,
-                height: frame.height,
-                content_hash: frame.content_hash.clone(),
-            });
-        }
-        let exchange = Exchange::new(&request.operation.id)?;
-        let request_path = exchange.0.join("request.json");
-        let response_path = exchange.0.join("response.json");
-        let document = serde_json::json!({
-            "protocol": SIDECAR_PROTOCOL,
-            "provider": {"id": provider.id, "revision": revision},
-            "vocabulary": terms,
-            "frames": offered,
-        });
-        fs::write(&request_path, document.to_string()).map_err(|error| error.to_string())?;
-
-        let program = self.sidecar_program();
-        let mut artifact = SemanticInventoryArtifact {
-            schema_version: SEMANTIC_INVENTORY_SCHEMA_VERSION,
-            status: SegmentationStatus::Unavailable,
-            unavailable_reason: None,
-            provider: SemanticProvider {
-                id: provider.id.clone(),
-                revision,
-                models: Vec::new(),
-                runtime: None,
-            },
-            vocabulary: SemanticVocabulary { source, terms },
-            frames,
-            observations: Vec::new(),
-            tracks: Vec::new(),
-            uncertainties: Vec::new(),
-            measurements: None,
-        };
-        match run_sidecar(&program, &request_path, &response_path, &exchange.0, cancel)? {
-            SidecarRun::Canceled => return Ok(None),
-            SidecarRun::NotStarted(reason) => artifact.unavailable_reason = Some(reason),
-            SidecarRun::Response(bytes) => {
-                let value: serde_json::Value = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("semantic sidecar response is not JSON: {error}"))?;
-                match value.get("status").and_then(serde_json::Value::as_str) {
-                    Some("available") => {
-                        let response: AvailableResponse = serde_json::from_value(value)
-                            .map_err(|error| format!("semantic sidecar response: {error}"))?;
-                        check_protocol(&response.protocol)?;
-                        artifact.status = SegmentationStatus::Available;
-                        artifact.provider.models = response.models;
-                        artifact.provider.runtime = Some(response.runtime);
-                        artifact.observations = response.observations;
-                        artifact.tracks = response.tracks;
-                        artifact.uncertainties = response.uncertainties;
-                        artifact.measurements = response.measurements;
-                    }
-                    Some("unavailable") => {
-                        let response: UnavailableResponse = serde_json::from_value(value)
-                            .map_err(|error| format!("semantic sidecar response: {error}"))?;
-                        check_protocol(&response.protocol)?;
-                        artifact.unavailable_reason = Some(response.reason);
-                    }
-                    _ => return Err("semantic sidecar response has no valid status".into()),
-                }
-            }
-        }
-        artifact.validate()?;
-        artifact.validate_against_keyframes(&keyframes)?;
-        if cancel.is_canceled() {
+        let Some(artifact) = detect_keyframe_objects(
+            &self.root,
+            &keyframes,
+            &self.sidecar_program(),
+            &provider.id,
+            provider.revision.as_deref().unwrap_or_default(),
+            SemanticVocabulary { source, terms },
+            cancel,
+        )?
+        else {
             return Ok(None);
-        }
+        };
         let output =
             ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
         let document = artifact.to_json();
@@ -289,6 +171,121 @@ impl BuiltInExecutor {
     }
 }
 
+/// Detect objects from locally decoded RGBA frames and validate their masks and tracks.
+pub fn detect_keyframe_objects(
+    root: &Path,
+    keyframes: &KeyframesArtifact,
+    program: &Path,
+    provider_id: &str,
+    revision: &str,
+    vocabulary: SemanticVocabulary,
+    cancel: &CancellationToken,
+) -> Result<Option<SemanticInventoryArtifact>, String> {
+    let SemanticVocabulary { source, terms } = vocabulary;
+    let mut frames = Vec::with_capacity(keyframes.frames.len());
+    let mut offered = Vec::with_capacity(keyframes.frames.len());
+    for frame in &keyframes.frames {
+        if cancel.is_canceled() {
+            return Ok(None);
+        }
+        let path = frame.pixels.resolve(root);
+        let expected = u64::from(frame.width) * u64::from(frame.height) * 4;
+        match crate::scene_store::hash_file(&path) {
+            Some((hash, length)) if hash == frame.content_hash && length == expected => {}
+            _ => {
+                return Err(format!(
+                    "keyframe {} pixels do not match their recorded identity",
+                    frame.frame_index
+                ))
+            }
+        }
+        let absolute = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        offered.push(serde_json::json!({
+            "frame_index": frame.frame_index,
+            "width": frame.width,
+            "height": frame.height,
+            "content_hash": frame.content_hash.as_str(),
+            "rgba_path": absolute,
+        }));
+        frames.push(SemanticFrame {
+            frame_index: frame.frame_index,
+            width: frame.width,
+            height: frame.height,
+            content_hash: frame.content_hash.clone(),
+        });
+    }
+    let exchange = Exchange::new("inventory")?;
+    let request_path = exchange.0.join("request.json");
+    let response_path = exchange.0.join("response.json");
+    let document = serde_json::json!({
+        "protocol": SIDECAR_PROTOCOL,
+        "provider": {"id": provider_id, "revision": revision},
+        "vocabulary": terms,
+        "frames": offered,
+    });
+    fs::write(&request_path, document.to_string()).map_err(|error| error.to_string())?;
+
+    let mut artifact = SemanticInventoryArtifact {
+        schema_version: SEMANTIC_INVENTORY_SCHEMA_VERSION,
+        status: SegmentationStatus::Unavailable,
+        unavailable_reason: None,
+        provider: SemanticProvider {
+            id: provider_id.to_owned(),
+            revision: revision.to_owned(),
+            models: Vec::new(),
+            runtime: None,
+        },
+        vocabulary: SemanticVocabulary { source, terms },
+        frames,
+        observations: Vec::new(),
+        tracks: Vec::new(),
+        uncertainties: Vec::new(),
+        measurements: None,
+    };
+    match run_sidecar(
+        "semantic",
+        program,
+        &request_path,
+        &response_path,
+        &exchange.0,
+        cancel,
+    )? {
+        SidecarRun::Canceled => return Ok(None),
+        SidecarRun::NotStarted(reason) => artifact.unavailable_reason = Some(reason),
+        SidecarRun::Response(bytes) => {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("semantic sidecar response is not JSON: {error}"))?;
+            match value.get("status").and_then(serde_json::Value::as_str) {
+                Some("available") => {
+                    let response: AvailableResponse = serde_json::from_value(value)
+                        .map_err(|error| format!("semantic sidecar response: {error}"))?;
+                    check_protocol(&response.protocol)?;
+                    artifact.status = SegmentationStatus::Available;
+                    artifact.provider.models = response.models;
+                    artifact.provider.runtime = Some(response.runtime);
+                    artifact.observations = response.observations;
+                    artifact.tracks = response.tracks;
+                    artifact.uncertainties = response.uncertainties;
+                    artifact.measurements = response.measurements;
+                }
+                Some("unavailable") => {
+                    let response: UnavailableResponse = serde_json::from_value(value)
+                        .map_err(|error| format!("semantic sidecar response: {error}"))?;
+                    check_protocol(&response.protocol)?;
+                    artifact.unavailable_reason = Some(response.reason);
+                }
+                _ => return Err("semantic sidecar response has no valid status".into()),
+            }
+        }
+    }
+    artifact.validate()?;
+    artifact.validate_against_keyframes(keyframes)?;
+    if cancel.is_canceled() {
+        return Ok(None);
+    }
+    Ok(Some(artifact))
+}
+
 fn check_protocol(protocol: &str) -> Result<(), String> {
     if protocol == SIDECAR_PROTOCOL {
         Ok(())
@@ -297,74 +294,6 @@ fn check_protocol(protocol: &str) -> Result<(), String> {
             "semantic sidecar speaks `{protocol}`, expected `{SIDECAR_PROTOCOL}`"
         ))
     }
-}
-
-/// Run the sidecar to completion, killing and reaping it on cancellation.
-fn run_sidecar(
-    program: &Path,
-    request: &Path,
-    response: &Path,
-    scratch: &Path,
-    cancel: &CancellationToken,
-) -> Result<SidecarRun, String> {
-    let stderr_path = scratch.join("stderr.log");
-    let stderr = fs::File::create(&stderr_path).map_err(|error| error.to_string())?;
-    let mut child = match Command::new(program)
-        .arg(request)
-        .arg(response)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(stderr)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            return Ok(SidecarRun::NotStarted(format!(
-                "semantic segmentation is unavailable: the local sidecar `{}` could not be started ({error})",
-                program.display()
-            )))
-        }
-    };
-    let status = loop {
-        if cancel.is_canceled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(SidecarRun::Canceled);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("semantic sidecar wait failed: {error}"));
-            }
-        }
-    };
-    if !status.success() {
-        let log = fs::read_to_string(&stderr_path).unwrap_or_default();
-        let tail: String = log
-            .lines()
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join(" / ");
-        return Err(format!("semantic sidecar exited with {status}: {tail}"));
-    }
-    let length = fs::metadata(response)
-        .map_err(|error| format!("semantic sidecar wrote no response: {error}"))?
-        .len();
-    if length > MAX_RESPONSE_BYTES {
-        return Err(format!(
-            "semantic sidecar response of {length} bytes exceeds the {MAX_RESPONSE_BYTES}-byte limit"
-        ));
-    }
-    fs::read(response)
-        .map(SidecarRun::Response)
-        .map_err(|error| format!("semantic sidecar response is unreadable: {error}"))
 }
 
 impl BuiltInExecutor {
@@ -848,50 +777,56 @@ impl BuiltInExecutor {
                 .clone()
                 .or_else(|| std::env::var_os(CLEAN_PLATE_ENVIRONMENT).map(PathBuf::from))
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_CLEAN_PLATE_SIDECAR));
-            let results: BTreeMap<String, PlateEditResult> =
-                match run_sidecar(&program, &request_path, &response_path, &exchange.0, cancel)? {
-                    SidecarRun::Canceled => return Ok(None),
-                    SidecarRun::NotStarted(reason) => {
-                        available = false;
-                        artifact.unavailable_reason = Some(reason.replace(
-                            "semantic segmentation is unavailable",
-                            "clean plates are unavailable",
-                        ));
-                        BTreeMap::new()
-                    }
-                    SidecarRun::Response(bytes) => {
-                        let response: PlateResponse = serde_json::from_slice(&bytes)
-                            .map_err(|error| format!("clean plate sidecar response: {error}"))?;
-                        if response.protocol != CLEAN_PLATE_PROTOCOL {
-                            return Err(format!(
+            let results: BTreeMap<String, PlateEditResult> = match run_sidecar(
+                "semantic",
+                &program,
+                &request_path,
+                &response_path,
+                &exchange.0,
+                cancel,
+            )? {
+                SidecarRun::Canceled => return Ok(None),
+                SidecarRun::NotStarted(reason) => {
+                    available = false;
+                    artifact.unavailable_reason = Some(reason.replace(
+                        "semantic sidecar is unavailable",
+                        "clean plates are unavailable",
+                    ));
+                    BTreeMap::new()
+                }
+                SidecarRun::Response(bytes) => {
+                    let response: PlateResponse = serde_json::from_slice(&bytes)
+                        .map_err(|error| format!("clean plate sidecar response: {error}"))?;
+                    if response.protocol != CLEAN_PLATE_PROTOCOL {
+                        return Err(format!(
                             "clean plate sidecar speaks `{}`, expected `{CLEAN_PLATE_PROTOCOL}`",
                             response.protocol
                         ));
-                        }
-                        match response.status.as_str() {
-                            "available" => {
-                                artifact.provider.models = response.models;
-                                artifact.provider.runtime = response.runtime;
-                                response
-                                    .edits
-                                    .into_iter()
-                                    .map(|edit| (edit.edit_id.clone(), edit))
-                                    .collect()
-                            }
-                            "unavailable" => {
-                                available = false;
-                                artifact.unavailable_reason = Some(
-                                    response
-                                        .reason
-                                        .filter(|reason| !reason.trim().is_empty())
-                                        .unwrap_or_else(|| "clean plates are unavailable".into()),
-                                );
-                                BTreeMap::new()
-                            }
-                            other => return Err(format!("clean plate sidecar status `{other}`")),
-                        }
                     }
-                };
+                    match response.status.as_str() {
+                        "available" => {
+                            artifact.provider.models = response.models;
+                            artifact.provider.runtime = response.runtime;
+                            response
+                                .edits
+                                .into_iter()
+                                .map(|edit| (edit.edit_id.clone(), edit))
+                                .collect()
+                        }
+                        "unavailable" => {
+                            available = false;
+                            artifact.unavailable_reason = Some(
+                                response
+                                    .reason
+                                    .filter(|reason| !reason.trim().is_empty())
+                                    .unwrap_or_else(|| "clean plates are unavailable".into()),
+                            );
+                            BTreeMap::new()
+                        }
+                        other => return Err(format!("clean plate sidecar status `{other}`")),
+                    }
+                }
+            };
             for plan in requests {
                 if cancel.is_canceled() {
                     return Ok(None);
@@ -1070,11 +1005,6 @@ impl BuiltInExecutor {
         cancel: &CancellationToken,
         directory: &str,
     ) -> Result<Option<ProducedArtifact>, String> {
-        use crate::object_generation::{
-            plan_generation, GeneratedClassification, GeneratedMesh, GeneratedObject,
-            GenerationProvider, GenerationStatus, ObjectGenerationArtifact,
-            OBJECT_GENERATION_SCHEMA_VERSION,
-        };
         let provider = request
             .provider
             .as_ref()
@@ -1099,172 +1029,28 @@ impl BuiltInExecutor {
         let references = crate::object_references::ObjectReferencesArtifact::from_json(
             &self.document(references_record, cancel)?,
         )?;
-        let plans = plan_generation(&inventory, &references, (&provider.id, &revision));
-        let mut artifact = ObjectGenerationArtifact {
-            schema_version: OBJECT_GENERATION_SCHEMA_VERSION,
-            status: GenerationStatus::Available,
-            unavailable_reason: None,
-            provider: GenerationProvider {
-                id: provider.id.clone(),
-                revision: revision.clone(),
-                models: Vec::new(),
-                runtime: None,
-            },
-            object_references: references_record.content_hash.clone(),
-            objects: Vec::new(),
+        let program = self
+            .generation_sidecar
+            .clone()
+            .or_else(|| std::env::var_os(GENERATION_ENVIRONMENT).map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_GENERATION_SIDECAR));
+        let Some(artifact) = generate_object_candidates(
+            &self.root,
+            &keyframes,
+            &inventory,
+            &references,
+            references_record.content_hash.clone(),
+            &self.root,
+            &format!("{directory}/objects"),
+            (&provider.id, &revision),
+            &program,
+            None,
+            cancel,
+        )?
+        else {
+            return Ok(None);
         };
-        let exchange = Exchange::new(&request.operation.id)?;
-        let mut available = true;
-        if !plans.is_empty() {
-            let mut entries = Vec::new();
-            for plan in &plans {
-                let keyframe = keyframes
-                    .frames
-                    .iter()
-                    .find(|frame| frame.frame_index == plan.frame_index)
-                    .ok_or("generation frame is not a keyframe")?;
-                let source = fs::canonicalize(keyframe.pixels.resolve(&self.root))
-                    .map_err(|error| error.to_string())?;
-                entries.push(serde_json::json!({
-                    "request_id": plan.request_id,
-                    "label": plan.label,
-                    "width": plan.width,
-                    "height": plan.height,
-                    "rgba_path": source,
-                    "crop": plan.crop,
-                    "mask_counts": plan.mask.counts,
-                    "output_path": exchange.0.join(format!("{}.glb", plan.request_id)),
-                }));
-            }
-            let request_path = exchange.0.join("request.json");
-            let response_path = exchange.0.join("response.json");
-            fs::write(
-                &request_path,
-                serde_json::json!({
-                    "protocol": GENERATION_PROTOCOL,
-                    "provider": {"id": provider.id, "revision": revision},
-                    "requests": entries,
-                })
-                .to_string(),
-            )
-            .map_err(|error| error.to_string())?;
-            let program = self
-                .generation_sidecar
-                .clone()
-                .or_else(|| std::env::var_os(GENERATION_ENVIRONMENT).map(PathBuf::from))
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_GENERATION_SIDECAR));
-            let results: BTreeMap<String, GenerationResult> = match run_sidecar(
-                &program,
-                &request_path,
-                &response_path,
-                &exchange.0,
-                cancel,
-            )? {
-                SidecarRun::Canceled => return Ok(None),
-                SidecarRun::NotStarted(reason) => {
-                    available = false;
-                    artifact.unavailable_reason = Some(reason.replace(
-                        "semantic segmentation is unavailable",
-                        "object generation is unavailable",
-                    ));
-                    BTreeMap::new()
-                }
-                SidecarRun::Response(bytes) => {
-                    let response: GenerationResponse = serde_json::from_slice(&bytes)
-                        .map_err(|error| format!("object generation sidecar response: {error}"))?;
-                    if response.protocol != GENERATION_PROTOCOL {
-                        return Err(format!(
-                                "object generation sidecar speaks `{}`, expected `{GENERATION_PROTOCOL}`",
-                                response.protocol
-                            ));
-                    }
-                    match response.status.as_str() {
-                        "available" => {
-                            artifact.provider.models = response.models;
-                            artifact.provider.runtime = response.runtime;
-                            response
-                                .results
-                                .into_iter()
-                                .map(|result| (result.request_id.clone(), result))
-                                .collect()
-                        }
-                        "unavailable" => {
-                            available = false;
-                            artifact.unavailable_reason = Some(
-                                response
-                                    .reason
-                                    .filter(|reason| !reason.trim().is_empty())
-                                    .unwrap_or_else(|| "object generation is unavailable".into()),
-                            );
-                            BTreeMap::new()
-                        }
-                        other => return Err(format!("object generation sidecar status `{other}`")),
-                    }
-                }
-            };
-            for plan in plans {
-                if cancel.is_canceled() {
-                    return Ok(None);
-                }
-                let (output, failure) = if !available {
-                    (None, Some("object generation was unavailable".into()))
-                } else {
-                    match results.get(&plan.request_id) {
-                        Some(result) if result.status == "ok" => {
-                            let produced = exchange.0.join(format!("{}.glb", plan.request_id));
-                            let bytes = fs::read(&produced).map_err(|error| {
-                                format!("generated mesh {} is unreadable: {error}", plan.request_id)
-                            })?;
-                            if bytes.len() < 12 || &bytes[..4] != b"glTF" {
-                                (None, Some("the sidecar wrote no binary glTF".to_owned()))
-                            } else if result.triangles.unwrap_or(0) == 0 {
-                                (None, Some("the generated mesh is empty".to_owned()))
-                            } else {
-                                let path = ProjectPath::new(format!(
-                                    "{directory}/objects/{}.glb",
-                                    plan.request_id
-                                ))
-                                .map_err(|e| e.to_string())?;
-                                write_atomically(&path.resolve(&self.root), &bytes)?;
-                                (
-                                    Some(GeneratedMesh {
-                                        path,
-                                        content_hash: ContentHash::of_bytes(&bytes),
-                                        vertices: result.vertices.unwrap_or(0),
-                                        triangles: result.triangles.unwrap_or(0),
-                                    }),
-                                    None,
-                                )
-                            }
-                        }
-                        Some(result) => (
-                            None,
-                            Some(
-                                result
-                                    .reason
-                                    .clone()
-                                    .filter(|reason| !reason.trim().is_empty())
-                                    .unwrap_or_else(|| "generation failed".into()),
-                            ),
-                        ),
-                        None => (
-                            None,
-                            Some("the sidecar returned no result for this object".into()),
-                        ),
-                    }
-                };
-                artifact.objects.push(GeneratedObject {
-                    request: plan,
-                    classification: GeneratedClassification::GenerativeCandidate,
-                    output,
-                    failure,
-                });
-            }
-        }
-        if !available {
-            artifact.status = GenerationStatus::Unavailable;
-        }
-        artifact.validate()?;
+        let available = artifact.status == crate::object_generation::GenerationStatus::Available;
         let output =
             ProjectPath::new(format!("{directory}/artifact.json")).map_err(|e| e.to_string())?;
         let document = artifact.to_json();
@@ -1299,56 +1085,271 @@ impl BuiltInExecutor {
     }
 }
 
-/// POSITION vertices of the first mesh primitive of a binary glTF.
-fn glb_positions(bytes: &[u8]) -> Result<Vec<[f64; 3]>, String> {
-    if bytes.len() < 20 || &bytes[..4] != b"glTF" {
-        return Err("not a binary glTF".into());
-    }
-    let chunk = |offset: usize| -> Result<(usize, &[u8]), String> {
-        let length = bytes
-            .get(offset..offset + 4)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
-            .ok_or("binary glTF chunk header is truncated")?;
-        let data = bytes
-            .get(offset + 8..offset + 8 + length)
-            .ok_or("binary glTF chunk is truncated")?;
-        Ok((offset + 8 + length, data))
+/// Run local object generation on the reference packages. Mesh paths in the
+/// resulting artifact are relative to output_root. Source RGBA paths are
+/// resolved separately so the browser handoff can remain ephemeral.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_object_candidates(
+    keyframes_root: &Path,
+    keyframes: &KeyframesArtifact,
+    inventory: &SemanticInventoryArtifact,
+    references: &crate::object_references::ObjectReferencesArtifact,
+    references_hash: ContentHash,
+    output_root: &Path,
+    objects_directory: &str,
+    provider: (&str, &str),
+    program: &Path,
+    cache: Option<(&Path, &crate::object_generation::ObjectGenerationArtifact)>,
+    cancel: &CancellationToken,
+) -> Result<Option<crate::object_generation::ObjectGenerationArtifact>, String> {
+    use crate::object_generation::{
+        plan_generation, GeneratedClassification, GeneratedMesh, GeneratedObject,
+        GenerationProvider, GenerationStatus, ObjectGenerationArtifact,
+        OBJECT_GENERATION_SCHEMA_VERSION,
     };
-    let (next, json) = chunk(12)?;
-    let json: serde_json::Value =
-        serde_json::from_slice(json).map_err(|error| format!("binary glTF JSON chunk: {error}"))?;
-    let (_, binary) = chunk(next)?;
-    let accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
-        .as_u64()
-        .ok_or("binary glTF has no POSITION accessor")?;
-    let accessor = &json["accessors"][accessor as usize];
-    if accessor["componentType"] != 5126 || accessor["type"] != "VEC3" {
-        return Err("POSITION accessor is not float VEC3".into());
+    let mut plans = plan_generation(inventory, references, provider);
+    let mut sources = BTreeMap::new();
+    for plan in &plans {
+        if sources.contains_key(&plan.frame_index) {
+            continue;
+        }
+        if cancel.is_canceled() {
+            return Ok(None);
+        }
+        let keyframe = keyframes
+            .frames
+            .iter()
+            .find(|frame| frame.frame_index == plan.frame_index)
+            .ok_or("generation frame is not a keyframe")?;
+        let path =
+            fs::canonicalize(keyframe.pixels.resolve(keyframes_root)).map_err(|e| e.to_string())?;
+        let length = u64::from(plan.width) * u64::from(plan.height) * 4;
+        if !matches!(crate::scene_store::hash_file(&path), Some((hash, n)) if hash == plan.source_frame_hash && n == length)
+        {
+            return Err(format!(
+                "object source frame {} pixels differ from the recorded evidence",
+                plan.frame_index
+            ));
+        }
+        sources.insert(plan.frame_index, path);
     }
-    let count = accessor["count"].as_u64().ok_or("POSITION has no count")? as usize;
-    let view = &json["bufferViews"][accessor["bufferView"]
-        .as_u64()
-        .ok_or("POSITION has no buffer view")? as usize];
-    let start = view["byteOffset"].as_u64().unwrap_or(0) as usize
-        + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
-    let stride = view["byteStride"].as_u64().unwrap_or(12) as usize;
-    (0..count)
-        .map(|index| {
-            let at = start + index * stride;
-            let value = |k: usize| -> Result<f64, String> {
-                bytes_f32(binary, at + 4 * k).ok_or_else(|| "POSITION data is truncated".into())
+    let mut artifact = ObjectGenerationArtifact {
+        schema_version: OBJECT_GENERATION_SCHEMA_VERSION,
+        status: GenerationStatus::Available,
+        unavailable_reason: None,
+        provider: GenerationProvider {
+            id: provider.0.to_owned(),
+            revision: provider.1.to_owned(),
+            models: Vec::new(),
+            runtime: None,
+        },
+        object_references: references_hash,
+        objects: Vec::new(),
+    };
+    if let Some((cache_root, prior)) = cache.filter(|(_, artifact)| {
+        artifact.provider.id == provider.0 && artifact.provider.revision == provider.1
+    }) {
+        let candidates: BTreeMap<_, _> = prior
+            .objects
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .output
+                    .as_ref()
+                    .map(|mesh| (entry.request.request_id.as_str(), mesh))
+            })
+            .collect();
+        let mut pending = Vec::new();
+        for plan in plans {
+            // The request ID binds the primary frame, crop, mask, object and generator.
+            let expected_path =
+                ProjectPath::new(format!("{objects_directory}/{}.glb", plan.request_id))
+                    .map_err(|e| e.to_string())?;
+            if let Some(mesh) = candidates.get(plan.request_id.as_str()).filter(|mesh| {
+                mesh.path == expected_path
+                    && crate::scene_store::hash_file(&mesh.path.resolve(cache_root))
+                        .is_some_and(|(hash, _)| hash == mesh.content_hash)
+            }) {
+                if output_root != cache_root {
+                    let bytes =
+                        fs::read(mesh.path.resolve(cache_root)).map_err(|e| e.to_string())?;
+                    write_atomically(&expected_path.resolve(output_root), &bytes)?;
+                }
+                artifact.objects.push(GeneratedObject {
+                    request: plan,
+                    classification: GeneratedClassification::GenerativeCandidate,
+                    output: Some((*mesh).clone()),
+                    failure: None,
+                });
+            } else {
+                pending.push(plan);
+            }
+        }
+        if !artifact.objects.is_empty() {
+            artifact.provider = prior.provider.clone();
+        }
+        plans = pending;
+    }
+    let exchange = Exchange::new("generation")?;
+    let mut available = true;
+    if !plans.is_empty() {
+        let mut entries = Vec::new();
+        for plan in &plans {
+            entries.push(serde_json::json!({
+                "request_id": plan.request_id,
+                "label": plan.label,
+                "object": plan.object,
+                "observation": plan.observation,
+                "frame_index": plan.frame_index,
+                "source_frame_hash": plan.source_frame_hash.as_str(),
+                "width": plan.width,
+                "height": plan.height,
+                "rgba_path": sources[&plan.frame_index],
+                "crop": plan.crop,
+                "mask_counts": plan.mask.counts,
+                "output_path": exchange.0.join(format!("{}.glb", plan.request_id)),
+            }));
+        }
+        let request_path = exchange.0.join("request.json");
+        let response_path = exchange.0.join("response.json");
+        fs::write(
+            &request_path,
+            serde_json::json!({
+                "protocol": GENERATION_PROTOCOL,
+                "provider": {"id": provider.0, "revision": provider.1},
+                "requests": entries,
+            })
+            .to_string(),
+        )
+        .map_err(|error| error.to_string())?;
+        let results: BTreeMap<String, GenerationResult> = match run_sidecar(
+            "semantic",
+            program,
+            &request_path,
+            &response_path,
+            &exchange.0,
+            cancel,
+        )? {
+            SidecarRun::Canceled => return Ok(None),
+            SidecarRun::NotStarted(reason) => {
+                available = false;
+                artifact.unavailable_reason = Some(reason.replace(
+                    "semantic sidecar is unavailable",
+                    "object generation is unavailable",
+                ));
+                BTreeMap::new()
+            }
+            SidecarRun::Response(bytes) => {
+                let response: GenerationResponse = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("object generation sidecar response: {error}"))?;
+                if response.protocol != GENERATION_PROTOCOL {
+                    return Err(format!(
+                        "object generation sidecar speaks `{}`, expected `{GENERATION_PROTOCOL}`",
+                        response.protocol
+                    ));
+                }
+                match response.status.as_str() {
+                    "available" => {
+                        artifact.provider.models = response.models;
+                        artifact.provider.runtime = response.runtime;
+                        response
+                            .results
+                            .into_iter()
+                            .map(|result| (result.request_id.clone(), result))
+                            .collect()
+                    }
+                    "unavailable" => {
+                        available = false;
+                        artifact.unavailable_reason = Some(
+                            response
+                                .reason
+                                .filter(|reason| !reason.trim().is_empty())
+                                .unwrap_or_else(|| "object generation is unavailable".into()),
+                        );
+                        BTreeMap::new()
+                    }
+                    other => return Err(format!("object generation sidecar status `{other}`")),
+                }
+            }
+        };
+        for plan in plans {
+            if cancel.is_canceled() {
+                return Ok(None);
+            }
+            let (output, failure) = if !available {
+                (None, Some("object generation was unavailable".into()))
+            } else {
+                match results.get(&plan.request_id) {
+                    Some(result) if result.status == "ok" => {
+                        let produced = exchange.0.join(format!("{}.glb", plan.request_id));
+                        let bytes = fs::read(&produced).map_err(|error| {
+                            format!("generated mesh {} is unreadable: {error}", plan.request_id)
+                        })?;
+                        if bytes.len() < 12 || &bytes[..4] != b"glTF" {
+                            (None, Some("the sidecar wrote no binary glTF".to_owned()))
+                        } else if result.triangles.unwrap_or(0) == 0 {
+                            (None, Some("the generated mesh is empty".to_owned()))
+                        } else {
+                            let path = ProjectPath::new(format!(
+                                "{objects_directory}/{}.glb",
+                                plan.request_id
+                            ))
+                            .map_err(|e| e.to_string())?;
+                            write_atomically(&path.resolve(output_root), &bytes)?;
+                            (
+                                Some(GeneratedMesh {
+                                    path,
+                                    content_hash: ContentHash::of_bytes(&bytes),
+                                    vertices: result.vertices.unwrap_or(0),
+                                    triangles: result.triangles.unwrap_or(0),
+                                }),
+                                None,
+                            )
+                        }
+                    }
+                    Some(result) => (
+                        None,
+                        Some(
+                            result
+                                .reason
+                                .clone()
+                                .filter(|reason| !reason.trim().is_empty())
+                                .unwrap_or_else(|| "generation failed".into()),
+                        ),
+                    ),
+                    None => (
+                        None,
+                        Some("the sidecar returned no result for this object".into()),
+                    ),
+                }
             };
-            Ok([value(0)?, value(1)?, value(2)?])
-        })
-        .collect()
-}
-
-fn bytes_f32(bytes: &[u8], at: usize) -> Option<f64> {
-    let value = f32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?);
-    value.is_finite().then_some(f64::from(value))
+            artifact.objects.push(GeneratedObject {
+                request: plan,
+                classification: GeneratedClassification::GenerativeCandidate,
+                output,
+                failure,
+            });
+        }
+    }
+    if !available
+        && artifact
+            .objects
+            .iter()
+            .all(|object| object.output.is_none())
+    {
+        artifact.status = GenerationStatus::Unavailable;
+    } else {
+        artifact.unavailable_reason = None;
+    }
+    artifact
+        .objects
+        .sort_by(|a, b| a.request.object.cmp(&b.request.object));
+    artifact.validate()?;
+    Ok(Some(artifact))
 }
 
 impl BuiltInExecutor {
+    #[cfg(not(target_arch = "wasm32"))]
     /// Built-in scene placement of generated candidates (#69), read-only.
     pub(super) fn object_placement(
         &self,
@@ -1384,33 +1385,45 @@ impl BuiltInExecutor {
             let generation = crate::object_generation::ObjectGenerationArtifact::from_json(
                 &self.document(generation_record, cancel)?,
             )?;
-            let mut vertices = BTreeMap::new();
-            for object in &generation.objects {
-                if let Some(mesh) = &object.output {
-                    let bytes = crate::scene_artifacts::read_verified_with_cancel(
-                        &self.root,
-                        &mesh.path,
-                        &mesh.content_hash,
-                        None,
-                        || cancel.is_canceled(),
-                    )?;
-                    vertices.insert(object.request.request_id.clone(), glb_positions(&bytes)?);
-                }
-            }
             let (cameras, points) = self.registered_geometry(request, cancel)?;
             if cancel.is_canceled() {
                 return Err("object placement canceled".into());
             }
-            let artifact = crate::object_placement::place_objects(
+            let keyframes = self.generation_keyframes(generation_record, cancel)?;
+            inventory.validate_against_keyframes(&keyframes)?;
+            let images = keyframes
+                .frames
+                .iter()
+                .map(|f| {
+                    keyframes
+                        .load_pixels_with_cancel(&self.root, f.frame_index, || cancel.is_canceled())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let frames = keyframes
+                .frames
+                .iter()
+                .zip(&images)
+                .map(|(f, bytes)| {
+                    (
+                        f.frame_index,
+                        f.width as usize,
+                        f.height as usize,
+                        bytes.as_slice(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut artifact = crate::generated_scene::place_generated_meshes(
                 &inventory,
                 &identities,
                 &references,
                 &generation,
-                generation_record.content_hash.clone(),
-                &vertices,
+                &self.root,
                 &cameras,
                 &points,
-            );
+                &frames,
+                || cancel.is_canceled(),
+            )?;
+            artifact.object_generation = generation_record.content_hash.clone();
             artifact.validate()?;
             let output = ProjectPath::new(format!("{directory}/artifact.json"))
                 .map_err(|e| e.to_string())?;
@@ -1472,48 +1485,5 @@ impl BuiltInExecutor {
             Err(_) if cancel.is_canceled() => AttemptOutcome::Canceled,
             Err(message) => AttemptOutcome::Failed(message),
         }
-    }
-}
-
-#[cfg(test)]
-mod glb_tests {
-    use super::glb_positions;
-
-    fn glb(json: &str, binary: &[u8]) -> Vec<u8> {
-        let mut json = json.as_bytes().to_vec();
-        while !json.len().is_multiple_of(4) {
-            json.push(b' ');
-        }
-        let mut out = b"glTF".to_vec();
-        out.extend(2u32.to_le_bytes());
-        out.extend(((12 + 8 + json.len() + 8 + binary.len()) as u32).to_le_bytes());
-        out.extend((json.len() as u32).to_le_bytes());
-        out.extend(b"JSON");
-        out.extend(json);
-        out.extend((binary.len() as u32).to_le_bytes());
-        out.extend(b"BIN\0");
-        out.extend(binary);
-        out
-    }
-
-    #[test]
-    fn positions_follow_offsets_and_strides() {
-        // Two vertices, 16-byte stride, after 8 bytes of other data.
-        let mut binary = vec![0u8; 8];
-        for vertex in [[1.0f32, 2.0, 3.0], [-1.0, 0.5, 4.0]] {
-            for value in vertex {
-                binary.extend(value.to_le_bytes());
-            }
-            binary.extend([0u8; 4]);
-        }
-        let json = r#"{"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
-            "accessors":[{"bufferView":0,"componentType":5126,"type":"VEC3","count":2}],
-            "bufferViews":[{"buffer":0,"byteOffset":8,"byteStride":16}]}"#;
-        let positions = glb_positions(&glb(json, &binary)).unwrap();
-        assert_eq!(positions, vec![[1.0, 2.0, 3.0], [-1.0, 0.5, 4.0]]);
-        let truncated = r#"{"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
-            "accessors":[{"bufferView":0,"componentType":5126,"type":"VEC3","count":3}],
-            "bufferViews":[{"buffer":0,"byteOffset":8,"byteStride":16}]}"#;
-        assert!(glb_positions(&glb(truncated, &binary)).is_err());
     }
 }

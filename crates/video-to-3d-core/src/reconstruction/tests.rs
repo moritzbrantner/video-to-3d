@@ -680,8 +680,21 @@ fn accepted_lateral_clip_records_its_seed_candidates() {
 
     let pair = result.calibrated_pair.as_ref().expect("lateral clip seeds");
     assert!(!result.registered_views.is_empty());
-    assert_eq!(result.seed_candidates.len(), 5);
-    let seed = &result.seed_candidates[pair.from_frame];
+    let adjacent: Vec<_> = result
+        .seed_candidates
+        .iter()
+        .filter(|seed| seed.to_frame == seed.from_frame + 1)
+        .collect();
+    assert_eq!(adjacent.len(), 5);
+    assert!(adjacent
+        .iter()
+        .any(|seed| { seed.rejected_gate == Some(SeedGate::TriangulationAngle) }));
+    assert!(pair.to_frame > pair.from_frame + 1);
+    let seed = result
+        .seed_candidates
+        .iter()
+        .find(|seed| seed.from_frame == pair.from_frame && seed.to_frame == pair.to_frame)
+        .expect("selected wider pair recorded");
     assert!(seed.selected && seed.rejected_gate.is_none());
     assert_eq!(seed.inliers, Some(pair.inliers));
     assert!(seed.rotation_only_residual_pixels.unwrap() > 1.25);

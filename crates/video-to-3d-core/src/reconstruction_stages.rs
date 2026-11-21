@@ -142,6 +142,9 @@ pub struct CameraStageArtifact {
     pub schema_version: u32,
     /// [`request_content_hash`] of the request this artifact was computed from.
     pub request_hash: ContentHash,
+    /// Present when an external provider registered the camera tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_provider: Option<crate::ReconstructionProviderDescriptor>,
     pub(crate) sparse: SparseReconstruction,
 }
 
@@ -518,15 +521,25 @@ pub fn reconstruct_cameras_with_cancel(
     let mut control = ReconstructionControl::new(&mut is_canceled);
     let sparse = crate::reconstruct_sparse_with_control(request, &mut control)
         .map_err(ReconstructionStageError::Reconstruction)?;
+    camera_stage_artifact(request, sparse, None, &mut control)
+}
+
+pub(crate) fn camera_stage_artifact(
+    request: &ReconstructionRequest,
+    sparse: SparseReconstruction,
+    registration_provider: Option<crate::ReconstructionProviderDescriptor>,
+    control: &mut ReconstructionControl<'_>,
+) -> Result<CameraStageArtifact, ReconstructionStageError> {
     control
         .check()
         .map_err(ReconstructionStageError::Reconstruction)?;
     let artifact = CameraStageArtifact {
         schema_version: CAMERA_STAGE_ARTIFACT_SCHEMA_VERSION,
-        request_hash: request_content_hash_with_control(request, &mut control)?,
+        request_hash: request_content_hash_with_control(request, control)?,
+        registration_provider,
         sparse,
     };
-    artifact.check_finite_with_control(&mut control)?;
+    artifact.check_finite_with_control(control)?;
     Ok(artifact)
 }
 
