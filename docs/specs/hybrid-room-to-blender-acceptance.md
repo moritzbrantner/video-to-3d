@@ -35,3 +35,65 @@ Given **three fixed, licensed videos**—one controlled short room video with ca
 ## Implementation sequencing
 
 Execution priorities and work-loop issue selection belong to the [whole-scene roadmap](../video-to-world-roadmap.md) (Atlas `6.1`, `6.2`, `6.3`). They do not modify any of the required artifacts or acceptance tests above. The independent fixture and three-real-video release contract remains authoritative even when a roadmap milestone or unit/synthetic smoke test passes.
+
+## First model-backed object from the approved TUM capture (#255)
+
+The native assembly operation can consume both `object_generation` and
+`object_placement` alongside its sparse reconstruction and surface mesh.
+Placement must share those exact inputs, and only placements accepted by the
+existing camera, mask and depth checks enter the completed scene. The generated
+asset uses a separate root mesh node and retains generative geometry provenance.
+The observed GLB excludes the generated node. The source frame ordinal, RGBA
+hash, mask hash and original browser-presented timestamp are recorded with the
+generation request. That timestamp retains the capture's f64 value without a
+conversion to ticks or a claim about the original container PTS.
+
+The explicit yellow-die test uses the Asset Tooling
+`mesh.image-to-3d.generate@1` operation with TripoSR on CUDA. It prepares one
+masked RGB crop, selects the die-like package with the most observed points
+and requires that it belong to the track checked against the approved visible
+samples. A tied selection fails. Other objects and clean plates are outside
+this run. Generated mesh provenance and the provider's approximate
+reproducibility label remain distinct from the acceptance verdict for its
+placement.
+
+On Ubuntu, start with the approved 87-frame browser capture described in
+[real-room-native-acceptance.md](real-room-native-acceptance.md) and
+[semantic-inventory-acceptance.md](semantic-inventory-acceptance.md).
+The command needs Rust, Bun, uv, Blender, NVIDIA CUDA, and the local
+[Asset Tooling TripoSR runtime and model ZIP](https://github.com/moritzbrantner/asset-tooling/blob/3dd0746918dbf07a440772049791500e201de979/docs/triposr.md).
+Put the TripoSR runtime's `python3` (PyTorch with CUDA, Pillow, NumPy,
+Transformers, Hugging Face Hub, OmegaConf, einops, trimesh and torchmcubes)
+on PATH. The Grounding DINO and SAM 2.1 sidecar uses its separate uv environment.
+Install Asset Tooling's dependencies with `bun install --frozen-lockfile` in
+a checkout at `3dd0746918dbf07a440772049791500e201de979`.
+
+From the Video-to-3D checkout with the #255 changes, set the local paths and
+the independently recorded model ZIP digest, then run:
+
+```bash
+export VIDEO_TO_3D_REAL_ROOM_INPUT="$HOME/.local/share/coding-agent/video179-independent-browser-input"
+export VIDEO_TO_3D_REAL_ROOM_WITNESS_HASH=sha256:f45e0cf9ade9a203dc52da6be87c6154ef5c501b454eedbc3d6ec63f46bea92d
+export VIDEO_TO_3D_ASSET_TOOLING=/absolute/path/to/asset-tooling
+export VIDEO_TO_3D_TRIPOSR_BUNDLE=/absolute/path/to/triposr.zip
+export VIDEO_TO_3D_TRIPOSR_BUNDLE_SHA256='<64-character bundle SHA-256>'
+export VIDEO_TO_3D_SEMANTIC_SIDECAR="$PWD/tools/semantic-sidecar/video-to-3d-semantic-sidecar"
+export VIDEO_TO_3D_OBJECT_GENERATION_SIDECAR="$PWD/tools/semantic-sidecar/asset-tooling-yellow-die.ts"
+export VIDEO_TO_3D_OBJECT_EVIDENCE="$PWD/target/yellow-die-255"
+export VIDEO_TO_3D_OBJECT_REPORT="$VIDEO_TO_3D_OBJECT_EVIDENCE/run.json"
+mkdir -p "$PWD/target"
+timeout --kill-after=30s 60m cargo test --release --locked -p video-to-3d-cli \
+  --test object_identity_real real_yellow_die_exports_an_independent_blender_mesh \
+  -- --ignored --exact --nocapture
+```
+
+Choose a fresh evidence directory on each attempt. The report records the
+stage states, selected track and references, model and bundle evidence,
+generation time, sampled whole-device VRAM, vertex and triangle counts, and
+per-view placement residuals. The GPU memory sample includes driver and other
+process usage. The unchanged build is replayed to check receipt reuse.
+When the gate passes, the directory also contains the Blender report, preview
+and editable `yellow-die.blend`, plus the native GLB under
+`project/exports/scene.glb`. The Blender gate checks that translating the die
+leaves the observed room mesh and other objects unchanged. This is a
+single-object gate within the controlled-room acceptance plan.

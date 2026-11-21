@@ -20,6 +20,7 @@ fn request() -> GenerationRequest {
         label: "chair".into(),
         observation: "o".into(),
         frame_index: 0,
+        timestamp_seconds: None,
         source_frame_hash: ContentHash::of_bytes(b"f"),
         width: 4,
         height: 4,

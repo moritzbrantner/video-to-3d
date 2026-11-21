@@ -249,6 +249,8 @@ impl OperationKind {
                 GenerativeCompletion,
                 TextureBake,
                 SplatOptimization,
+                ObjectGeneration,
+                ObjectPlacement,
             ],
         }
     }
@@ -267,8 +269,8 @@ impl OperationKind {
             Self::SparseReconstruction => 7,
             // 3: adapt plane sweep density to sparse image coverage and memory.
             Self::DenseReconstruction => 3,
-            // 2: native classic stages and canonical observed-environment assembly.
-            Self::SceneAssembly => 2,
+            // 3: optionally place accepted generated objects as editable scene assets (#259).
+            Self::SceneAssembly => 3,
             // 2: separate isolated inconsistent observations from long stationary tracks.
             Self::ObjectIdentity => 2,
             // 5: recover the exact generated-object keyframes for RGB patch depth fitting.

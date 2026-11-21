@@ -70,6 +70,7 @@ fn completed_export_selects_validated_mesh_in_matched_gauge_and_preserves_observ
         content_hash: ContentHash::of_bytes(&candidate),
         vertices: 3,
         triangles: 1,
+        provider_evidence: None,
     };
     let request = GenerationRequest {
         request_id: "g".into(),
@@ -77,6 +78,7 @@ fn completed_export_selects_validated_mesh_in_matched_gauge_and_preserves_observ
         label: "chair".into(),
         observation: "s1".into(),
         frame_index: 0,
+        timestamp_seconds: None,
         source_frame_hash: hash.clone(),
         width: 2,
         height: 2,
