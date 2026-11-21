@@ -23,6 +23,27 @@
         "digest"
       ],
       "groupName": "git-pinned crate revisions"
+    },
+    {
+      "description": "torch and torchvision are released as a version pair; a single bump leaves the sidecar unresolvable.",
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchPackageNames": [
+        "torch",
+        "torchvision"
+      ],
+      "groupName": "pytorch"
+    },
+    {
+      "description": "PyTorch publishes no cp315 wheels yet (checked 2026-11-21 for torch 2.9.1 and 2.11.0), so the sidecar stays below Python 3.15.",
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchPackageNames": [
+        "python"
+      ],
+      "allowedVersions": "<3.15"
     }
   ],
   "platformAutomerge": true
