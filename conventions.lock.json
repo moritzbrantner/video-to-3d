@@ -16,18 +16,18 @@
     "benchmarking"
   ],
   "files": {
-    "modules/base/principles/README.md": "3d58fb814c77122520a9140a1f81a0e4b6f53276f404b25d3bb0d364ddb29c31",
-    "modules/base/docs/adr/0001-capability-internalization.md": "43e98e05265dd48f1f559cc428ba037e3da5530af687237764900a27471ab30e",
+    "modules/base/principles/README.md": "296c6e39659b26b7dbf267f48d33653908073b02fef04e8b8d139bcb789aaa0a",
+    "modules/base/docs/adr/0001-capability-internalization.md": "0a23a3ac31d6f7a8a221b9ecba4428defadb82affbac3433a988a569f3a05d1b",
     "modules/base/conventions/agents/README.md": "75b0cc474a865d7af8a99f60dc88ac49bc9df61bff2bd0a51093d57741906efc",
     "modules/base/conventions/codebase-design/README.md": "6743ceffc083283edb53232ced06aebac58fc0e71db0d042cfb35bb140c68a67",
     "modules/base/conventions/repository/README.md": "593e058a2569c6e7acdcd7e2212a5571b9cfa8a94f02fdd3d0674bfc8439f794",
     "modules/base/conventions/repository/REPO-010.json": "9f5cb19d1dcb35b8b7d7866d87200db6b1717806a0a894bd951bf1d54e771333",
     "modules/base/conventions/repository/REPO-012.json": "8d8139e3e99bda60ed85db1aefd3149b383818bd74888fc255d3d6c57acb226e",
     "modules/base/conventions/repository/REPO-013.json": "579de2f1800e75119e85f73dcbc85d78735444eb6dd79562e511488b6e7c62fd",
-    "modules/base/conventions/reproducibility/README.md": "1f9ec0574118ef99cb0b42415efa86fdc656a44e42144470f8b541ba50f11389",
+    "modules/base/conventions/reproducibility/README.md": "67facd13c3b44e3eceaf5ca13c0c3ed490cac750656ebb30a6aaafec404a7087",
     "modules/base/conventions/reproducibility/REP-011.json": "4ba7ca9eaf0343c94daecb80347694db25a78bb0aaf254256902f21d7ed5caff",
     "modules/base/conventions/reliability/README.md": "014d10aa07ce42f8537bafdb7ed2e382e4ef35be09ffec501c9b7e000666626f",
-    "modules/base/conventions/testing/README.md": "7adcd0380ae4c826050d2c729e55648ce81c5bdceb307c87f1fc4ae6ae6e4aac",
+    "modules/base/conventions/testing/README.md": "7788242978798a5531a35743f90fed6955bba5aa8392ebe113a3a58c2c7ea6bc",
     "modules/base/conventions/scripts/README.md": "8a72616fc9b04833e9c2208712666b3e934b1e046f2a25c8c64388d76e8ba899",
     "modules/base/conventions/security/README.md": "13d51a84d3aec3efc8f1919417680698c9dc7ab1c01286e0454ef8149c33c0fa",
     "modules/rust/technologies/rust/README.md": "cf6eaeb058e999e8df328f9d2c9d17dc7330c6323074720efbf297d72deea583",
@@ -48,11 +48,11 @@
     "modules/react/technologies/typescript/react/generators/react-component/templates/Component.tsx.tmpl": "50b48dad6aef4f6c6c7eda5b4f0620e97096570f404d8d32f196ad982ca8d9ca",
     "modules/react/technologies/typescript/react/generators/react-component/templates/index.ts.tmpl": "fc88a84159dd20dcefb01cba7ad22ca7138b63db92123c4ce0970650f2d9c2e6",
     "modules/nextjs/technologies/typescript/react/nextjs/README.md": "4a2aae205fd4308d54f0649a6540de39114d6b3831896c9296b93ab76854595a",
-    "modules/tooling/technologies/tooling/README.md": "9de9b62271629e975208bc004098370cedc9bd722bf57a28f74623ae59520847",
-    "modules/tooling/technologies/tooling/BUN-001.json": "fa8a372718ef4bead7714fc671625744b5d190db28b0f3bdd3c2e4e5f62f5bc7",
-    "modules/benchmarking/conventions/benchmarking/README.md": "19d89b01d89bb13df2a57227b15d23a61d17eddcf56edc8a4ddb1b7126176bd1",
+    "modules/tooling/technologies/tooling/README.md": "819d86bc7f5bff7ac99a5c647aa306cafbe1b67d0cac00373adc5ede40e9ddd0",
+    "modules/tooling/technologies/tooling/BUN-001.json": "1ae09a9c3a27b511b926913ef0b4a60542a7eafbfba1205989baaa325de12e15",
+    "modules/benchmarking/conventions/benchmarking/README.md": "79f07c9e5a51608c5c4fb06e03dd85e6eecce870fb24ab1d7133c9ef126be301",
     "modules/benchmarking/conventions/benchmarking/BENCH-002.json": "f5813c38a52ae73694745a1d2d518ba9ac041e2fbf0d0a5551fb93de968b0ce0",
     "configurations.json": "55aa39679c6f3b2e00f8e75600677c366603e1ae8153cb733ceb06461540dfd7",
-    "index.md": "914a12b591bd547a8e7695db2c4272202cac497c4fbf864950446a3545011894"
+    "index.md": "6b128e32b85656d5aee6a93d97af253d71ef4a14bef856c5f5f896626205a534"
   }
 }

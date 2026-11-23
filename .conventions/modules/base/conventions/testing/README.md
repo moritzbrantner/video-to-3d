@@ -114,3 +114,9 @@
 - Keep the oracle independent enough that it does not reuse the optimization machinery whose correctness it is intended to check.
 - Keep cheap differential/oracle cases in the ordinary deterministic test gate; place larger generated, stress, or exhaustive cases in an explicitly broader tier rather than omitting the evidence.
 - Do not create a duplicate implementation merely for test symmetry when the semantics are trivial, the repository does not own them, or a trusted external/reference contract already provides a suitable oracle.
+
+## TEST-023 — Verify multi-state UI transitions against a bounded contract
+
+- For substantial navigable workflows, exercise an independent, bounded set of expected page and interaction states and transitions through the existing public acceptance seam; assert visible outcomes, available actions, and blocked transitions.
+- Cover deep links, reload, and browser history for URL-backed states, plus relevant open/close/error/retry interaction transitions. Extend established browser suites instead of introducing a parallel harness.
+- Identify untested transitions and unbounded data dimensions; passing finite-path coverage is not a proof of arbitrary UI correctness.

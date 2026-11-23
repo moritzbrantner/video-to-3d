@@ -40,7 +40,8 @@
 
 ## REP-008 — Keep toolchains current
 
-- Repositories may use current stable toolchain channels or native version declarations. Do not require an exact fleet-wide version, canonical baseline, or repeated CI check of the resolved toolchain identity.
+- Track the latest stable release of every toolchain whenever possible (owner decision 2026-10-21, reaffirmed 2026-10-23): CI installs Bun `latest`, Rust `stable`, and Node LTS (`lts/*`, not the Current line). Workflows do not pass exact toolchain versions; reusable-workflow inputs such as `bun_version` stay optional, default to latest, and are omitted by callers.
+- Repositories may use current stable toolchain channels or native version declarations. A declared version (for example `rust-toolchain.toml`) is a minimum, not a CI pin; Bun is not declared at all (BUN-001). Do not require an exact fleet-wide version, canonical baseline, or repeated CI check of the resolved toolchain identity.
 - When a toolchain update exposes an incompatibility, fix the affected repository. Pin a version narrowly when a specific compatibility or release contract requires it.
 
 ## REP-009 — Unused implementation code is not part of a green baseline

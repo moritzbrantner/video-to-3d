@@ -122,3 +122,10 @@
 - Do not duplicate every foundation microbenchmark in each consumer; inherit foundation correctness/performance evidence and add consumer journeys that expose pathological composition.
 - Attribute work to the authoritative subsystem where practical so a product-level regression identifies whether the problem is domain orchestration, physics, rendering, networking, storage, or another foundation.
 - Keep repository-specific metric names and thresholds domain-owned while using shared evidence formats and comparison policy.
+
+## BENCH-018 — Enforce explicitly adopted operation-complexity contracts
+
+- For a reusable hot-path operation whose growth class is an architectural requirement, declare the input, active-set, affected-set, and output dimensions that matter, the acceptable work-growth class, and any independent absolute work budget. Do not impose a universal Big-O target on legitimately exhaustive, dense, or exponential operations.
+- Protect adopted bounds with deterministic work-count scaling checks, varying one dimension at a time across representative sparse and dense shapes. Include state changes such as insertion, removal, cache invalidation, and repeated calls where they can reveal hidden or deferred work.
+- When a bounded operation may run out of work budget, make its degradation or incomplete-result semantics explicit, deterministic, and testable; never silently claim complete or correct output after skipping required work.
+- An architectural change that violates an adopted class or budget must restore the contract or deliberately revise it with an owner-reviewed reason and equivalent correctness evidence. Keep hardware-dependent latency and external-oracle performance gates separate under `BENCH-003` and `BENCH-005`.

@@ -15,7 +15,11 @@ The landscape therefore needs a durable rule for when to keep an external implem
 
 Treat important functionality as a capability whose implementation may change over time.
 
-Use external implementations freely while they are the best current trade-off. Avoid coupling domain behavior unnecessarily to a vendor, service protocol, package-specific model, or process boundary when a narrow capability boundary can express what the application actually consumes.
+Use suitable maintained external implementations as the production default while an internal foundation is incomplete, unless the repository already has an explicit, evidence-backed reason to do otherwise. Product delivery should not be blocked by a lab or foundation's aspirational feature roadmap. Avoid coupling domain behavior unnecessarily to a vendor, service protocol, package-specific model, or process boundary when a narrow capability boundary is actually valuable. Existing game and domain authority contracts remain intact; adopting an external renderer, for example, must not silently replace authoritative gameplay rules.
+
+A default usage progression is: **one real consumer** uses the external tool directly; **two consumers** compare their repeated needs and may share minimal integration; **three independent consumers** trigger an evaluation of whether the commonly used subset is worth internalizing. This threshold is a heuristic, not a mandate: a measurable single-consumer bottleneck can justify an earlier experiment, and three consumers alone never justify reimplementation. Keep the external implementation if it remains the best trade-off.
+
+Choose the narrowest integration mechanism that fits the actual caller: library for runtime use, CLI/API for tools or services, MCP when an agent needs to operate a tool. A new adapter is not automatically needed simply because a reference implementation exists.
 
 When there is a concrete reason to investigate internalization, prefer this progression:
 
@@ -38,6 +42,19 @@ remove the external implementation only when no longer needed
 ```
 
 A failed replacement experiment is an acceptable outcome. Evidence that the existing implementation is already the better trade-off should terminate the experiment rather than trigger further rewriting.
+
+## Integration traceability
+
+Keep **decisions** here or in the owning repository's product Atlas as appropriate; keep **implementation facts** with the repository that owns the integration. Reuse existing architecture/provider documents, dependency manifests, code and tests rather than creating a fleet-wide manually updated list.
+
+For each important reference/candidate relationship, make it possible to trace:
+
+- Capability and actual consumers (a source-backed import, call site or repository dependency; separate direct consumers from indirect or example usage).
+- Current external provider, version/identity when relevant, and role: `production`, `reference/test-only`, `experimental`, or `planned`.
+- Internal owner, implemented subset, acceptance/benchmark evidence, gaps, and whether any consumer actually uses it in production.
+- The next promotion or rollback condition, without turning an experimental integration into a product promise.
+
+Source files, lockfiles and executable tests are the authority for current usage; notes summarize what they establish and should link to those files. `coding-tooling` and the read-only `repo-dashboard` may derive fleet-wide relationships from repository-owned evidence, not own a competing dependency register. A mention in prose does not prove that a provider is integrated into the product.
 
 ## What counts as evidence
 
@@ -75,7 +92,7 @@ A capability is worth investigating when evidence or requirements suggest one or
 - significant latency, CPU, memory, allocation, startup, or package/binary cost;
 - a large dependency surface for a small consumed subset;
 - portability, offline, embedding, determinism, or deployment constraints;
-- a capability that would be reused by multiple repositories;
+- repeated use of the same narrow capability in independent consumers (three is the default evaluation trigger, not a development requirement);
 - a specialized workload for which the general-purpose implementation cannot provide an important property.
 
 The mere availability of cheap generated code is not a trigger.
@@ -86,7 +103,7 @@ Do not replace mature infrastructure or security-critical implementations merely
 
 Whole-database engines, cryptographic primitives, TLS stacks, distributed consensus systems, and similarly reliability- or security-sensitive systems require a substantially higher evidence bar. Internalizing a narrow capability around such systems can still be appropriate without attempting to reproduce the system itself.
 
-Do not make every dependency pass through a speculative abstraction. Introduce a capability boundary when the implementation may realistically vary, the boundary reduces unwanted coupling, or an internalization experiment is being prepared.
+Do not build a custom equivalent just because a mature tool is used by several repositories. Do not make every dependency pass through a speculative abstraction. Introduce a capability boundary when the implementation may realistically vary, the boundary reduces unwanted coupling, or an internalization experiment is being prepared.
 
 Do not keep shadow/reference implementations forever without a purpose. Once a decision is stable, retain only the comparison fixtures or adapters that still provide useful regression evidence.
 
