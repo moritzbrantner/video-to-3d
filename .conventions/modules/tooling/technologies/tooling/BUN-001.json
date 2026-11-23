@@ -3,6 +3,6 @@
   "ruleId": "BUN-001",
   "enforcement": {
     "kind": "builtin",
-    "check": "bun-default"
+    "check": "bun-latest"
   }
 }

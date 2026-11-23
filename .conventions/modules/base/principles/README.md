@@ -38,7 +38,14 @@
 ## PRINCIPLE-007 — Keep capabilities replaceable; internalize with evidence
 
 - External libraries, services, processes, and hosted infrastructure are valid bootstrap implementations; avoid unnecessary domain coupling to a particular implementation.
+- Before adding significant generic capability, prefer suitable maintained ecosystem dependencies or an existing internal owner over a new implementation. Evaluate fit, maintenance, security, portability, and lifecycle cost rather than treating internal code as inherently preferable.
+- Choose the smallest suitable integration surface: a runtime library for in-process capabilities, an API or CLI for service/process interaction, or MCP when an agent needs tool discovery and invocation. Do not introduce MCP or an adapter layer merely to wrap a working direct dependency.
+- Preserve repository-local first-party goals and ownership boundaries; reuse decisions must not silently override an explicit domain or engine strategy.
+- Keep the mature working implementation on a product's delivery path while an internal candidate is experimental or missing required capabilities; do not make consumer delivery wait for speculative foundation work. Respect explicit local architecture and authority decisions.
+- Treat three independently demonstrated consumers of the same capability as a default trigger to *evaluate* a focused internal alternative, not as permission or an obligation to build it. Fewer consumers may justify investigation for a concrete constraint or measured cost.
 - Internalize only the capability actually consumed, and only when evidence supports a concrete benefit such as fewer expensive boundaries, lower latency or resource use, a smaller dependency surface, stronger determinism or portability, or useful cross-project reuse.
+- Scope candidates to the operations and behavior actual consumers use; do not recreate the upstream product. Promote only proven slices, and retain the external reference or fallback where it remains useful.
+- Track integration role and readiness from repository-owned source, manifest, tests, and representative acceptance evidence; distinguish active production use, test/reference use, experimental candidates, and planned integrations. Derive fleet-wide usage from these sources instead of maintaining duplicate manual dependency inventories.
 - Prefer staged replacement: external implementation → explicit capability contract → native candidate → differential/parity validation → representative benchmarks → real consumer → optional default switch or removal.
 - Reimplementation is not justified by implementation cost alone; retain mature external implementations when a replacement has no demonstrated advantage.
 - See also: [ADR 0001 — Capability internalization](../docs/adr/0001-capability-internalization.md).
@@ -68,3 +75,33 @@
 - Compare production mechanics with the reference over representative deterministic inputs and state transitions, including mutations that exercise invalidation and reuse; matching one steady-state output is not sufficient evidence for an incremental architecture.
 - Treat the reference as semantic authority, not as the required runtime architecture. Production code may use a substantially different execution strategy once equivalence is established.
 - Keep semantic equivalence and execution cost as separate claims: reference parity proves correctness, while cost models, deterministic work counters, and representative benchmarks prove that the production architecture avoids unintended recomputation or materialization.
+
+## PRINCIPLE-011 — Replace, don't preserve, while experimental
+
+- While a repository is experimental (the default for owner projects unless its `AGENTS.md` says otherwise), choose the cleanest design and change APIs, schemas, save formats and names in place.
+- Do not add compatibility shims, deprecated aliases, parallel old/new functions, deprecation windows or migration notes. Update all callers in the same change.
+- A repository opts out by declaring a stable public contract in its `AGENTS.md`.
+
+## PRINCIPLE-012 — Verify in proportion to consequence
+
+- Do not add attestation, signature or fingerprint matching, byte-exact rebuild gates, provenance receipts that are checked, security-approval gates or "inactive until approved" rollouts unless an issue states the concrete risk they address.
+- Record plain metadata (versions, sources, hashes) when it is cheap and useful; do not build workflows that re-verify it.
+- Start a new mechanism active and in one repository; generalize after it works there.
+
+## PRINCIPLE-013 — Setup converges idempotently
+
+- Setup, acquisition and environment scripts bring managed state to the declared state: running them again on a correct environment is a no-op, and on a drifted managed environment it repairs only managed state.
+- Fetch large inputs (model weights, toolchains, assets) on first need into a managed cache; do not require a separate manual download step when a stable source exists.
+- Never modify unmanaged user state.
+
+## PRINCIPLE-014 — No temporary substitutes for specified inputs
+
+- When the owner specified a real input (assets, models, data sources, services), do not ship placeholders, primitives, mock data or stand-in names as a step toward it. Block the issue on the real input and work elsewhere.
+- Groundwork that survives unchanged once the real input arrives is fine; a substitute that must later be removed is not.
+
+## PRINCIPLE-015 — Make it work, make it right, make it fast
+
+- In experimental repositories, size and performance ceilings never block a working feature. Get the functionality right first; loading strategies and optimization come after.
+- Keep measuring: report size and performance on every change. When a feature regresses them, land the feature and file a focused optimization issue with the measurements, instead of shrinking the feature or holding it.
+- Correctness gates stay blocking. Oracle parity checks (e.g. physics-engine vs Rapier, render-engine vs Bevy) define correctness, not speed; they keep failing a change that diverges.
+- Owner decision 2026-10-31 (maps#268), approved for all experimental repositories.
