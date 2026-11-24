@@ -15,9 +15,9 @@ sha2 = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 gltf = { version = "1.4.1", default-features = false, features = ["names", "utils"] }
-three-d-core = { git = "https://github.com/moritzbrantner/3d-lab", rev = "743e79a17ab3a49770c342810f5510db12eb98b8" }
-three-d-assets = { git = "https://github.com/moritzbrantner/3d-lab", rev = "743e79a17ab3a49770c342810f5510db12eb98b8" }
-three-d-animation = { git = "https://github.com/moritzbrantner/3d-lab", rev = "743e79a17ab3a49770c342810f5510db12eb98b8" }
-three-d-formats = { git = "https://github.com/moritzbrantner/3d-lab", rev = "743e79a17ab3a49770c342810f5510db12eb98b8" }
-three-d-scene = { git = "https://github.com/moritzbrantner/3d-lab", rev = "743e79a17ab3a49770c342810f5510db12eb98b8" }
-three-d-export = { git = "https://github.com/moritzbrantner/3d-lab", rev = "743e79a17ab3a49770c342810f5510db12eb98b8" }
+three-d-core = { git = "https://github.com/moritzbrantner/3d-lab", rev = "1d185c64fa82dc270e0fd0685d77157ef5c59142" }
+three-d-assets = { git = "https://github.com/moritzbrantner/3d-lab", rev = "1d185c64fa82dc270e0fd0685d77157ef5c59142" }
+three-d-animation = { git = "https://github.com/moritzbrantner/3d-lab", rev = "1d185c64fa82dc270e0fd0685d77157ef5c59142" }
+three-d-formats = { git = "https://github.com/moritzbrantner/3d-lab", rev = "1d185c64fa82dc270e0fd0685d77157ef5c59142" }
+three-d-scene = { git = "https://github.com/moritzbrantner/3d-lab", rev = "1d185c64fa82dc270e0fd0685d77157ef5c59142" }
+three-d-export = { git = "https://github.com/moritzbrantner/3d-lab", rev = "1d185c64fa82dc270e0fd0685d77157ef5c59142" }
