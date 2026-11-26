@@ -582,6 +582,7 @@ mod tests {
             label: "panel".into(),
             observation: "obs0".into(),
             frame_index: 0,
+            timestamp_seconds: None,
             source_frame_hash: ContentHash::of_bytes(b"pixels"),
             width: 100,
             height: 100,

@@ -946,6 +946,8 @@ struct GenerationResult {
     vertices: Option<u64>,
     #[serde(default)]
     triangles: Option<u64>,
+    #[serde(default)]
+    evidence: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1109,18 +1111,20 @@ pub fn generate_object_candidates(
     };
     let mut plans = plan_generation(inventory, references, provider);
     let mut sources = BTreeMap::new();
-    for plan in &plans {
+    for plan in &mut plans {
+        let keyframe = keyframes
+            .frames
+            .iter()
+            .find(|frame| frame.frame_index == plan.frame_index)
+            .ok_or("generation frame is not a keyframe")?;
+        // The original keyframe timestamp, carried without conversion (#259).
+        plan.timestamp_seconds = Some(keyframe.timestamp_seconds);
         if sources.contains_key(&plan.frame_index) {
             continue;
         }
         if cancel.is_canceled() {
             return Ok(None);
         }
-        let keyframe = keyframes
-            .frames
-            .iter()
-            .find(|frame| frame.frame_index == plan.frame_index)
-            .ok_or("generation frame is not a keyframe")?;
         let path =
             fs::canonicalize(keyframe.pixels.resolve(keyframes_root)).map_err(|e| e.to_string())?;
         let length = u64::from(plan.width) * u64::from(plan.height) * 4;
@@ -1201,7 +1205,10 @@ pub fn generate_object_candidates(
                 "object": plan.object,
                 "observation": plan.observation,
                 "frame_index": plan.frame_index,
+                "timestamp_seconds": plan.timestamp_seconds,
+                "observed_points": plan.observed_points,
                 "source_frame_hash": plan.source_frame_hash.as_str(),
+                "mask_hash": plan.mask_hash.as_str(),
                 "width": plan.width,
                 "height": plan.height,
                 "rgba_path": sources[&plan.frame_index],
@@ -1302,6 +1309,7 @@ pub fn generate_object_candidates(
                                     content_hash: ContentHash::of_bytes(&bytes),
                                     vertices: result.vertices.unwrap_or(0),
                                     triangles: result.triangles.unwrap_or(0),
+                                    provider_evidence: result.evidence.clone(),
                                 }),
                                 None,
                             )
