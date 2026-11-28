@@ -777,7 +777,7 @@ pub(super) fn conform_edges(
     triangles: &mut Vec<MeshTriangle>,
     position: &dyn Fn(usize) -> Vector3<f64>,
     control: &mut crate::ReconstructionControl<'_>,
-) -> Option<(Vec<usize>, usize)> {
+) -> Option<(Vec<usize>, Vec<usize>)> {
     let parameter_on = |edge: EdgeKey, vertex: usize| -> Option<f64> {
         if vertex == edge.0 {
             Some(0.0)
@@ -794,7 +794,7 @@ pub(super) fn conform_edges(
     };
     let mut split = Vec::new();
     let mut appended = Vec::new();
-    let mut failures = 0;
+    let mut failures = Vec::new();
     for slot in 0..triangles.len() {
         if slot % 256 == 0 && control.is_canceled() {
             return None;
@@ -852,7 +852,7 @@ pub(super) fn conform_edges(
         }
         let polygon: Vec<Vector2<f64>> = boundary.iter().map(|(_, at)| *at).collect();
         let Some(ears) = ear_clip(&polygon, 1.0e-12) else {
-            failures += 1;
+            failures.push(slot);
             continue;
         };
         // A split whose pieces would be degenerate in space is a failure too.
@@ -861,7 +861,7 @@ pub(super) fn conform_edges(
             (b - a).cross(&(c - a)).norm() <= f64::EPSILON
         });
         if degenerate {
-            failures += 1;
+            failures.push(slot);
             continue;
         }
         let mut pieces = ears.into_iter().map(|ear| MeshTriangle {

@@ -5,7 +5,11 @@ export interface DenseSurfaceDiagnostics {
     missing_reference_depth: number;
     accepted: number;
   };
-  meshing: { exported_triangles: number };
+  meshing: {
+    exported_triangles: number;
+    verified_samples?: number;
+    consensus_moved_over_one_percent?: number;
+  };
   topology: { islands: number; small_islands: number; largest_island_triangles: number };
   dominant_rejection: string | null;
 }
@@ -29,6 +33,12 @@ export function denseDiagnosticSummary(report: unknown): string | null {
       ` ${t.small_islands.toLocaleString("en-US")} tiny).`,
     `Stereo gave no depth for ${percent(v.missing_reference_depth, v.reference_samples)} of reference samples.`,
   ];
+  if (count(m.verified_samples) && count(m.consensus_moved_over_one_percent) && m.verified_samples > 0) {
+    parts.push(
+      `Views disagreed by over 1% in depth on ${percent(m.consensus_moved_over_one_percent, m.verified_samples)}` +
+        " of verified samples (averaged).",
+    );
+  }
   if (diagnostics.dominant_rejection) {
     parts.push(`Most rejected samples: ${diagnostics.dominant_rejection.replaceAll("_", " ")}.`);
   }

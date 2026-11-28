@@ -175,6 +175,80 @@ The selection keeps the covisibility ranking for clusters and sources. Only wher
 
 H3 now produces a verified surface, but it is very small. Restoring H3's depth needs more than source choice (follow-up 3 continues). H3 has no depth oracle, so its accuracy is not measured.
 
+## Follow-up 2, first result: cross-view fusion (draft)
+
+`colmap_surface` now passes the independently meshed reference views through the classic pipeline's existing cross-reference fusion and ownership merge (`surface_fusion.rs`, `surface_merge.rs`). Mutually nearest, normal-aligned seam vertices become shared. A view linked by such seams that already meshes a surface owns it, and the duplicated copy is removed. Partially owned triangles are clipped with lineage-carrying derived vertices.
+
+Two changes were needed in shared code:
+- **Unconformable clips.** A single clip that cannot be split without a T-junction used to reject the whole merge. This provider instead drops only that triangle and counts it: 1–3 per TUM export. The classic browser path is unchanged.
+- **Object labels on clip pieces.** The object partition now labels triangles whose corners have observed *provenance* (`provenance_point`), so clip pieces can carry an object label. Object localization still uses observed points only.
+
+Measured on the same TUM PatchMatch grids (80 held-out views, with the die inventory):
+
+| Measure | Union per view (#261) | + fusion |
+| --- | ---: | ---: |
+| Held-out ≤10 cm / false positive in front / behind / missing | 55.3% / 9.6% / 7.1% / 28.0% | 54.7% / 8.8% / 7.6% / 28.9% |
+| Median / P90 depth error | 2.8 / 32.7 cm | 2.8 / 33.0 cm |
+| Triangles / area | 115,647 / 75.8 m² | 78,389 / 26.2 m² (TSDF reference: 23.7 m²) |
+| Largest edge-connected component | 3.9% | **76.8%** |
+| Largest vertex-connected island (Rust report) | 4.1% | 94% |
+| Triangles in pieces under 32 triangles / boundary loops | 6.0% / 952 | 13.2% / 3,916 |
+| Precision ≤5 cm / median distance to Kinect / free-space violation | 81.7% / 1.4 cm / 0.5% | 75.7% / 1.9 cm / 0.9% |
+| Desk / partition / floor covered | 63.9% / 31.3% / 1.2% | 63.4% / 32.7% / 1.3% |
+| Untextured surface area | 0% | **7.2%** |
+| Yellow die: triangles, IoU 6 / 101, median depth error | 930, 0.894 / 0.717, 1.47 / 1.30 cm | 389, 0.877 / 0.695, 1.65 / 1.42 cm |
+| Yellow die: headless Blender independent edit | pass | pass |
+| Export time / peak RSS | 4.4 s / 221 MB | 55 s / 285 MB |
+
+On H1, the largest island grows from 11.7% to 64.7% of triangles (27,463 → 18,880 triangles), and 5.5% of the area is untextured. H3's surface is too small to change.
+
+The stacked duplicates are gone, and most of the scene is one connected surface, at unchanged coverage. Three costs remain before this can merge:
+- **Untextured seams.** All untextured triangles are seam triangles spanning two views. The single-camera seam rule rejects them mostly as grazing views (1,424 on H1) or ambiguous (383).
+- **Precision.** Precision drops 6 pp. In absolute terms, area off the Kinect surface falls from about 13.9 to 6.4 m², but the steep seam triangles suggest some stitches bridge depth steps.
+- **Slivers.** The share of triangles in tiny pieces rises from 6% to 13%.
+
+The export now reports the fusion funnel and the untextured reasons.
+
+### What the untextured seams are, and multi-view depth consensus
+
+Untextured seam triangles were checked against the dense Kinect reference (TUM, area-weighted distance from each triangle centre):
+
+| Triangles | Area | Median distance | Area more than 5 cm off |
+| --- | ---: | ---: | ---: |
+| Textured | 24.3 m² | 1.9 cm | 25% |
+| Untextured seam | 1.9 m² | 1.5 cm | 8% |
+
+They are the most accurate part of the mesh, so the 7% texture gap is not a geometry defect, and the steep stitches did not cause the precision drop. Most of the 25% is surface the clip-wide Kinect TSDF does not contain; free-space violation stays below 1%.
+
+Instrumenting the seam rule on TUM shows why they are rejected. A seam is usually rejected by the camera that owns two of its corners because it is steep in that view (6,835) or ambiguous (5,489). Every ambiguous verdict had another accepted layer 2–5% of the depth in front of it in the same pixel, and geometry clearly in front in a neighbouring pixel. The seams are short steps joining layers that overlapping views place a few centimetres apart. Per-view depth only has to agree within 2% to be verified. Widening the seam-fusion radius (0.28 → 0.6 or 1.0 local edge lengths) changed nothing (7,680 and 7,794 untextured), and loosening only the in-pixel band would not release triangles that the neighbouring-pixel test also rejects, so neither change was made.
+
+`verified_union` now places each verified sample at the mean of the reference depth and every verifying source's own measurement along the reference ray. Each source's measurement is exact for the source's depth, and verification has already required it to agree within 2%. Only agreeing observed depths are averaged, and the region still lists exactly the verifying cameras. The report counts samples moved by more than 1% (`consensus_moved_over_one_percent` out of `verified_samples`), and the studio line shows that share.
+
+| Measure (TUM) | Fusion | + consensus |
+| --- | ---: | ---: |
+| Untextured seam triangles | 8,432 | 7,608 |
+| Fused seam pairs | 9,534 | 12,661 |
+| Islands / largest island | 710 / 94% | 611 / 93% |
+| Samples moved by more than 1% | – | 1,595 of 73,875 (2%) |
+| 80 held-out views / 85 sampled views, rays ≤10 cm | 54.7% / 54.6% | 54.6% / 54.4% |
+| Yellow die IoU 6 / 101, median depth error | 0.877 / 0.695, 1.65 / 1.42 cm | 0.877 / 0.689, 1.67 / 1.37 cm |
+| Yellow die headless Blender independent edit | pass | pass |
+
+H1: 18,028 triangles, 171 islands (was 181), 8.9% untextured (was 9.8%). H3: largest island 57% (was 52%). The step is accuracy-neutral. It moves only 2% of samples measurably, so the layers are mostly systematic offsets between distant views rather than per-sample noise.
+
+### Object surfaces
+
+Per object (TUM, die `obj-a8947013df32`):
+
+| | Union per view (#261) | + fusion |
+| --- | ---: | ---: |
+| Triangles / connected pieces | 930 / 11 | 389 / 24 |
+| Largest piece | 24% | 90% |
+| Area (Kinect scale) | 3,013 cm² (stacked copies) | 620 cm² |
+| Median distance to Kinect | 8.2 mm | 6.7 mm |
+
+Fusion turns the die from stacked per-view shells into one connected observed surface. What remains open is the unfilmed sides and the die's edges, where each reference view's mesher cuts at the depth discontinuity. Closing it is completion, not observation (Atlas 1.2, 2.3): the generative candidate route of #255 / #259.
+
 ## Prioritised follow-up
 
 1. **Done (see above).** **Mesh the verified union once per reference view** (smallest fix, `colmap_surface.rs`, about 15 lines).

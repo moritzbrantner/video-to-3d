@@ -206,7 +206,13 @@ pub fn partition_object_surfaces(
         partition.objects.push((obj.id.clone(), obj.label.clone()));
         for (index, face) in evidence.triangles.iter().enumerate() {
             let indices = [face.a, face.b, face.c];
-            if !indices.iter().all(|i| observed(*i)) {
+            // A derived seam-clip corner lies on an observed triangle and inherits (never
+            // adds) its provenance, so it may carry an object label; localization above
+            // still uses observed points only.
+            if !indices
+                .iter()
+                .all(|i| observed(evidence.provenance_point(*i)))
+            {
                 continue;
             }
             let corners = indices.map(xyz);
