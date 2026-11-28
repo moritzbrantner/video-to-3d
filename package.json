@@ -24,6 +24,6 @@
     "wasm:check": "cargo check --target wasm32-unknown-unknown -p video-to-3d-wasm"
   },
   "devDependencies": {
-    "playwright-core": "1.65.0"
+    "playwright-core": "1.65.1"
   }
 }
